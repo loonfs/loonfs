@@ -1,0 +1,10 @@
+[package]
+name = "loon-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+loon-types = { path = "../loon-types" }
