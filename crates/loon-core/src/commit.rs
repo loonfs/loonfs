@@ -54,6 +54,8 @@ pub enum Precondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitPlan {
     pub namespace_id: NamespaceId,
+    pub commit_id: String,
+    pub base_head_seq: ChangeSeq,
     pub next_seq: ChangeSeq,
     pub durable_content_required: bool,
     pub wal_object_must_be_written: bool,
@@ -169,6 +171,8 @@ pub fn build_commit_plan(
 
     Ok(CommitPlan {
         namespace_id: request.namespace_id.clone(),
+        commit_id: request.request_id.clone(),
+        base_head_seq: request.planned_head_seq,
         next_seq,
         durable_content_required: request
             .ops

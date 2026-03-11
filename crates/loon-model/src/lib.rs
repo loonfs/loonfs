@@ -11,6 +11,15 @@ pub struct ModelNamespace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelWalCommit {
+    pub namespace_id: NamespaceId,
+    pub seq: ChangeSeq,
+    pub base_head_seq: ChangeSeq,
+    pub commit_id: String,
+    pub writer_fence_token: FenceToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelAction {
     CreateDir {
         inode_id: InodeId,
@@ -69,6 +78,27 @@ impl ModelNamespace {
             }
         }
     }
+
+    pub fn prepare_wal_commit(
+        &self,
+        commit_id: impl Into<String>,
+        writer_fence_token: FenceToken,
+    ) -> Result<ModelWalCommit, ModelError> {
+        if writer_fence_token != self.active_fence_token {
+            return Err(ModelError::StaleWriterFenceToken {
+                expected: self.active_fence_token,
+                actual: writer_fence_token,
+            });
+        }
+
+        Ok(ModelWalCommit {
+            namespace_id: self.namespace_id.clone(),
+            seq: ChangeSeq(self.head_seq.0 + 1),
+            base_head_seq: self.head_seq,
+            commit_id: commit_id.into(),
+            writer_fence_token,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -106,5 +136,17 @@ mod tests {
                 actual: FenceToken(8),
             }
         );
+    }
+
+    #[test]
+    fn model_prepares_next_wal_commit_seq_for_active_writer() {
+        let ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        let wal = ns
+            .prepare_wal_commit("req-20260311-0001", FenceToken(0))
+            .expect("active writer should prepare WAL");
+
+        assert_eq!(wal.seq, ChangeSeq(1));
+        assert_eq!(wal.base_head_seq, ChangeSeq(0));
+        assert_eq!(wal.commit_id, "req-20260311-0001");
     }
 }

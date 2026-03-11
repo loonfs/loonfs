@@ -135,3 +135,61 @@ Before writing a WAL object, the commit planner must at minimum validate:
 5. the lease has not expired at the explicitly supplied validation time
 
 The planner may leave deeper inode and name checks to later metadata lookups, but the checks above are mandatory before publish is attempted.
+
+## WAL commit object
+
+After validation succeeds, the writer must create one immutable WAL object before attempting the head CAS.
+
+The object key is:
+
+```text
+namespaces/{namespace_id}/wal/{seq:020}-{commit_id}.cbor.zst
+```
+
+The body is:
+
+1. a `WalCommitEnvelope`
+2. encoded as CBOR
+3. then compressed with zstd
+
+The envelope must carry:
+
+- `kind = "namespace_wal_commit"`
+- `format_version = 1`
+- `writer_version`
+- `payload_checksum_sha256`
+- `payload.namespace_id`
+- `payload.seq`
+- `payload.base_head_seq`
+- `payload.commit_id`
+- `payload.request_id`
+- `payload.writer_id`
+- `payload.writer_fence_token`
+- `payload.ops`
+- `payload.preconditions`
+
+For the current skeleton, `commit_id` may equal `request_id`.
+
+Why these fields exist:
+
+- `seq` and `base_head_seq` make the visible ordering explicit
+- `commit_id` makes the immutable object key stable and auditable
+- `writer_id` and `writer_fence_token` preserve the publish authority that produced the WAL entry
+- `ops` and `preconditions` preserve the semantic input that replay and debugging need
+- `payload_checksum_sha256` makes corruption or codec drift observable
+
+Failure modes prevented:
+
+- head advancement that points at missing WAL history
+- opaque commit history that cannot explain why metadata changed
+- silent corruption of immutable WAL payload bytes
+
+## Write ordering rule
+
+The head CAS must not be attempted until the WAL object create-if-absent succeeds.
+
+If the WAL object already exists with the same key, the write path may treat that as idempotent only after verifying that the stored envelope payload matches the commit it intended to publish.
+
+Failure mode prevented:
+
+- head state publishing a seq whose immutable WAL record was never durably created
