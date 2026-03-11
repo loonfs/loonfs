@@ -5,7 +5,9 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("render-case") => {
-            let path = args.next().ok_or_else(|| anyhow::anyhow!("missing scenario path"))?;
+            let path = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("missing scenario path"))?;
             let scenario = Scenario::load(path)?;
             println!("{}", render_summary(&scenario));
             Ok(())

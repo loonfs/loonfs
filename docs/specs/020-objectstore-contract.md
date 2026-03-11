@@ -61,3 +61,23 @@ Both AWS S3 and Cloudflare R2 expose strong consistency for reads, writes, delet
 Head, lease, and queue objects must stay small enough for simple conditional writes.
 Large immutable file content may use multipart upload.
 Small mutable control objects should not.
+
+## Initial durable key layout
+
+The first object-store key builders should encode these stable families:
+
+```text
+namespaces/{namespace_id}/head.json
+namespaces/{namespace_id}/lease.json
+namespaces/{namespace_id}/wal/{seq:020}-{commit_id}.cbor.zst
+namespaces/{namespace_id}/snapshots/{seq:020}/manifest.json
+namespaces/{namespace_id}/snapshots/{seq:020}/tables/{family}-{segment_index:05}.sst.zst
+namespaces/{namespace_id}/derived/{work_class}/progress.json
+queue/shards/{shard_index:05}.json
+```
+
+Why this section exists:
+engineers need one readable place that defines the object families the key builders are allowed to generate.
+
+Failure mode prevented:
+different crates silently inventing incompatible durable paths for the same logical object.

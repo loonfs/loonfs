@@ -31,8 +31,37 @@ pub struct ByteRange {
 
 pub trait ObjectStore {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
-    fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Vec<u8>>, ObjectStoreError>;
-    fn put(&self, key: &str, bytes: &[u8], mode: PutMode) -> Result<ObjectMetadata, ObjectStoreError>;
+    fn get(&self, key: &str, range: Option<ByteRange>)
+        -> Result<Option<Vec<u8>>, ObjectStoreError>;
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError>;
     fn delete(&self, key: &str) -> Result<(), ObjectStoreError>;
     fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError>;
+
+    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put(key, bytes, PutMode::Overwrite)
+    }
+
+    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put(key, bytes, PutMode::CreateIfAbsent)
+    }
+
+    fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: &[u8],
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put(
+            key,
+            bytes,
+            PutMode::CompareAndSwap {
+                expected_etag: expected_etag.to_owned(),
+            },
+        )
+    }
 }

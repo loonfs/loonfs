@@ -26,7 +26,9 @@ impl ModelNamespace {
 
     pub fn apply(&mut self, action: ModelAction) {
         match action {
-            ModelAction::CreateDir { .. } | ModelAction::DeleteSubtree { .. } | ModelAction::BumpSeq => {
+            ModelAction::CreateDir { .. }
+            | ModelAction::DeleteSubtree { .. }
+            | ModelAction::BumpSeq => {
                 self.head_seq = ChangeSeq(self.head_seq.0 + 1);
             }
         }

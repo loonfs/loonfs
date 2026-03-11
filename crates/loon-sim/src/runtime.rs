@@ -9,6 +9,8 @@ pub struct SimRuntime {
 impl SimRuntime {
     pub fn advance_time(&mut self, delta_ms: u64) {
         self.now_ms += delta_ms;
-        self.trace.push(TraceEvent::TimeAdvanced { now_ms: self.now_ms });
+        self.trace.push(TraceEvent::TimeAdvanced {
+            now_ms: self.now_ms,
+        });
     }
 }

@@ -4,6 +4,10 @@ use thiserror::Error;
 pub enum ObjectStoreError {
     #[error("object not found")]
     NotFound,
+    #[error("invalid object key: {0}")]
+    InvalidKey(String),
+    #[error("invalid byte range")]
+    InvalidRange,
     #[error("precondition failed")]
     PreconditionFailed,
     #[error("conflict")]

@@ -33,9 +33,17 @@ pub enum CommitOp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Precondition {
     HeadSeqIs(ChangeSeq),
-    InodeRevisionIs { inode_id: InodeId, revision: RevisionNo },
-    AncestorsNotSubtreeDeleted { inode_id: InodeId },
-    ChildNameAbsent { parent_inode: InodeId, name_key: String },
+    InodeRevisionIs {
+        inode_id: InodeId,
+        revision: RevisionNo,
+    },
+    AncestorsNotSubtreeDeleted {
+        inode_id: InodeId,
+    },
+    ChildNameAbsent {
+        parent_inode: InodeId,
+        name_key: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
