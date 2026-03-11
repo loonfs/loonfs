@@ -1,4 +1,4 @@
-use loon_types::ChangeSeq;
+use loon_types::{ChangeSeq, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub struct QueueClaim {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeqScopedPayload {
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
     pub through_seq: ChangeSeq,
 }
 

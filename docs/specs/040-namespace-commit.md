@@ -61,3 +61,77 @@ history should be monotonic.
 
 Failure mode prevented:
 moving the head backward and rewriting history.
+
+## Control objects used by commit validation
+
+The namespace commit path depends on two small JSON control objects:
+
+### `head.json`
+
+The head object is the authoritative summary of the latest visible namespace state.
+
+It must carry:
+
+- `kind = "namespace_head"`
+- `format_version = 1`
+- `writer_version`
+- `payload_checksum_sha256`
+- `state.namespace_id`
+- `state.seq`
+- `state.active_fence_token`
+- `state.next_inode_id`
+- `state.snapshot_hint_seq`
+- `state.retention_floor_seq`
+
+Why these fields exist:
+
+- `seq` gives one publish boundary
+- `active_fence_token` fences stale writers
+- `next_inode_id` keeps allocation inside the serialized head update
+- `snapshot_hint_seq` tells readers where checkpoint replay may start
+- `retention_floor_seq` tells readers whether incremental replay is still promised
+
+Failure modes prevented:
+
+- separate inode-id allocation side channels
+- readers guessing the replay start point
+- stale writers publishing after lease takeover
+
+### `lease.json`
+
+The lease object is the current writer claim for the namespace.
+
+It must carry:
+
+- `kind = "namespace_lease"`
+- `format_version = 1`
+- `writer_version`
+- `payload_checksum_sha256`
+- `state.namespace_id`
+- `state.holder_id`
+- `state.fence_token`
+- `state.lease_expires_at_ms`
+
+Why these fields exist:
+
+- `holder_id` tells us who currently owns the write lease
+- `fence_token` must match the active head token before publish
+- `lease_expires_at_ms` makes expiration an explicit input to deterministic validation
+
+Failure modes prevented:
+
+- old writers publishing after a leadership handoff
+- silent disagreement between head state and lease state
+- validation logic depending on ambient wall-clock reads
+
+## Validation skeleton
+
+Before writing a WAL object, the commit planner must at minimum validate:
+
+1. the request namespace matches the current head and lease namespace
+2. the planned head seq still matches the current head seq
+3. the request carries the active fencing token
+4. the lease holder still matches the requesting writer
+5. the lease has not expired at the explicitly supplied validation time
+
+The planner may leave deeper inode and name checks to later metadata lookups, but the checks above are mandatory before publish is attempted.
