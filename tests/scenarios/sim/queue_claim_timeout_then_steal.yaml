@@ -1,0 +1,30 @@
+name: queue_claim_timeout_then_steal
+seed: 9001
+initial:
+  queue:
+    work_class: BuildSnapshot
+    shard: 17
+    jobs:
+      - job_id: job-1
+        dedupe_key: BuildSnapshot:ns-1
+        payload:
+          namespace_id: ns-1
+          through_seq: 420
+actions:
+  - worker_claim:
+      worker: worker-a
+      job_id: job-1
+  - advance_time_ms: 30000
+  - worker_claim:
+      worker: worker-b
+      job_id: job-1
+  - stale_complete:
+      worker: worker-a
+      job_id: job-1
+  - fresh_complete:
+      worker: worker-b
+      job_id: job-1
+expect:
+  invariants:
+    - stale_claim_token_cannot_complete
+    - stolen_job_completes_once

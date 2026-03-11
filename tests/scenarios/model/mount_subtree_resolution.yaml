@@ -1,0 +1,31 @@
+name: mount_subtree_resolution
+initial:
+  namespaces:
+    - id: ns-home
+      tree:
+        - dir: /
+        - mount: /SharedIcons
+          target_namespace: ns-assets
+          target_inode: 7
+    - id: ns-assets
+      tree:
+        - dir: /
+        - dir: /assets
+          inode: 3
+        - dir: /assets/icons
+          inode: 7
+        - file: /assets/icons/logo.png
+          inode: 8
+          revision: 1
+          content: sha256:icon
+actions:
+  - resolve_path:
+      namespace: ns-home
+      path: /SharedIcons/logo.png
+expect:
+  invariants:
+    - mount_root_can_point_to_subtree
+  final:
+    resolved_target:
+      namespace: ns-assets
+      inode: 8

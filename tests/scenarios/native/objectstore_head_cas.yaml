@@ -1,0 +1,16 @@
+name: objectstore_head_cas
+initial:
+  object_key: namespaces/ns-1/head.json
+  body: '{"seq": 41, "fence_token": 8}'
+actions:
+  - writer_a_reads: true
+  - writer_b_reads: true
+  - writer_a_compare_and_swap:
+      expected_etag: from_read
+      new_body: '{"seq": 42, "fence_token": 8}'
+  - writer_b_compare_and_swap:
+      expected_etag: from_read
+      new_body: '{"seq": 42, "fence_token": 9}'
+expect:
+  invariants:
+    - exactly_one_cas_succeeds
