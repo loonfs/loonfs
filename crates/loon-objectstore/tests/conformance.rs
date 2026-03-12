@@ -1,3 +1,5 @@
+mod provider_env;
+
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -6,6 +8,11 @@ use loon_objectstore::keys::{
 };
 use loon_objectstore::provider::{AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
 use loon_objectstore::{ByteRange, ObjectStore};
+use provider_env::{
+    provider_env_example_contents, AwsS3ConformanceConfig, CloudflareR2ConformanceConfig,
+    AWS_S3_OPTIONAL_VARS, AWS_S3_REQUIRED_VARS, CLOUDFLARE_R2_OPTIONAL_VARS,
+    CLOUDFLARE_R2_REQUIRED_VARS,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,6 +45,49 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/derived/BuildSnapshot/progress.json"
     );
     assert_eq!(queue_shard(12), "queue/shards/00012.json");
+}
+
+#[test]
+fn provider_env_example_covers_real_provider_contract() {
+    let example = provider_env_example_contents().expect("read provider env example");
+    for name in AWS_S3_REQUIRED_VARS
+        .iter()
+        .chain(AWS_S3_OPTIONAL_VARS.iter())
+        .chain(CLOUDFLARE_R2_REQUIRED_VARS.iter())
+        .chain(CLOUDFLARE_R2_OPTIONAL_VARS.iter())
+    {
+        assert!(
+            example.contains(name),
+            "provider env example should contain {name}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires real AWS S3 credentials; adapter wiring is still pending"]
+fn aws_s3_real_provider_conformance() {
+    let config = AwsS3ConformanceConfig::from_env()
+        .expect("load AWS S3 real-provider conformance environment");
+
+    assert!(!config.bucket.is_empty());
+    assert!(!config.region.is_empty());
+    assert!(!config.access_key_id.is_empty());
+    assert!(!config.secret_access_key.is_empty());
+    assert!(!config.prefix.is_empty());
+}
+
+#[test]
+#[ignore = "requires real Cloudflare R2 credentials; adapter wiring is still pending"]
+fn cloudflare_r2_real_provider_conformance() {
+    let config = CloudflareR2ConformanceConfig::from_env()
+        .expect("load Cloudflare R2 real-provider conformance environment");
+
+    assert!(!config.bucket.is_empty());
+    assert!(!config.account_id.is_empty());
+    assert!(!config.endpoint.is_empty());
+    assert!(!config.access_key_id.is_empty());
+    assert!(!config.secret_access_key.is_empty());
+    assert!(!config.prefix.is_empty());
 }
 
 #[test]
