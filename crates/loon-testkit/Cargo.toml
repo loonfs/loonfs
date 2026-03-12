@@ -9,3 +9,10 @@ rust-version.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
+
+[dev-dependencies]
+loon-core = { path = "../loon-core" }
+loon-model = { path = "../loon-model" }
+loon-objectstore = { path = "../loon-objectstore" }
+loon-types = { path = "../loon-types" }
+serde_json.workspace = true

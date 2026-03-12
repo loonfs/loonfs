@@ -991,7 +991,12 @@ name = "loon-testkit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "loon-core",
+ "loon-model",
+ "loon-objectstore",
+ "loon-types",
  "serde",
+ "serde_json",
  "serde_yaml",
 ]
 
