@@ -33,6 +33,41 @@ We do **not** use one global queue file.
 Why not:
 a single mutable object becomes a write hotspot.
 
+Queue shards are durable JSON control objects at:
+
+```text
+queue/shards/{shard_index:05}.json
+```
+
+The envelope shape matches other small mutable control objects:
+
+```json
+{
+  "kind": "queue_shard",
+  "format_version": 1,
+  "writer_version": "loon-worker/0.1.0",
+  "payload_checksum_sha256": "<sha256>",
+  "state": {
+    "work_class": "BuildSnapshot",
+    "shard_id": 17,
+    "broker": null,
+    "jobs": []
+  }
+}
+```
+
+Rules:
+
+- the object key must match `shard_id`
+- queue shard updates use create-if-absent for first publish and CAS for later mutation
+- broker lease state and jobs live in the same durable object so claim and repair decisions see one shard view
+
+Failure modes prevented:
+
+- queue writers silently disagreeing about which shard object they meant to update
+- claim metadata racing in a different object from the jobs it is meant to guard
+- lost updates from blind overwrite of a mutable shard
+
 ## Job rule
 
 Every job class must be idempotent.
@@ -159,6 +194,16 @@ Repair behavior:
 - if a matching ready job exists, raise its payload `through_seq` to `max(existing, head.seq)`
 - if a matching claimed job exists, attach or raise its follow-up payload to `max(existing, head.seq)`
 
+Durable repair publish rule:
+
+1. read `queue/shards/{shard_index:05}.json` if it exists
+2. validate the shard object against key, kind, and payload checksum
+3. apply the in-memory repair transform to the shard state
+4. if the transform produced no shard change, skip the write
+5. if the shard did not exist and repair needs a job, create the shard object
+6. otherwise compare-and-swap the updated shard object
+7. treat create/CAS conflicts as retry-from-fresh-read
+
 Why this rule exists:
 
 - queue shards are coordination only
@@ -170,3 +215,4 @@ Failure modes prevented:
 - derived work stalling forever because one post-commit enqueue was dropped
 - duplicate snapshot jobs for the same namespace fighting each other
 - a claimed stale job losing visibility of newer required work
+- repair logic fabricating queue state without a durable CAS boundary

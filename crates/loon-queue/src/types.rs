@@ -1,4 +1,4 @@
-use loon_types::{ChangeSeq, NamespaceId};
+use loon_types::{ChangeSeq, ControlObjectEnvelope, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,3 +73,5 @@ pub struct QueueShardState {
     pub broker: Option<QueueBroker>,
     pub jobs: Vec<QueueJob>,
 }
+
+pub type QueueShardEnvelope = ControlObjectEnvelope<QueueShardState>;

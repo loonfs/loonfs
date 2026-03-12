@@ -96,6 +96,7 @@ pub enum ControlObjectKind {
     NamespaceHead,
     NamespaceLease,
     NamespaceProgress,
+    QueueShard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

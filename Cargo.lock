@@ -241,8 +241,10 @@ dependencies = [
 name = "loon-queue"
 version = "0.1.0"
 dependencies = [
+ "loon-objectstore",
  "loon-types",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
