@@ -1,0 +1,28 @@
+name: progress_publish_advances_monotonically
+initial:
+  progress:
+    key: namespaces/ns-1/derived/BuildSnapshot/progress.json
+    payload:
+      namespace_id: ns-1
+      work_class: BuildSnapshot
+      through_seq: 40
+actions:
+  - publish_progress:
+      namespace_id: ns-1
+      work_class: BuildSnapshot
+      through_seq: 42
+  - publish_progress:
+      namespace_id: ns-1
+      work_class: BuildSnapshot
+      through_seq: 41
+expect:
+  progress:
+    key: namespaces/ns-1/derived/BuildSnapshot/progress.json
+    payload:
+      namespace_id: ns-1
+      work_class: BuildSnapshot
+      through_seq: 42
+  invariants:
+    - progress_object_checksum_matches_payload
+    - progress_object_key_matches_namespace_and_work_class
+    - progress_through_seq_advances_monotonically

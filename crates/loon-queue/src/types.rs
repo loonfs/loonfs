@@ -13,6 +13,21 @@ pub enum WorkClass {
     AdvanceRetentionFloor,
 }
 
+impl WorkClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BuildSnapshot => "BuildSnapshot",
+            Self::BuildChangeIndex => "BuildChangeIndex",
+            Self::BuildListingIndex => "BuildListingIndex",
+            Self::BuildRevisionIndex => "BuildRevisionIndex",
+            Self::VerifyNamespaceIntegrity => "VerifyNamespaceIntegrity",
+            Self::PlanGc => "PlanGc",
+            Self::SweepGcPlan => "SweepGcPlan",
+            Self::AdvanceRetentionFloor => "AdvanceRetentionFloor",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueBroker {
     pub broker_id: String,

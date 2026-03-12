@@ -1,7 +1,10 @@
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::derived_progress;
-use loon_objectstore::ObjectStore;
-use loon_types::{payload_checksum_sha256, ControlObjectKind, NamespaceId, ProgressStateEnvelope};
+use loon_objectstore::{ObjectMetadata, ObjectStore};
+use loon_types::{
+    payload_checksum_sha256, ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId,
+    ProgressState, ProgressStateEnvelope,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -23,6 +26,19 @@ pub struct LoadedRetentionAuthorizers {
     pub required_progress: Vec<LoadedProgressObject>,
     pub retention_policy: LoadedProgressObject,
     pub checked_invariants: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishedProgressObject {
+    pub metadata: ObjectMetadata,
+    pub progress: LoadedProgressObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProgressPublishOutcome {
+    Created(PublishedProgressObject),
+    Advanced(PublishedProgressObject),
+    NoChange(LoadedProgressObject),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +66,17 @@ pub enum ProgressLoadError {
         expected: String,
         actual: String,
     },
+    Codec(String),
+    Store(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProgressPublishError {
+    EmptyWriterVersion,
+    MissingObjectAfterHead { object_key: String },
+    MissingObjectEtag { object_key: String },
+    ConcurrentWrite,
+    Load(ProgressLoadError),
     Codec(String),
     Store(String),
 }
@@ -172,6 +199,119 @@ pub fn load_retention_authorizers<S: ObjectStore>(
     })
 }
 
+pub fn publish_progress<S: ObjectStore>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    expected_work_class: &str,
+    requested_through_seq: ChangeSeq,
+    writer_version: &str,
+) -> Result<ProgressPublishOutcome, ProgressPublishError> {
+    if writer_version.trim().is_empty() {
+        return Err(ProgressPublishError::EmptyWriterVersion);
+    }
+
+    let object_key = derived_progress(expected_namespace.as_str(), expected_work_class);
+    match store.head(&object_key).map_err(map_publish_store_error)? {
+        Some(metadata) => {
+            let etag =
+                metadata
+                    .etag
+                    .clone()
+                    .ok_or_else(|| ProgressPublishError::MissingObjectEtag {
+                        object_key: object_key.clone(),
+                    })?;
+            let encoded_bytes = store
+                .get(&object_key, None)
+                .map_err(map_publish_store_error)?
+                .ok_or_else(|| ProgressPublishError::MissingObjectAfterHead {
+                    object_key: object_key.clone(),
+                })?;
+            let current = load_progress_object(
+                expected_namespace,
+                expected_work_class,
+                &StoredProgressObject {
+                    object_key: object_key.clone(),
+                    encoded_bytes,
+                },
+            )
+            .map_err(ProgressPublishError::Load)?;
+
+            if current.envelope.state.through_seq >= requested_through_seq {
+                return Ok(ProgressPublishOutcome::NoChange(current));
+            }
+
+            let next = build_loaded_progress_object(
+                expected_namespace,
+                expected_work_class,
+                requested_through_seq,
+                writer_version,
+            )
+            .map_err(ProgressPublishError::Codec)?;
+            let written_metadata = store
+                .compare_and_swap(&object_key, &etag, &encode_progress_object(&next)?)
+                .map_err(map_publish_store_error)?;
+
+            Ok(ProgressPublishOutcome::Advanced(PublishedProgressObject {
+                metadata: written_metadata,
+                progress: next,
+            }))
+        }
+        None => {
+            let next = build_loaded_progress_object(
+                expected_namespace,
+                expected_work_class,
+                requested_through_seq,
+                writer_version,
+            )
+            .map_err(ProgressPublishError::Codec)?;
+            let written_metadata = store
+                .put_if_absent(&object_key, &encode_progress_object(&next)?)
+                .map_err(map_publish_store_error)?;
+
+            Ok(ProgressPublishOutcome::Created(PublishedProgressObject {
+                metadata: written_metadata,
+                progress: next,
+            }))
+        }
+    }
+}
+
+fn build_loaded_progress_object(
+    namespace_id: &NamespaceId,
+    work_class: &str,
+    through_seq: ChangeSeq,
+    writer_version: &str,
+) -> Result<LoadedProgressObject, String> {
+    let object_key = derived_progress(namespace_id.as_str(), work_class);
+    let envelope = ControlObjectEnvelope::from_state(
+        ControlObjectKind::NamespaceProgress,
+        writer_version,
+        ProgressState {
+            namespace_id: namespace_id.clone(),
+            work_class: work_class.to_owned(),
+            through_seq,
+        },
+    )
+    .map_err(|err| err.to_string())?;
+
+    Ok(LoadedProgressObject {
+        object_key,
+        envelope,
+        checked_invariants: vec![
+            "progress_object_checksum_matches_payload".to_owned(),
+            "progress_object_key_matches_namespace_and_work_class".to_owned(),
+            "progress_through_seq_advances_monotonically".to_owned(),
+        ],
+    })
+}
+
+fn encode_progress_object(
+    progress: &LoadedProgressObject,
+) -> Result<Vec<u8>, ProgressPublishError> {
+    serde_json::to_vec(&progress.envelope)
+        .map_err(|err| ProgressPublishError::Codec(err.to_string()))
+}
+
 fn extend_invariants(checked_invariants: &mut Vec<String>, new_invariants: &[String]) {
     for invariant in new_invariants {
         if !checked_invariants.iter().any(|value| value == invariant) {
@@ -184,10 +324,18 @@ fn map_object_store_error(err: ObjectStoreError) -> ProgressLoadError {
     ProgressLoadError::Store(err.to_string())
 }
 
+fn map_publish_store_error(err: ObjectStoreError) -> ProgressPublishError {
+    match err {
+        ObjectStoreError::PreconditionFailed => ProgressPublishError::ConcurrentWrite,
+        other => ProgressPublishError::Store(other.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        load_progress_object, load_retention_authorizers, ProgressLoadError, StoredProgressObject,
+        load_progress_object, load_retention_authorizers, publish_progress, ProgressLoadError,
+        ProgressPublishOutcome, StoredProgressObject,
     };
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::derived_progress;
@@ -262,6 +410,78 @@ mod tests {
         assert!(loaded
             .checked_invariants
             .contains(&"progress_object_key_matches_namespace_and_work_class".to_owned()));
+    }
+
+    #[test]
+    fn publish_progress_creates_missing_object() {
+        let temp_dir = TestDir::new("publish-progress-create");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+
+        let published = publish_progress(
+            &store,
+            &NamespaceId::from("ns-1"),
+            "BuildSnapshot",
+            ChangeSeq(42),
+            "loon-core-test",
+        )
+        .expect("publish missing progress object");
+
+        match published {
+            ProgressPublishOutcome::Created(published) => {
+                assert_eq!(published.progress.envelope.state.through_seq, ChangeSeq(42));
+            }
+            other => panic!("unexpected publish outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_progress_advances_existing_object_monotonically() {
+        let temp_dir = TestDir::new("publish-progress-advance");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        seed_progress_object(&store, "ns-1", "BuildSnapshot", ChangeSeq(40));
+
+        let published = publish_progress(
+            &store,
+            &NamespaceId::from("ns-1"),
+            "BuildSnapshot",
+            ChangeSeq(42),
+            "loon-core-test",
+        )
+        .expect("advance progress object");
+
+        match published {
+            ProgressPublishOutcome::Advanced(published) => {
+                assert_eq!(published.progress.envelope.state.through_seq, ChangeSeq(42));
+                assert!(published
+                    .progress
+                    .checked_invariants
+                    .contains(&"progress_through_seq_advances_monotonically".to_owned()));
+            }
+            other => panic!("unexpected publish outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_progress_noops_when_requested_seq_is_stale() {
+        let temp_dir = TestDir::new("publish-progress-noop");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        seed_progress_object(&store, "ns-1", "BuildSnapshot", ChangeSeq(42));
+
+        let published = publish_progress(
+            &store,
+            &NamespaceId::from("ns-1"),
+            "BuildSnapshot",
+            ChangeSeq(41),
+            "loon-core-test",
+        )
+        .expect("stale progress publish should no-op");
+
+        match published {
+            ProgressPublishOutcome::NoChange(current) => {
+                assert_eq!(current.envelope.state.through_seq, ChangeSeq(42));
+            }
+            other => panic!("unexpected publish outcome: {other:?}"),
+        }
     }
 
     fn seed_progress_object(

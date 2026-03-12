@@ -69,6 +69,49 @@ pub struct ModelCheckpointPublishAuthorizers {
     pub retention_policy: ModelProgressObject,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelQueueWorkClass {
+    BuildSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelQueueJobState {
+    Ready,
+    Claimed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelQueueSeqPayload {
+    pub namespace_id: NamespaceId,
+    pub through_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelQueueJob {
+    pub job_id: String,
+    pub dedupe_key: String,
+    pub state: ModelQueueJobState,
+    pub payload: ModelQueueSeqPayload,
+    pub follow_up: Option<ModelQueueSeqPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelQueueShard {
+    pub work_class: ModelQueueWorkClass,
+    pub shard_id: u32,
+    pub jobs: Vec<ModelQueueJob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelQueueRepairOutcome {
+    NoRepairNeeded,
+    Enqueued { through_seq: ChangeSeq },
+    RaisedReadyJob { through_seq: ChangeSeq },
+    AttachedFollowUp { through_seq: ChangeSeq },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelAction {
     CreateDir {
@@ -131,6 +174,10 @@ pub enum ModelError {
         expected: NamespaceId,
         actual: NamespaceId,
     },
+    ProgressWorkClassMismatch {
+        expected: String,
+        actual: String,
+    },
     RequiredProgressLag {
         work_class: String,
         requested: ChangeSeq,
@@ -140,6 +187,10 @@ pub enum ModelError {
         work_class: String,
         requested: ChangeSeq,
         available: ChangeSeq,
+    },
+    QueueWorkClassMismatch {
+        expected: ModelQueueWorkClass,
+        actual: ModelQueueWorkClass,
     },
 }
 
@@ -306,6 +357,131 @@ impl ModelNamespace {
         }
     }
 
+    pub fn publish_progress(
+        &self,
+        current: Option<&ModelProgressObject>,
+        work_class: &str,
+        requested_through_seq: ChangeSeq,
+    ) -> Result<ModelProgressObject, ModelError> {
+        if let Some(current) = current {
+            if current.namespace_id != self.namespace_id {
+                return Err(ModelError::ProgressNamespaceMismatch {
+                    work_class: current.work_class.clone(),
+                    expected: self.namespace_id.clone(),
+                    actual: current.namespace_id.clone(),
+                });
+            }
+
+            if current.work_class != work_class {
+                return Err(ModelError::ProgressWorkClassMismatch {
+                    expected: work_class.to_owned(),
+                    actual: current.work_class.clone(),
+                });
+            }
+
+            if current.through_seq >= requested_through_seq {
+                return Ok(current.clone());
+            }
+        }
+
+        Ok(ModelProgressObject {
+            namespace_id: self.namespace_id.clone(),
+            work_class: work_class.to_owned(),
+            through_seq: requested_through_seq,
+        })
+    }
+
+    pub fn repair_lost_snapshot_enqueue(
+        &self,
+        queue: &mut ModelQueueShard,
+        progress: Option<&ModelProgressObject>,
+    ) -> Result<ModelQueueRepairOutcome, ModelError> {
+        if queue.work_class != ModelQueueWorkClass::BuildSnapshot {
+            return Err(ModelError::QueueWorkClassMismatch {
+                expected: ModelQueueWorkClass::BuildSnapshot,
+                actual: queue.work_class,
+            });
+        }
+
+        if self.head_seq == ChangeSeq(0) {
+            return Ok(ModelQueueRepairOutcome::NoRepairNeeded);
+        }
+
+        if let Some(progress) = progress {
+            if progress.namespace_id != self.namespace_id {
+                return Err(ModelError::ProgressNamespaceMismatch {
+                    work_class: progress.work_class.clone(),
+                    expected: self.namespace_id.clone(),
+                    actual: progress.namespace_id.clone(),
+                });
+            }
+
+            if progress.work_class != build_snapshot_work_class() {
+                return Err(ModelError::ProgressWorkClassMismatch {
+                    expected: build_snapshot_work_class().to_owned(),
+                    actual: progress.work_class.clone(),
+                });
+            }
+
+            if progress.through_seq >= self.head_seq {
+                return Ok(ModelQueueRepairOutcome::NoRepairNeeded);
+            }
+        }
+
+        let desired_payload = ModelQueueSeqPayload {
+            namespace_id: self.namespace_id.clone(),
+            through_seq: self.head_seq,
+        };
+        let dedupe_key = build_snapshot_dedupe_key(&self.namespace_id);
+
+        if let Some(job) = queue
+            .jobs
+            .iter_mut()
+            .find(|job| job.dedupe_key == dedupe_key)
+        {
+            match job.state {
+                ModelQueueJobState::Ready => {
+                    if desired_payload.through_seq > job.payload.through_seq {
+                        job.payload.through_seq = desired_payload.through_seq;
+                        return Ok(ModelQueueRepairOutcome::RaisedReadyJob {
+                            through_seq: job.payload.through_seq,
+                        });
+                    }
+                }
+                ModelQueueJobState::Claimed => match &mut job.follow_up {
+                    Some(existing) => {
+                        if desired_payload.through_seq > existing.through_seq {
+                            existing.through_seq = desired_payload.through_seq;
+                            return Ok(ModelQueueRepairOutcome::AttachedFollowUp {
+                                through_seq: existing.through_seq,
+                            });
+                        }
+                    }
+                    None => {
+                        job.follow_up = Some(desired_payload.clone());
+                        return Ok(ModelQueueRepairOutcome::AttachedFollowUp {
+                            through_seq: desired_payload.through_seq,
+                        });
+                    }
+                },
+            }
+
+            return Ok(ModelQueueRepairOutcome::NoRepairNeeded);
+        }
+
+        queue.jobs.push(ModelQueueJob {
+            job_id: build_snapshot_repair_job_id(&self.namespace_id),
+            dedupe_key,
+            state: ModelQueueJobState::Ready,
+            payload: desired_payload.clone(),
+            follow_up: None,
+        });
+
+        Ok(ModelQueueRepairOutcome::Enqueued {
+            through_seq: desired_payload.through_seq,
+        })
+    }
+
     pub fn publish_checkpoint(
         &mut self,
         checkpoint: &ModelCheckpoint,
@@ -439,6 +615,18 @@ fn checkpoint_segment_object_key(
         checkpoint_seq.0,
         family.as_str()
     )
+}
+
+fn build_snapshot_work_class() -> &'static str {
+    "BuildSnapshot"
+}
+
+fn build_snapshot_dedupe_key(namespace_id: &NamespaceId) -> String {
+    format!("{}:{namespace_id}", build_snapshot_work_class())
+}
+
+fn build_snapshot_repair_job_id(namespace_id: &NamespaceId) -> String {
+    format!("repair-{}-{namespace_id}", build_snapshot_work_class())
 }
 
 impl ModelCheckpointFamily {
@@ -615,6 +803,105 @@ mod tests {
         assert_eq!(ns.next_inode_id, InodeId(42));
         assert_eq!(ns.snapshot_hint_seq, Some(ChangeSeq(1)));
         assert_eq!(ns.retention_floor_seq, ChangeSeq(1));
+    }
+
+    #[test]
+    fn model_progress_publish_is_monotonic() {
+        let ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        let current = ModelProgressObject {
+            namespace_id: NamespaceId::from("ns-1"),
+            work_class: "BuildSnapshot".to_owned(),
+            through_seq: ChangeSeq(42),
+        };
+
+        let published = ns
+            .publish_progress(Some(&current), "BuildSnapshot", ChangeSeq(41))
+            .expect("stale progress publish should no-op");
+
+        assert_eq!(published, current);
+    }
+
+    #[test]
+    fn model_repair_enqueues_snapshot_job_when_progress_lags() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::BumpSeq {
+            writer_fence_token: FenceToken(0),
+        })
+        .expect("active writer should advance seq");
+        let progress = ModelProgressObject {
+            namespace_id: NamespaceId::from("ns-1"),
+            work_class: "BuildSnapshot".to_owned(),
+            through_seq: ChangeSeq(0),
+        };
+        let mut queue = ModelQueueShard {
+            work_class: ModelQueueWorkClass::BuildSnapshot,
+            shard_id: 17,
+            jobs: vec![],
+        };
+
+        let outcome = ns
+            .repair_lost_snapshot_enqueue(&mut queue, Some(&progress))
+            .expect("repair should enqueue missing snapshot job");
+
+        assert_eq!(
+            outcome,
+            ModelQueueRepairOutcome::Enqueued {
+                through_seq: ChangeSeq(1),
+            }
+        );
+        assert_eq!(queue.jobs.len(), 1);
+        assert_eq!(queue.jobs[0].dedupe_key, "BuildSnapshot:ns-1");
+        assert_eq!(queue.jobs[0].payload.through_seq, ChangeSeq(1));
+    }
+
+    #[test]
+    fn model_repair_attaches_follow_up_for_claimed_snapshot_job() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::BumpSeq {
+            writer_fence_token: FenceToken(0),
+        })
+        .expect("active writer should advance seq");
+        ns.apply(ModelAction::BumpSeq {
+            writer_fence_token: FenceToken(0),
+        })
+        .expect("active writer should advance seq again");
+        let progress = ModelProgressObject {
+            namespace_id: NamespaceId::from("ns-1"),
+            work_class: "BuildSnapshot".to_owned(),
+            through_seq: ChangeSeq(0),
+        };
+        let mut queue = ModelQueueShard {
+            work_class: ModelQueueWorkClass::BuildSnapshot,
+            shard_id: 17,
+            jobs: vec![ModelQueueJob {
+                job_id: "job-1".to_owned(),
+                dedupe_key: "BuildSnapshot:ns-1".to_owned(),
+                state: ModelQueueJobState::Claimed,
+                payload: ModelQueueSeqPayload {
+                    namespace_id: NamespaceId::from("ns-1"),
+                    through_seq: ChangeSeq(1),
+                },
+                follow_up: None,
+            }],
+        };
+
+        let outcome = ns
+            .repair_lost_snapshot_enqueue(&mut queue, Some(&progress))
+            .expect("repair should attach follow-up to claimed job");
+
+        assert_eq!(
+            outcome,
+            ModelQueueRepairOutcome::AttachedFollowUp {
+                through_seq: ChangeSeq(2),
+            }
+        );
+        assert_eq!(
+            queue.jobs[0].follow_up,
+            Some(ModelQueueSeqPayload {
+                namespace_id: NamespaceId::from("ns-1"),
+                through_seq: ChangeSeq(2),
+            })
+        );
     }
 
     #[test]

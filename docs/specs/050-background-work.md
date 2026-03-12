@@ -95,6 +95,32 @@ Failure modes prevented:
 - mutating progress state backward and silently regressing published coverage
 - treating malformed progress JSON as authoritative
 
+## Progress publication rule
+
+Workers publish `progress.json` only after the immutable derived outputs for that `through_seq` are already durable.
+
+Publication must:
+
+1. derive the progress key from `namespace_id` and `work_class`
+2. read the current `progress.json` if it exists
+3. validate the existing object against its durable key, kind, and payload checksum
+4. skip the write when `current.through_seq >= requested_through_seq`
+5. create the object if it does not exist
+6. otherwise compare-and-swap it to the new higher `through_seq`
+7. treat CAS/create conflicts as retry-from-fresh-read, never as permission to overwrite blindly
+
+Why these rules exist:
+
+- derived coverage must only move forward
+- duplicate workers should converge on the same durable promise
+- stale workers must not regress visibility of already-built derived state
+
+Failure modes prevented:
+
+- a slower worker moving progress backward after a newer worker already advanced it
+- publishing progress for outputs that are not fully durable yet
+- lost updates from concurrent workers racing on the same progress object
+
 ## Retention policy gate
 
 Retention advancement also requires one durable progress object that represents the policy gate for the namespace.
@@ -109,3 +135,38 @@ Rule:
 Failure mode prevented:
 
 - dropping incremental replay before policy has actually authorized it
+
+## Lost enqueue repair
+
+`BuildSnapshot` is the first repair path.
+
+Repair uses canonical durable state, not queue state, as truth:
+
+1. read `head.json`
+2. read `namespaces/{namespace_id}/derived/BuildSnapshot/progress.json` if it exists
+3. if `head.seq <= progress.through_seq`, do nothing
+4. if `head.seq > progress.through_seq` or the progress object is missing, ensure one deduped queue job exists for that namespace
+
+The dedupe key is namespace-scoped:
+
+```text
+BuildSnapshot:{namespace_id}
+```
+
+Repair behavior:
+
+- if no matching job exists, enqueue a ready `BuildSnapshot` job through `head.seq`
+- if a matching ready job exists, raise its payload `through_seq` to `max(existing, head.seq)`
+- if a matching claimed job exists, attach or raise its follow-up payload to `max(existing, head.seq)`
+
+Why this rule exists:
+
+- queue shards are coordination only
+- repair must reconstruct missing work from durable namespace state
+- a claimed worker should finish what it already holds while still learning about newer head coverage
+
+Failure modes prevented:
+
+- derived work stalling forever because one post-commit enqueue was dropped
+- duplicate snapshot jobs for the same namespace fighting each other
+- a claimed stale job losing visibility of newer required work
