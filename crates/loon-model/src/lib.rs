@@ -8,6 +8,8 @@ pub struct ModelNamespace {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
     pub active_fence_token: FenceToken,
+    pub next_inode_id: InodeId,
+    pub retention_floor_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,7 +26,31 @@ pub struct ModelCheckpoint {
     pub namespace_id: NamespaceId,
     pub checkpoint_seq: ChangeSeq,
     pub active_fence_token: FenceToken,
+    pub next_inode_id: InodeId,
+    pub retention_floor_seq: ChangeSeq,
     pub verified: bool,
+    pub tables: Vec<ModelCheckpointTable>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCheckpointFamily {
+    Inodes,
+    Direntries,
+    Revisions,
+    Tombstones,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCheckpointSegment {
+    pub segment_index: u32,
+    pub row_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCheckpointTable {
+    pub family: ModelCheckpointFamily,
+    pub segments: Vec<ModelCheckpointSegment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,15 +100,29 @@ impl ModelNamespace {
             namespace_id,
             head_seq: ChangeSeq(0),
             active_fence_token: FenceToken(0),
+            next_inode_id: InodeId(1),
+            retention_floor_seq: ChangeSeq(0),
         }
     }
 
     pub fn apply(&mut self, action: ModelAction) -> Result<(), ModelError> {
         match action {
             ModelAction::CreateDir {
-                writer_fence_token, ..
+                inode_id,
+                writer_fence_token,
+            } => {
+                if writer_fence_token != self.active_fence_token {
+                    return Err(ModelError::StaleWriterFenceToken {
+                        expected: self.active_fence_token,
+                        actual: writer_fence_token,
+                    });
+                }
+                self.head_seq = ChangeSeq(self.head_seq.0 + 1);
+                self.next_inode_id =
+                    InodeId(self.next_inode_id.0.max(inode_id.0.saturating_add(1)));
+                Ok(())
             }
-            | ModelAction::DeleteSubtree {
+            ModelAction::DeleteSubtree {
                 writer_fence_token, ..
             }
             | ModelAction::BumpSeq { writer_fence_token } => {
@@ -156,7 +196,39 @@ impl ModelNamespace {
             namespace_id: self.namespace_id.clone(),
             checkpoint_seq: self.head_seq,
             active_fence_token: self.active_fence_token,
+            next_inode_id: self.next_inode_id,
+            retention_floor_seq: self.retention_floor_seq,
             verified: true,
+            tables: vec![
+                ModelCheckpointTable {
+                    family: ModelCheckpointFamily::Inodes,
+                    segments: vec![ModelCheckpointSegment {
+                        segment_index: 0,
+                        row_count: 0,
+                    }],
+                },
+                ModelCheckpointTable {
+                    family: ModelCheckpointFamily::Direntries,
+                    segments: vec![ModelCheckpointSegment {
+                        segment_index: 0,
+                        row_count: 0,
+                    }],
+                },
+                ModelCheckpointTable {
+                    family: ModelCheckpointFamily::Revisions,
+                    segments: vec![ModelCheckpointSegment {
+                        segment_index: 0,
+                        row_count: 0,
+                    }],
+                },
+                ModelCheckpointTable {
+                    family: ModelCheckpointFamily::Tombstones,
+                    segments: vec![ModelCheckpointSegment {
+                        segment_index: 0,
+                        row_count: 0,
+                    }],
+                },
+            ],
         }
     }
 
@@ -171,6 +243,8 @@ impl ModelNamespace {
             namespace_id: checkpoint.namespace_id.clone(),
             head_seq: checkpoint.checkpoint_seq,
             active_fence_token: checkpoint.active_fence_token,
+            next_inode_id: checkpoint.next_inode_id,
+            retention_floor_seq: checkpoint.retention_floor_seq,
         })
     }
 }
@@ -187,6 +261,19 @@ mod tests {
         })
         .expect("active writer should advance seq");
         assert_eq!(ns.head_seq.0, 1);
+    }
+
+    #[test]
+    fn model_create_dir_advances_next_inode_id() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::CreateDir {
+            inode_id: InodeId(7),
+            writer_fence_token: FenceToken(0),
+        })
+        .expect("create dir should advance next inode id");
+
+        assert_eq!(ns.head_seq, ChangeSeq(1));
+        assert_eq!(ns.next_inode_id, InodeId(8));
     }
 
     #[test]
@@ -269,7 +356,8 @@ mod tests {
             new_fence_token: FenceToken(9),
         })
         .expect("fence rotation should succeed");
-        ns.apply(ModelAction::BumpSeq {
+        ns.apply(ModelAction::CreateDir {
+            inode_id: InodeId(41),
             writer_fence_token: FenceToken(9),
         })
         .expect("active writer should advance seq");
@@ -281,6 +369,25 @@ mod tests {
         assert_eq!(restored.namespace_id, NamespaceId::from("ns-1"));
         assert_eq!(restored.head_seq, ChangeSeq(1));
         assert_eq!(restored.active_fence_token, FenceToken(9));
+        assert_eq!(restored.next_inode_id, InodeId(42));
+        assert_eq!(restored.retention_floor_seq, ChangeSeq(0));
+    }
+
+    #[test]
+    fn model_checkpoint_includes_one_empty_segment_per_family() {
+        let ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        let checkpoint = ns.checkpoint();
+
+        assert_eq!(checkpoint.tables.len(), 4);
+        assert!(checkpoint
+            .tables
+            .iter()
+            .all(|table| table.segments.len() == 1));
+        assert!(checkpoint.tables.iter().all(|table| table.segments[0]
+            == ModelCheckpointSegment {
+                segment_index: 0,
+                row_count: 0,
+            }));
     }
 
     #[test]
@@ -289,7 +396,10 @@ mod tests {
             namespace_id: NamespaceId::from("ns-1"),
             checkpoint_seq: ChangeSeq(40),
             active_fence_token: FenceToken(8),
+            next_inode_id: InodeId(501),
+            retention_floor_seq: ChangeSeq(40),
             verified: false,
+            tables: vec![],
         };
 
         let error = ModelNamespace::restore_from_checkpoint(&checkpoint)

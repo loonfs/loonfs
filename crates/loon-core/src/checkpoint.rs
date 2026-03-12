@@ -1,12 +1,51 @@
 use crate::wal::{replay_wal_tail, StoredWalObject, WalReplayError};
-use loon_objectstore::keys::snapshot_manifest;
+use loon_objectstore::keys::{snapshot_manifest, snapshot_table, SnapshotTableFamily};
 use loon_types::{
-    decode_checkpoint_manifest_json, ChangeSeq, CheckpointManifestEnvelope, HeadState, NamespaceId,
+    decode_checkpoint_manifest_json, encode_checkpoint_manifest_json,
+    encode_checkpoint_segment_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,
+    CheckpointManifestPayload, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
+    CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest, HeadState,
+    NamespaceId,
 };
 use serde::{Deserialize, Serialize};
 
+const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 4] = [
+    CheckpointTableFamily::Inodes,
+    CheckpointTableFamily::Direntries,
+    CheckpointTableFamily::Revisions,
+    CheckpointTableFamily::Tombstones,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedCheckpointManifest {
+    pub object_key: String,
+    pub envelope: CheckpointManifestEnvelope,
+    pub encoded_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedCheckpointSegment {
+    pub object_key: String,
+    pub descriptor: CheckpointSegmentDescriptor,
+    pub envelope: CheckpointSegmentEnvelope,
+    pub encoded_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedCheckpoint {
+    pub manifest: PreparedCheckpointManifest,
+    pub segments: Vec<PreparedCheckpointSegment>,
+    pub checked_invariants: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredCheckpointManifest {
+    pub object_key: String,
+    pub encoded_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredCheckpointSegment {
     pub object_key: String,
     pub encoded_bytes: Vec<u8>,
 }
@@ -17,6 +56,12 @@ pub struct LoadedCheckpointManifest {
     pub manifest: CheckpointManifestEnvelope,
     pub basis_head: HeadState,
     pub checked_invariants: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CheckpointBuildError {
+    EmptyWriterVersion,
+    Codec(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +79,57 @@ pub enum CheckpointReplayError {
         checkpoint_seq: ChangeSeq,
     },
     WalReplay(WalReplayError),
+}
+
+pub fn prepare_checkpoint(
+    head: &HeadState,
+    writer_version: &str,
+) -> Result<PreparedCheckpoint, CheckpointBuildError> {
+    if writer_version.trim().is_empty() {
+        return Err(CheckpointBuildError::EmptyWriterVersion);
+    }
+
+    let segments = CHECKPOINT_TABLE_FAMILIES
+        .iter()
+        .copied()
+        .map(|family| prepare_checkpoint_segment(head, family, writer_version))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let manifest_payload = CheckpointManifestPayload {
+        namespace_id: head.namespace_id.clone(),
+        checkpoint_seq: head.seq,
+        active_fence_token: head.active_fence_token,
+        next_inode_id: head.next_inode_id,
+        retention_floor_seq: head.retention_floor_seq,
+        verified: true,
+        tables: segments
+            .iter()
+            .map(|segment| CheckpointTableManifest {
+                family: segment.envelope.payload.family,
+                segments: vec![segment.descriptor.clone()],
+            })
+            .collect(),
+    };
+    let manifest_envelope =
+        CheckpointManifestEnvelope::from_payload(writer_version, manifest_payload)
+            .map_err(|err| CheckpointBuildError::Codec(err.to_string()))?;
+    let manifest = PreparedCheckpointManifest {
+        object_key: snapshot_manifest(head.namespace_id.as_str(), head.seq.0),
+        encoded_bytes: encode_checkpoint_manifest_json(&manifest_envelope)
+            .map_err(|err| CheckpointBuildError::Codec(err.to_string()))?,
+        envelope: manifest_envelope,
+    };
+
+    Ok(PreparedCheckpoint {
+        manifest,
+        segments,
+        checked_invariants: vec![
+            "checkpoint_segment_payload_checksum_matches_payload".to_owned(),
+            "checkpoint_segment_key_matches_family_and_index".to_owned(),
+            "verified_checkpoint_manifest_requires_durable_segments".to_owned(),
+            "checkpoint_manifest_preserves_head_summary".to_owned(),
+        ],
+    })
 }
 
 pub fn load_checkpoint_manifest(
@@ -95,20 +191,170 @@ pub fn replay_from_checkpoint_and_wal_tail(
     replay_wal_tail(&loaded.basis_head, wal_tail).map_err(CheckpointReplayError::WalReplay)
 }
 
+fn prepare_checkpoint_segment(
+    head: &HeadState,
+    family: CheckpointTableFamily,
+    writer_version: &str,
+) -> Result<PreparedCheckpointSegment, CheckpointBuildError> {
+    let payload = CheckpointSegmentPayload {
+        namespace_id: head.namespace_id.clone(),
+        checkpoint_seq: head.seq,
+        family,
+        segment_index: 0,
+        row_count: 0,
+        min_key: String::new(),
+        max_key: String::new(),
+        pages: vec![],
+    };
+    let envelope = CheckpointSegmentEnvelope::from_payload(writer_version, payload)
+        .map_err(|err| CheckpointBuildError::Codec(err.to_string()))?;
+    let object_key = snapshot_table(
+        head.namespace_id.as_str(),
+        head.seq.0,
+        snapshot_table_family(family),
+        envelope.payload.segment_index,
+    );
+    let descriptor = CheckpointSegmentDescriptor {
+        object_key: object_key.clone(),
+        segment_index: envelope.payload.segment_index,
+        row_count: envelope.payload.row_count,
+        min_key: envelope.payload.min_key.clone(),
+        max_key: envelope.payload.max_key.clone(),
+        payload_checksum_sha256: envelope.payload_checksum_sha256.clone(),
+        page_checksums_sha256: envelope
+            .page_checksums_sha256()
+            .map_err(|err| CheckpointBuildError::Codec(err.to_string()))?,
+    };
+    let encoded_bytes = encode_checkpoint_segment_envelope_zstd(&envelope)
+        .map_err(|err| CheckpointBuildError::Codec(err.to_string()))?;
+
+    Ok(PreparedCheckpointSegment {
+        object_key,
+        descriptor,
+        envelope,
+        encoded_bytes,
+    })
+}
+
+fn snapshot_table_family(family: CheckpointTableFamily) -> SnapshotTableFamily {
+    match family {
+        CheckpointTableFamily::Inodes => SnapshotTableFamily::Inodes,
+        CheckpointTableFamily::Direntries => SnapshotTableFamily::Direntries,
+        CheckpointTableFamily::Revisions => SnapshotTableFamily::Revisions,
+        CheckpointTableFamily::Tombstones => SnapshotTableFamily::Tombstones,
+    }
+}
+
+impl From<&PreparedCheckpointManifest> for StoredCheckpointManifest {
+    fn from(value: &PreparedCheckpointManifest) -> Self {
+        Self {
+            object_key: value.object_key.clone(),
+            encoded_bytes: value.encoded_bytes.clone(),
+        }
+    }
+}
+
+impl From<&PreparedCheckpointSegment> for StoredCheckpointSegment {
+    fn from(value: &PreparedCheckpointSegment) -> Self {
+        Self {
+            object_key: value.object_key.clone(),
+            encoded_bytes: value.encoded_bytes.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        load_checkpoint_manifest, replay_from_checkpoint_and_wal_tail, CheckpointReplayError,
-        StoredCheckpointManifest,
+        load_checkpoint_manifest, prepare_checkpoint, replay_from_checkpoint_and_wal_tail,
+        CheckpointBuildError, CheckpointReplayError, StoredCheckpointManifest,
     };
     use crate::wal::StoredWalObject;
-    use loon_objectstore::keys::{snapshot_manifest, wal_commit};
+    use loon_objectstore::keys::{
+        snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily,
+    };
     use loon_types::{
+        decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
         encode_checkpoint_manifest_json, encode_wal_commit_envelope_zstd, ChangeSeq,
         CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointSegmentDescriptor,
-        CheckpointTableFamily, CheckpointTableManifest, FenceToken, InodeId, NamespaceId,
-        WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+        CheckpointTableFamily, CheckpointTableManifest, FenceToken, HeadState, InodeId,
+        NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
     };
+
+    #[test]
+    fn prepare_checkpoint_builds_verified_manifest_and_empty_segments() {
+        let prepared =
+            prepare_checkpoint(&sample_head(), "loon-core-test").expect("prepare checkpoint");
+
+        assert_eq!(
+            prepared.manifest.object_key,
+            "namespaces/ns-1/snapshots/00000000000000000042/manifest.json"
+        );
+        assert_eq!(prepared.segments.len(), 4);
+        assert!(prepared
+            .checked_invariants
+            .contains(&"verified_checkpoint_manifest_requires_durable_segments".to_owned()));
+
+        let manifest = decode_checkpoint_manifest_json(&prepared.manifest.encoded_bytes)
+            .expect("decode prepared checkpoint manifest");
+
+        assert!(manifest.payload.verified);
+        assert_eq!(manifest.payload.checkpoint_seq, ChangeSeq(42));
+        assert_eq!(manifest.payload.active_fence_token, FenceToken(9));
+        assert_eq!(manifest.payload.next_inode_id, InodeId(777));
+        assert_eq!(manifest.payload.retention_floor_seq, ChangeSeq(40));
+        assert_eq!(manifest.payload.tables.len(), 4);
+        assert_eq!(
+            manifest.payload.tables[0].segments[0].object_key,
+            snapshot_table("ns-1", 42, SnapshotTableFamily::Inodes, 0)
+        );
+        assert!(manifest
+            .payload
+            .tables
+            .iter()
+            .all(|table| table.segments[0].row_count == 0));
+    }
+
+    #[test]
+    fn prepare_checkpoint_segment_round_trips_through_shared_codec() {
+        let prepared =
+            prepare_checkpoint(&sample_head(), "loon-core-test").expect("prepare checkpoint");
+        let decoded = decode_checkpoint_segment_envelope_zstd(&prepared.segments[0].encoded_bytes)
+            .expect("decode checkpoint segment");
+
+        assert_eq!(decoded.payload.namespace_id, NamespaceId::from("ns-1"));
+        assert_eq!(decoded.payload.checkpoint_seq, ChangeSeq(42));
+        assert_eq!(decoded.payload.family, CheckpointTableFamily::Inodes);
+        assert_eq!(decoded.payload.segment_index, 0);
+        assert!(decoded
+            .has_valid_payload_checksum()
+            .expect("recompute checkpoint segment checksum"));
+        assert_eq!(decoded.payload.pages.len(), 0);
+    }
+
+    #[test]
+    fn prepare_checkpoint_manifest_can_be_loaded_as_basis_head() {
+        let prepared =
+            prepare_checkpoint(&sample_head(), "loon-core-test").expect("prepare checkpoint");
+        let loaded = load_checkpoint_manifest(
+            &NamespaceId::from("ns-1"),
+            &StoredCheckpointManifest::from(&prepared.manifest),
+        )
+        .expect("load prepared checkpoint manifest");
+
+        assert_eq!(loaded.basis_head.seq, ChangeSeq(42));
+        assert_eq!(loaded.basis_head.active_fence_token, FenceToken(9));
+        assert_eq!(loaded.basis_head.next_inode_id, InodeId(777));
+        assert_eq!(loaded.basis_head.snapshot_hint_seq, Some(ChangeSeq(42)));
+    }
+
+    #[test]
+    fn prepare_checkpoint_rejects_empty_writer_version() {
+        let error = prepare_checkpoint(&sample_head(), "   ")
+            .expect_err("empty writer version should fail");
+
+        assert_eq!(error, CheckpointBuildError::EmptyWriterVersion);
+    }
 
     #[test]
     fn load_checkpoint_manifest_derives_basis_head() {
@@ -267,6 +513,17 @@ mod tests {
         StoredWalObject {
             object_key,
             encoded_bytes,
+        }
+    }
+
+    fn sample_head() -> HeadState {
+        HeadState {
+            namespace_id: NamespaceId::from("ns-1"),
+            seq: ChangeSeq(42),
+            active_fence_token: FenceToken(9),
+            next_inode_id: InodeId(777),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
         }
     }
 }

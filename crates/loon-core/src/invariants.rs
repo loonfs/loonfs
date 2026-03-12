@@ -14,6 +14,10 @@ pub const INVARIANTS: &[&str] = &[
     "checkpoint_manifest_key_matches_seq",
     "checkpoint_manifest_must_be_verified",
     "checkpoint_plus_wal_tail_reproduces_head",
+    "checkpoint_segment_payload_checksum_matches_payload",
+    "checkpoint_segment_key_matches_family_and_index",
+    "verified_checkpoint_manifest_requires_durable_segments",
+    "checkpoint_manifest_preserves_head_summary",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

@@ -1,0 +1,55 @@
+name: checkpoint_builder_writes_verified_manifest_and_segments
+initial:
+  head:
+    namespace_id: ns-1
+    seq: 42
+    active_fence_token: 9
+    next_inode_id: 777
+    snapshot_hint_seq: 40
+    retention_floor_seq: 40
+actions:
+  - build_checkpoint: true
+expect:
+  checkpoint_manifest:
+    key: namespaces/ns-1/snapshots/00000000000000000042/manifest.json
+    payload:
+      namespace_id: ns-1
+      checkpoint_seq: 42
+      active_fence_token: 9
+      next_inode_id: 777
+      retention_floor_seq: 40
+      verified: true
+  checkpoint_segments:
+    - key: namespaces/ns-1/snapshots/00000000000000000042/tables/inodes-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 42
+        family: inodes
+        segment_index: 0
+        row_count: 0
+    - key: namespaces/ns-1/snapshots/00000000000000000042/tables/direntries-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 42
+        family: direntries
+        segment_index: 0
+        row_count: 0
+    - key: namespaces/ns-1/snapshots/00000000000000000042/tables/revisions-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 42
+        family: revisions
+        segment_index: 0
+        row_count: 0
+    - key: namespaces/ns-1/snapshots/00000000000000000042/tables/tombstones-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 42
+        family: tombstones
+        segment_index: 0
+        row_count: 0
+  invariants:
+    - checkpoint_segment_payload_checksum_matches_payload
+    - checkpoint_segment_key_matches_family_and_index
+    - verified_checkpoint_manifest_requires_durable_segments
+    - checkpoint_manifest_preserves_head_summary

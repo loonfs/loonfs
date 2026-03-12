@@ -298,3 +298,76 @@ Failure modes prevented:
 - starting replay from the wrong checkpoint
 - treating an unverified snapshot as a trusted basis
 - diverging between checkpoint basis state and later WAL replay
+
+## Checkpoint segment object skeleton
+
+Each checkpoint segment lives at:
+
+```text
+namespaces/{namespace_id}/snapshots/{checkpoint_seq:020}/tables/{family}-{segment_index:05}.sst.zst
+```
+
+Each segment is an immutable `CheckpointSegmentEnvelope` encoded as CBOR and then compressed with zstd.
+
+The envelope must carry:
+
+- `kind = "namespace_checkpoint_segment"`
+- `format_version = 1`
+- `writer_version`
+- `payload_checksum_sha256`
+- `payload.namespace_id`
+- `payload.checkpoint_seq`
+- `payload.family`
+- `payload.segment_index`
+- `payload.row_count`
+- `payload.min_key`
+- `payload.max_key`
+- `payload.pages`
+
+Each page entry must name:
+
+- `page_index`
+- `min_key`
+- `max_key`
+- `row_keys`
+
+The manifest stores the segment payload checksum plus one checksum per page. The current skeleton uses ordered string keys inside each page so the durable object shape is fixed before typed table-row encodings land.
+
+For the current writer skeleton, each table family emits one deterministic segment object at `segment_index = 0`. The first implementation may emit empty pages and zero-row segments while preserving the namespace head summary needed for replay.
+
+Why these fields exist:
+
+- `family` and `segment_index` bind the object body to its durable object key
+- segment `row_count`, `min_key`, and `max_key` make manifest-to-segment verification explicit
+- page-level ordered keys give the first checksum and pagination contract without locking a final row encoding too early
+- immutable CBOR+zstd keeps snapshot bulk data portable and append-only
+
+Failure modes prevented:
+
+- mutable or implementation-defined snapshot segment encodings
+- manifest descriptors that cannot be checked against the segment body
+- page-level corruption going undetected inside a durable checkpoint object
+
+## Skeleton checkpoint writer
+
+The first checkpoint writer path is:
+
+1. take the current `HeadState` as the checkpoint basis
+2. derive `checkpoint_seq = head.seq`
+3. build immutable segment objects for each table family under that `checkpoint_seq`
+4. copy each segment payload checksum and page checksum list into the manifest descriptors
+5. write `manifest.json` with `verified = true` only after the segment objects are fully assembled
+
+The current skeleton preserves:
+
+- `active_fence_token`
+- `next_inode_id`
+- `retention_floor_seq`
+
+It does not yet materialize full inode, direntry, revision, or tombstone rows. That richer table scan/build path comes later.
+
+Failure modes prevented:
+
+- publishing a verified manifest before its segment objects exist
+- losing allocator or retention state while building a checkpoint
+- drifting between durable segment keys and manifest metadata
