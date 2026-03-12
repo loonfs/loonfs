@@ -7,6 +7,9 @@ pub const INVARIANTS: &[&str] = &[
     "wal_payload_checksum_matches_payload",
     "wal_key_matches_committed_seq",
     "head_publish_requires_durable_wal",
+    "wal_replay_requires_matching_namespace",
+    "wal_replay_requires_matching_base_head_seq",
+    "wal_tail_seq_is_contiguous",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

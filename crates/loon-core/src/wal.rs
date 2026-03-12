@@ -1,8 +1,8 @@
 use crate::commit::{CommitOp, CommitPlan, CommitRequest, Precondition};
 use loon_objectstore::keys::wal_commit;
 use loon_types::{
-    encode_wal_commit_envelope_zstd, ChangeSeq, NamespaceId, WalCommitEnvelope, WalCommitPayload,
-    WalOp, WalPrecondition,
+    decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, ChangeSeq, HeadState,
+    NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +28,42 @@ pub enum WalBuildError {
         plan: ChangeSeq,
     },
     Codec(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredWalObject {
+    pub object_key: String,
+    pub encoded_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayedWalCommit {
+    pub object_key: String,
+    pub envelope: WalCommitEnvelope,
+    pub resulting_head: HeadState,
+    pub checked_invariants: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WalReplayError {
+    Codec(String),
+    ObjectKeyMismatch {
+        expected: String,
+        actual: String,
+    },
+    NamespaceMismatch {
+        expected: NamespaceId,
+        actual: NamespaceId,
+    },
+    BaseHeadSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    NonContiguousSeq {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    SeqOverflow,
 }
 
 pub fn prepare_wal_commit(
@@ -88,6 +124,96 @@ pub fn prepare_wal_commit(
             "head_publish_requires_durable_wal".to_owned(),
         ],
     })
+}
+
+pub fn replay_wal_commit(
+    current_head: &HeadState,
+    wal_object: &StoredWalObject,
+) -> Result<ReplayedWalCommit, WalReplayError> {
+    let envelope = decode_wal_commit_envelope_zstd(&wal_object.encoded_bytes)
+        .map_err(|err| WalReplayError::Codec(err.to_string()))?;
+    let expected_object_key = wal_commit(
+        envelope.payload.namespace_id.as_str(),
+        envelope.payload.seq.0,
+        &envelope.payload.commit_id,
+    );
+
+    if wal_object.object_key != expected_object_key {
+        return Err(WalReplayError::ObjectKeyMismatch {
+            expected: expected_object_key,
+            actual: wal_object.object_key.clone(),
+        });
+    }
+
+    if envelope.payload.namespace_id != current_head.namespace_id {
+        return Err(WalReplayError::NamespaceMismatch {
+            expected: current_head.namespace_id.clone(),
+            actual: envelope.payload.namespace_id.clone(),
+        });
+    }
+
+    if envelope.payload.base_head_seq != current_head.seq {
+        return Err(WalReplayError::BaseHeadSeqMismatch {
+            expected: current_head.seq,
+            actual: envelope.payload.base_head_seq,
+        });
+    }
+
+    let expected_seq = current_head
+        .seq
+        .0
+        .checked_add(1)
+        .map(ChangeSeq)
+        .ok_or(WalReplayError::SeqOverflow)?;
+
+    if envelope.payload.seq != expected_seq {
+        return Err(WalReplayError::NonContiguousSeq {
+            expected: expected_seq,
+            actual: envelope.payload.seq,
+        });
+    }
+
+    Ok(ReplayedWalCommit {
+        object_key: wal_object.object_key.clone(),
+        envelope: envelope.clone(),
+        resulting_head: HeadState {
+            namespace_id: current_head.namespace_id.clone(),
+            seq: envelope.payload.seq,
+            active_fence_token: envelope.payload.writer_fence_token,
+            next_inode_id: current_head.next_inode_id,
+            snapshot_hint_seq: current_head.snapshot_hint_seq,
+            retention_floor_seq: current_head.retention_floor_seq,
+        },
+        checked_invariants: vec![
+            "wal_payload_checksum_matches_payload".to_owned(),
+            "wal_key_matches_committed_seq".to_owned(),
+            "wal_replay_requires_matching_namespace".to_owned(),
+            "wal_replay_requires_matching_base_head_seq".to_owned(),
+            "wal_tail_seq_is_contiguous".to_owned(),
+        ],
+    })
+}
+
+pub fn replay_wal_tail(
+    basis_head: &HeadState,
+    wal_tail: &[StoredWalObject],
+) -> Result<HeadState, WalReplayError> {
+    let mut current_head = basis_head.clone();
+
+    for wal_object in wal_tail {
+        current_head = replay_wal_commit(&current_head, wal_object)?.resulting_head;
+    }
+
+    Ok(current_head)
+}
+
+impl From<&PreparedWalCommit> for StoredWalObject {
+    fn from(value: &PreparedWalCommit) -> Self {
+        Self {
+            object_key: value.object_key.clone(),
+            encoded_bytes: value.encoded_bytes.clone(),
+        }
+    }
 }
 
 impl From<&CommitOp> for WalOp {
@@ -151,13 +277,18 @@ impl From<&Precondition> for WalPrecondition {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_wal_commit, WalBuildError};
+    use super::{
+        prepare_wal_commit, replay_wal_commit, replay_wal_tail, StoredWalObject, WalBuildError,
+        WalReplayError,
+    };
     use crate::commit::{
         build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, Precondition,
     };
+    use loon_objectstore::keys::wal_commit;
     use loon_types::{
-        decode_wal_commit_envelope_zstd, ChangeSeq, FenceToken, HeadState, InodeId, LeaseState,
-        NamespaceId, RevisionNo, WalEnvelopeKind, WalOp, WalPrecondition,
+        decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, ChangeSeq, FenceToken,
+        HeadState, InodeId, LeaseState, NamespaceId, RevisionNo, WalCommitEnvelope,
+        WalCommitPayload, WalEnvelopeKind, WalOp, WalPrecondition,
     };
 
     #[test]
@@ -233,6 +364,167 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replay_wal_commit_updates_head_for_contiguous_entry() {
+        let request = sample_request();
+        let context = validation_context(999);
+        let prepared = prepare_wal_commit(
+            &request,
+            &build_commit_plan(&request, &context).expect("validated commit plan"),
+            "loon-core-test",
+        )
+        .expect("prepare wal commit");
+
+        let replayed = replay_wal_commit(&context.head, &StoredWalObject::from(&prepared))
+            .expect("replay should succeed");
+
+        assert_eq!(replayed.resulting_head.seq, ChangeSeq(42));
+        assert_eq!(replayed.resulting_head.active_fence_token, FenceToken(8));
+        assert_eq!(replayed.resulting_head.next_inode_id, InodeId(501));
+        assert!(replayed
+            .checked_invariants
+            .contains(&"wal_tail_seq_is_contiguous".to_owned()));
+    }
+
+    #[test]
+    fn replay_wal_tail_advances_head_through_multiple_entries() {
+        let basis_head = HeadState {
+            namespace_id: NamespaceId::from("ns-1"),
+            seq: ChangeSeq(40),
+            active_fence_token: FenceToken(8),
+            next_inode_id: InodeId(501),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let wal_tail = vec![
+            stored_wal_object(sample_payload(
+                ChangeSeq(41),
+                ChangeSeq(40),
+                "req-20260311-0001",
+                FenceToken(8),
+            )),
+            stored_wal_object(sample_payload(
+                ChangeSeq(42),
+                ChangeSeq(41),
+                "req-20260311-0002",
+                FenceToken(9),
+            )),
+        ];
+
+        let final_head =
+            replay_wal_tail(&basis_head, &wal_tail).expect("tail replay should succeed");
+
+        assert_eq!(final_head.seq, ChangeSeq(42));
+        assert_eq!(final_head.active_fence_token, FenceToken(9));
+        assert_eq!(final_head.next_inode_id, InodeId(501));
+        assert_eq!(final_head.snapshot_hint_seq, Some(ChangeSeq(40)));
+    }
+
+    #[test]
+    fn replay_wal_commit_rejects_namespace_mismatch() {
+        let current_head = replay_basis_head();
+        let wal_object = stored_wal_object(WalCommitPayload {
+            namespace_id: NamespaceId::from("ns-2"),
+            seq: ChangeSeq(41),
+            base_head_seq: ChangeSeq(40),
+            commit_id: "req-20260311-0001".to_owned(),
+            request_id: "req-20260311-0001".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            ops: Vec::new(),
+            preconditions: vec![WalPrecondition::HeadSeqIs(ChangeSeq(40))],
+        });
+
+        let error = replay_wal_commit(&current_head, &wal_object)
+            .expect_err("should reject namespace mismatch");
+
+        assert_eq!(
+            error,
+            WalReplayError::NamespaceMismatch {
+                expected: NamespaceId::from("ns-1"),
+                actual: NamespaceId::from("ns-2"),
+            }
+        );
+    }
+
+    #[test]
+    fn replay_wal_commit_rejects_base_head_seq_mismatch() {
+        let current_head = replay_basis_head();
+        let wal_object = stored_wal_object(sample_payload(
+            ChangeSeq(41),
+            ChangeSeq(39),
+            "req-20260311-0001",
+            FenceToken(8),
+        ));
+
+        let error = replay_wal_commit(&current_head, &wal_object)
+            .expect_err("should reject base head mismatch");
+
+        assert_eq!(
+            error,
+            WalReplayError::BaseHeadSeqMismatch {
+                expected: ChangeSeq(40),
+                actual: ChangeSeq(39),
+            }
+        );
+    }
+
+    #[test]
+    fn replay_wal_commit_rejects_seq_gap() {
+        let current_head = replay_basis_head();
+        let wal_object = stored_wal_object(sample_payload(
+            ChangeSeq(42),
+            ChangeSeq(40),
+            "req-20260311-0001",
+            FenceToken(8),
+        ));
+
+        let error =
+            replay_wal_commit(&current_head, &wal_object).expect_err("should reject seq gap");
+
+        assert_eq!(
+            error,
+            WalReplayError::NonContiguousSeq {
+                expected: ChangeSeq(41),
+                actual: ChangeSeq(42),
+            }
+        );
+    }
+
+    #[test]
+    fn replay_wal_commit_rejects_tampered_payload() {
+        let current_head = replay_basis_head();
+        let payload = sample_payload(
+            ChangeSeq(41),
+            ChangeSeq(40),
+            "req-20260311-0001",
+            FenceToken(8),
+        );
+        let mut envelope = WalCommitEnvelope::from_payload("loon-core-test", payload.clone())
+            .expect("build envelope");
+        envelope.payload.seq = ChangeSeq(42);
+
+        let wal_object = StoredWalObject {
+            object_key: loon_objectstore::keys::wal_commit(
+                payload.namespace_id.as_str(),
+                payload.seq.0,
+                &payload.commit_id,
+            ),
+            encoded_bytes: encode_wal_commit_envelope_zstd(&envelope)
+                .expect("encode tampered wal object"),
+        };
+
+        let error =
+            replay_wal_commit(&current_head, &wal_object).expect_err("tampering should fail");
+
+        match error {
+            WalReplayError::Codec(message) => {
+                assert!(message.contains("checksum mismatch"));
+            }
+            other => panic!("expected codec error, got {other:?}"),
+        }
+    }
+
     fn sample_request() -> CommitRequest {
         CommitRequest {
             namespace_id: NamespaceId::from("ns-1"),
@@ -252,6 +544,55 @@ mod tests {
                     revision: RevisionNo(7),
                 },
             ],
+        }
+    }
+
+    fn sample_payload(
+        seq: ChangeSeq,
+        base_head_seq: ChangeSeq,
+        commit_id: &str,
+        writer_fence_token: FenceToken,
+    ) -> WalCommitPayload {
+        WalCommitPayload {
+            namespace_id: NamespaceId::from("ns-1"),
+            seq,
+            base_head_seq,
+            commit_id: commit_id.to_owned(),
+            request_id: commit_id.to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token,
+            ops: vec![WalOp::DeleteSubtree {
+                root_inode: InodeId(2),
+            }],
+            preconditions: vec![WalPrecondition::HeadSeqIs(base_head_seq)],
+        }
+    }
+
+    fn stored_wal_object(payload: WalCommitPayload) -> StoredWalObject {
+        let object_key = wal_commit(
+            payload.namespace_id.as_str(),
+            payload.seq.0,
+            &payload.commit_id,
+        );
+        let envelope =
+            WalCommitEnvelope::from_payload("loon-core-test", payload).expect("build envelope");
+        let encoded_bytes =
+            encode_wal_commit_envelope_zstd(&envelope).expect("encode WAL envelope");
+
+        StoredWalObject {
+            object_key,
+            encoded_bytes,
+        }
+    }
+
+    fn replay_basis_head() -> HeadState {
+        HeadState {
+            namespace_id: NamespaceId::from("ns-1"),
+            seq: ChangeSeq(40),
+            active_fence_token: FenceToken(8),
+            next_inode_id: InodeId(501),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
         }
     }
 

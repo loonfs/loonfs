@@ -43,6 +43,18 @@ pub enum ModelError {
         expected: FenceToken,
         actual: FenceToken,
     },
+    NamespaceMismatch {
+        expected: NamespaceId,
+        actual: NamespaceId,
+    },
+    BaseHeadSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    NonContiguousSeq {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
 }
 
 impl ModelNamespace {
@@ -99,6 +111,34 @@ impl ModelNamespace {
             writer_fence_token,
         })
     }
+
+    pub fn replay_wal_commit(&mut self, wal: &ModelWalCommit) -> Result<(), ModelError> {
+        if wal.namespace_id != self.namespace_id {
+            return Err(ModelError::NamespaceMismatch {
+                expected: self.namespace_id.clone(),
+                actual: wal.namespace_id.clone(),
+            });
+        }
+
+        if wal.base_head_seq != self.head_seq {
+            return Err(ModelError::BaseHeadSeqMismatch {
+                expected: self.head_seq,
+                actual: wal.base_head_seq,
+            });
+        }
+
+        let expected_next_seq = ChangeSeq(self.head_seq.0 + 1);
+        if wal.seq != expected_next_seq {
+            return Err(ModelError::NonContiguousSeq {
+                expected: expected_next_seq,
+                actual: wal.seq,
+            });
+        }
+
+        self.head_seq = wal.seq;
+        self.active_fence_token = wal.writer_fence_token;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +188,43 @@ mod tests {
         assert_eq!(wal.seq, ChangeSeq(1));
         assert_eq!(wal.base_head_seq, ChangeSeq(0));
         assert_eq!(wal.commit_id, "req-20260311-0001");
+    }
+
+    #[test]
+    fn model_replays_contiguous_wal_commit() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        let wal = ns
+            .prepare_wal_commit("req-20260311-0001", FenceToken(0))
+            .expect("active writer should prepare WAL");
+
+        ns.replay_wal_commit(&wal)
+            .expect("contiguous WAL should replay");
+
+        assert_eq!(ns.head_seq, ChangeSeq(1));
+        assert_eq!(ns.active_fence_token, FenceToken(0));
+    }
+
+    #[test]
+    fn model_rejects_non_contiguous_wal_commit() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        let wal = ModelWalCommit {
+            namespace_id: NamespaceId::from("ns-1"),
+            seq: ChangeSeq(2),
+            base_head_seq: ChangeSeq(0),
+            commit_id: "req-20260311-0001".to_owned(),
+            writer_fence_token: FenceToken(0),
+        };
+
+        let error = ns
+            .replay_wal_commit(&wal)
+            .expect_err("gap should be rejected");
+
+        assert_eq!(
+            error,
+            ModelError::NonContiguousSeq {
+                expected: ChangeSeq(1),
+                actual: ChangeSeq(2),
+            }
+        );
     }
 }

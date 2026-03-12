@@ -193,3 +193,33 @@ If the WAL object already exists with the same key, the write path may treat tha
 Failure mode prevented:
 
 - head state publishing a seq whose immutable WAL record was never durably created
+
+## WAL replay skeleton
+
+The first WAL replay skeleton starts from a known basis head and a sorted WAL tail.
+
+For each WAL object, replay must verify:
+
+1. the object decodes successfully and its payload checksum still matches
+2. the object key still matches `payload.seq` and `payload.commit_id`
+3. `payload.namespace_id` matches the namespace being replayed
+4. `payload.base_head_seq` matches the current replay cursor
+5. `payload.seq` is exactly one greater than the current replay cursor
+
+If those checks pass, replay may advance the head summary to:
+
+- `seq = payload.seq`
+- `active_fence_token = payload.writer_fence_token`
+
+The current skeleton preserves `next_inode_id`, `snapshot_hint_seq`, and `retention_floor_seq` from the replay basis. Rich metadata application still comes later.
+
+Why this section exists:
+
+- readers need one deterministic rule for whether a WAL tail is safe to apply
+- checkpoint integration later depends on the same continuity checks
+
+Failure modes prevented:
+
+- skipping WAL entries during replay
+- applying WAL from the wrong namespace
+- accepting corrupted or mismatched immutable history objects

@@ -1,0 +1,40 @@
+name: wal_tail_replay_advances_head
+initial:
+  replay_basis_head:
+    namespace_id: ns-1
+    seq: 40
+    active_fence_token: 8
+    next_inode_id: 501
+    snapshot_hint_seq: 40
+    retention_floor_seq: 40
+  wal_objects:
+    - key: namespaces/ns-1/wal/00000000000000000041-req-20260311-0001.cbor.zst
+      payload:
+        namespace_id: ns-1
+        seq: 41
+        base_head_seq: 40
+        commit_id: req-20260311-0001
+        writer_fence_token: 8
+    - key: namespaces/ns-1/wal/00000000000000000042-req-20260311-0002.cbor.zst
+      payload:
+        namespace_id: ns-1
+        seq: 42
+        base_head_seq: 41
+        commit_id: req-20260311-0002
+        writer_fence_token: 9
+actions:
+  - replay_wal_tail: true
+expect:
+  final_head:
+    namespace_id: ns-1
+    seq: 42
+    active_fence_token: 9
+    next_inode_id: 501
+    snapshot_hint_seq: 40
+    retention_floor_seq: 40
+  invariants:
+    - wal_payload_checksum_matches_payload
+    - wal_key_matches_committed_seq
+    - wal_replay_requires_matching_namespace
+    - wal_replay_requires_matching_base_head_seq
+    - wal_tail_seq_is_contiguous
