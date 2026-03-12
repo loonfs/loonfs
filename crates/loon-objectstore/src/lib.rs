@@ -2,9 +2,11 @@
 
 pub mod error;
 pub mod fs;
+mod keyspace;
 pub mod keys;
 pub mod provider;
 pub mod r2;
+mod s3_compatible;
 pub mod s3;
 
 use crate::error::ObjectStoreError;

@@ -7,5 +7,8 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+aws-sdk-s3.workspace = true
+http.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true

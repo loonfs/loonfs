@@ -1,4 +1,5 @@
 use crate::error::ObjectStoreError;
+use crate::keyspace::validate_segments;
 use crate::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -221,37 +222,6 @@ impl ObjectStore for LocalFsStore {
         keys.sort();
         Ok(keys)
     }
-}
-
-fn validate_segments(
-    key: &str,
-    allow_trailing_separator: bool,
-) -> Result<Vec<&str>, ObjectStoreError> {
-    if key.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let raw_segments: Vec<_> = key.split('/').collect();
-    let mut segments = Vec::with_capacity(raw_segments.len());
-
-    for (index, segment) in raw_segments.iter().enumerate() {
-        if segment.is_empty() {
-            let is_trailing = allow_trailing_separator && index + 1 == raw_segments.len();
-            if is_trailing {
-                continue;
-            }
-
-            return Err(ObjectStoreError::InvalidKey(key.to_owned()));
-        }
-
-        if *segment == "." || *segment == ".." {
-            return Err(ObjectStoreError::InvalidKey(key.to_owned()));
-        }
-
-        segments.push(*segment);
-    }
-
-    Ok(segments)
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<(), ObjectStoreError> {

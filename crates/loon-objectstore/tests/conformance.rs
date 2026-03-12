@@ -7,6 +7,8 @@ use loon_objectstore::keys::{
     snapshot_table, wal_commit, SnapshotTableFamily,
 };
 use loon_objectstore::provider::{AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
+use loon_objectstore::r2::{R2Store, R2StoreConfig};
+use loon_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
 use loon_objectstore::{ByteRange, ObjectStore};
 use provider_env::{
     provider_env_example_contents, AwsS3ConformanceConfig, CloudflareR2ConformanceConfig,
@@ -64,37 +66,89 @@ fn provider_env_example_covers_real_provider_contract() {
 }
 
 #[test]
-#[ignore = "requires real AWS S3 credentials; adapter wiring is still pending"]
-fn aws_s3_real_provider_conformance() {
-    let config = AwsS3ConformanceConfig::from_env()
-        .expect("load AWS S3 real-provider conformance environment");
-
-    assert!(!config.bucket.is_empty());
-    assert!(!config.region.is_empty());
-    assert!(!config.access_key_id.is_empty());
-    assert!(!config.secret_access_key.is_empty());
-    assert!(!config.prefix.is_empty());
-}
-
-#[test]
-#[ignore = "requires real Cloudflare R2 credentials; adapter wiring is still pending"]
-fn cloudflare_r2_real_provider_conformance() {
-    let config = CloudflareR2ConformanceConfig::from_env()
-        .expect("load Cloudflare R2 real-provider conformance environment");
-
-    assert!(!config.bucket.is_empty());
-    assert!(!config.account_id.is_empty());
-    assert!(!config.endpoint.is_empty());
-    assert!(!config.access_key_id.is_empty());
-    assert!(!config.secret_access_key.is_empty());
-    assert!(!config.prefix.is_empty());
-}
-
-#[test]
 fn local_fs_create_if_absent_is_enforced() {
     let temp_dir = TestDir::new("create-if-absent");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_create_if_absent_is_enforced(&store);
+}
+
+#[test]
+fn local_fs_compare_and_swap_rejects_stale_writer() {
+    let temp_dir = TestDir::new("cas");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_compare_and_swap_rejects_stale_writer(&store);
+}
+
+#[test]
+fn local_fs_lists_immediately_after_write_and_delete() {
+    let temp_dir = TestDir::new("listing");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_lists_immediately_after_write_and_delete(&store);
+}
+
+#[test]
+fn local_fs_supports_range_reads() {
+    let temp_dir = TestDir::new("ranges");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_supports_range_reads(&store);
+}
+
+#[test]
+fn local_fs_rejects_path_traversal_keys() {
+    let temp_dir = TestDir::new("invalid-key");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_rejects_path_traversal_keys(&store);
+}
+
+#[test]
+#[ignore = "requires real AWS S3 credentials"]
+fn aws_s3_real_provider_conformance() {
+    let config = AwsS3ConformanceConfig::from_env()
+        .expect("load AWS S3 real-provider conformance environment");
+    let store = AwsS3Store::new(AwsS3StoreConfig {
+        bucket: config.bucket,
+        region: config.region,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        session_token: config.session_token,
+        key_prefix: Some(config.prefix),
+        force_path_style: false,
+    })
+    .expect("create AWS S3 object store");
+
+    assert_provider_conformance(&store);
+}
+
+#[test]
+#[ignore = "requires real Cloudflare R2 credentials"]
+fn cloudflare_r2_real_provider_conformance() {
+    let config = CloudflareR2ConformanceConfig::from_env()
+        .expect("load Cloudflare R2 real-provider conformance environment");
+    let store = R2Store::new(R2StoreConfig {
+        bucket: config.bucket,
+        account_id: config.account_id,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id,
+        secret_access_key: config.secret_access_key,
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create Cloudflare R2 object store");
+
+    assert_provider_conformance(&store);
+}
+
+fn assert_provider_conformance<S: ObjectStore>(store: &S) {
+    assert_create_if_absent_is_enforced(store);
+    assert_compare_and_swap_rejects_stale_writer(store);
+    assert_lists_immediately_after_write_and_delete(store);
+    assert_supports_range_reads(store);
+    assert_rejects_path_traversal_keys(store);
+}
+
+fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {
     let key = namespace_head("ns-1");
+    let _ = store.delete(&key);
 
     store
         .put_if_absent(&key, br#"{"seq":41}"#)
@@ -110,13 +164,13 @@ fn local_fs_create_if_absent_is_enforced() {
             .expect("body exists"),
         br#"{"seq":41}"#
     );
+
+    store.delete(&key).expect("cleanup create-if-absent object");
 }
 
-#[test]
-fn local_fs_compare_and_swap_rejects_stale_writer() {
-    let temp_dir = TestDir::new("cas");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S) {
     let key = namespace_head("ns-1");
+    let _ = store.delete(&key);
 
     store
         .put_if_absent(&key, br#"{"seq":41,"fence_token":8}"#)
@@ -142,13 +196,13 @@ fn local_fs_compare_and_swap_rejects_stale_writer() {
             .expect("body exists"),
         br#"{"seq":42,"fence_token":8}"#
     );
+
+    store.delete(&key).expect("cleanup CAS object");
 }
 
-#[test]
-fn local_fs_lists_immediately_after_write_and_delete() {
-    let temp_dir = TestDir::new("listing");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
     let key = derived_progress("ns-1", "BuildSnapshot");
+    let _ = store.delete(&key);
 
     store
         .put_if_absent(&key, br#"{"built_through_seq":420}"#)
@@ -167,11 +221,9 @@ fn local_fs_lists_immediately_after_write_and_delete() {
         .is_empty());
 }
 
-#[test]
-fn local_fs_supports_range_reads() {
-    let temp_dir = TestDir::new("ranges");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
     let key = wal_commit("ns-1", 420, "commit-1");
+    let _ = store.delete(&key);
 
     store
         .put_if_absent(&key, b"abcdef")
@@ -189,13 +241,11 @@ fn local_fs_supports_range_reads() {
         .expect("range body should exist");
 
     assert_eq!(range, b"bcd");
+
+    store.delete(&key).expect("cleanup range object");
 }
 
-#[test]
-fn local_fs_rejects_path_traversal_keys() {
-    let temp_dir = TestDir::new("invalid-key");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-
+fn assert_rejects_path_traversal_keys<S: ObjectStore>(store: &S) {
     let result = store.put_if_absent("../escape", b"oops");
     assert!(matches!(result, Err(ObjectStoreError::InvalidKey(_))));
 }
