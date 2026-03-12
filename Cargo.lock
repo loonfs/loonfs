@@ -994,6 +994,7 @@ dependencies = [
  "loon-core",
  "loon-model",
  "loon-objectstore",
+ "loon-queue",
  "loon-types",
  "serde",
  "serde_json",

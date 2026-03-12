@@ -121,10 +121,7 @@ impl S3CompatibleStore {
         {
             Ok(output) => Ok(Some(ObjectMetadata {
                 etag: output.e_tag().map(ToOwned::to_owned),
-                size_bytes: output
-                    .content_length()
-                    .try_into()
-                    .unwrap_or_default(),
+                size_bytes: output.content_length().try_into().unwrap_or_default(),
             })),
             Err(err) if is_not_found(&err) => Ok(None),
             Err(err) => Err(map_sdk_error(err)),
@@ -345,7 +342,10 @@ fn is_not_found<E, R>(err: &SdkError<E, R>) -> bool
 where
     E: ProvideErrorMetadata,
 {
-    matches!(service_error_code(err), Some("NotFound" | "NoSuchKey" | "404"))
+    matches!(
+        service_error_code(err),
+        Some("NotFound" | "NoSuchKey" | "404")
+    )
 }
 
 fn is_invalid_range<E, R>(err: &SdkError<E, R>) -> bool

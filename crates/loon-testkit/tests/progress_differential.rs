@@ -8,9 +8,7 @@ use loon_objectstore::keys::derived_progress;
 use loon_objectstore::ObjectStore;
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
-use loon_types::{
-    ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId, ProgressState,
-};
+use loon_types::{ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId, ProgressState};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,17 +36,14 @@ fn progress_publish_fixture_matches_model_and_core() {
         seed_progress_object(&store, progress);
     }
     let mut observed_invariants = Vec::new();
-    if let Some(loaded) = read_progress_object(&store, &namespace_id, &work_class)
-        .ok()
-    {
+    if let Some(loaded) = read_progress_object(&store, &namespace_id, &work_class).ok() {
         extend_invariants(&mut observed_invariants, &loaded.checked_invariants);
     }
 
     let mut trace = vec![format!(
         "initial model={:?} core={:?}",
         model_progress.as_ref().map(snapshot_from_model_progress),
-        read_core_snapshot(&store, &namespace_id, &work_class)
-            .expect("read initial core progress")
+        read_core_snapshot(&store, &namespace_id, &work_class).expect("read initial core progress")
     )];
 
     assert_states_match(
@@ -56,8 +51,7 @@ fn progress_publish_fixture_matches_model_and_core() {
         &trace,
         0,
         model_progress.as_ref().map(snapshot_from_model_progress),
-        read_core_snapshot(&store, &namespace_id, &work_class)
-            .expect("read initial core progress"),
+        read_core_snapshot(&store, &namespace_id, &work_class).expect("read initial core progress"),
     );
 
     for (index, action) in actions.iter().enumerate() {
@@ -122,8 +116,8 @@ fn progress_publish_fixture_matches_model_and_core() {
 
     let expected_progress = expect.progress.as_ref().map(snapshot_from_fixture_progress);
     let actual_model = model_progress.as_ref().map(snapshot_from_model_progress);
-    let actual_core = read_core_snapshot(&store, &namespace_id, &work_class)
-        .expect("read final core progress");
+    let actual_core =
+        read_core_snapshot(&store, &namespace_id, &work_class).expect("read final core progress");
 
     trace.push(format!(
         "final expected={:?} model={:?} core={:?}",
@@ -199,9 +193,7 @@ fn load_fixture(relative_path: &str) -> Scenario {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/scenarios")
         .join(relative_path);
-    Scenario::load(&path).unwrap_or_else(|err| {
-        panic!("load fixture {}: {err}", path.display())
-    })
+    Scenario::load(&path).unwrap_or_else(|err| panic!("load fixture {}: {err}", path.display()))
 }
 
 fn scenario_target(
@@ -335,9 +327,8 @@ fn classify_core_outcome(outcome: &ProgressPublishOutcome) -> ProgressOutcome {
 
 fn core_outcome_invariants(outcome: &ProgressPublishOutcome) -> &[String] {
     match outcome {
-        ProgressPublishOutcome::Created(published) | ProgressPublishOutcome::Advanced(published) => {
-            &published.progress.checked_invariants
-        }
+        ProgressPublishOutcome::Created(published)
+        | ProgressPublishOutcome::Advanced(published) => &published.progress.checked_invariants,
         ProgressPublishOutcome::NoChange(current) => &current.checked_invariants,
     }
 }
@@ -415,8 +406,10 @@ impl TestDir {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = std::env::temp_dir()
-            .join(format!("loondb-testkit-{prefix}-{}-{nanos}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "loondb-testkit-{prefix}-{}-{nanos}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("create temp dir");
         Self { path }
     }

@@ -14,5 +14,6 @@ serde_yaml.workspace = true
 loon-core = { path = "../loon-core" }
 loon-model = { path = "../loon-model" }
 loon-objectstore = { path = "../loon-objectstore" }
+loon-queue = { path = "../loon-queue" }
 loon-types = { path = "../loon-types" }
 serde_json.workspace = true

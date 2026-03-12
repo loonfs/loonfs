@@ -2,12 +2,12 @@
 
 pub mod error;
 pub mod fs;
-mod keyspace;
 pub mod keys;
+mod keyspace;
 pub mod provider;
 pub mod r2;
-mod s3_compatible;
 pub mod s3;
+mod s3_compatible;
 
 use crate::error::ObjectStoreError;
 use serde::{Deserialize, Serialize};
