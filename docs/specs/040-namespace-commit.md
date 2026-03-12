@@ -283,20 +283,27 @@ Failure modes prevented:
 The first checkpoint-aware replay path is:
 
 1. load a verified checkpoint manifest
-2. derive a basis head with:
+2. load every checkpoint segment object referenced by the manifest
+3. for each referenced segment:
+   - decode the immutable segment envelope
+   - verify the segment object key matches `(namespace_id, checkpoint_seq, family, segment_index)`
+   - verify the manifest descriptor matches the decoded segment payload checksum, page checksums, row count, and min/max keys
+4. only after all referenced segments verify, derive a basis head with:
    - `seq = checkpoint_seq`
    - `active_fence_token = manifest.active_fence_token`
    - `next_inode_id = manifest.next_inode_id`
    - `snapshot_hint_seq = Some(checkpoint_seq)`
    - `retention_floor_seq = manifest.retention_floor_seq`
-3. replay the WAL tail after `checkpoint_seq` using the WAL replay checks above
+5. replay the WAL tail after `checkpoint_seq` using the WAL replay checks above
 
-If the manifest namespace does not match, the manifest key does not match `checkpoint_seq`, or `verified` is false, replay must fail before any WAL is applied.
+If the manifest namespace does not match, the manifest key does not match `checkpoint_seq`, `verified` is false, a referenced segment object is missing, or any descriptor does not match its decoded segment body, replay must fail before any WAL is applied.
 
 Failure modes prevented:
 
 - starting replay from the wrong checkpoint
 - treating an unverified snapshot as a trusted basis
+- trusting manifest metadata that does not match the durable segment bodies
+- silently skipping a referenced checkpoint segment during restore
 - diverging between checkpoint basis state and later WAL replay
 
 ## Checkpoint segment object skeleton

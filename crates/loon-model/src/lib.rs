@@ -2,6 +2,7 @@
 
 use loon_types::{ChangeSeq, FenceToken, InodeId, NamespaceId};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelNamespace {
@@ -43,6 +44,7 @@ pub enum ModelCheckpointFamily {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCheckpointSegment {
+    pub object_key: String,
     pub segment_index: u32,
     pub row_count: u64,
 }
@@ -91,6 +93,9 @@ pub enum ModelError {
     },
     UnverifiedCheckpoint {
         checkpoint_seq: ChangeSeq,
+    },
+    MissingCheckpointSegment {
+        object_key: String,
     },
 }
 
@@ -203,6 +208,12 @@ impl ModelNamespace {
                 ModelCheckpointTable {
                     family: ModelCheckpointFamily::Inodes,
                     segments: vec![ModelCheckpointSegment {
+                        object_key: checkpoint_segment_object_key(
+                            &self.namespace_id,
+                            self.head_seq,
+                            ModelCheckpointFamily::Inodes,
+                            0,
+                        ),
                         segment_index: 0,
                         row_count: 0,
                     }],
@@ -210,6 +221,12 @@ impl ModelNamespace {
                 ModelCheckpointTable {
                     family: ModelCheckpointFamily::Direntries,
                     segments: vec![ModelCheckpointSegment {
+                        object_key: checkpoint_segment_object_key(
+                            &self.namespace_id,
+                            self.head_seq,
+                            ModelCheckpointFamily::Direntries,
+                            0,
+                        ),
                         segment_index: 0,
                         row_count: 0,
                     }],
@@ -217,6 +234,12 @@ impl ModelNamespace {
                 ModelCheckpointTable {
                     family: ModelCheckpointFamily::Revisions,
                     segments: vec![ModelCheckpointSegment {
+                        object_key: checkpoint_segment_object_key(
+                            &self.namespace_id,
+                            self.head_seq,
+                            ModelCheckpointFamily::Revisions,
+                            0,
+                        ),
                         segment_index: 0,
                         row_count: 0,
                     }],
@@ -224,6 +247,12 @@ impl ModelNamespace {
                 ModelCheckpointTable {
                     family: ModelCheckpointFamily::Tombstones,
                     segments: vec![ModelCheckpointSegment {
+                        object_key: checkpoint_segment_object_key(
+                            &self.namespace_id,
+                            self.head_seq,
+                            ModelCheckpointFamily::Tombstones,
+                            0,
+                        ),
                         segment_index: 0,
                         row_count: 0,
                     }],
@@ -232,11 +261,25 @@ impl ModelNamespace {
         }
     }
 
-    pub fn restore_from_checkpoint(checkpoint: &ModelCheckpoint) -> Result<Self, ModelError> {
+    pub fn restore_from_checkpoint(
+        checkpoint: &ModelCheckpoint,
+        available_segment_keys: &[String],
+    ) -> Result<Self, ModelError> {
         if !checkpoint.verified {
             return Err(ModelError::UnverifiedCheckpoint {
                 checkpoint_seq: checkpoint.checkpoint_seq,
             });
+        }
+
+        let available: BTreeSet<&str> = available_segment_keys.iter().map(String::as_str).collect();
+        for table in &checkpoint.tables {
+            for segment in &table.segments {
+                if !available.contains(segment.object_key.as_str()) {
+                    return Err(ModelError::MissingCheckpointSegment {
+                        object_key: segment.object_key.clone(),
+                    });
+                }
+            }
         }
 
         Ok(Self {
@@ -246,6 +289,31 @@ impl ModelNamespace {
             next_inode_id: checkpoint.next_inode_id,
             retention_floor_seq: checkpoint.retention_floor_seq,
         })
+    }
+}
+
+fn checkpoint_segment_object_key(
+    namespace_id: &NamespaceId,
+    checkpoint_seq: ChangeSeq,
+    family: ModelCheckpointFamily,
+    segment_index: u32,
+) -> String {
+    format!(
+        "namespaces/{}/snapshots/{:020}/tables/{}-{segment_index:05}.sst.zst",
+        namespace_id.as_str(),
+        checkpoint_seq.0,
+        family.as_str()
+    )
+}
+
+impl ModelCheckpointFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Inodes => "inodes",
+            Self::Direntries => "direntries",
+            Self::Revisions => "revisions",
+            Self::Tombstones => "tombstones",
+        }
     }
 }
 
@@ -363,8 +431,19 @@ mod tests {
         .expect("active writer should advance seq");
 
         let checkpoint = ns.checkpoint();
+        let available_segment_keys = checkpoint
+            .tables
+            .iter()
+            .flat_map(|table| {
+                table
+                    .segments
+                    .iter()
+                    .map(|segment| segment.object_key.clone())
+            })
+            .collect::<Vec<_>>();
         let restored =
-            ModelNamespace::restore_from_checkpoint(&checkpoint).expect("checkpoint restore");
+            ModelNamespace::restore_from_checkpoint(&checkpoint, &available_segment_keys)
+                .expect("checkpoint restore");
 
         assert_eq!(restored.namespace_id, NamespaceId::from("ns-1"));
         assert_eq!(restored.head_seq, ChangeSeq(1));
@@ -383,11 +462,34 @@ mod tests {
             .tables
             .iter()
             .all(|table| table.segments.len() == 1));
-        assert!(checkpoint.tables.iter().all(|table| table.segments[0]
-            == ModelCheckpointSegment {
-                segment_index: 0,
-                row_count: 0,
-            }));
+        assert!(checkpoint
+            .tables
+            .iter()
+            .all(|table| table.segments[0].segment_index == 0));
+        assert!(checkpoint
+            .tables
+            .iter()
+            .all(|table| table.segments[0].row_count == 0));
+        assert!(checkpoint
+            .tables
+            .iter()
+            .all(|table| table.segments[0].object_key.contains("/tables/")));
+    }
+
+    #[test]
+    fn model_rejects_restore_when_checkpoint_segment_is_missing() {
+        let checkpoint = ModelNamespace::new(NamespaceId::from("ns-1")).checkpoint();
+        let error = ModelNamespace::restore_from_checkpoint(&checkpoint, &[])
+            .expect_err("missing checkpoint segment should fail");
+
+        assert_eq!(
+            error,
+            ModelError::MissingCheckpointSegment {
+                object_key:
+                    "namespaces/ns-1/snapshots/00000000000000000000/tables/inodes-00000.sst.zst"
+                        .to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -402,7 +504,7 @@ mod tests {
             tables: vec![],
         };
 
-        let error = ModelNamespace::restore_from_checkpoint(&checkpoint)
+        let error = ModelNamespace::restore_from_checkpoint(&checkpoint, &[])
             .expect_err("unverified checkpoint should fail");
 
         assert_eq!(

@@ -1,13 +1,14 @@
 use crate::wal::{replay_wal_tail, StoredWalObject, WalReplayError};
 use loon_objectstore::keys::{snapshot_manifest, snapshot_table, SnapshotTableFamily};
 use loon_types::{
-    decode_checkpoint_manifest_json, encode_checkpoint_manifest_json,
-    encode_checkpoint_segment_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,
-    CheckpointManifestPayload, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-    CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest, HeadState,
-    NamespaceId,
+    decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
+    encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd, ChangeSeq,
+    CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointSegmentDescriptor,
+    CheckpointSegmentEnvelope, CheckpointSegmentPayload, CheckpointTableFamily,
+    CheckpointTableManifest, HeadState, NamespaceId,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 4] = [
     CheckpointTableFamily::Inodes,
@@ -59,6 +60,22 @@ pub struct LoadedCheckpointManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedCheckpointSegment {
+    pub object_key: String,
+    pub descriptor: CheckpointSegmentDescriptor,
+    pub envelope: CheckpointSegmentEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedCheckpoint {
+    pub object_key: String,
+    pub manifest: CheckpointManifestEnvelope,
+    pub basis_head: HeadState,
+    pub segments: Vec<LoadedCheckpointSegment>,
+    pub checked_invariants: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckpointBuildError {
     EmptyWriterVersion,
     Codec(String),
@@ -77,6 +94,21 @@ pub enum CheckpointReplayError {
     },
     UnverifiedManifest {
         checkpoint_seq: ChangeSeq,
+    },
+    MissingSegment {
+        object_key: String,
+    },
+    UnexpectedSegment {
+        object_key: String,
+    },
+    SegmentObjectKeyMismatch {
+        expected: String,
+        actual: String,
+    },
+    SegmentDescriptorMismatch {
+        object_key: String,
+        expected: CheckpointSegmentDescriptor,
+        actual: CheckpointSegmentDescriptor,
     },
     WalReplay(WalReplayError),
 }
@@ -182,12 +214,104 @@ pub fn load_checkpoint_manifest(
     })
 }
 
+pub fn load_checkpoint(
+    expected_namespace: &NamespaceId,
+    checkpoint_manifest: &StoredCheckpointManifest,
+    checkpoint_segments: &[StoredCheckpointSegment],
+) -> Result<LoadedCheckpoint, CheckpointReplayError> {
+    let loaded_manifest = load_checkpoint_manifest(expected_namespace, checkpoint_manifest)?;
+    let expected_segments = loaded_manifest
+        .manifest
+        .payload
+        .tables
+        .iter()
+        .flat_map(|table| table.segments.iter().cloned())
+        .map(|descriptor| (descriptor.object_key.clone(), descriptor))
+        .collect::<BTreeMap<_, _>>();
+    let mut provided_segments = checkpoint_segments
+        .iter()
+        .map(|segment| (segment.object_key.clone(), segment))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut loaded_segments = Vec::with_capacity(expected_segments.len());
+    for (object_key, expected_descriptor) in &expected_segments {
+        let stored_segment = provided_segments.remove(object_key).ok_or_else(|| {
+            CheckpointReplayError::MissingSegment {
+                object_key: object_key.clone(),
+            }
+        })?;
+        let envelope = decode_checkpoint_segment_envelope_zstd(&stored_segment.encoded_bytes)
+            .map_err(|err| CheckpointReplayError::Codec(err.to_string()))?;
+        let expected_object_key = snapshot_table(
+            envelope.payload.namespace_id.as_str(),
+            envelope.payload.checkpoint_seq.0,
+            snapshot_table_family(envelope.payload.family),
+            envelope.payload.segment_index,
+        );
+
+        if stored_segment.object_key != expected_object_key {
+            return Err(CheckpointReplayError::SegmentObjectKeyMismatch {
+                expected: expected_object_key,
+                actual: stored_segment.object_key.clone(),
+            });
+        }
+
+        let actual_descriptor =
+            checkpoint_segment_descriptor(stored_segment.object_key.clone(), &envelope)
+                .map_err(|err| CheckpointReplayError::Codec(err.to_string()))?;
+        if &actual_descriptor != expected_descriptor {
+            return Err(CheckpointReplayError::SegmentDescriptorMismatch {
+                object_key: stored_segment.object_key.clone(),
+                expected: expected_descriptor.clone(),
+                actual: actual_descriptor,
+            });
+        }
+
+        loaded_segments.push(LoadedCheckpointSegment {
+            object_key: stored_segment.object_key.clone(),
+            descriptor: expected_descriptor.clone(),
+            envelope,
+        });
+    }
+
+    if let Some((object_key, _)) = provided_segments.into_iter().next() {
+        return Err(CheckpointReplayError::UnexpectedSegment { object_key });
+    }
+
+    let mut checked_invariants = loaded_manifest.checked_invariants.clone();
+    push_invariant(
+        &mut checked_invariants,
+        "checkpoint_replay_requires_all_manifest_segments",
+    );
+    push_invariant(
+        &mut checked_invariants,
+        "checkpoint_segment_payload_checksum_matches_payload",
+    );
+    push_invariant(
+        &mut checked_invariants,
+        "checkpoint_segment_key_matches_family_and_index",
+    );
+    push_invariant(
+        &mut checked_invariants,
+        "checkpoint_segment_descriptor_matches_payload",
+    );
+
+    Ok(LoadedCheckpoint {
+        object_key: loaded_manifest.object_key,
+        manifest: loaded_manifest.manifest,
+        basis_head: loaded_manifest.basis_head,
+        segments: loaded_segments,
+        checked_invariants,
+    })
+}
+
 pub fn replay_from_checkpoint_and_wal_tail(
     expected_namespace: &NamespaceId,
     checkpoint_manifest: &StoredCheckpointManifest,
+    checkpoint_segments: &[StoredCheckpointSegment],
     wal_tail: &[StoredWalObject],
 ) -> Result<HeadState, CheckpointReplayError> {
-    let loaded = load_checkpoint_manifest(expected_namespace, checkpoint_manifest)?;
+    let loaded = load_checkpoint(expected_namespace, checkpoint_manifest, checkpoint_segments)?;
     replay_wal_tail(&loaded.basis_head, wal_tail).map_err(CheckpointReplayError::WalReplay)
 }
 
@@ -236,12 +360,35 @@ fn prepare_checkpoint_segment(
     })
 }
 
+fn checkpoint_segment_descriptor(
+    object_key: String,
+    envelope: &CheckpointSegmentEnvelope,
+) -> Result<CheckpointSegmentDescriptor, String> {
+    Ok(CheckpointSegmentDescriptor {
+        object_key,
+        segment_index: envelope.payload.segment_index,
+        row_count: envelope.payload.row_count,
+        min_key: envelope.payload.min_key.clone(),
+        max_key: envelope.payload.max_key.clone(),
+        payload_checksum_sha256: envelope.payload_checksum_sha256.clone(),
+        page_checksums_sha256: envelope
+            .page_checksums_sha256()
+            .map_err(|err| err.to_string())?,
+    })
+}
+
 fn snapshot_table_family(family: CheckpointTableFamily) -> SnapshotTableFamily {
     match family {
         CheckpointTableFamily::Inodes => SnapshotTableFamily::Inodes,
         CheckpointTableFamily::Direntries => SnapshotTableFamily::Direntries,
         CheckpointTableFamily::Revisions => SnapshotTableFamily::Revisions,
         CheckpointTableFamily::Tombstones => SnapshotTableFamily::Tombstones,
+    }
+}
+
+fn push_invariant(checked_invariants: &mut Vec<String>, invariant: &str) {
+    if !checked_invariants.iter().any(|value| value == invariant) {
+        checked_invariants.push(invariant.to_owned());
     }
 }
 
@@ -266,8 +413,9 @@ impl From<&PreparedCheckpointSegment> for StoredCheckpointSegment {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_checkpoint_manifest, prepare_checkpoint, replay_from_checkpoint_and_wal_tail,
-        CheckpointBuildError, CheckpointReplayError, StoredCheckpointManifest,
+        load_checkpoint, load_checkpoint_manifest, prepare_checkpoint,
+        replay_from_checkpoint_and_wal_tail, CheckpointBuildError, CheckpointReplayError,
+        StoredCheckpointManifest, StoredCheckpointSegment,
     };
     use crate::wal::StoredWalObject;
     use loon_objectstore::keys::{
@@ -333,19 +481,24 @@ mod tests {
     }
 
     #[test]
-    fn prepare_checkpoint_manifest_can_be_loaded_as_basis_head() {
+    fn load_checkpoint_verifies_segments_before_deriving_basis_head() {
         let prepared =
             prepare_checkpoint(&sample_head(), "loon-core-test").expect("prepare checkpoint");
-        let loaded = load_checkpoint_manifest(
+        let loaded = load_checkpoint(
             &NamespaceId::from("ns-1"),
             &StoredCheckpointManifest::from(&prepared.manifest),
+            &stored_checkpoint_segments(&prepared),
         )
-        .expect("load prepared checkpoint manifest");
+        .expect("load prepared checkpoint");
 
         assert_eq!(loaded.basis_head.seq, ChangeSeq(42));
         assert_eq!(loaded.basis_head.active_fence_token, FenceToken(9));
         assert_eq!(loaded.basis_head.next_inode_id, InodeId(777));
         assert_eq!(loaded.basis_head.snapshot_hint_seq, Some(ChangeSeq(42)));
+        assert_eq!(loaded.segments.len(), 4);
+        assert!(loaded
+            .checked_invariants
+            .contains(&"checkpoint_segment_descriptor_matches_payload".to_owned()));
     }
 
     #[test]
@@ -370,7 +523,7 @@ mod tests {
 
     #[test]
     fn replay_from_checkpoint_and_wal_tail_reproduces_head() {
-        let checkpoint = stored_checkpoint_manifest(sample_checkpoint_manifest_payload(true));
+        let prepared = prepared_checkpoint_for_replay();
         let wal_tail = vec![stored_wal_object(sample_wal_payload(
             ChangeSeq(41),
             ChangeSeq(40),
@@ -378,14 +531,100 @@ mod tests {
             FenceToken(9),
         ))];
 
-        let final_head =
-            replay_from_checkpoint_and_wal_tail(&NamespaceId::from("ns-1"), &checkpoint, &wal_tail)
-                .expect("checkpoint plus wal tail should replay");
+        let final_head = replay_from_checkpoint_and_wal_tail(
+            &NamespaceId::from("ns-1"),
+            &StoredCheckpointManifest::from(&prepared.manifest),
+            &stored_checkpoint_segments(&prepared),
+            &wal_tail,
+        )
+        .expect("checkpoint plus wal tail should replay");
 
         assert_eq!(final_head.seq, ChangeSeq(41));
         assert_eq!(final_head.active_fence_token, FenceToken(9));
         assert_eq!(final_head.next_inode_id, InodeId(501));
         assert_eq!(final_head.snapshot_hint_seq, Some(ChangeSeq(40)));
+    }
+
+    #[test]
+    fn load_checkpoint_rejects_missing_segment() {
+        let prepared = prepared_checkpoint_for_replay();
+        let mut segments = stored_checkpoint_segments(&prepared);
+        let missing = segments
+            .pop()
+            .expect("prepared checkpoint should have at least one segment");
+
+        let error = load_checkpoint(
+            &NamespaceId::from("ns-1"),
+            &StoredCheckpointManifest::from(&prepared.manifest),
+            &segments,
+        )
+        .expect_err("missing segment should fail");
+
+        assert_eq!(
+            error,
+            CheckpointReplayError::MissingSegment {
+                object_key: missing.object_key,
+            }
+        );
+    }
+
+    #[test]
+    fn load_checkpoint_rejects_unexpected_segment() {
+        let prepared = prepared_checkpoint_for_replay();
+        let mut segments = stored_checkpoint_segments(&prepared);
+        let mut unexpected = segments[0].clone();
+        unexpected.object_key =
+            "namespaces/ns-1/snapshots/00000000000000000040/tables/extra-00000.sst.zst".to_owned();
+        segments.push(unexpected.clone());
+
+        let error = load_checkpoint(
+            &NamespaceId::from("ns-1"),
+            &StoredCheckpointManifest::from(&prepared.manifest),
+            &segments,
+        )
+        .expect_err("unexpected segment should fail");
+
+        assert_eq!(
+            error,
+            CheckpointReplayError::UnexpectedSegment {
+                object_key: unexpected.object_key,
+            }
+        );
+    }
+
+    #[test]
+    fn load_checkpoint_rejects_descriptor_mismatch() {
+        let prepared = prepared_checkpoint_for_replay();
+        let mut manifest_payload = prepared.manifest.envelope.payload.clone();
+        manifest_payload.tables[0].segments[0].row_count = 1;
+        let manifest_envelope =
+            CheckpointManifestEnvelope::from_payload("loon-core-test", manifest_payload)
+                .expect("rebuild mismatched checkpoint manifest");
+        let manifest = StoredCheckpointManifest {
+            object_key: prepared.manifest.object_key.clone(),
+            encoded_bytes: encode_checkpoint_manifest_json(&manifest_envelope)
+                .expect("encode mismatched checkpoint manifest"),
+        };
+
+        let error = load_checkpoint(
+            &NamespaceId::from("ns-1"),
+            &manifest,
+            &stored_checkpoint_segments(&prepared),
+        )
+        .expect_err("descriptor mismatch should fail");
+
+        match error {
+            CheckpointReplayError::SegmentDescriptorMismatch {
+                object_key,
+                expected,
+                actual,
+            } => {
+                assert!(object_key.contains("/tables/"));
+                assert_eq!(expected.row_count, 1);
+                assert_eq!(actual.row_count, 0);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -516,12 +755,38 @@ mod tests {
         }
     }
 
+    fn stored_checkpoint_segments(
+        prepared: &super::PreparedCheckpoint,
+    ) -> Vec<StoredCheckpointSegment> {
+        prepared
+            .segments
+            .iter()
+            .map(StoredCheckpointSegment::from)
+            .collect()
+    }
+
+    fn prepared_checkpoint_for_replay() -> super::PreparedCheckpoint {
+        prepare_checkpoint(&sample_checkpoint_head(), "loon-core-test")
+            .expect("prepare checkpoint for replay tests")
+    }
+
     fn sample_head() -> HeadState {
         HeadState {
             namespace_id: NamespaceId::from("ns-1"),
             seq: ChangeSeq(42),
             active_fence_token: FenceToken(9),
             next_inode_id: InodeId(777),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        }
+    }
+
+    fn sample_checkpoint_head() -> HeadState {
+        HeadState {
+            namespace_id: NamespaceId::from("ns-1"),
+            seq: ChangeSeq(40),
+            active_fence_token: FenceToken(8),
+            next_inode_id: InodeId(501),
             snapshot_hint_seq: Some(ChangeSeq(40)),
             retention_floor_seq: ChangeSeq(40),
         }

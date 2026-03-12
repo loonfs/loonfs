@@ -20,6 +20,23 @@ initial:
               payload_checksum_sha256: seg-checksum-1
               page_checksums_sha256:
                 - page-checksum-1
+  checkpoint_segments:
+    - key: namespaces/ns-1/snapshots/00000000000000000040/tables/inodes-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 40
+        family: inodes
+        segment_index: 0
+        row_count: 500
+        min_key: inode-1
+        max_key: inode-500
+        pages:
+          - page_index: 0
+            min_key: inode-1
+            max_key: inode-500
+            row_keys:
+              - inode-1
+              - inode-500
   wal_objects:
     - key: namespaces/ns-1/wal/00000000000000000041-req-20260311-0001.cbor.zst
       payload:
@@ -42,4 +59,6 @@ expect:
     - checkpoint_manifest_checksum_matches_payload
     - checkpoint_manifest_key_matches_seq
     - checkpoint_manifest_must_be_verified
+    - checkpoint_replay_requires_all_manifest_segments
+    - checkpoint_segment_descriptor_matches_payload
     - checkpoint_plus_wal_tail_reproduces_head
