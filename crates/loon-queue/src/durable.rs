@@ -1,5 +1,10 @@
+use crate::broker::{renew_broker_lease, BrokerLeaseError, BrokerLeaseOutcome};
 use crate::repair::{repair_lost_snapshot_enqueue, SnapshotRepairError, SnapshotRepairOutcome};
 use crate::types::{QueueShardEnvelope, QueueShardState, WorkClass};
+use crate::worker::{
+    claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobCompleteOutcome,
+    JobHeartbeatOutcome, WorkerMutationError,
+};
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::queue_shard;
 use loon_objectstore::{ObjectMetadata, ObjectStore};
@@ -45,6 +50,40 @@ pub enum QueueShardLoadError {
     Codec(String),
     Store(String),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedQueueShardMutation<T> {
+    pub metadata: ObjectMetadata,
+    pub mutation: T,
+    pub shard: LoadedQueueShardObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DurableQueueShardWriteOutcome<T> {
+    Created(PersistedQueueShardMutation<T>),
+    Updated(PersistedQueueShardMutation<T>),
+}
+
+pub type DurableBrokerLeaseOutcome = DurableQueueShardWriteOutcome<BrokerLeaseOutcome>;
+pub type DurableJobClaimOutcome = DurableQueueShardWriteOutcome<JobClaimOutcome>;
+pub type DurableJobHeartbeatOutcome = DurableQueueShardWriteOutcome<JobHeartbeatOutcome>;
+pub type DurableJobCompleteOutcome = DurableQueueShardWriteOutcome<JobCompleteOutcome>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DurableQueueShardMutationError<E> {
+    EmptyWriterVersion,
+    MissingObject { object_key: String },
+    MissingObjectAfterHead { object_key: String },
+    MissingObjectEtag { object_key: String },
+    Load(QueueShardLoadError),
+    Mutation(E),
+    ConcurrentWrite,
+    Codec(String),
+    Store(String),
+}
+
+pub type DurableBrokerLeaseError = DurableQueueShardMutationError<BrokerLeaseError>;
+pub type DurableWorkerMutationError = DurableQueueShardMutationError<WorkerMutationError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedQueueShardRepair {
@@ -119,6 +158,158 @@ pub fn load_queue_shard(
     })
 }
 
+pub fn read_queue_shard<S: ObjectStore>(
+    store: &S,
+    shard_index: u32,
+) -> Result<LoadedQueueShardObject, QueueShardLoadError> {
+    let object_key = queue_shard(shard_index);
+    let encoded_bytes = store
+        .get(&object_key, None)
+        .map_err(map_queue_load_store_error)?
+        .ok_or_else(|| QueueShardLoadError::MissingObject {
+            object_key: object_key.clone(),
+        })?;
+
+    load_queue_shard(
+        shard_index,
+        &StoredQueueShardObject {
+            object_key,
+            encoded_bytes,
+        },
+    )
+}
+
+pub fn renew_broker_lease_in_store<S: ObjectStore>(
+    store: &S,
+    shard_index: u32,
+    work_class: WorkClass,
+    broker_id: &str,
+    now_ms: u64,
+    lease_duration_ms: u64,
+    writer_version: &str,
+) -> Result<DurableBrokerLeaseOutcome, DurableBrokerLeaseError> {
+    if writer_version.trim().is_empty() {
+        return Err(DurableBrokerLeaseError::EmptyWriterVersion);
+    }
+
+    let object_key = queue_shard(shard_index);
+    match store
+        .head(&object_key)
+        .map_err(map_queue_mutation_store_error::<BrokerLeaseError>)?
+    {
+        Some(_) => mutate_existing_queue_shard(store, shard_index, writer_version, |next_state| {
+            let outcome = renew_broker_lease(next_state, broker_id, now_ms, lease_duration_ms)?;
+            Ok((outcome.clone(), broker_lease_invariants(&outcome)))
+        }),
+        None => {
+            let mut next_state = QueueShardState {
+                work_class,
+                shard_id: shard_index,
+                broker: None,
+                jobs: vec![],
+            };
+            let outcome = renew_broker_lease(&mut next_state, broker_id, now_ms, lease_duration_ms)
+                .map_err(DurableBrokerLeaseError::Mutation)?;
+            let next = merge_queue_mutation_invariants(
+                build_loaded_queue_shard(next_state, writer_version)
+                    .map_err(DurableBrokerLeaseError::Codec)?,
+                None,
+                shard_index,
+                &broker_lease_invariants(&outcome),
+            );
+            let metadata = store
+                .put_if_absent(
+                    &object_key,
+                    &encode_queue_shard_bytes(&next).map_err(DurableBrokerLeaseError::Codec)?,
+                )
+                .map_err(map_queue_mutation_store_error::<BrokerLeaseError>)?;
+
+            Ok(DurableBrokerLeaseOutcome::Created(
+                PersistedQueueShardMutation {
+                    metadata,
+                    mutation: outcome,
+                    shard: next,
+                },
+            ))
+        }
+    }
+}
+
+pub fn claim_job_in_store<S: ObjectStore>(
+    store: &S,
+    shard_index: u32,
+    broker_id: &str,
+    broker_epoch: u64,
+    worker_id: &str,
+    claim_token: &str,
+    job_id: &str,
+    now_ms: u64,
+    claim_timeout_ms: u64,
+    writer_version: &str,
+) -> Result<DurableJobClaimOutcome, DurableWorkerMutationError> {
+    mutate_existing_queue_shard(store, shard_index, writer_version, |next_state| {
+        let outcome = claim_job(
+            next_state,
+            broker_id,
+            broker_epoch,
+            worker_id,
+            claim_token,
+            job_id,
+            now_ms,
+            claim_timeout_ms,
+        )?;
+        Ok((outcome.clone(), claim_invariants(&outcome)))
+    })
+}
+
+pub fn heartbeat_job_in_store<S: ObjectStore>(
+    store: &S,
+    shard_index: u32,
+    broker_id: &str,
+    broker_epoch: u64,
+    job_id: &str,
+    claim_token: &str,
+    now_ms: u64,
+    claim_timeout_ms: u64,
+    writer_version: &str,
+) -> Result<DurableJobHeartbeatOutcome, DurableWorkerMutationError> {
+    mutate_existing_queue_shard(store, shard_index, writer_version, |next_state| {
+        let outcome = heartbeat_job(
+            next_state,
+            broker_id,
+            broker_epoch,
+            job_id,
+            claim_token,
+            now_ms,
+            claim_timeout_ms,
+        )?;
+        Ok((outcome, heartbeat_invariants()))
+    })
+}
+
+pub fn complete_job_in_store<S: ObjectStore>(
+    store: &S,
+    shard_index: u32,
+    broker_id: &str,
+    broker_epoch: u64,
+    job_id: &str,
+    claim_token: &str,
+    now_ms: u64,
+    writer_version: &str,
+) -> Result<DurableJobCompleteOutcome, DurableWorkerMutationError> {
+    mutate_existing_queue_shard(store, shard_index, writer_version, |next_state| {
+        let outcome = complete_job(
+            next_state,
+            broker_id,
+            broker_epoch,
+            job_id,
+            claim_token,
+            now_ms,
+        )?;
+        Ok((outcome, complete_invariants()))
+    })
+}
+
 pub fn repair_lost_snapshot_enqueue_in_store<S: ObjectStore>(
     store: &S,
     shard_index: u32,
@@ -163,7 +354,11 @@ pub fn repair_lost_snapshot_enqueue_in_store<S: ObjectStore>(
             let next = build_loaded_queue_shard(next_state, writer_version)
                 .map_err(DurableSnapshotRepairError::Codec)?;
             let metadata = store
-                .compare_and_swap(&object_key, &etag, &encode_queue_shard(&next)?)
+                .compare_and_swap(
+                    &object_key,
+                    &etag,
+                    &encode_queue_shard_bytes(&next).map_err(DurableSnapshotRepairError::Codec)?,
+                )
                 .map_err(map_repair_store_error)?;
 
             Ok(DurableSnapshotRepairOutcome::Updated(
@@ -190,7 +385,10 @@ pub fn repair_lost_snapshot_enqueue_in_store<S: ObjectStore>(
             let next = build_loaded_queue_shard(next_state, writer_version)
                 .map_err(DurableSnapshotRepairError::Codec)?;
             let metadata = store
-                .put_if_absent(&object_key, &encode_queue_shard(&next)?)
+                .put_if_absent(
+                    &object_key,
+                    &encode_queue_shard_bytes(&next).map_err(DurableSnapshotRepairError::Codec)?,
+                )
                 .map_err(map_repair_store_error)?;
 
             Ok(DurableSnapshotRepairOutcome::Created(
@@ -202,6 +400,84 @@ pub fn repair_lost_snapshot_enqueue_in_store<S: ObjectStore>(
             ))
         }
     }
+}
+
+fn mutate_existing_queue_shard<S: ObjectStore, E, T, F>(
+    store: &S,
+    shard_index: u32,
+    writer_version: &str,
+    mutate: F,
+) -> Result<DurableQueueShardWriteOutcome<T>, DurableQueueShardMutationError<E>>
+where
+    F: FnOnce(&mut QueueShardState) -> Result<(T, Vec<String>), E>,
+{
+    if writer_version.trim().is_empty() {
+        return Err(DurableQueueShardMutationError::EmptyWriterVersion);
+    }
+
+    let (etag, current) = read_queue_shard_for_update::<S, E>(store, shard_index)?;
+    let object_key = queue_shard(shard_index);
+    let mut next_state = current.envelope.state.clone();
+    let (mutation, invariants) =
+        mutate(&mut next_state).map_err(DurableQueueShardMutationError::Mutation)?;
+    let next = merge_queue_mutation_invariants(
+        build_loaded_queue_shard(next_state, writer_version)
+            .map_err(DurableQueueShardMutationError::Codec)?,
+        Some(&current),
+        shard_index,
+        &invariants,
+    );
+    let metadata = store
+        .compare_and_swap(
+            &object_key,
+            &etag,
+            &encode_queue_shard_bytes(&next).map_err(DurableQueueShardMutationError::Codec)?,
+        )
+        .map_err(map_queue_mutation_store_error::<E>)?;
+
+    Ok(DurableQueueShardWriteOutcome::Updated(
+        PersistedQueueShardMutation {
+            metadata,
+            mutation,
+            shard: next,
+        },
+    ))
+}
+
+fn read_queue_shard_for_update<S: ObjectStore, E>(
+    store: &S,
+    shard_index: u32,
+) -> Result<(String, LoadedQueueShardObject), DurableQueueShardMutationError<E>> {
+    let object_key = queue_shard(shard_index);
+    let metadata = store
+        .head(&object_key)
+        .map_err(map_queue_mutation_store_error::<E>)?
+        .ok_or_else(|| DurableQueueShardMutationError::MissingObject {
+            object_key: object_key.clone(),
+        })?;
+    let etag =
+        metadata
+            .etag
+            .clone()
+            .ok_or_else(|| DurableQueueShardMutationError::MissingObjectEtag {
+                object_key: object_key.clone(),
+            })?;
+    let encoded_bytes = store
+        .get(&object_key, None)
+        .map_err(map_queue_mutation_store_error::<E>)?
+        .ok_or_else(|| DurableQueueShardMutationError::MissingObjectAfterHead {
+            object_key: object_key.clone(),
+        })?;
+    let current = load_queue_shard(
+        shard_index,
+        &StoredQueueShardObject {
+            object_key,
+            encoded_bytes,
+        },
+    )
+    .map_err(DurableQueueShardMutationError::Load)?;
+
+    Ok((etag, current))
 }
 
 fn build_loaded_queue_shard(
@@ -223,11 +499,35 @@ fn build_loaded_queue_shard(
     })
 }
 
-fn encode_queue_shard(
-    shard: &LoadedQueueShardObject,
-) -> Result<Vec<u8>, DurableSnapshotRepairError> {
-    serde_json::to_vec(&shard.envelope)
-        .map_err(|err| DurableSnapshotRepairError::Codec(err.to_string()))
+fn encode_queue_shard_bytes(shard: &LoadedQueueShardObject) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&shard.envelope).map_err(|err| err.to_string())
+}
+
+fn broker_lease_invariants(outcome: &BrokerLeaseOutcome) -> Vec<String> {
+    let mut invariants = vec![];
+    if matches!(outcome, BrokerLeaseOutcome::TakenOver { .. }) {
+        invariants.push("broker_lease_takeover_increments_epoch".to_owned());
+    }
+    invariants
+}
+
+fn claim_invariants(outcome: &JobClaimOutcome) -> Vec<String> {
+    let mut invariants = vec!["active_broker_lease_required_for_shard_mutation".to_owned()];
+    if matches!(outcome, JobClaimOutcome::Stolen { .. }) {
+        invariants.push("claim_timeout_allows_steal".to_owned());
+    }
+    invariants
+}
+
+fn heartbeat_invariants() -> Vec<String> {
+    vec![
+        "active_broker_lease_required_for_shard_mutation".to_owned(),
+        "worker_heartbeat_requires_matching_claim_token".to_owned(),
+    ]
+}
+
+fn complete_invariants() -> Vec<String> {
+    vec!["active_broker_lease_required_for_shard_mutation".to_owned()]
 }
 
 fn merge_repair_invariants(
@@ -274,11 +574,46 @@ fn merge_repair_invariants(
     shard
 }
 
+fn merge_queue_mutation_invariants(
+    mut shard: LoadedQueueShardObject,
+    current: Option<&LoadedQueueShardObject>,
+    shard_index: u32,
+    mutation_invariants: &[String],
+) -> LoadedQueueShardObject {
+    if let Some(current) = current {
+        extend_invariants(&mut shard.checked_invariants, &current.checked_invariants);
+    }
+    extend_invariants(
+        &mut shard.checked_invariants,
+        &[
+            "queue_shard_checksum_matches_payload".to_owned(),
+            "queue_shard_key_matches_shard_id".to_owned(),
+            "queue_shard_cas_protects_updates".to_owned(),
+        ],
+    );
+    extend_invariants(&mut shard.checked_invariants, mutation_invariants);
+    if shard.object_key != queue_shard(shard_index) {
+        shard.object_key = queue_shard(shard_index);
+    }
+    shard
+}
+
 fn extend_invariants(checked_invariants: &mut Vec<String>, new_invariants: &[String]) {
     for invariant in new_invariants {
         if !checked_invariants.iter().any(|value| value == invariant) {
             checked_invariants.push(invariant.clone());
         }
+    }
+}
+
+fn map_queue_load_store_error(err: ObjectStoreError) -> QueueShardLoadError {
+    QueueShardLoadError::Store(err.to_string())
+}
+
+fn map_queue_mutation_store_error<E>(err: ObjectStoreError) -> DurableQueueShardMutationError<E> {
+    match err {
+        ObjectStoreError::PreconditionFailed => DurableQueueShardMutationError::ConcurrentWrite,
+        other => DurableQueueShardMutationError::Store(other.to_string()),
     }
 }
 
@@ -292,10 +627,16 @@ fn map_repair_store_error(err: ObjectStoreError) -> DurableSnapshotRepairError {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_queue_shard, repair_lost_snapshot_enqueue_in_store, DurableSnapshotRepairOutcome,
-        QueueShardLoadError, StoredQueueShardObject,
+        claim_job_in_store, complete_job_in_store, heartbeat_job_in_store, load_queue_shard,
+        read_queue_shard, renew_broker_lease_in_store, repair_lost_snapshot_enqueue_in_store,
+        DurableBrokerLeaseOutcome, DurableJobClaimOutcome, DurableJobCompleteOutcome,
+        DurableQueueShardMutationError, DurableSnapshotRepairOutcome, QueueShardLoadError,
+        StoredQueueShardObject,
     };
-    use crate::types::{QueueShardEnvelope, QueueShardState, WorkClass};
+    use crate::types::{
+        JobState, QueueClaim, QueueJob, QueueShardEnvelope, QueueShardState, WorkClass,
+    };
+    use crate::worker::{JobClaimOutcome, JobCompleteOutcome, WorkerMutationError};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::queue_shard;
     use loon_objectstore::ObjectStore;
@@ -317,10 +658,10 @@ mod tests {
             },
         )
         .expect("build queue shard envelope");
-        envelope.state.jobs.push(crate::types::QueueJob {
+        envelope.state.jobs.push(QueueJob {
             job_id: "job-1".to_owned(),
             dedupe_key: "BuildSnapshot:ns-1".to_owned(),
-            state: crate::types::JobState::Ready,
+            state: JobState::Ready,
             payload: crate::types::SeqScopedPayload {
                 namespace_id: "ns-1".into(),
                 through_seq: ChangeSeq(42),
@@ -343,6 +684,217 @@ mod tests {
             error,
             QueueShardLoadError::ChecksumMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn renew_broker_lease_in_store_creates_missing_shard() {
+        let temp_dir = TestDir::new("queue-broker-create");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create object store");
+
+        let outcome = renew_broker_lease_in_store(
+            &store,
+            17,
+            WorkClass::BuildSnapshot,
+            "broker-a",
+            0,
+            10_000,
+            "loon-queue-test",
+        )
+        .expect("lease should create missing shard");
+
+        match outcome {
+            DurableBrokerLeaseOutcome::Created(persisted) => {
+                assert_eq!(
+                    persisted
+                        .shard
+                        .envelope
+                        .state
+                        .broker
+                        .as_ref()
+                        .expect("created shard should have broker")
+                        .epoch,
+                    1
+                );
+                assert!(persisted
+                    .shard
+                    .checked_invariants
+                    .contains(&"queue_shard_cas_protects_updates".to_owned()));
+            }
+            other => panic!("unexpected lease outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn heartbeat_in_store_extends_claim_timeout() {
+        let temp_dir = TestDir::new("queue-heartbeat");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create object store");
+        seed_queue_shard(&store, ready_snapshot_shard());
+        renew_broker_lease_in_store(
+            &store,
+            17,
+            WorkClass::BuildSnapshot,
+            "broker-a",
+            0,
+            10_000,
+            "loon-queue-test",
+        )
+        .expect("broker lease should succeed");
+        claim_job_in_store(
+            &store,
+            17,
+            "broker-a",
+            1,
+            "worker-a",
+            "claim-a",
+            "job-1",
+            0,
+            10_000,
+            "loon-queue-test",
+        )
+        .expect("claim should succeed");
+
+        heartbeat_job_in_store(
+            &store,
+            17,
+            "broker-a",
+            1,
+            "job-1",
+            "claim-a",
+            5_000,
+            10_000,
+            "loon-queue-test",
+        )
+        .expect("heartbeat should succeed");
+
+        let shard = read_queue_shard(&store, 17).expect("queue shard should load");
+        assert_eq!(
+            shard.envelope.state.jobs[0]
+                .claim
+                .as_ref()
+                .expect("claim should still exist")
+                .timeout_at_ms,
+            15_000
+        );
+    }
+
+    #[test]
+    fn claim_timeout_then_steal_rejects_stale_complete_in_store() {
+        let temp_dir = TestDir::new("queue-steal");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create object store");
+        seed_queue_shard(&store, ready_snapshot_shard());
+
+        renew_broker_lease_in_store(
+            &store,
+            17,
+            WorkClass::BuildSnapshot,
+            "broker-a",
+            0,
+            10_000,
+            "loon-queue-test",
+        )
+        .expect("initial broker lease");
+        match claim_job_in_store(
+            &store,
+            17,
+            "broker-a",
+            1,
+            "worker-a",
+            "claim-a",
+            "job-1",
+            0,
+            10_000,
+            "loon-queue-test",
+        )
+        .expect("initial claim should succeed")
+        {
+            DurableJobClaimOutcome::Updated(persisted) => {
+                assert_eq!(
+                    persisted.mutation,
+                    JobClaimOutcome::Claimed {
+                        claim_token: "claim-a".to_owned(),
+                    }
+                );
+                assert_eq!(persisted.shard.envelope.state.jobs[0].attempts, 1);
+            }
+            other => panic!("unexpected claim outcome: {other:?}"),
+        }
+
+        renew_broker_lease_in_store(
+            &store,
+            17,
+            WorkClass::BuildSnapshot,
+            "broker-b",
+            30_000,
+            10_000,
+            "loon-queue-test",
+        )
+        .expect("expired lease should allow takeover");
+
+        match claim_job_in_store(
+            &store,
+            17,
+            "broker-b",
+            2,
+            "worker-b",
+            "claim-b",
+            "job-1",
+            30_000,
+            10_000,
+            "loon-queue-test",
+        )
+        .expect("timed-out claim should be stealable")
+        {
+            DurableJobClaimOutcome::Updated(persisted) => {
+                assert_eq!(
+                    persisted.mutation,
+                    JobClaimOutcome::Stolen {
+                        claim_token: "claim-b".to_owned(),
+                    }
+                );
+                assert!(persisted
+                    .shard
+                    .checked_invariants
+                    .contains(&"claim_timeout_allows_steal".to_owned()));
+            }
+            other => panic!("unexpected steal outcome: {other:?}"),
+        }
+
+        let stale_complete = complete_job_in_store(
+            &store,
+            17,
+            "broker-b",
+            2,
+            "job-1",
+            "claim-a",
+            30_001,
+            "loon-queue-test",
+        )
+        .expect_err("stale claim token should be rejected");
+        assert!(matches!(
+            stale_complete,
+            DurableQueueShardMutationError::Mutation(
+                WorkerMutationError::ClaimTokenMismatch { .. }
+            )
+        ));
+
+        match complete_job_in_store(
+            &store,
+            17,
+            "broker-b",
+            2,
+            "job-1",
+            "claim-b",
+            30_001,
+            "loon-queue-test",
+        )
+        .expect("fresh claim should complete")
+        {
+            DurableJobCompleteOutcome::Updated(persisted) => {
+                assert_eq!(persisted.mutation, JobCompleteOutcome::Removed);
+                assert!(persisted.shard.envelope.state.jobs.is_empty());
+            }
+            other => panic!("unexpected complete outcome: {other:?}"),
+        }
     }
 
     #[test]
@@ -421,21 +973,46 @@ mod tests {
             .expect("seed queue shard");
     }
 
-    fn claimed_snapshot_shard() -> QueueShardState {
+    fn ready_snapshot_shard() -> QueueShardState {
         QueueShardState {
             work_class: WorkClass::BuildSnapshot,
             shard_id: 17,
             broker: None,
-            jobs: vec![crate::types::QueueJob {
+            jobs: vec![QueueJob {
                 job_id: "job-1".to_owned(),
                 dedupe_key: "BuildSnapshot:ns-1".to_owned(),
-                state: crate::types::JobState::Claimed,
+                state: JobState::Ready,
                 payload: crate::types::SeqScopedPayload {
                     namespace_id: "ns-1".into(),
                     through_seq: ChangeSeq(40),
                 },
                 follow_up: None,
                 claim: None,
+                attempts: 0,
+            }],
+        }
+    }
+
+    fn claimed_snapshot_shard() -> QueueShardState {
+        QueueShardState {
+            work_class: WorkClass::BuildSnapshot,
+            shard_id: 17,
+            broker: None,
+            jobs: vec![QueueJob {
+                job_id: "job-1".to_owned(),
+                dedupe_key: "BuildSnapshot:ns-1".to_owned(),
+                state: JobState::Claimed,
+                payload: crate::types::SeqScopedPayload {
+                    namespace_id: "ns-1".into(),
+                    through_seq: ChangeSeq(40),
+                },
+                follow_up: None,
+                claim: Some(QueueClaim {
+                    worker_id: "worker-a".to_owned(),
+                    claim_token: "claim-a".to_owned(),
+                    heartbeat_at_ms: 0,
+                    timeout_at_ms: 10_000,
+                }),
                 attempts: 1,
             }],
         }

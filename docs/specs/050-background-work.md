@@ -68,6 +68,64 @@ Failure modes prevented:
 - claim metadata racing in a different object from the jobs it is meant to guard
 - lost updates from blind overwrite of a mutable shard
 
+## Broker lease rule
+
+Each shard has one active broker lease in `state.broker`.
+
+Broker lease transitions:
+
+- a missing broker lease may be created
+- the same broker may renew its unexpired lease without changing epoch
+- a different broker may take over only after the prior lease is expired
+- every takeover increments `epoch`
+
+Worker-visible shard mutations must fence on both:
+
+- `broker_id`
+- `epoch`
+
+Why this rule exists:
+
+- broker identity alone is not enough when a restarted broker reuses the same ID
+- lease takeover must fence stale shard mutators
+
+Failure modes prevented:
+
+- a stale broker continuing to mutate jobs after another broker already took the shard
+- the same broker ID being reused without a new generation fence
+
+## Worker claim, heartbeat, and complete rule
+
+Claims live inside the same durable shard object as the jobs they guard.
+
+Claim rule:
+
+- claiming a ready job sets `state = claimed`
+- the shard records `worker_id`, `claim_token`, `heartbeat_at_ms`, and `timeout_at_ms`
+- claiming an already claimed job is allowed only when `timeout_at_ms <= now_ms`
+- every successful claim or steal increments `attempts`
+
+Heartbeat rule:
+
+- only the matching `claim_token` may extend `heartbeat_at_ms` and `timeout_at_ms`
+
+Complete rule:
+
+- only the matching `claim_token` may complete the job
+- if a follow-up payload exists, completion promotes it into a fresh ready job state
+- otherwise completion removes the job from the shard
+
+Why this rule exists:
+
+- claim ownership and stale-token rejection must be derived from one durable shard view
+- a stolen job must not be completable by the loser
+
+Failure modes prevented:
+
+- one worker heartbeating or completing another worker's claim
+- a stolen job being completed twice
+- completion racing against a separately stored claim record
+
 ## Job rule
 
 Every job class must be idempotent.
@@ -203,6 +261,9 @@ Durable repair publish rule:
 5. if the shard did not exist and repair needs a job, create the shard object
 6. otherwise compare-and-swap the updated shard object
 7. treat create/CAS conflicts as retry-from-fresh-read
+
+The same read-validate-transform-CAS rule applies to broker lease renewal, worker claim,
+heartbeat, and complete transitions.
 
 Why this rule exists:
 

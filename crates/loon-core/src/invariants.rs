@@ -35,6 +35,12 @@ pub const INVARIANTS: &[&str] = &[
     "lost_enqueue_repair_enqueues_when_head_outpaces_progress",
     "snapshot_repair_dedupe_key_is_namespace_scoped",
     "snapshot_repair_claimed_job_gets_follow_up",
+    "broker_lease_takeover_increments_epoch",
+    "active_broker_lease_required_for_shard_mutation",
+    "claim_timeout_allows_steal",
+    "worker_heartbeat_requires_matching_claim_token",
+    "stale_claim_token_cannot_complete",
+    "stolen_job_completes_once",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

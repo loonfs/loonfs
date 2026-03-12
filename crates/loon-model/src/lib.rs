@@ -83,6 +83,21 @@ pub enum ModelQueueJobState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelQueueBroker {
+    pub broker_id: String,
+    pub epoch: u64,
+    pub lease_expires_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelQueueClaim {
+    pub worker_id: String,
+    pub claim_token: String,
+    pub heartbeat_at_ms: u64,
+    pub timeout_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelQueueSeqPayload {
     pub namespace_id: NamespaceId,
     pub through_seq: ChangeSeq,
@@ -95,12 +110,15 @@ pub struct ModelQueueJob {
     pub state: ModelQueueJobState,
     pub payload: ModelQueueSeqPayload,
     pub follow_up: Option<ModelQueueSeqPayload>,
+    pub claim: Option<ModelQueueClaim>,
+    pub attempts: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelQueueShard {
     pub work_class: ModelQueueWorkClass,
     pub shard_id: u32,
+    pub broker: Option<ModelQueueBroker>,
     pub jobs: Vec<ModelQueueJob>,
 }
 
@@ -110,6 +128,25 @@ pub enum ModelQueueRepairOutcome {
     Enqueued { through_seq: ChangeSeq },
     RaisedReadyJob { through_seq: ChangeSeq },
     AttachedFollowUp { through_seq: ChangeSeq },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelBrokerLeaseOutcome {
+    Acquired { epoch: u64 },
+    Renewed { epoch: u64 },
+    TakenOver { epoch: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelJobClaimOutcome {
+    Claimed { claim_token: String },
+    Stolen { claim_token: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelJobCompleteOutcome {
+    Removed,
+    PromotedFollowUp { through_seq: ChangeSeq },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +229,229 @@ pub enum ModelError {
         expected: ModelQueueWorkClass,
         actual: ModelQueueWorkClass,
     },
+    MissingBrokerLease,
+    BrokerLeaseHeldByOther {
+        active_broker_id: String,
+        active_epoch: u64,
+        lease_expires_at_ms: u64,
+        now_ms: u64,
+    },
+    BrokerLeaseMismatch {
+        expected_broker_id: String,
+        expected_epoch: u64,
+        actual_broker_id: String,
+        actual_epoch: u64,
+    },
+    BrokerLeaseExpired {
+        broker_id: String,
+        epoch: u64,
+        lease_expires_at_ms: u64,
+        now_ms: u64,
+    },
+    JobNotFound {
+        job_id: String,
+    },
+    JobBusy {
+        job_id: String,
+        worker_id: String,
+        timeout_at_ms: u64,
+        now_ms: u64,
+    },
+    JobNotClaimed {
+        job_id: String,
+    },
+    ClaimTokenMismatch {
+        expected: String,
+        actual: String,
+    },
+}
+
+impl ModelQueueShard {
+    pub fn renew_broker_lease(
+        &mut self,
+        broker_id: &str,
+        now_ms: u64,
+        lease_duration_ms: u64,
+    ) -> Result<ModelBrokerLeaseOutcome, ModelError> {
+        match &mut self.broker {
+            None => {
+                self.broker = Some(ModelQueueBroker {
+                    broker_id: broker_id.to_owned(),
+                    epoch: 1,
+                    lease_expires_at_ms: now_ms.saturating_add(lease_duration_ms),
+                });
+
+                Ok(ModelBrokerLeaseOutcome::Acquired { epoch: 1 })
+            }
+            Some(current)
+                if current.broker_id == broker_id && current.lease_expires_at_ms > now_ms =>
+            {
+                current.lease_expires_at_ms = now_ms.saturating_add(lease_duration_ms);
+                Ok(ModelBrokerLeaseOutcome::Renewed {
+                    epoch: current.epoch,
+                })
+            }
+            Some(current) if current.lease_expires_at_ms <= now_ms => {
+                current.broker_id = broker_id.to_owned();
+                current.epoch = current.epoch.saturating_add(1);
+                current.lease_expires_at_ms = now_ms.saturating_add(lease_duration_ms);
+                Ok(ModelBrokerLeaseOutcome::TakenOver {
+                    epoch: current.epoch,
+                })
+            }
+            Some(current) => Err(ModelError::BrokerLeaseHeldByOther {
+                active_broker_id: current.broker_id.clone(),
+                active_epoch: current.epoch,
+                lease_expires_at_ms: current.lease_expires_at_ms,
+                now_ms,
+            }),
+        }
+    }
+
+    pub fn claim_job(
+        &mut self,
+        broker_id: &str,
+        broker_epoch: u64,
+        worker_id: &str,
+        claim_token: &str,
+        job_id: &str,
+        now_ms: u64,
+        claim_timeout_ms: u64,
+    ) -> Result<ModelJobClaimOutcome, ModelError> {
+        ensure_active_broker_lease(self, broker_id, broker_epoch, now_ms)?;
+
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|job| job.job_id == job_id)
+            .ok_or_else(|| ModelError::JobNotFound {
+                job_id: job_id.to_owned(),
+            })?;
+
+        let new_claim = ModelQueueClaim {
+            worker_id: worker_id.to_owned(),
+            claim_token: claim_token.to_owned(),
+            heartbeat_at_ms: now_ms,
+            timeout_at_ms: now_ms.saturating_add(claim_timeout_ms),
+        };
+
+        match job.state {
+            ModelQueueJobState::Ready => {
+                job.state = ModelQueueJobState::Claimed;
+                job.claim = Some(new_claim.clone());
+                job.attempts = job.attempts.saturating_add(1);
+                Ok(ModelJobClaimOutcome::Claimed {
+                    claim_token: new_claim.claim_token,
+                })
+            }
+            ModelQueueJobState::Claimed => {
+                let current = job
+                    .claim
+                    .as_ref()
+                    .ok_or_else(|| ModelError::JobNotClaimed {
+                        job_id: job_id.to_owned(),
+                    })?;
+                if current.timeout_at_ms > now_ms {
+                    return Err(ModelError::JobBusy {
+                        job_id: job_id.to_owned(),
+                        worker_id: current.worker_id.clone(),
+                        timeout_at_ms: current.timeout_at_ms,
+                        now_ms,
+                    });
+                }
+
+                job.claim = Some(new_claim.clone());
+                job.attempts = job.attempts.saturating_add(1);
+                Ok(ModelJobClaimOutcome::Stolen {
+                    claim_token: new_claim.claim_token,
+                })
+            }
+        }
+    }
+
+    pub fn heartbeat_job(
+        &mut self,
+        broker_id: &str,
+        broker_epoch: u64,
+        job_id: &str,
+        claim_token: &str,
+        now_ms: u64,
+        claim_timeout_ms: u64,
+    ) -> Result<(), ModelError> {
+        ensure_active_broker_lease(self, broker_id, broker_epoch, now_ms)?;
+
+        let job = self
+            .jobs
+            .iter_mut()
+            .find(|job| job.job_id == job_id)
+            .ok_or_else(|| ModelError::JobNotFound {
+                job_id: job_id.to_owned(),
+            })?;
+        let claim = job
+            .claim
+            .as_mut()
+            .ok_or_else(|| ModelError::JobNotClaimed {
+                job_id: job_id.to_owned(),
+            })?;
+        if claim.claim_token != claim_token {
+            return Err(ModelError::ClaimTokenMismatch {
+                expected: claim.claim_token.clone(),
+                actual: claim_token.to_owned(),
+            });
+        }
+
+        claim.heartbeat_at_ms = now_ms;
+        claim.timeout_at_ms = now_ms.saturating_add(claim_timeout_ms);
+        Ok(())
+    }
+
+    pub fn complete_job(
+        &mut self,
+        broker_id: &str,
+        broker_epoch: u64,
+        job_id: &str,
+        claim_token: &str,
+        now_ms: u64,
+    ) -> Result<ModelJobCompleteOutcome, ModelError> {
+        ensure_active_broker_lease(self, broker_id, broker_epoch, now_ms)?;
+
+        let job_index = self
+            .jobs
+            .iter()
+            .position(|job| job.job_id == job_id)
+            .ok_or_else(|| ModelError::JobNotFound {
+                job_id: job_id.to_owned(),
+            })?;
+
+        {
+            let claim =
+                self.jobs[job_index]
+                    .claim
+                    .as_ref()
+                    .ok_or_else(|| ModelError::JobNotClaimed {
+                        job_id: job_id.to_owned(),
+                    })?;
+            if claim.claim_token != claim_token {
+                return Err(ModelError::ClaimTokenMismatch {
+                    expected: claim.claim_token.clone(),
+                    actual: claim_token.to_owned(),
+                });
+            }
+        }
+
+        if let Some(follow_up) = self.jobs[job_index].follow_up.take() {
+            let job = &mut self.jobs[job_index];
+            job.state = ModelQueueJobState::Ready;
+            job.payload = follow_up.clone();
+            job.claim = None;
+            return Ok(ModelJobCompleteOutcome::PromotedFollowUp {
+                through_seq: follow_up.through_seq,
+            });
+        }
+
+        self.jobs.remove(job_index);
+        Ok(ModelJobCompleteOutcome::Removed)
+    }
 }
 
 impl ModelNamespace {
@@ -475,6 +735,8 @@ impl ModelNamespace {
             state: ModelQueueJobState::Ready,
             payload: desired_payload.clone(),
             follow_up: None,
+            claim: None,
+            attempts: 0,
         });
 
         Ok(ModelQueueRepairOutcome::Enqueued {
@@ -615,6 +877,38 @@ fn checkpoint_segment_object_key(
         checkpoint_seq.0,
         family.as_str()
     )
+}
+
+fn ensure_active_broker_lease(
+    queue: &ModelQueueShard,
+    broker_id: &str,
+    broker_epoch: u64,
+    now_ms: u64,
+) -> Result<(), ModelError> {
+    let broker = queue
+        .broker
+        .as_ref()
+        .ok_or(ModelError::MissingBrokerLease)?;
+
+    if broker.broker_id != broker_id || broker.epoch != broker_epoch {
+        return Err(ModelError::BrokerLeaseMismatch {
+            expected_broker_id: broker.broker_id.clone(),
+            expected_epoch: broker.epoch,
+            actual_broker_id: broker_id.to_owned(),
+            actual_epoch: broker_epoch,
+        });
+    }
+
+    if broker.lease_expires_at_ms <= now_ms {
+        return Err(ModelError::BrokerLeaseExpired {
+            broker_id: broker.broker_id.clone(),
+            epoch: broker.epoch,
+            lease_expires_at_ms: broker.lease_expires_at_ms,
+            now_ms,
+        });
+    }
+
+    Ok(())
 }
 
 fn build_snapshot_work_class() -> &'static str {
@@ -836,6 +1130,7 @@ mod tests {
         let mut queue = ModelQueueShard {
             work_class: ModelQueueWorkClass::BuildSnapshot,
             shard_id: 17,
+            broker: None,
             jobs: vec![],
         };
 
@@ -873,6 +1168,7 @@ mod tests {
         let mut queue = ModelQueueShard {
             work_class: ModelQueueWorkClass::BuildSnapshot,
             shard_id: 17,
+            broker: None,
             jobs: vec![ModelQueueJob {
                 job_id: "job-1".to_owned(),
                 dedupe_key: "BuildSnapshot:ns-1".to_owned(),
@@ -882,6 +1178,13 @@ mod tests {
                     through_seq: ChangeSeq(1),
                 },
                 follow_up: None,
+                claim: Some(ModelQueueClaim {
+                    worker_id: "worker-a".to_owned(),
+                    claim_token: "claim-a".to_owned(),
+                    heartbeat_at_ms: 0,
+                    timeout_at_ms: 10_000,
+                }),
+                attempts: 1,
             }],
         };
 
@@ -902,6 +1205,100 @@ mod tests {
                 through_seq: ChangeSeq(2),
             })
         );
+    }
+
+    #[test]
+    fn model_broker_lease_takeover_fences_old_generation() {
+        let mut queue = ModelQueueShard {
+            work_class: ModelQueueWorkClass::BuildSnapshot,
+            shard_id: 17,
+            broker: None,
+            jobs: vec![],
+        };
+
+        assert_eq!(
+            queue
+                .renew_broker_lease("broker-a", 0, 10_000)
+                .expect("first lease should be acquired"),
+            ModelBrokerLeaseOutcome::Acquired { epoch: 1 }
+        );
+        assert_eq!(
+            queue
+                .renew_broker_lease("broker-b", 30_000, 10_000)
+                .expect("expired lease should be takeable"),
+            ModelBrokerLeaseOutcome::TakenOver { epoch: 2 }
+        );
+        assert_eq!(
+            ensure_active_broker_lease(&queue, "broker-a", 1, 30_001)
+                .expect_err("old broker generation should be fenced"),
+            ModelError::BrokerLeaseMismatch {
+                expected_broker_id: "broker-b".to_owned(),
+                expected_epoch: 2,
+                actual_broker_id: "broker-a".to_owned(),
+                actual_epoch: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn model_claim_timeout_then_steal_rejects_stale_complete() {
+        let mut queue = ModelQueueShard {
+            work_class: ModelQueueWorkClass::BuildSnapshot,
+            shard_id: 17,
+            broker: None,
+            jobs: vec![ModelQueueJob {
+                job_id: "job-1".to_owned(),
+                dedupe_key: "BuildSnapshot:ns-1".to_owned(),
+                state: ModelQueueJobState::Ready,
+                payload: ModelQueueSeqPayload {
+                    namespace_id: NamespaceId::from("ns-1"),
+                    through_seq: ChangeSeq(420),
+                },
+                follow_up: None,
+                claim: None,
+                attempts: 0,
+            }],
+        };
+        queue
+            .renew_broker_lease("broker-a", 0, 10_000)
+            .expect("broker-a should acquire lease");
+        assert_eq!(
+            queue
+                .claim_job("broker-a", 1, "worker-a", "claim-a", "job-1", 0, 10_000)
+                .expect("worker-a should claim job"),
+            ModelJobClaimOutcome::Claimed {
+                claim_token: "claim-a".to_owned(),
+            }
+        );
+
+        queue
+            .renew_broker_lease("broker-b", 30_000, 10_000)
+            .expect("broker-b should take over after expiry");
+        assert_eq!(
+            queue
+                .claim_job("broker-b", 2, "worker-b", "claim-b", "job-1", 30_000, 10_000,)
+                .expect("worker-b should steal expired job"),
+            ModelJobClaimOutcome::Stolen {
+                claim_token: "claim-b".to_owned(),
+            }
+        );
+
+        assert_eq!(
+            queue
+                .complete_job("broker-b", 2, "job-1", "claim-a", 30_001)
+                .expect_err("stale claim token should be rejected"),
+            ModelError::ClaimTokenMismatch {
+                expected: "claim-b".to_owned(),
+                actual: "claim-a".to_owned(),
+            }
+        );
+        assert_eq!(
+            queue
+                .complete_job("broker-b", 2, "job-1", "claim-b", 30_001)
+                .expect("fresh claim should complete"),
+            ModelJobCompleteOutcome::Removed
+        );
+        assert!(queue.jobs.is_empty());
     }
 
     #[test]

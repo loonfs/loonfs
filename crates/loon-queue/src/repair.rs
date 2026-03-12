@@ -195,7 +195,12 @@ mod tests {
                 through_seq: ChangeSeq(40),
             },
             follow_up: None,
-            claim: None,
+            claim: Some(crate::types::QueueClaim {
+                worker_id: "worker-a".to_owned(),
+                claim_token: "claim-a".to_owned(),
+                heartbeat_at_ms: 0,
+                timeout_at_ms: 10_000,
+            }),
             attempts: 1,
         });
 
