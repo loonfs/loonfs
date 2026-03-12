@@ -20,6 +20,12 @@ pub const INVARIANTS: &[&str] = &[
     "checkpoint_manifest_preserves_head_summary",
     "checkpoint_replay_requires_all_manifest_segments",
     "checkpoint_segment_descriptor_matches_payload",
+    "checkpoint_publish_requires_verified_checkpoint",
+    "snapshot_hint_seq_advances_monotonically",
+    "retention_floor_seq_advances_monotonically",
+    "retention_floor_seq_requires_checkpoint_coverage",
+    "retention_floor_seq_requires_derived_progress",
+    "retention_floor_seq_respects_policy_gate",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

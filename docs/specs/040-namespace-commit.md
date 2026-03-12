@@ -378,3 +378,38 @@ Failure modes prevented:
 - publishing a verified manifest before its segment objects exist
 - losing allocator or retention state while building a checkpoint
 - drifting between durable segment keys and manifest metadata
+
+## Checkpoint publication via head CAS
+
+After a checkpoint is fully verified, background work may CAS-update `head.json` to advertise it.
+
+Checkpoint publication must:
+
+1. read the latest `head.json`
+2. require the checkpoint namespace to match the head namespace
+3. require `checkpoint_seq <= head.seq`
+4. preserve the current head values for:
+   - `seq`
+   - `active_fence_token`
+   - `next_inode_id`
+5. set `snapshot_hint_seq = max(current_snapshot_hint_seq, checkpoint_seq)`
+6. optionally advance `retention_floor_seq` only when the requested floor:
+   - is not below the current floor
+   - is at or below `checkpoint_seq`
+   - is at or below the minimum required derived-progress coverage
+   - is allowed by retention policy
+7. skip the CAS if neither `snapshot_hint_seq` nor `retention_floor_seq` would change
+8. encode the new head as a JSON `namespace_head` envelope and compare-and-swap `head.json`
+
+Why these rules exist:
+
+- checkpoint publication is summary maintenance, not an authoritative metadata commit
+- `snapshot_hint_seq` must only move forward
+- `retention_floor_seq` must move only when replay and derived-state promises still hold
+
+Failure modes prevented:
+
+- background work rewriting the authoritative commit seq or writer generation
+- regressing the published checkpoint hint
+- advertising retention beyond what a verified checkpoint and derived progress can support
+- unnecessary head CAS traffic that does not change any published promise

@@ -10,6 +10,7 @@ pub struct ModelNamespace {
     pub head_seq: ChangeSeq,
     pub active_fence_token: FenceToken,
     pub next_inode_id: InodeId,
+    pub snapshot_hint_seq: Option<ChangeSeq>,
     pub retention_floor_seq: ChangeSeq,
 }
 
@@ -97,6 +98,32 @@ pub enum ModelError {
     MissingCheckpointSegment {
         object_key: String,
     },
+    CheckpointAheadOfHead {
+        checkpoint_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+    },
+    RetentionFloorRegression {
+        current: ChangeSeq,
+        requested: ChangeSeq,
+    },
+    RetentionFloorBeyondCheckpoint {
+        checkpoint_seq: ChangeSeq,
+        requested: ChangeSeq,
+    },
+    MissingDerivedProgressFloor {
+        requested: ChangeSeq,
+    },
+    DerivedProgressLag {
+        requested: ChangeSeq,
+        available: ChangeSeq,
+    },
+    MissingRetentionPolicyFloor {
+        requested: ChangeSeq,
+    },
+    RetentionPolicyLag {
+        requested: ChangeSeq,
+        allowed: ChangeSeq,
+    },
 }
 
 impl ModelNamespace {
@@ -106,6 +133,7 @@ impl ModelNamespace {
             head_seq: ChangeSeq(0),
             active_fence_token: FenceToken(0),
             next_inode_id: InodeId(1),
+            snapshot_hint_seq: None,
             retention_floor_seq: ChangeSeq(0),
         }
     }
@@ -261,35 +289,107 @@ impl ModelNamespace {
         }
     }
 
+    pub fn publish_checkpoint(
+        &mut self,
+        checkpoint: &ModelCheckpoint,
+        available_segment_keys: &[String],
+        requested_retention_floor_seq: Option<ChangeSeq>,
+        derived_progress_floor_seq: Option<ChangeSeq>,
+        retention_policy_floor_seq: Option<ChangeSeq>,
+    ) -> Result<(), ModelError> {
+        ensure_checkpoint_is_restorable(checkpoint, available_segment_keys)?;
+
+        if checkpoint.checkpoint_seq > self.head_seq {
+            return Err(ModelError::CheckpointAheadOfHead {
+                checkpoint_seq: checkpoint.checkpoint_seq,
+                head_seq: self.head_seq,
+            });
+        }
+
+        self.snapshot_hint_seq = Some(
+            self.snapshot_hint_seq
+                .unwrap_or(checkpoint.checkpoint_seq)
+                .max(checkpoint.checkpoint_seq),
+        );
+
+        if let Some(requested) = requested_retention_floor_seq {
+            if requested < self.retention_floor_seq {
+                return Err(ModelError::RetentionFloorRegression {
+                    current: self.retention_floor_seq,
+                    requested,
+                });
+            }
+
+            if requested > checkpoint.checkpoint_seq {
+                return Err(ModelError::RetentionFloorBeyondCheckpoint {
+                    checkpoint_seq: checkpoint.checkpoint_seq,
+                    requested,
+                });
+            }
+
+            let derived_progress_floor_seq = derived_progress_floor_seq
+                .ok_or(ModelError::MissingDerivedProgressFloor { requested })?;
+            if derived_progress_floor_seq < requested {
+                return Err(ModelError::DerivedProgressLag {
+                    requested,
+                    available: derived_progress_floor_seq,
+                });
+            }
+
+            let retention_policy_floor_seq = retention_policy_floor_seq
+                .ok_or(ModelError::MissingRetentionPolicyFloor { requested })?;
+            if retention_policy_floor_seq < requested {
+                return Err(ModelError::RetentionPolicyLag {
+                    requested,
+                    allowed: retention_policy_floor_seq,
+                });
+            }
+
+            self.retention_floor_seq = requested;
+        }
+
+        Ok(())
+    }
+
     pub fn restore_from_checkpoint(
         checkpoint: &ModelCheckpoint,
         available_segment_keys: &[String],
     ) -> Result<Self, ModelError> {
-        if !checkpoint.verified {
-            return Err(ModelError::UnverifiedCheckpoint {
-                checkpoint_seq: checkpoint.checkpoint_seq,
-            });
-        }
-
-        let available: BTreeSet<&str> = available_segment_keys.iter().map(String::as_str).collect();
-        for table in &checkpoint.tables {
-            for segment in &table.segments {
-                if !available.contains(segment.object_key.as_str()) {
-                    return Err(ModelError::MissingCheckpointSegment {
-                        object_key: segment.object_key.clone(),
-                    });
-                }
-            }
-        }
+        ensure_checkpoint_is_restorable(checkpoint, available_segment_keys)?;
 
         Ok(Self {
             namespace_id: checkpoint.namespace_id.clone(),
             head_seq: checkpoint.checkpoint_seq,
             active_fence_token: checkpoint.active_fence_token,
             next_inode_id: checkpoint.next_inode_id,
+            snapshot_hint_seq: Some(checkpoint.checkpoint_seq),
             retention_floor_seq: checkpoint.retention_floor_seq,
         })
     }
+}
+
+fn ensure_checkpoint_is_restorable(
+    checkpoint: &ModelCheckpoint,
+    available_segment_keys: &[String],
+) -> Result<(), ModelError> {
+    if !checkpoint.verified {
+        return Err(ModelError::UnverifiedCheckpoint {
+            checkpoint_seq: checkpoint.checkpoint_seq,
+        });
+    }
+
+    let available: BTreeSet<&str> = available_segment_keys.iter().map(String::as_str).collect();
+    for table in &checkpoint.tables {
+        for segment in &table.segments {
+            if !available.contains(segment.object_key.as_str()) {
+                return Err(ModelError::MissingCheckpointSegment {
+                    object_key: segment.object_key.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn checkpoint_segment_object_key(
@@ -449,7 +549,93 @@ mod tests {
         assert_eq!(restored.head_seq, ChangeSeq(1));
         assert_eq!(restored.active_fence_token, FenceToken(9));
         assert_eq!(restored.next_inode_id, InodeId(42));
+        assert_eq!(restored.snapshot_hint_seq, Some(ChangeSeq(1)));
         assert_eq!(restored.retention_floor_seq, ChangeSeq(0));
+    }
+
+    #[test]
+    fn model_publishes_verified_checkpoint_into_head_summary() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::RotateFence {
+            new_fence_token: FenceToken(9),
+        })
+        .expect("fence rotation should succeed");
+        ns.apply(ModelAction::CreateDir {
+            inode_id: InodeId(41),
+            writer_fence_token: FenceToken(9),
+        })
+        .expect("active writer should advance seq");
+
+        let checkpoint = ns.checkpoint();
+        ns.publish_checkpoint(
+            &checkpoint,
+            &available_segment_keys(&checkpoint),
+            Some(ChangeSeq(1)),
+            Some(ChangeSeq(1)),
+            Some(ChangeSeq(1)),
+        )
+        .expect("checkpoint publication should succeed");
+
+        assert_eq!(ns.head_seq, ChangeSeq(1));
+        assert_eq!(ns.active_fence_token, FenceToken(9));
+        assert_eq!(ns.next_inode_id, InodeId(42));
+        assert_eq!(ns.snapshot_hint_seq, Some(ChangeSeq(1)));
+        assert_eq!(ns.retention_floor_seq, ChangeSeq(1));
+    }
+
+    #[test]
+    fn model_rejects_retention_floor_without_derived_progress() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::BumpSeq {
+            writer_fence_token: FenceToken(0),
+        })
+        .expect("active writer should advance seq");
+        let checkpoint = ns.checkpoint();
+
+        let error = ns
+            .publish_checkpoint(
+                &checkpoint,
+                &available_segment_keys(&checkpoint),
+                Some(ChangeSeq(1)),
+                None,
+                Some(ChangeSeq(1)),
+            )
+            .expect_err("missing derived progress should fail");
+
+        assert_eq!(
+            error,
+            ModelError::MissingDerivedProgressFloor {
+                requested: ChangeSeq(1),
+            }
+        );
+    }
+
+    #[test]
+    fn model_rejects_retention_floor_above_checkpoint() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::BumpSeq {
+            writer_fence_token: FenceToken(0),
+        })
+        .expect("active writer should advance seq");
+        let checkpoint = ns.checkpoint();
+
+        let error = ns
+            .publish_checkpoint(
+                &checkpoint,
+                &available_segment_keys(&checkpoint),
+                Some(ChangeSeq(2)),
+                Some(ChangeSeq(2)),
+                Some(ChangeSeq(2)),
+            )
+            .expect_err("retention floor beyond checkpoint should fail");
+
+        assert_eq!(
+            error,
+            ModelError::RetentionFloorBeyondCheckpoint {
+                checkpoint_seq: ChangeSeq(1),
+                requested: ChangeSeq(2),
+            }
+        );
     }
 
     #[test]
@@ -513,5 +699,18 @@ mod tests {
                 checkpoint_seq: ChangeSeq(40),
             }
         );
+    }
+
+    fn available_segment_keys(checkpoint: &ModelCheckpoint) -> Vec<String> {
+        checkpoint
+            .tables
+            .iter()
+            .flat_map(|table| {
+                table
+                    .segments
+                    .iter()
+                    .map(|segment| segment.object_key.clone())
+            })
+            .collect()
     }
 }

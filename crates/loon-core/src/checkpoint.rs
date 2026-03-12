@@ -1,11 +1,15 @@
 use crate::wal::{replay_wal_tail, StoredWalObject, WalReplayError};
-use loon_objectstore::keys::{snapshot_manifest, snapshot_table, SnapshotTableFamily};
+use loon_objectstore::error::ObjectStoreError;
+use loon_objectstore::keys::{
+    namespace_head, snapshot_manifest, snapshot_table, SnapshotTableFamily,
+};
+use loon_objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
     encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd, ChangeSeq,
     CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointSegmentDescriptor,
     CheckpointSegmentEnvelope, CheckpointSegmentPayload, CheckpointTableFamily,
-    CheckpointTableManifest, HeadState, NamespaceId,
+    CheckpointTableManifest, ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -76,6 +80,22 @@ pub struct LoadedCheckpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointHeadPublishRequest {
+    pub requested_retention_floor_seq: Option<ChangeSeq>,
+    pub derived_progress_floor_seq: Option<ChangeSeq>,
+    pub retention_policy_floor_seq: Option<ChangeSeq>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedCheckpointHeadPublish {
+    pub object_key: String,
+    pub resulting_head: HeadState,
+    pub envelope: HeadStateEnvelope,
+    pub encoded_bytes: Vec<u8>,
+    pub checked_invariants: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckpointBuildError {
     EmptyWriterVersion,
     Codec(String),
@@ -111,6 +131,49 @@ pub enum CheckpointReplayError {
         actual: CheckpointSegmentDescriptor,
     },
     WalReplay(WalReplayError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CheckpointPublishError {
+    EmptyWriterVersion,
+    EmptyExpectedHeadEtag,
+    UnverifiedCheckpoint {
+        checkpoint_seq: ChangeSeq,
+    },
+    NamespaceMismatch {
+        head: NamespaceId,
+        checkpoint: NamespaceId,
+    },
+    CheckpointAheadOfHead {
+        checkpoint_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+    },
+    RetentionFloorRegression {
+        current: ChangeSeq,
+        requested: ChangeSeq,
+    },
+    RetentionFloorBeyondCheckpoint {
+        checkpoint_seq: ChangeSeq,
+        requested: ChangeSeq,
+    },
+    MissingDerivedProgressFloor {
+        requested: ChangeSeq,
+    },
+    DerivedProgressLag {
+        requested: ChangeSeq,
+        available: ChangeSeq,
+    },
+    MissingRetentionPolicyFloor {
+        requested: ChangeSeq,
+    },
+    RetentionPolicyLag {
+        requested: ChangeSeq,
+        allowed: ChangeSeq,
+    },
+    NoHeadChangeRequired,
+    HeadCasPreconditionFailed,
+    Codec(String),
+    Store(String),
 }
 
 pub fn prepare_checkpoint(
@@ -315,6 +378,166 @@ pub fn replay_from_checkpoint_and_wal_tail(
     replay_wal_tail(&loaded.basis_head, wal_tail).map_err(CheckpointReplayError::WalReplay)
 }
 
+pub fn prepare_checkpoint_head_publish(
+    current_head: &HeadState,
+    checkpoint: &LoadedCheckpoint,
+    request: &CheckpointHeadPublishRequest,
+    writer_version: &str,
+) -> Result<PreparedCheckpointHeadPublish, CheckpointPublishError> {
+    if writer_version.trim().is_empty() {
+        return Err(CheckpointPublishError::EmptyWriterVersion);
+    }
+
+    if !checkpoint.manifest.payload.verified
+        || !checkpoint
+            .checked_invariants
+            .iter()
+            .any(|name| name == "checkpoint_segment_descriptor_matches_payload")
+    {
+        return Err(CheckpointPublishError::UnverifiedCheckpoint {
+            checkpoint_seq: checkpoint.manifest.payload.checkpoint_seq,
+        });
+    }
+
+    if current_head.namespace_id != checkpoint.manifest.payload.namespace_id {
+        return Err(CheckpointPublishError::NamespaceMismatch {
+            head: current_head.namespace_id.clone(),
+            checkpoint: checkpoint.manifest.payload.namespace_id.clone(),
+        });
+    }
+
+    if checkpoint.manifest.payload.checkpoint_seq > current_head.seq {
+        return Err(CheckpointPublishError::CheckpointAheadOfHead {
+            checkpoint_seq: checkpoint.manifest.payload.checkpoint_seq,
+            head_seq: current_head.seq,
+        });
+    }
+
+    let resulting_snapshot_hint_seq = Some(
+        current_head
+            .snapshot_hint_seq
+            .unwrap_or(checkpoint.manifest.payload.checkpoint_seq)
+            .max(checkpoint.manifest.payload.checkpoint_seq),
+    );
+    let resulting_retention_floor_seq = match request.requested_retention_floor_seq {
+        Some(requested) => {
+            if requested < current_head.retention_floor_seq {
+                return Err(CheckpointPublishError::RetentionFloorRegression {
+                    current: current_head.retention_floor_seq,
+                    requested,
+                });
+            }
+
+            if requested > checkpoint.manifest.payload.checkpoint_seq {
+                return Err(CheckpointPublishError::RetentionFloorBeyondCheckpoint {
+                    checkpoint_seq: checkpoint.manifest.payload.checkpoint_seq,
+                    requested,
+                });
+            }
+
+            let derived_progress_floor_seq = request
+                .derived_progress_floor_seq
+                .ok_or(CheckpointPublishError::MissingDerivedProgressFloor { requested })?;
+            if derived_progress_floor_seq < requested {
+                return Err(CheckpointPublishError::DerivedProgressLag {
+                    requested,
+                    available: derived_progress_floor_seq,
+                });
+            }
+
+            let retention_policy_floor_seq = request
+                .retention_policy_floor_seq
+                .ok_or(CheckpointPublishError::MissingRetentionPolicyFloor { requested })?;
+            if retention_policy_floor_seq < requested {
+                return Err(CheckpointPublishError::RetentionPolicyLag {
+                    requested,
+                    allowed: retention_policy_floor_seq,
+                });
+            }
+
+            requested
+        }
+        None => current_head.retention_floor_seq,
+    };
+
+    if current_head.snapshot_hint_seq == resulting_snapshot_hint_seq
+        && current_head.retention_floor_seq == resulting_retention_floor_seq
+    {
+        return Err(CheckpointPublishError::NoHeadChangeRequired);
+    }
+
+    let resulting_head = HeadState {
+        namespace_id: current_head.namespace_id.clone(),
+        seq: current_head.seq,
+        active_fence_token: current_head.active_fence_token,
+        next_inode_id: current_head.next_inode_id,
+        snapshot_hint_seq: resulting_snapshot_hint_seq,
+        retention_floor_seq: resulting_retention_floor_seq,
+    };
+    let envelope = HeadStateEnvelope::from_state(
+        ControlObjectKind::NamespaceHead,
+        writer_version,
+        resulting_head.clone(),
+    )
+    .map_err(|err| CheckpointPublishError::Codec(err.to_string()))?;
+    let encoded_bytes = serde_json::to_vec(&envelope)
+        .map_err(|err| CheckpointPublishError::Codec(err.to_string()))?;
+
+    let mut checked_invariants = checkpoint.checked_invariants.clone();
+    push_invariant(
+        &mut checked_invariants,
+        "checkpoint_publish_requires_verified_checkpoint",
+    );
+    push_invariant(
+        &mut checked_invariants,
+        "snapshot_hint_seq_advances_monotonically",
+    );
+    if request.requested_retention_floor_seq.is_some() {
+        push_invariant(
+            &mut checked_invariants,
+            "retention_floor_seq_advances_monotonically",
+        );
+        push_invariant(
+            &mut checked_invariants,
+            "retention_floor_seq_requires_checkpoint_coverage",
+        );
+        push_invariant(
+            &mut checked_invariants,
+            "retention_floor_seq_requires_derived_progress",
+        );
+        push_invariant(
+            &mut checked_invariants,
+            "retention_floor_seq_respects_policy_gate",
+        );
+    }
+
+    Ok(PreparedCheckpointHeadPublish {
+        object_key: namespace_head(current_head.namespace_id.as_str()),
+        resulting_head,
+        envelope,
+        encoded_bytes,
+        checked_invariants,
+    })
+}
+
+pub fn publish_checkpoint_head<S: ObjectStore>(
+    store: &S,
+    expected_head_etag: &str,
+    prepared: &PreparedCheckpointHeadPublish,
+) -> Result<ObjectMetadata, CheckpointPublishError> {
+    if expected_head_etag.trim().is_empty() {
+        return Err(CheckpointPublishError::EmptyExpectedHeadEtag);
+    }
+
+    store
+        .compare_and_swap(
+            &prepared.object_key,
+            expected_head_etag,
+            &prepared.encoded_bytes,
+        )
+        .map_err(map_object_store_error)
+}
+
 fn prepare_checkpoint_segment(
     head: &HeadState,
     family: CheckpointTableFamily,
@@ -392,6 +615,13 @@ fn push_invariant(checked_invariants: &mut Vec<String>, invariant: &str) {
     }
 }
 
+fn map_object_store_error(err: ObjectStoreError) -> CheckpointPublishError {
+    match err {
+        ObjectStoreError::PreconditionFailed => CheckpointPublishError::HeadCasPreconditionFailed,
+        other => CheckpointPublishError::Store(other.to_string()),
+    }
+}
+
 impl From<&PreparedCheckpointManifest> for StoredCheckpointManifest {
     fn from(value: &PreparedCheckpointManifest) -> Self {
         Self {
@@ -414,20 +644,28 @@ impl From<&PreparedCheckpointSegment> for StoredCheckpointSegment {
 mod tests {
     use super::{
         load_checkpoint, load_checkpoint_manifest, prepare_checkpoint,
-        replay_from_checkpoint_and_wal_tail, CheckpointBuildError, CheckpointReplayError,
-        StoredCheckpointManifest, StoredCheckpointSegment,
+        prepare_checkpoint_head_publish, publish_checkpoint_head,
+        replay_from_checkpoint_and_wal_tail, CheckpointBuildError, CheckpointHeadPublishRequest,
+        CheckpointPublishError, CheckpointReplayError, LoadedCheckpoint, StoredCheckpointManifest,
+        StoredCheckpointSegment,
     };
     use crate::wal::StoredWalObject;
+    use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{
-        snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily,
+        namespace_head, snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily,
     };
+    use loon_objectstore::ObjectStore;
     use loon_types::{
         decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
         encode_checkpoint_manifest_json, encode_wal_commit_envelope_zstd, ChangeSeq,
         CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointSegmentDescriptor,
-        CheckpointTableFamily, CheckpointTableManifest, FenceToken, HeadState, InodeId,
-        NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+        CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind, FenceToken, HeadState,
+        HeadStateEnvelope, InodeId, NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp,
+        WalPrecondition,
     };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn prepare_checkpoint_builds_verified_manifest_and_empty_segments() {
@@ -499,6 +737,132 @@ mod tests {
         assert!(loaded
             .checked_invariants
             .contains(&"checkpoint_segment_descriptor_matches_payload".to_owned()));
+    }
+
+    #[test]
+    fn prepare_checkpoint_head_publish_advances_snapshot_hint_and_retention_floor() {
+        let loaded_checkpoint = loaded_checkpoint_for_publish();
+        let prepared = prepare_checkpoint_head_publish(
+            &sample_head(),
+            &loaded_checkpoint,
+            &CheckpointHeadPublishRequest {
+                requested_retention_floor_seq: Some(ChangeSeq(42)),
+                derived_progress_floor_seq: Some(ChangeSeq(42)),
+                retention_policy_floor_seq: Some(ChangeSeq(42)),
+            },
+            "loon-core-test",
+        )
+        .expect("prepare checkpoint head publish");
+
+        assert_eq!(prepared.object_key, namespace_head("ns-1"));
+        assert_eq!(prepared.resulting_head.seq, ChangeSeq(42));
+        assert_eq!(prepared.resulting_head.active_fence_token, FenceToken(9));
+        assert_eq!(prepared.resulting_head.next_inode_id, InodeId(777));
+        assert_eq!(
+            prepared.resulting_head.snapshot_hint_seq,
+            Some(ChangeSeq(42))
+        );
+        assert_eq!(prepared.resulting_head.retention_floor_seq, ChangeSeq(42));
+        assert!(prepared
+            .checked_invariants
+            .contains(&"retention_floor_seq_requires_derived_progress".to_owned()));
+    }
+
+    #[test]
+    fn prepare_checkpoint_head_publish_rejects_missing_derived_progress() {
+        let error = prepare_checkpoint_head_publish(
+            &sample_head(),
+            &loaded_checkpoint_for_publish(),
+            &CheckpointHeadPublishRequest {
+                requested_retention_floor_seq: Some(ChangeSeq(42)),
+                derived_progress_floor_seq: None,
+                retention_policy_floor_seq: Some(ChangeSeq(42)),
+            },
+            "loon-core-test",
+        )
+        .expect_err("missing derived progress should fail");
+
+        assert_eq!(
+            error,
+            CheckpointPublishError::MissingDerivedProgressFloor {
+                requested: ChangeSeq(42),
+            }
+        );
+    }
+
+    #[test]
+    fn prepare_checkpoint_head_publish_rejects_noop_publish() {
+        let current_head = HeadState {
+            snapshot_hint_seq: Some(ChangeSeq(42)),
+            retention_floor_seq: ChangeSeq(42),
+            ..sample_head()
+        };
+        let error = prepare_checkpoint_head_publish(
+            &current_head,
+            &loaded_checkpoint_for_publish(),
+            &CheckpointHeadPublishRequest {
+                requested_retention_floor_seq: None,
+                derived_progress_floor_seq: None,
+                retention_policy_floor_seq: None,
+            },
+            "loon-core-test",
+        )
+        .expect_err("noop publish should fail");
+
+        assert_eq!(error, CheckpointPublishError::NoHeadChangeRequired);
+    }
+
+    #[test]
+    fn publish_checkpoint_head_compare_and_swap_writes_new_head() {
+        let temp_dir = TestDir::new("checkpoint-head-publish");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        let initial_head = sample_head();
+        let initial_envelope = HeadStateEnvelope::from_state(
+            ControlObjectKind::NamespaceHead,
+            "seed-head",
+            initial_head,
+        )
+        .expect("build initial head envelope");
+        let head_key = namespace_head("ns-1");
+        let initial_bytes =
+            serde_json::to_vec(&initial_envelope).expect("encode initial head envelope");
+
+        store
+            .put_if_absent(&head_key, &initial_bytes)
+            .expect("seed initial head");
+        let etag = store
+            .head(&head_key)
+            .expect("head read")
+            .expect("head should exist")
+            .etag
+            .expect("head etag should exist");
+
+        let prepared = prepare_checkpoint_head_publish(
+            &sample_head(),
+            &loaded_checkpoint_for_publish(),
+            &CheckpointHeadPublishRequest {
+                requested_retention_floor_seq: Some(ChangeSeq(42)),
+                derived_progress_floor_seq: Some(ChangeSeq(42)),
+                retention_policy_floor_seq: Some(ChangeSeq(42)),
+            },
+            "loon-core-test",
+        )
+        .expect("prepare checkpoint head publish");
+
+        publish_checkpoint_head(&store, &etag, &prepared).expect("head CAS should succeed");
+
+        let stored_bytes = store
+            .get(&head_key, None)
+            .expect("read published head")
+            .expect("published head should exist");
+        let stored: HeadStateEnvelope =
+            serde_json::from_slice(&stored_bytes).expect("decode published head");
+
+        assert_eq!(stored.state.snapshot_hint_seq, Some(ChangeSeq(42)));
+        assert_eq!(stored.state.retention_floor_seq, ChangeSeq(42));
+        assert!(stored
+            .has_valid_payload_checksum()
+            .expect("recompute head payload checksum"));
     }
 
     #[test]
@@ -770,6 +1134,17 @@ mod tests {
             .expect("prepare checkpoint for replay tests")
     }
 
+    fn loaded_checkpoint_for_publish() -> LoadedCheckpoint {
+        let prepared = prepare_checkpoint(&sample_head(), "loon-core-test")
+            .expect("prepare checkpoint for publish tests");
+        load_checkpoint(
+            &NamespaceId::from("ns-1"),
+            &StoredCheckpointManifest::from(&prepared.manifest),
+            &stored_checkpoint_segments(&prepared),
+        )
+        .expect("load checkpoint for publish tests")
+    }
+
     fn sample_head() -> HeadState {
         HeadState {
             namespace_id: NamespaceId::from("ns-1"),
@@ -789,6 +1164,36 @@ mod tests {
             next_inode_id: InodeId(501),
             snapshot_hint_seq: Some(ChangeSeq(40)),
             retention_floor_seq: ChangeSeq(40),
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "loondb-core-{label}-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
         }
     }
 }
