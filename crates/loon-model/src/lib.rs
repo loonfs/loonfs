@@ -20,6 +20,14 @@ pub struct ModelWalCommit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCheckpoint {
+    pub namespace_id: NamespaceId,
+    pub checkpoint_seq: ChangeSeq,
+    pub active_fence_token: FenceToken,
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelAction {
     CreateDir {
         inode_id: InodeId,
@@ -54,6 +62,9 @@ pub enum ModelError {
     NonContiguousSeq {
         expected: ChangeSeq,
         actual: ChangeSeq,
+    },
+    UnverifiedCheckpoint {
+        checkpoint_seq: ChangeSeq,
     },
 }
 
@@ -138,6 +149,29 @@ impl ModelNamespace {
         self.head_seq = wal.seq;
         self.active_fence_token = wal.writer_fence_token;
         Ok(())
+    }
+
+    pub fn checkpoint(&self) -> ModelCheckpoint {
+        ModelCheckpoint {
+            namespace_id: self.namespace_id.clone(),
+            checkpoint_seq: self.head_seq,
+            active_fence_token: self.active_fence_token,
+            verified: true,
+        }
+    }
+
+    pub fn restore_from_checkpoint(checkpoint: &ModelCheckpoint) -> Result<Self, ModelError> {
+        if !checkpoint.verified {
+            return Err(ModelError::UnverifiedCheckpoint {
+                checkpoint_seq: checkpoint.checkpoint_seq,
+            });
+        }
+
+        Ok(Self {
+            namespace_id: checkpoint.namespace_id.clone(),
+            head_seq: checkpoint.checkpoint_seq,
+            active_fence_token: checkpoint.active_fence_token,
+        })
     }
 }
 
@@ -224,6 +258,47 @@ mod tests {
             ModelError::NonContiguousSeq {
                 expected: ChangeSeq(1),
                 actual: ChangeSeq(2),
+            }
+        );
+    }
+
+    #[test]
+    fn model_restores_from_verified_checkpoint() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::RotateFence {
+            new_fence_token: FenceToken(9),
+        })
+        .expect("fence rotation should succeed");
+        ns.apply(ModelAction::BumpSeq {
+            writer_fence_token: FenceToken(9),
+        })
+        .expect("active writer should advance seq");
+
+        let checkpoint = ns.checkpoint();
+        let restored =
+            ModelNamespace::restore_from_checkpoint(&checkpoint).expect("checkpoint restore");
+
+        assert_eq!(restored.namespace_id, NamespaceId::from("ns-1"));
+        assert_eq!(restored.head_seq, ChangeSeq(1));
+        assert_eq!(restored.active_fence_token, FenceToken(9));
+    }
+
+    #[test]
+    fn model_rejects_unverified_checkpoint() {
+        let checkpoint = ModelCheckpoint {
+            namespace_id: NamespaceId::from("ns-1"),
+            checkpoint_seq: ChangeSeq(40),
+            active_fence_token: FenceToken(8),
+            verified: false,
+        };
+
+        let error = ModelNamespace::restore_from_checkpoint(&checkpoint)
+            .expect_err("unverified checkpoint should fail");
+
+        assert_eq!(
+            error,
+            ModelError::UnverifiedCheckpoint {
+                checkpoint_seq: ChangeSeq(40),
             }
         );
     }

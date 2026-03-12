@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod checkpoint;
 pub mod commit;
 pub mod invariants;
 pub mod namespace;

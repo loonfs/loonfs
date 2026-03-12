@@ -10,6 +10,10 @@ pub const INVARIANTS: &[&str] = &[
     "wal_replay_requires_matching_namespace",
     "wal_replay_requires_matching_base_head_seq",
     "wal_tail_seq_is_contiguous",
+    "checkpoint_manifest_checksum_matches_payload",
+    "checkpoint_manifest_key_matches_seq",
+    "checkpoint_manifest_must_be_verified",
+    "checkpoint_plus_wal_tail_reproduces_head",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

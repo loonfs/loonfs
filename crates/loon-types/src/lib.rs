@@ -87,6 +87,7 @@ pub struct Identity {
 
 pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
 pub const WAL_FORMAT_VERSION: u32 = 1;
+pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -179,6 +180,78 @@ where
 #[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
     NamespaceWalCommit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointManifestKind {
+    NamespaceCheckpointManifest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointTableFamily {
+    Inodes,
+    Direntries,
+    Revisions,
+    Tombstones,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointSegmentDescriptor {
+    pub object_key: String,
+    pub segment_index: u32,
+    pub row_count: u64,
+    pub min_key: String,
+    pub max_key: String,
+    pub payload_checksum_sha256: String,
+    pub page_checksums_sha256: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointTableManifest {
+    pub family: CheckpointTableFamily,
+    pub segments: Vec<CheckpointSegmentDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointManifestPayload {
+    pub namespace_id: NamespaceId,
+    pub checkpoint_seq: ChangeSeq,
+    pub active_fence_token: FenceToken,
+    pub next_inode_id: InodeId,
+    pub retention_floor_seq: ChangeSeq,
+    pub verified: bool,
+    pub tables: Vec<CheckpointTableManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointManifestEnvelope {
+    pub kind: CheckpointManifestKind,
+    pub format_version: u32,
+    pub writer_version: String,
+    pub payload_checksum_sha256: String,
+    pub payload: CheckpointManifestPayload,
+}
+
+impl CheckpointManifestEnvelope {
+    pub fn from_payload(
+        writer_version: impl Into<String>,
+        payload: CheckpointManifestPayload,
+    ) -> Result<Self, CheckpointManifestCodecError> {
+        Ok(Self {
+            kind: CheckpointManifestKind::NamespaceCheckpointManifest,
+            format_version: CHECKPOINT_MANIFEST_FORMAT_VERSION,
+            writer_version: writer_version.into(),
+            payload_checksum_sha256: checkpoint_manifest_payload_checksum_sha256(&payload)?,
+            payload,
+        })
+    }
+
+    pub fn has_valid_payload_checksum(&self) -> Result<bool, CheckpointManifestCodecError> {
+        Ok(self.payload_checksum_sha256
+            == checkpoint_manifest_payload_checksum_sha256(&self.payload)?)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +348,18 @@ pub enum WalCodecError {
     ChecksumMismatch { expected: String, actual: String },
 }
 
+#[derive(Debug, Error)]
+pub enum CheckpointManifestCodecError {
+    #[error("failed to encode checkpoint manifest payload to JSON: {0}")]
+    PayloadEncode(String),
+    #[error("failed to encode checkpoint manifest envelope to JSON: {0}")]
+    EnvelopeEncode(String),
+    #[error("failed to decode checkpoint manifest envelope from JSON: {0}")]
+    EnvelopeDecode(String),
+    #[error("checkpoint manifest payload checksum mismatch: expected {expected}, actual {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+}
+
 pub fn wal_payload_checksum_sha256(payload: &WalCommitPayload) -> Result<String, WalCodecError> {
     Ok(sha256_hex(&encode_wal_payload_cbor(payload)?))
 }
@@ -284,6 +369,38 @@ pub fn encode_wal_payload_cbor(payload: &WalCommitPayload) -> Result<Vec<u8>, Wa
     into_writer(payload, &mut encoded)
         .map_err(|err| WalCodecError::PayloadEncode(err.to_string()))?;
     Ok(encoded)
+}
+
+pub fn checkpoint_manifest_payload_checksum_sha256(
+    payload: &CheckpointManifestPayload,
+) -> Result<String, CheckpointManifestCodecError> {
+    let bytes = serde_json::to_vec(payload)
+        .map_err(|err| CheckpointManifestCodecError::PayloadEncode(err.to_string()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+pub fn encode_checkpoint_manifest_json(
+    envelope: &CheckpointManifestEnvelope,
+) -> Result<Vec<u8>, CheckpointManifestCodecError> {
+    serde_json::to_vec(envelope)
+        .map_err(|err| CheckpointManifestCodecError::EnvelopeEncode(err.to_string()))
+}
+
+pub fn decode_checkpoint_manifest_json(
+    bytes: &[u8],
+) -> Result<CheckpointManifestEnvelope, CheckpointManifestCodecError> {
+    let envelope: CheckpointManifestEnvelope = serde_json::from_slice(bytes)
+        .map_err(|err| CheckpointManifestCodecError::EnvelopeDecode(err.to_string()))?;
+    let actual = checkpoint_manifest_payload_checksum_sha256(&envelope.payload)?;
+
+    if actual != envelope.payload_checksum_sha256 {
+        return Err(CheckpointManifestCodecError::ChecksumMismatch {
+            expected: envelope.payload_checksum_sha256.clone(),
+            actual,
+        });
+    }
+
+    Ok(envelope)
 }
 
 pub fn encode_wal_commit_envelope_zstd(
@@ -339,11 +456,15 @@ impl fmt::Display for InodeId {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, payload_checksum_sha256,
-        wal_payload_checksum_sha256, ChangeSeq, ControlObjectEnvelope, ControlObjectKind,
+        checkpoint_manifest_payload_checksum_sha256, decode_checkpoint_manifest_json,
+        decode_wal_commit_envelope_zstd, encode_checkpoint_manifest_json,
+        encode_wal_commit_envelope_zstd, payload_checksum_sha256, wal_payload_checksum_sha256,
+        ChangeSeq, CheckpointManifestCodecError, CheckpointManifestEnvelope,
+        CheckpointManifestKind, CheckpointManifestPayload, CheckpointSegmentDescriptor,
+        CheckpointTableFamily, CheckpointTableManifest, ControlObjectEnvelope, ControlObjectKind,
         FenceToken, HeadState, InodeId, LeaseState, NamespaceId, RevisionNo, WalCodecError,
-        WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition, CONTROL_OBJECT_FORMAT_VERSION,
-        WAL_FORMAT_VERSION,
+        WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+        CHECKPOINT_MANIFEST_FORMAT_VERSION, CONTROL_OBJECT_FORMAT_VERSION, WAL_FORMAT_VERSION,
     };
 
     #[test]
@@ -459,6 +580,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checkpoint_manifest_round_trips_through_json() {
+        let payload = sample_checkpoint_manifest_payload();
+        let envelope = CheckpointManifestEnvelope::from_payload("test-writer", payload.clone())
+            .expect("build manifest envelope");
+
+        let encoded = encode_checkpoint_manifest_json(&envelope).expect("encode manifest");
+        let decoded = decode_checkpoint_manifest_json(&encoded).expect("decode manifest");
+
+        assert_eq!(
+            decoded.kind,
+            CheckpointManifestKind::NamespaceCheckpointManifest
+        );
+        assert_eq!(decoded.format_version, CHECKPOINT_MANIFEST_FORMAT_VERSION);
+        assert_eq!(decoded.payload, payload);
+        assert!(decoded
+            .has_valid_payload_checksum()
+            .expect("recompute manifest checksum"));
+    }
+
+    #[test]
+    fn checkpoint_manifest_checksum_detects_tampering() {
+        let payload = sample_checkpoint_manifest_payload();
+        let mut envelope = CheckpointManifestEnvelope::from_payload("test-writer", payload)
+            .expect("build manifest envelope");
+        envelope.payload.checkpoint_seq = ChangeSeq(41);
+
+        let encoded = encode_checkpoint_manifest_json(&envelope).expect("encode manifest");
+        let error = decode_checkpoint_manifest_json(&encoded).expect_err("tampering should fail");
+
+        assert!(matches!(
+            error,
+            CheckpointManifestCodecError::ChecksumMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn checkpoint_manifest_checksum_helper_matches_envelope_value() {
+        let payload = sample_checkpoint_manifest_payload();
+        let envelope = CheckpointManifestEnvelope::from_payload("test-writer", payload)
+            .expect("build manifest envelope");
+
+        assert_eq!(
+            envelope.payload_checksum_sha256,
+            checkpoint_manifest_payload_checksum_sha256(&envelope.payload)
+                .expect("recompute manifest checksum")
+        );
+    }
+
     fn sample_wal_payload() -> WalCommitPayload {
         WalCommitPayload {
             namespace_id: NamespaceId::from("ns-1"),
@@ -480,6 +650,31 @@ mod tests {
                     revision: RevisionNo(7),
                 },
             ],
+        }
+    }
+
+    fn sample_checkpoint_manifest_payload() -> CheckpointManifestPayload {
+        CheckpointManifestPayload {
+            namespace_id: NamespaceId::from("ns-1"),
+            checkpoint_seq: ChangeSeq(40),
+            active_fence_token: FenceToken(8),
+            next_inode_id: InodeId(501),
+            retention_floor_seq: ChangeSeq(40),
+            verified: true,
+            tables: vec![CheckpointTableManifest {
+                family: CheckpointTableFamily::Inodes,
+                segments: vec![CheckpointSegmentDescriptor {
+                    object_key:
+                        "namespaces/ns-1/snapshots/00000000000000000040/tables/inodes-00000.sst.zst"
+                            .to_owned(),
+                    segment_index: 0,
+                    row_count: 500,
+                    min_key: "inode-1".to_owned(),
+                    max_key: "inode-500".to_owned(),
+                    payload_checksum_sha256: "seg-checksum-1".to_owned(),
+                    page_checksums_sha256: vec!["page-checksum-1".to_owned()],
+                }],
+            }],
         }
     }
 }

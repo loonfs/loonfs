@@ -223,3 +223,78 @@ Failure modes prevented:
 - skipping WAL entries during replay
 - applying WAL from the wrong namespace
 - accepting corrupted or mismatched immutable history objects
+
+## Checkpoint manifest skeleton
+
+The first checkpoint manifest lives at:
+
+```text
+namespaces/{namespace_id}/snapshots/{checkpoint_seq:020}/manifest.json
+```
+
+The manifest is JSON and must carry:
+
+- `kind = "namespace_checkpoint_manifest"`
+- `format_version = 1`
+- `writer_version`
+- `payload_checksum_sha256`
+- `payload.namespace_id`
+- `payload.checkpoint_seq`
+- `payload.active_fence_token`
+- `payload.next_inode_id`
+- `payload.retention_floor_seq`
+- `payload.verified`
+- `payload.tables`
+
+Each table entry must name:
+
+- `family`
+- `segments`
+
+Each segment entry must name:
+
+- `object_key`
+- `segment_index`
+- `row_count`
+- `min_key`
+- `max_key`
+- `payload_checksum_sha256`
+- `page_checksums_sha256`
+
+For the current skeleton, replay uses the manifest only as a verified basis summary. Rich table decoding comes later.
+
+Why these fields exist:
+
+- `checkpoint_seq` pins the replay basis boundary
+- `active_fence_token` lets the restored head summary preserve writer generation
+- `next_inode_id` preserves deterministic inode allocation after restore
+- `retention_floor_seq` preserves replay promises made by the published head
+- `verified` keeps partially built checkpoints out of the read path
+- per-segment checksums and ranges make segment verification explicit instead of implied
+
+Failure modes prevented:
+
+- using a partially built checkpoint as authoritative state
+- restoring a head summary that loses allocator or retention state
+- silently drifting between manifest metadata and segment objects
+
+## Checkpoint plus WAL tail replay
+
+The first checkpoint-aware replay path is:
+
+1. load a verified checkpoint manifest
+2. derive a basis head with:
+   - `seq = checkpoint_seq`
+   - `active_fence_token = manifest.active_fence_token`
+   - `next_inode_id = manifest.next_inode_id`
+   - `snapshot_hint_seq = Some(checkpoint_seq)`
+   - `retention_floor_seq = manifest.retention_floor_seq`
+3. replay the WAL tail after `checkpoint_seq` using the WAL replay checks above
+
+If the manifest namespace does not match, the manifest key does not match `checkpoint_seq`, or `verified` is false, replay must fail before any WAL is applied.
+
+Failure modes prevented:
+
+- starting replay from the wrong checkpoint
+- treating an unverified snapshot as a trusted basis
+- diverging between checkpoint basis state and later WAL replay
