@@ -95,6 +95,7 @@ pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 1;
 pub enum ControlObjectKind {
     NamespaceHead,
     NamespaceLease,
+    NamespaceProgress,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +136,13 @@ impl LeaseState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressState {
+    pub namespace_id: NamespaceId,
+    pub work_class: String,
+    pub through_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObjectEnvelope<T> {
     pub kind: ControlObjectKind,
     pub format_version: u32,
@@ -168,6 +176,7 @@ where
 
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 pub type LeaseStateEnvelope = ControlObjectEnvelope<LeaseState>;
+pub type ProgressStateEnvelope = ControlObjectEnvelope<ProgressState>;
 
 pub fn payload_checksum_sha256<T>(value: &T) -> Result<String, serde_json::Error>
 where
@@ -608,9 +617,10 @@ mod tests {
         CheckpointSegmentCodecError, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
         CheckpointSegmentKind, CheckpointSegmentPayload, CheckpointTableFamily,
         CheckpointTableManifest, ControlObjectEnvelope, ControlObjectKind, FenceToken, HeadState,
-        InodeId, LeaseState, NamespaceId, RevisionNo, WalCodecError, WalCommitEnvelope,
-        WalCommitPayload, WalOp, WalPrecondition, CHECKPOINT_MANIFEST_FORMAT_VERSION,
-        CHECKPOINT_SEGMENT_FORMAT_VERSION, CONTROL_OBJECT_FORMAT_VERSION, WAL_FORMAT_VERSION,
+        InodeId, LeaseState, NamespaceId, ProgressState, RevisionNo, WalCodecError,
+        WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+        CHECKPOINT_MANIFEST_FORMAT_VERSION, CHECKPOINT_SEGMENT_FORMAT_VERSION,
+        CONTROL_OBJECT_FORMAT_VERSION, WAL_FORMAT_VERSION,
     };
 
     #[test]
@@ -682,6 +692,31 @@ mod tests {
             envelope.payload_checksum_sha256,
             payload_checksum_sha256(&envelope.state).expect("recompute checksum")
         );
+    }
+
+    #[test]
+    fn progress_state_envelope_round_trips_through_json() {
+        let state = ProgressState {
+            namespace_id: NamespaceId::from("ns-1"),
+            work_class: "BuildListingIndex".to_owned(),
+            through_seq: ChangeSeq(42),
+        };
+        let envelope = ControlObjectEnvelope::from_state(
+            ControlObjectKind::NamespaceProgress,
+            "test-writer",
+            state.clone(),
+        )
+        .expect("build progress envelope");
+        let encoded = serde_json::to_vec(&envelope).expect("encode progress envelope");
+        let decoded: ControlObjectEnvelope<ProgressState> =
+            serde_json::from_slice(&encoded).expect("decode progress envelope");
+
+        assert_eq!(decoded.kind, ControlObjectKind::NamespaceProgress);
+        assert_eq!(decoded.format_version, CONTROL_OBJECT_FORMAT_VERSION);
+        assert_eq!(decoded.state, state);
+        assert!(decoded
+            .has_valid_payload_checksum()
+            .expect("recompute progress checksum"));
     }
 
     #[test]

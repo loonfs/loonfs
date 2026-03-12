@@ -24,11 +24,23 @@ initial:
         family: inodes
         segment_index: 0
         row_count: 0
-  derived_progress_floor_seq: 42
-  retention_policy_floor_seq: 42
+  progress_objects:
+    - key: namespaces/ns-1/derived/BuildListingIndex/progress.json
+      payload:
+        namespace_id: ns-1
+        work_class: BuildListingIndex
+        through_seq: 42
+    - key: namespaces/ns-1/derived/RetentionPolicy/progress.json
+      payload:
+        namespace_id: ns-1
+        work_class: RetentionPolicy
+        through_seq: 42
 actions:
   - publish_checkpoint_to_head:
       requested_retention_floor_seq: 42
+      required_progress_work_classes:
+        - BuildListingIndex
+      retention_policy_work_class: RetentionPolicy
 expect:
   head:
     namespace_id: ns-1

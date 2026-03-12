@@ -396,20 +396,24 @@ Checkpoint publication must:
 6. optionally advance `retention_floor_seq` only when the requested floor:
    - is not below the current floor
    - is at or below `checkpoint_seq`
-   - is at or below the minimum required derived-progress coverage
-   - is allowed by retention policy
-7. skip the CAS if neither `snapshot_hint_seq` nor `retention_floor_seq` would change
-8. encode the new head as a JSON `namespace_head` envelope and compare-and-swap `head.json`
+   - is covered by every required `progress.json` object loaded from `namespaces/{namespace_id}/derived/{work_class}/progress.json`
+   - is covered by the retention-policy `progress.json` object
+7. require every loaded progress object to:
+   - decode as a `namespace_progress` control envelope
+   - have a valid payload checksum
+   - match the expected namespace and work class in both key and payload
+8. skip the CAS if neither `snapshot_hint_seq` nor `retention_floor_seq` would change
+9. encode the new head as a JSON `namespace_head` envelope and compare-and-swap `head.json`
 
 Why these rules exist:
 
 - checkpoint publication is summary maintenance, not an authoritative metadata commit
 - `snapshot_hint_seq` must only move forward
-- `retention_floor_seq` must move only when replay and derived-state promises still hold
+- `retention_floor_seq` must move only when replay and derived-state promises still hold, as proven by durable progress objects
 
 Failure modes prevented:
 
 - background work rewriting the authoritative commit seq or writer generation
 - regressing the published checkpoint hint
-- advertising retention beyond what a verified checkpoint and derived progress can support
+- advertising retention beyond what a verified checkpoint and durable progress objects can support
 - unnecessary head CAS traffic that does not change any published promise

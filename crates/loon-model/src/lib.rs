@@ -57,6 +57,19 @@ pub struct ModelCheckpointTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelProgressObject {
+    pub namespace_id: NamespaceId,
+    pub work_class: String,
+    pub through_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCheckpointPublishAuthorizers {
+    pub required_progress: Vec<ModelProgressObject>,
+    pub retention_policy: ModelProgressObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelAction {
     CreateDir {
         inode_id: InodeId,
@@ -110,19 +123,23 @@ pub enum ModelError {
         checkpoint_seq: ChangeSeq,
         requested: ChangeSeq,
     },
-    MissingDerivedProgressFloor {
+    MissingRetentionAuthorizers {
         requested: ChangeSeq,
     },
-    DerivedProgressLag {
+    ProgressNamespaceMismatch {
+        work_class: String,
+        expected: NamespaceId,
+        actual: NamespaceId,
+    },
+    RequiredProgressLag {
+        work_class: String,
         requested: ChangeSeq,
         available: ChangeSeq,
     },
-    MissingRetentionPolicyFloor {
-        requested: ChangeSeq,
-    },
     RetentionPolicyLag {
+        work_class: String,
         requested: ChangeSeq,
-        allowed: ChangeSeq,
+        available: ChangeSeq,
     },
 }
 
@@ -294,8 +311,7 @@ impl ModelNamespace {
         checkpoint: &ModelCheckpoint,
         available_segment_keys: &[String],
         requested_retention_floor_seq: Option<ChangeSeq>,
-        derived_progress_floor_seq: Option<ChangeSeq>,
-        retention_policy_floor_seq: Option<ChangeSeq>,
+        authorizers: Option<&ModelCheckpointPublishAuthorizers>,
     ) -> Result<(), ModelError> {
         ensure_checkpoint_is_restorable(checkpoint, available_segment_keys)?;
 
@@ -327,21 +343,40 @@ impl ModelNamespace {
                 });
             }
 
-            let derived_progress_floor_seq = derived_progress_floor_seq
-                .ok_or(ModelError::MissingDerivedProgressFloor { requested })?;
-            if derived_progress_floor_seq < requested {
-                return Err(ModelError::DerivedProgressLag {
-                    requested,
-                    available: derived_progress_floor_seq,
+            let authorizers =
+                authorizers.ok_or(ModelError::MissingRetentionAuthorizers { requested })?;
+
+            for progress in &authorizers.required_progress {
+                if progress.namespace_id != self.namespace_id {
+                    return Err(ModelError::ProgressNamespaceMismatch {
+                        work_class: progress.work_class.clone(),
+                        expected: self.namespace_id.clone(),
+                        actual: progress.namespace_id.clone(),
+                    });
+                }
+
+                if progress.through_seq < requested {
+                    return Err(ModelError::RequiredProgressLag {
+                        work_class: progress.work_class.clone(),
+                        requested,
+                        available: progress.through_seq,
+                    });
+                }
+            }
+
+            if authorizers.retention_policy.namespace_id != self.namespace_id {
+                return Err(ModelError::ProgressNamespaceMismatch {
+                    work_class: authorizers.retention_policy.work_class.clone(),
+                    expected: self.namespace_id.clone(),
+                    actual: authorizers.retention_policy.namespace_id.clone(),
                 });
             }
 
-            let retention_policy_floor_seq = retention_policy_floor_seq
-                .ok_or(ModelError::MissingRetentionPolicyFloor { requested })?;
-            if retention_policy_floor_seq < requested {
+            if authorizers.retention_policy.through_seq < requested {
                 return Err(ModelError::RetentionPolicyLag {
+                    work_class: authorizers.retention_policy.work_class.clone(),
                     requested,
-                    allowed: retention_policy_floor_seq,
+                    available: authorizers.retention_policy.through_seq,
                 });
             }
 
@@ -571,8 +606,7 @@ mod tests {
             &checkpoint,
             &available_segment_keys(&checkpoint),
             Some(ChangeSeq(1)),
-            Some(ChangeSeq(1)),
-            Some(ChangeSeq(1)),
+            Some(&sample_publish_authorizers(ChangeSeq(1))),
         )
         .expect("checkpoint publication should succeed");
 
@@ -584,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn model_rejects_retention_floor_without_derived_progress() {
+    fn model_rejects_retention_floor_without_authorizers() {
         let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
         ns.apply(ModelAction::BumpSeq {
             writer_fence_token: FenceToken(0),
@@ -598,14 +632,42 @@ mod tests {
                 &available_segment_keys(&checkpoint),
                 Some(ChangeSeq(1)),
                 None,
-                Some(ChangeSeq(1)),
             )
-            .expect_err("missing derived progress should fail");
+            .expect_err("missing authorizers should fail");
 
         assert_eq!(
             error,
-            ModelError::MissingDerivedProgressFloor {
+            ModelError::MissingRetentionAuthorizers {
                 requested: ChangeSeq(1),
+            }
+        );
+    }
+
+    #[test]
+    fn model_rejects_retention_floor_when_required_progress_lags() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::BumpSeq {
+            writer_fence_token: FenceToken(0),
+        })
+        .expect("active writer should advance seq");
+        let checkpoint = ns.checkpoint();
+        let authorizers = sample_publish_authorizers(ChangeSeq(0));
+
+        let error = ns
+            .publish_checkpoint(
+                &checkpoint,
+                &available_segment_keys(&checkpoint),
+                Some(ChangeSeq(1)),
+                Some(&authorizers),
+            )
+            .expect_err("lagging required progress should fail");
+
+        assert_eq!(
+            error,
+            ModelError::RequiredProgressLag {
+                work_class: "BuildListingIndex".to_owned(),
+                requested: ChangeSeq(1),
+                available: ChangeSeq(0),
             }
         );
     }
@@ -624,8 +686,7 @@ mod tests {
                 &checkpoint,
                 &available_segment_keys(&checkpoint),
                 Some(ChangeSeq(2)),
-                Some(ChangeSeq(2)),
-                Some(ChangeSeq(2)),
+                Some(&sample_publish_authorizers(ChangeSeq(2))),
             )
             .expect_err("retention floor beyond checkpoint should fail");
 
@@ -712,5 +773,20 @@ mod tests {
                     .map(|segment| segment.object_key.clone())
             })
             .collect()
+    }
+
+    fn sample_publish_authorizers(through_seq: ChangeSeq) -> ModelCheckpointPublishAuthorizers {
+        ModelCheckpointPublishAuthorizers {
+            required_progress: vec![ModelProgressObject {
+                namespace_id: NamespaceId::from("ns-1"),
+                work_class: "BuildListingIndex".to_owned(),
+                through_seq,
+            }],
+            retention_policy: ModelProgressObject {
+                namespace_id: NamespaceId::from("ns-1"),
+                work_class: "RetentionPolicy".to_owned(),
+                through_seq,
+            },
+        }
     }
 }

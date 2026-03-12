@@ -1,3 +1,4 @@
+use crate::progress::LoadedRetentionAuthorizers;
 use crate::wal::{replay_wal_tail, StoredWalObject, WalReplayError};
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::{
@@ -82,8 +83,7 @@ pub struct LoadedCheckpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointHeadPublishRequest {
     pub requested_retention_floor_seq: Option<ChangeSeq>,
-    pub derived_progress_floor_seq: Option<ChangeSeq>,
-    pub retention_policy_floor_seq: Option<ChangeSeq>,
+    pub retention_authorizers: Option<LoadedRetentionAuthorizers>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,19 +156,18 @@ pub enum CheckpointPublishError {
         checkpoint_seq: ChangeSeq,
         requested: ChangeSeq,
     },
-    MissingDerivedProgressFloor {
+    MissingRetentionAuthorizers {
         requested: ChangeSeq,
     },
-    DerivedProgressLag {
+    RequiredProgressLag {
+        work_class: String,
         requested: ChangeSeq,
         available: ChangeSeq,
     },
-    MissingRetentionPolicyFloor {
-        requested: ChangeSeq,
-    },
     RetentionPolicyLag {
+        work_class: String,
         requested: ChangeSeq,
-        allowed: ChangeSeq,
+        available: ChangeSeq,
     },
     NoHeadChangeRequired,
     HeadCasPreconditionFailed,
@@ -435,23 +434,40 @@ pub fn prepare_checkpoint_head_publish(
                 });
             }
 
-            let derived_progress_floor_seq = request
-                .derived_progress_floor_seq
-                .ok_or(CheckpointPublishError::MissingDerivedProgressFloor { requested })?;
-            if derived_progress_floor_seq < requested {
-                return Err(CheckpointPublishError::DerivedProgressLag {
-                    requested,
-                    available: derived_progress_floor_seq,
-                });
+            let retention_authorizers = request
+                .retention_authorizers
+                .as_ref()
+                .ok_or(CheckpointPublishError::MissingRetentionAuthorizers { requested })?;
+            for progress in &retention_authorizers.required_progress {
+                if progress.envelope.state.through_seq < requested {
+                    return Err(CheckpointPublishError::RequiredProgressLag {
+                        work_class: progress.envelope.state.work_class.clone(),
+                        requested,
+                        available: progress.envelope.state.through_seq,
+                    });
+                }
             }
 
-            let retention_policy_floor_seq = request
-                .retention_policy_floor_seq
-                .ok_or(CheckpointPublishError::MissingRetentionPolicyFloor { requested })?;
-            if retention_policy_floor_seq < requested {
+            if retention_authorizers
+                .retention_policy
+                .envelope
+                .state
+                .through_seq
+                < requested
+            {
                 return Err(CheckpointPublishError::RetentionPolicyLag {
+                    work_class: retention_authorizers
+                        .retention_policy
+                        .envelope
+                        .state
+                        .work_class
+                        .clone(),
                     requested,
-                    allowed: retention_policy_floor_seq,
+                    available: retention_authorizers
+                        .retention_policy
+                        .envelope
+                        .state
+                        .through_seq,
                 });
             }
 
@@ -484,6 +500,12 @@ pub fn prepare_checkpoint_head_publish(
         .map_err(|err| CheckpointPublishError::Codec(err.to_string()))?;
 
     let mut checked_invariants = checkpoint.checked_invariants.clone();
+    if let Some(retention_authorizers) = request.retention_authorizers.as_ref() {
+        extend_invariants(
+            &mut checked_invariants,
+            &retention_authorizers.checked_invariants,
+        );
+    }
     push_invariant(
         &mut checked_invariants,
         "checkpoint_publish_requires_verified_checkpoint",
@@ -615,6 +637,12 @@ fn push_invariant(checked_invariants: &mut Vec<String>, invariant: &str) {
     }
 }
 
+fn extend_invariants(checked_invariants: &mut Vec<String>, new_invariants: &[String]) {
+    for invariant in new_invariants {
+        push_invariant(checked_invariants, invariant);
+    }
+}
+
 fn map_object_store_error(err: ObjectStoreError) -> CheckpointPublishError {
     match err {
         ObjectStoreError::PreconditionFailed => CheckpointPublishError::HeadCasPreconditionFailed,
@@ -649,10 +677,14 @@ mod tests {
         CheckpointPublishError, CheckpointReplayError, LoadedCheckpoint, StoredCheckpointManifest,
         StoredCheckpointSegment,
     };
+    use crate::progress::{
+        load_retention_authorizers, LoadedProgressObject, LoadedRetentionAuthorizers,
+    };
     use crate::wal::StoredWalObject;
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{
-        namespace_head, snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily,
+        derived_progress, namespace_head, snapshot_manifest, snapshot_table, wal_commit,
+        SnapshotTableFamily,
     };
     use loon_objectstore::ObjectStore;
     use loon_types::{
@@ -660,8 +692,8 @@ mod tests {
         encode_checkpoint_manifest_json, encode_wal_commit_envelope_zstd, ChangeSeq,
         CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointSegmentDescriptor,
         CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind, FenceToken, HeadState,
-        HeadStateEnvelope, InodeId, NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp,
-        WalPrecondition,
+        HeadStateEnvelope, InodeId, NamespaceId, ProgressState, ProgressStateEnvelope,
+        WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -747,8 +779,7 @@ mod tests {
             &loaded_checkpoint,
             &CheckpointHeadPublishRequest {
                 requested_retention_floor_seq: Some(ChangeSeq(42)),
-                derived_progress_floor_seq: Some(ChangeSeq(42)),
-                retention_policy_floor_seq: Some(ChangeSeq(42)),
+                retention_authorizers: Some(sample_retention_authorizers(ChangeSeq(42))),
             },
             "loon-core-test",
         )
@@ -769,23 +800,45 @@ mod tests {
     }
 
     #[test]
-    fn prepare_checkpoint_head_publish_rejects_missing_derived_progress() {
+    fn prepare_checkpoint_head_publish_rejects_missing_authorizers() {
         let error = prepare_checkpoint_head_publish(
             &sample_head(),
             &loaded_checkpoint_for_publish(),
             &CheckpointHeadPublishRequest {
                 requested_retention_floor_seq: Some(ChangeSeq(42)),
-                derived_progress_floor_seq: None,
-                retention_policy_floor_seq: Some(ChangeSeq(42)),
+                retention_authorizers: None,
             },
             "loon-core-test",
         )
-        .expect_err("missing derived progress should fail");
+        .expect_err("missing authorizers should fail");
 
         assert_eq!(
             error,
-            CheckpointPublishError::MissingDerivedProgressFloor {
+            CheckpointPublishError::MissingRetentionAuthorizers {
                 requested: ChangeSeq(42),
+            }
+        );
+    }
+
+    #[test]
+    fn prepare_checkpoint_head_publish_rejects_lagging_required_progress() {
+        let error = prepare_checkpoint_head_publish(
+            &sample_head(),
+            &loaded_checkpoint_for_publish(),
+            &CheckpointHeadPublishRequest {
+                requested_retention_floor_seq: Some(ChangeSeq(42)),
+                retention_authorizers: Some(sample_retention_authorizers(ChangeSeq(41))),
+            },
+            "loon-core-test",
+        )
+        .expect_err("lagging required progress should fail");
+
+        assert_eq!(
+            error,
+            CheckpointPublishError::RequiredProgressLag {
+                work_class: "BuildListingIndex".to_owned(),
+                requested: ChangeSeq(42),
+                available: ChangeSeq(41),
             }
         );
     }
@@ -802,8 +855,7 @@ mod tests {
             &loaded_checkpoint_for_publish(),
             &CheckpointHeadPublishRequest {
                 requested_retention_floor_seq: None,
-                derived_progress_floor_seq: None,
-                retention_policy_floor_seq: None,
+                retention_authorizers: None,
             },
             "loon-core-test",
         )
@@ -830,20 +882,28 @@ mod tests {
         store
             .put_if_absent(&head_key, &initial_bytes)
             .expect("seed initial head");
+        seed_progress_object(&store, "ns-1", "BuildListingIndex", ChangeSeq(42));
+        seed_progress_object(&store, "ns-1", "RetentionPolicy", ChangeSeq(42));
         let etag = store
             .head(&head_key)
             .expect("head read")
             .expect("head should exist")
             .etag
             .expect("head etag should exist");
+        let retention_authorizers = load_retention_authorizers(
+            &store,
+            &NamespaceId::from("ns-1"),
+            &["BuildListingIndex".to_owned()],
+            "RetentionPolicy",
+        )
+        .expect("load retention authorizers");
 
         let prepared = prepare_checkpoint_head_publish(
             &sample_head(),
             &loaded_checkpoint_for_publish(),
             &CheckpointHeadPublishRequest {
                 requested_retention_floor_seq: Some(ChangeSeq(42)),
-                derived_progress_floor_seq: Some(ChangeSeq(42)),
-                retention_policy_floor_seq: Some(ChangeSeq(42)),
+                retention_authorizers: Some(retention_authorizers),
             },
             "loon-core-test",
         )
@@ -1165,6 +1225,67 @@ mod tests {
             snapshot_hint_seq: Some(ChangeSeq(40)),
             retention_floor_seq: ChangeSeq(40),
         }
+    }
+
+    fn sample_retention_authorizers(through_seq: ChangeSeq) -> LoadedRetentionAuthorizers {
+        let required_progress = loaded_progress_object("BuildListingIndex", through_seq);
+        let retention_policy = loaded_progress_object("RetentionPolicy", through_seq);
+
+        LoadedRetentionAuthorizers {
+            required_progress: vec![required_progress.clone()],
+            retention_policy: retention_policy.clone(),
+            checked_invariants: vec![
+                "progress_object_checksum_matches_payload".to_owned(),
+                "progress_object_key_matches_namespace_and_work_class".to_owned(),
+            ],
+        }
+    }
+
+    fn loaded_progress_object(work_class: &str, through_seq: ChangeSeq) -> LoadedProgressObject {
+        let envelope = ProgressStateEnvelope::from_state(
+            ControlObjectKind::NamespaceProgress,
+            "loon-core-test",
+            ProgressState {
+                namespace_id: NamespaceId::from("ns-1"),
+                work_class: work_class.to_owned(),
+                through_seq,
+            },
+        )
+        .expect("build progress envelope");
+
+        LoadedProgressObject {
+            object_key: derived_progress("ns-1", work_class),
+            envelope,
+            checked_invariants: vec![
+                "progress_object_checksum_matches_payload".to_owned(),
+                "progress_object_key_matches_namespace_and_work_class".to_owned(),
+            ],
+        }
+    }
+
+    fn seed_progress_object(
+        store: &LocalFsStore,
+        namespace_id: &str,
+        work_class: &str,
+        through_seq: ChangeSeq,
+    ) {
+        let envelope = ProgressStateEnvelope::from_state(
+            ControlObjectKind::NamespaceProgress,
+            "loon-core-test",
+            ProgressState {
+                namespace_id: NamespaceId::from(namespace_id),
+                work_class: work_class.to_owned(),
+                through_seq,
+            },
+        )
+        .expect("build progress envelope");
+
+        store
+            .put_if_absent(
+                &derived_progress(namespace_id, work_class),
+                &serde_json::to_vec(&envelope).expect("encode progress envelope"),
+            )
+            .expect("seed progress object");
     }
 
     #[derive(Debug)]
