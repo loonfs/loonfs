@@ -8,3 +8,8 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 loon-types = { path = "../loon-types" }
+rusqlite.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+loon-testkit = { path = "../loon-testkit" }
