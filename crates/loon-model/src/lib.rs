@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use loon_types::{ChangeSeq, FenceToken, InodeId, NamespaceId};
+use loon_types::{ChangeSeq, FenceToken, InodeId, LeaseState, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -67,6 +67,46 @@ pub struct ModelProgressObject {
 pub struct ModelCheckpointPublishAuthorizers {
     pub required_progress: Vec<ModelProgressObject>,
     pub retention_policy: ModelProgressObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCommitValidationRequest {
+    pub namespace_id: NamespaceId,
+    pub writer_id: String,
+    pub writer_fence_token: FenceToken,
+    pub planned_head_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCommitValidationOutcome {
+    pub next_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelCommitValidationError {
+    NamespaceMismatch,
+    HeadLeaseNamespaceMismatch,
+    HeadLeaseFenceMismatch {
+        head: FenceToken,
+        lease: FenceToken,
+    },
+    PlannedHeadSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    StaleWriterFenceToken {
+        expected: FenceToken,
+        actual: FenceToken,
+    },
+    LeaseHolderMismatch {
+        expected: String,
+        actual: String,
+    },
+    LeaseExpired {
+        lease_expires_at_ms: u64,
+        now_ms: u64,
+    },
+    SeqOverflow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -522,6 +562,65 @@ impl ModelNamespace {
             commit_id: commit_id.into(),
             writer_fence_token,
         })
+    }
+
+    pub fn validate_commit_attempt(
+        &self,
+        request: &ModelCommitValidationRequest,
+        lease: &LeaseState,
+        now_ms: u64,
+    ) -> Result<ModelCommitValidationOutcome, ModelCommitValidationError> {
+        if request.namespace_id != self.namespace_id || request.namespace_id != lease.namespace_id {
+            return Err(ModelCommitValidationError::NamespaceMismatch);
+        }
+
+        if self.namespace_id != lease.namespace_id {
+            return Err(ModelCommitValidationError::HeadLeaseNamespaceMismatch);
+        }
+
+        if self.active_fence_token != lease.fence_token {
+            return Err(ModelCommitValidationError::HeadLeaseFenceMismatch {
+                head: self.active_fence_token,
+                lease: lease.fence_token,
+            });
+        }
+
+        if request.planned_head_seq != self.head_seq {
+            return Err(ModelCommitValidationError::PlannedHeadSeqMismatch {
+                expected: self.head_seq,
+                actual: request.planned_head_seq,
+            });
+        }
+
+        if request.writer_fence_token != self.active_fence_token {
+            return Err(ModelCommitValidationError::StaleWriterFenceToken {
+                expected: self.active_fence_token,
+                actual: request.writer_fence_token,
+            });
+        }
+
+        if request.writer_id != lease.holder_id {
+            return Err(ModelCommitValidationError::LeaseHolderMismatch {
+                expected: lease.holder_id.clone(),
+                actual: request.writer_id.clone(),
+            });
+        }
+
+        if !lease.is_valid_at(now_ms) {
+            return Err(ModelCommitValidationError::LeaseExpired {
+                lease_expires_at_ms: lease.lease_expires_at_ms,
+                now_ms,
+            });
+        }
+
+        let next_seq = self
+            .head_seq
+            .0
+            .checked_add(1)
+            .map(ChangeSeq)
+            .ok_or(ModelCommitValidationError::SeqOverflow)?;
+
+        Ok(ModelCommitValidationOutcome { next_seq })
     }
 
     pub fn replay_wal_commit(&mut self, wal: &ModelWalCommit) -> Result<(), ModelError> {
@@ -980,6 +1079,77 @@ mod tests {
             ModelError::StaleWriterFenceToken {
                 expected: FenceToken(9),
                 actual: FenceToken(8),
+            }
+        );
+    }
+
+    #[test]
+    fn model_accepts_active_commit_attempt() {
+        let ns = ModelNamespace {
+            namespace_id: NamespaceId::from("ns-1"),
+            head_seq: ChangeSeq(41),
+            active_fence_token: FenceToken(8),
+            next_inode_id: InodeId(501),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let lease = LeaseState {
+            namespace_id: NamespaceId::from("ns-1"),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(8),
+            lease_expires_at_ms: 1_000,
+        };
+        let request = ModelCommitValidationRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+        };
+
+        let outcome = ns
+            .validate_commit_attempt(&request, &lease, 999)
+            .expect("active writer should validate");
+
+        assert_eq!(
+            outcome,
+            ModelCommitValidationOutcome {
+                next_seq: ChangeSeq(42),
+            }
+        );
+    }
+
+    #[test]
+    fn model_stale_commit_attempt_hits_planned_head_seq_mismatch_after_handover_publish() {
+        let ns = ModelNamespace {
+            namespace_id: NamespaceId::from("ns-1"),
+            head_seq: ChangeSeq(42),
+            active_fence_token: FenceToken(9),
+            next_inode_id: InodeId(504),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let lease = LeaseState {
+            namespace_id: NamespaceId::from("ns-1"),
+            holder_id: "writer-b".to_owned(),
+            fence_token: FenceToken(9),
+            lease_expires_at_ms: 2_000,
+        };
+        let request = ModelCommitValidationRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+        };
+
+        let error = ns
+            .validate_commit_attempt(&request, &lease, 1_500)
+            .expect_err("stale writer should be rejected");
+
+        assert_eq!(
+            error,
+            ModelCommitValidationError::PlannedHeadSeqMismatch {
+                expected: ChangeSeq(42),
+                actual: ChangeSeq(41),
             }
         );
     }
