@@ -13,3 +13,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 loon-testkit = { path = "../loon-testkit" }
+loon-server = { path = "../loon-server" }
+loon-objectstore = { path = "../loon-objectstore" }
+serde_json.workspace = true

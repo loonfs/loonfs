@@ -292,6 +292,86 @@ Failure modes prevented:
 - planner output being coupled to a transport shape that cannot become a namespace commit request
 - retrying the same local-only action with a different authoritative request id
 
+## Schema v4: pending client mutations
+
+The next schema version adds one durable bridge for in-flight authoritative creates:
+
+- `pending_client_mutations`
+
+One row is keyed by:
+
+```text
+client_request_id
+```
+
+The row must durably map:
+
+- `client_request_id`
+- `namespace_id`
+- `client_file_id`
+- `created_at_ms`
+
+Rules:
+
+- the client must persist this row before it treats a create request as in flight
+- the mapping from `client_request_id` to `client_file_id` must stay stable across restart
+- recording the same request twice is only valid if it still points at the same namespace and temporary local identity
+
+Why this rule exists:
+
+- a successful authoritative create may be observed after a client restart
+- the bind step still needs to know which temporary local identity that success belongs to
+
+Failure modes prevented:
+
+- a post-restart success response that cannot be matched back to the correct `client_file_id`
+- the client binding one authoritative inode to the wrong temporary local file
+
+Failure modes named for the first implementation:
+
+- `pending_client_mutation_missing`
+- `pending_client_mutation_conflict`
+- `pending_client_mutation_namespace_mismatch`
+
+## Bind-after-publish loop
+
+After a successful `create_file` or `create_dir`, the authoritative side returns one committed
+create summary:
+
+- `namespace_id`
+- `client_request_id`
+- `committed_seq`
+- `created_inode.inode_id`
+- `created_inode.inode_kind`
+- `created_inode.revision_no`
+- `created_inode.parent_inode_id`
+- `created_inode.display_name`
+- `created_inode.content_digest`
+
+For the current create-only contract, `created_inode.revision_no` is `1` and
+`created_inode.content_digest` is `null` for directories.
+
+On receipt of that response, one SQLite transaction must:
+
+1. load `pending_client_mutations(client_request_id)`
+2. derive the authoritative `remote_state` row from the committed create summary
+3. bind the stored `client_file_id` into inode-keyed `remote_state`, `local_state`, and `sync_anchor`
+4. delete the matching `pending_client_mutations` row
+5. delete the temporary `local_only_state` and `planned_local_only_actions` rows
+
+After that transaction commits, a restart and normal planner tick for the bound inode must return
+`no_op` / `already_converged`.
+
+Why this rule exists:
+
+- a successful create should converge immediately instead of waiting for a later full directory crawl
+- restart must not lose either the in-flight request mapping or the converged bound state
+
+Failure modes prevented:
+
+- create success returning an inode id that the client never persists durably
+- restart after success re-planning the same local-only create because the bind was only in memory
+
 ## First local-only bind rule
 
 After a local-only create is successfully published and the client later observes the authoritative remote inode, the client must bind the temporary `client_file_id` into the inode-keyed tables.

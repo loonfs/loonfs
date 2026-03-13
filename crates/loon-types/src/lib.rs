@@ -94,6 +94,24 @@ pub struct ClientMutationRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientMutationResponse {
+    pub namespace_id: NamespaceId,
+    pub client_request_id: String,
+    pub committed_seq: ChangeSeq,
+    pub created_inode: CreatedRemoteInode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatedRemoteInode {
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub revision_no: RevisionNo,
+    pub parent_inode_id: InodeId,
+    pub display_name: String,
+    pub content_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientMutationOp {
     CreateDir {

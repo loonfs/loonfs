@@ -249,6 +249,40 @@ Failure modes prevented:
 - allocating a new inode without advancing durable head state
 - WAL replay and live publish disagreeing about the next free inode id
 
+## Create success response
+
+After the WAL write and head CAS both succeed for a client create mutation, the authoritative side
+may return one committed create summary to the client.
+
+For the current create-only client mutation contract, that summary must carry:
+
+- `namespace_id`
+- `client_request_id`
+- `committed_seq`
+- `created_inode.inode_id`
+- `created_inode.inode_kind`
+- `created_inode.revision_no`
+- `created_inode.parent_inode_id`
+- `created_inode.display_name`
+- `created_inode.content_digest`
+
+Rules:
+
+- the response is only valid after the head CAS succeeds
+- `committed_seq` must equal the newly published head seq
+- the returned `created_inode.inode_id` must equal the inode id allocated in the WAL op
+- the first create revision is `1`
+
+Why this rule exists:
+
+- the client needs one authoritative post-publish observation it can bind immediately
+- the success response should be derivable from committed namespace history, not an out-of-band guess
+
+Failure modes prevented:
+
+- returning success before metadata is durably visible
+- the client binding a temporary local create to an inode id that does not match committed history
+
 ## Write ordering rule
 
 The head CAS must not be attempted until the WAL object create-if-absent succeeds.

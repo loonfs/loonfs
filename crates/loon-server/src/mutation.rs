@@ -8,8 +8,9 @@ use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{
-    payload_checksum_sha256, ClientMutationOp, ClientMutationRequest, ControlObjectKind, HeadState,
-    HeadStateEnvelope, LeaseStateEnvelope, NamespaceId,
+    payload_checksum_sha256, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
+    ControlObjectKind, CreatedRemoteInode, HeadState, HeadStateEnvelope, LeaseStateEnvelope,
+    NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -29,6 +30,7 @@ pub struct ExecutedClientMutation {
     pub wal_metadata: ObjectMetadata,
     pub head_publish: PreparedCommitHeadPublish,
     pub head_metadata: ObjectMetadata,
+    pub response: ClientMutationResponse,
     pub checked_invariants: Vec<String>,
 }
 
@@ -113,6 +115,8 @@ pub enum ClientMutationExecutionError {
     WalWrite(String),
     #[error("failed to publish head object: {0}")]
     HeadWrite(String),
+    #[error("client mutation must allocate exactly one inode id, got {actual}")]
+    UnexpectedAllocatedInodeCount { actual: usize },
 }
 
 pub fn execute_client_mutation<S: ObjectStore>(
@@ -144,6 +148,7 @@ pub fn execute_client_mutation<S: ObjectStore>(
         .map_err(map_store_write_error)?;
     let head_metadata = publish_commit_head(store, &head_etag, &head_publish)
         .map_err(|err| ClientMutationExecutionError::HeadWrite(format!("{err:?}")))?;
+    let response = build_client_mutation_response(request, &plan, &head_publish)?;
 
     let mut checked_invariants = Vec::new();
     extend_invariants(&mut checked_invariants, &plan.checked_invariants);
@@ -157,7 +162,56 @@ pub fn execute_client_mutation<S: ObjectStore>(
         wal_metadata,
         head_publish,
         head_metadata,
+        response,
         checked_invariants,
+    })
+}
+
+fn build_client_mutation_response(
+    request: &ClientMutationRequest,
+    plan: &CommitPlan,
+    head_publish: &PreparedCommitHeadPublish,
+) -> Result<ClientMutationResponse, ClientMutationExecutionError> {
+    if plan.allocated_inode_ids.len() != 1 {
+        return Err(
+            ClientMutationExecutionError::UnexpectedAllocatedInodeCount {
+                actual: plan.allocated_inode_ids.len(),
+            },
+        );
+    }
+
+    let inode_id = plan.allocated_inode_ids[0];
+    let created_inode = match &request.op {
+        ClientMutationOp::CreateDir {
+            parent_inode_id,
+            display_name,
+        } => CreatedRemoteInode {
+            inode_id,
+            inode_kind: loon_types::InodeKind::Dir,
+            revision_no: RevisionNo(1),
+            parent_inode_id: *parent_inode_id,
+            display_name: display_name.clone(),
+            content_digest: None,
+        },
+        ClientMutationOp::CreateFile {
+            parent_inode_id,
+            display_name,
+            content_manifest_digest,
+        } => CreatedRemoteInode {
+            inode_id,
+            inode_kind: loon_types::InodeKind::File,
+            revision_no: RevisionNo(1),
+            parent_inode_id: *parent_inode_id,
+            display_name: display_name.clone(),
+            content_digest: Some(content_manifest_digest.clone()),
+        },
+    };
+
+    Ok(ClientMutationResponse {
+        namespace_id: request.namespace_id.clone(),
+        client_request_id: request.client_request_id.clone(),
+        committed_seq: head_publish.resulting_head.seq,
+        created_inode,
     })
 }
 
@@ -516,6 +570,23 @@ mod tests {
                 display_name: "note.txt".to_owned(),
                 content_manifest_digest: "sha256:child-note".to_owned(),
             }]
+        );
+        assert_eq!(
+            executed.response.namespace_id,
+            loon_types::NamespaceId::from("ns-1")
+        );
+        assert_eq!(executed.response.client_request_id, "client-req-0001");
+        assert_eq!(executed.response.committed_seq, loon_types::ChangeSeq(42));
+        assert_eq!(
+            executed.response.created_inode,
+            loon_types::CreatedRemoteInode {
+                inode_id: loon_types::InodeId(501),
+                inode_kind: loon_types::InodeKind::File,
+                revision_no: loon_types::RevisionNo(1),
+                parent_inode_id: loon_types::InodeId(902),
+                display_name: "note.txt".to_owned(),
+                content_digest: Some("sha256:child-note".to_owned()),
+            }
         );
         assert_eq!(executed.head_publish.resulting_head, expect.head);
         for invariant in &expect.invariants {

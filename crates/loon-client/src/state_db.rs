@@ -1,10 +1,13 @@
-use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
+use loon_types::{
+    ChangeSeq, ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind, NamespaceId,
+    RevisionNo,
+};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
     namespace_id TEXT NOT NULL,
@@ -117,6 +120,15 @@ ALTER TABLE local_only_state
 ADD COLUMN inode_kind TEXT NOT NULL DEFAULT 'file';
 "#;
 
+const SCHEMA_V4_SQL: &str = r#"
+CREATE TABLE pending_client_mutations (
+    client_request_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    client_file_id TEXT NOT NULL UNIQUE,
+    created_at_ms INTEGER NOT NULL
+);
+"#;
+
 #[derive(Debug, Error)]
 pub enum StateDbError {
     #[error("SQLite error: {0}")]
@@ -154,6 +166,24 @@ pub enum StateDbError {
     },
     #[error("local_only_file_missing: `{client_file_id}`")]
     LocalOnlyFileMissing { client_file_id: String },
+    #[error("pending_client_mutation_missing: `{client_request_id}`")]
+    PendingClientMutationMissing { client_request_id: String },
+    #[error(
+        "pending_client_mutation_conflict: `{client_request_id}` existing temp `{existing_client_file_id}` != new temp `{new_client_file_id}`"
+    )]
+    PendingClientMutationConflict {
+        client_request_id: String,
+        existing_client_file_id: String,
+        new_client_file_id: String,
+    },
+    #[error(
+        "pending_client_mutation_namespace_mismatch: `{client_request_id}` pending namespace `{pending_namespace_id}` != response namespace `{response_namespace_id}`"
+    )]
+    PendingClientMutationNamespaceMismatch {
+        client_request_id: String,
+        pending_namespace_id: String,
+        response_namespace_id: String,
+    },
     #[error(
         "bind_kind_mismatch: `{client_file_id}` local kind `{local_kind}` != remote kind `{remote_kind}`"
     )]
@@ -288,7 +318,7 @@ pub struct ObservedLocalOnlyInode {
     pub last_local_change_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalOnlyPlannedActionRow {
     pub client_file_id: ClientFileId,
     pub namespace_id: NamespaceId,
@@ -297,7 +327,15 @@ pub struct LocalOnlyPlannedActionRow {
     pub created_at_ms: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingClientMutationRow {
+    pub client_request_id: String,
+    pub namespace_id: NamespaceId,
+    pub client_file_id: ClientFileId,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundLocalOnlyFile {
     pub client_file_id: ClientFileId,
     pub namespace_id: NamespaceId,
@@ -394,6 +432,13 @@ impl SqliteStateDb {
         load_planned_local_only_action(&self.conn, client_file_id)
     }
 
+    pub fn load_pending_client_mutation(
+        &self,
+        client_request_id: &str,
+    ) -> Result<Option<PendingClientMutationRow>, StateDbError> {
+        load_pending_client_mutation(&self.conn, client_request_id)
+    }
+
     pub fn observe_local_only_inode_under_parent(
         &mut self,
         observed: &ObservedLocalOnlyInode,
@@ -418,6 +463,26 @@ impl SqliteStateDb {
     ) -> Result<BoundLocalOnlyFile, StateDbError> {
         self.planner_transaction("bind_local_only_inode_to_remote", |tx| {
             tx.bind_local_only_inode_to_remote(client_file_id, remote)
+        })
+    }
+
+    pub fn record_pending_client_mutation(
+        &mut self,
+        client_file_id: &ClientFileId,
+        request: &ClientMutationRequest,
+        created_at_ms: u64,
+    ) -> Result<PendingClientMutationRow, StateDbError> {
+        self.planner_transaction("record_pending_client_mutation", |tx| {
+            tx.record_pending_client_mutation(client_file_id, request, created_at_ms)
+        })
+    }
+
+    pub fn apply_client_mutation_response(
+        &mut self,
+        response: &ClientMutationResponse,
+    ) -> Result<BoundLocalOnlyFile, StateDbError> {
+        self.planner_transaction("apply_client_mutation_response", |tx| {
+            tx.apply_client_mutation_response(response)
         })
     }
 
@@ -446,6 +511,14 @@ impl SqliteStateDb {
         if current_version == 2 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V3_SQL)?;
+            tx.pragma_update(None, "user_version", 3)?;
+            tx.commit()?;
+            current_version = 3;
+        }
+
+        if current_version == 3 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V4_SQL)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -657,6 +730,85 @@ impl PlannerTxn<'_> {
         Ok(row)
     }
 
+    pub fn record_pending_client_mutation(
+        &mut self,
+        client_file_id: &ClientFileId,
+        request: &ClientMutationRequest,
+        created_at_ms: u64,
+    ) -> Result<PendingClientMutationRow, StateDbError> {
+        if let Some(existing) = load_pending_client_mutation(&self.tx, &request.client_request_id)?
+        {
+            if existing.namespace_id == request.namespace_id
+                && existing.client_file_id == *client_file_id
+            {
+                return Ok(existing);
+            }
+
+            return Err(StateDbError::PendingClientMutationConflict {
+                client_request_id: request.client_request_id.clone(),
+                existing_client_file_id: existing.client_file_id.as_str().to_owned(),
+                new_client_file_id: client_file_id.as_str().to_owned(),
+            });
+        }
+
+        let row = PendingClientMutationRow {
+            client_request_id: request.client_request_id.clone(),
+            namespace_id: request.namespace_id.clone(),
+            client_file_id: client_file_id.clone(),
+            created_at_ms,
+        };
+        self.tx.execute(
+            "INSERT INTO pending_client_mutations (
+                client_request_id,
+                namespace_id,
+                client_file_id,
+                created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                &row.client_request_id,
+                row.namespace_id.as_str(),
+                row.client_file_id.as_str(),
+                to_sql_u64(row.created_at_ms, "created_at_ms")?,
+            ],
+        )?;
+
+        Ok(row)
+    }
+
+    pub fn apply_client_mutation_response(
+        &mut self,
+        response: &ClientMutationResponse,
+    ) -> Result<BoundLocalOnlyFile, StateDbError> {
+        let pending = load_pending_client_mutation(&self.tx, &response.client_request_id)?
+            .ok_or_else(|| StateDbError::PendingClientMutationMissing {
+                client_request_id: response.client_request_id.clone(),
+            })?;
+
+        if pending.namespace_id != response.namespace_id {
+            return Err(StateDbError::PendingClientMutationNamespaceMismatch {
+                client_request_id: response.client_request_id.clone(),
+                pending_namespace_id: pending.namespace_id.as_str().to_owned(),
+                response_namespace_id: response.namespace_id.as_str().to_owned(),
+            });
+        }
+
+        let remote = RemoteFileStateRow {
+            namespace_id: response.namespace_id.clone(),
+            inode_id: response.created_inode.inode_id,
+            inode_kind: response.created_inode.inode_kind.clone(),
+            observed_seq: response.committed_seq,
+            revision_no: response.created_inode.revision_no,
+            content_digest: response.created_inode.content_digest.clone(),
+            parent_inode_id: Some(response.created_inode.parent_inode_id),
+            display_name: response.created_inode.display_name.clone(),
+            is_deleted: false,
+        };
+        let bound = self.bind_local_only_inode_to_remote(&pending.client_file_id, &remote)?;
+        self.delete_pending_client_mutation(&response.client_request_id)?;
+
+        Ok(bound)
+    }
+
     pub fn bind_local_only_inode_to_remote(
         &mut self,
         client_file_id: &ClientFileId,
@@ -855,6 +1007,17 @@ impl PlannerTxn<'_> {
         self.tx.execute(
             "DELETE FROM local_only_state WHERE client_file_id = ?1",
             params![client_file_id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_pending_client_mutation(
+        &mut self,
+        client_request_id: &str,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM pending_client_mutations WHERE client_request_id = ?1",
+            params![client_request_id],
         )?;
         Ok(())
     }
@@ -1209,6 +1372,37 @@ fn load_planned_local_only_action(
     .transpose()
 }
 
+fn load_pending_client_mutation(
+    conn: &Connection,
+    client_request_id: &str,
+) -> Result<Option<PendingClientMutationRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT namespace_id, client_file_id, created_at_ms
+            FROM pending_client_mutations
+            WHERE client_request_id = ?1",
+            params![client_request_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(|(namespace_id, client_file_id, created_at_ms)| {
+        Ok(PendingClientMutationRow {
+            client_request_id: client_request_id.to_owned(),
+            namespace_id: NamespaceId::from(namespace_id),
+            client_file_id: ClientFileId::new(client_file_id),
+            created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+        })
+    })
+    .transpose()
+}
+
 fn inode_kind_as_str(kind: &InodeKind) -> &'static str {
     match kind {
         InodeKind::File => "file",
@@ -1258,13 +1452,16 @@ fn from_sql_u64(value: i64, field: &'static str) -> Result<u64, StateDbError> {
 mod tests {
     use super::{
         BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
-        LocalOnlyPlannedActionRow, ObservedLocalOnlyInode, RemoteFileStateRow, SqliteStateDb,
-        StateDbError, SyncAnchorRow, SCHEMA_VERSION,
+        LocalOnlyPlannedActionRow, ObservedLocalOnlyInode, PendingClientMutationRow,
+        RemoteFileStateRow, SqliteStateDb, StateDbError, SyncAnchorRow, SCHEMA_VERSION,
     };
-    use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
+    use loon_types::{
+        ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
+        CreatedRemoteInode, InodeId, InodeKind, NamespaceId, RevisionNo,
+    };
 
     #[test]
-    fn sqlite_state_db_applies_schema_v3() {
+    fn sqlite_state_db_applies_schema_v4() {
         let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
         assert_eq!(
@@ -1280,6 +1477,7 @@ mod tests {
             "client_metadata",
             "local_only_state",
             "planned_local_only_actions",
+            "pending_client_mutations",
             "transfer_ledger",
             "conflicts_and_errors",
         ] {
@@ -1374,6 +1572,62 @@ mod tests {
                 .expect("load local-only state"),
             Some(local_only)
         );
+    }
+
+    #[test]
+    fn record_pending_client_mutation_persists_and_reuses_same_mapping() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let request = sample_client_create_file_request();
+        let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+
+        let recorded = db
+            .record_pending_client_mutation(&client_file_id, &request, 1_700_000_106_000)
+            .expect("record pending mutation");
+        let reused = db
+            .record_pending_client_mutation(&client_file_id, &request, 1_700_000_106_999)
+            .expect("reuse same pending mutation");
+
+        assert_eq!(
+            recorded,
+            PendingClientMutationRow {
+                client_request_id: "client-req-0001".to_owned(),
+                namespace_id: NamespaceId::from("ns-1"),
+                client_file_id: client_file_id.clone(),
+                created_at_ms: 1_700_000_106_000,
+            }
+        );
+        assert_eq!(reused, recorded);
+        assert_eq!(
+            db.load_pending_client_mutation("client-req-0001")
+                .expect("load pending mutation"),
+            Some(recorded)
+        );
+    }
+
+    #[test]
+    fn record_pending_client_mutation_rejects_conflicting_temp_identity() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let request = sample_client_create_file_request();
+
+        db.record_pending_client_mutation(
+            &ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            &request,
+            1_700_000_106_000,
+        )
+        .expect("record pending mutation");
+
+        let error = db
+            .record_pending_client_mutation(
+                &ClientFileId::from("tmp:ns-1:00000000000000000002"),
+                &request,
+                1_700_000_106_001,
+            )
+            .expect_err("conflicting mapping should fail");
+
+        assert!(matches!(
+            error,
+            StateDbError::PendingClientMutationConflict { .. }
+        ));
     }
 
     #[test]
@@ -1594,6 +1848,91 @@ mod tests {
         );
     }
 
+    #[test]
+    fn apply_client_mutation_response_binds_and_clears_pending_row() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let request = sample_client_create_file_request();
+        let response = sample_client_create_file_response();
+        let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+
+        db.planner_transaction("seed-local-only-and-plan", |tx| {
+            tx.upsert_local_only_file(&sample_local_only())?;
+            tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+                client_file_id: client_file_id.clone(),
+                namespace_id: NamespaceId::from("ns-1"),
+                decision: "upload_local_create".to_owned(),
+                reason: "local_only_file_without_remote_identity".to_owned(),
+                created_at_ms: 1_700_000_105_000,
+            })?;
+            tx.record_pending_client_mutation(&client_file_id, &request, 1_700_000_106_000)?;
+            Ok(())
+        })
+        .expect("seed local-only state and pending mutation");
+
+        let bound = db
+            .apply_client_mutation_response(&response)
+            .expect("apply client mutation response");
+
+        assert_eq!(
+            bound,
+            BoundLocalOnlyFile {
+                client_file_id: client_file_id.clone(),
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(501),
+            }
+        );
+        assert_eq!(
+            db.load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(501))
+                .expect("load bound views"),
+            FileSyncViews {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(501),
+                remote: Some(RemoteFileStateRow {
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_id: InodeId(501),
+                    inode_kind: InodeKind::File,
+                    observed_seq: ChangeSeq(42),
+                    revision_no: RevisionNo(1),
+                    content_digest: Some("sha256:new-local-file".to_owned()),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "draft.txt".to_owned(),
+                    is_deleted: false,
+                }),
+                local: Some(LocalFileStateRow {
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_id: InodeId(501),
+                    inode_kind: InodeKind::File,
+                    content_digest: Some("sha256:new-local-file".to_owned()),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "draft.txt".to_owned(),
+                    exists_on_disk: true,
+                    dirty: false,
+                    last_local_change_ms: 1_700_000_100_000,
+                }),
+                sync_anchor: Some(SyncAnchorRow {
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_id: InodeId(501),
+                    inode_kind: InodeKind::File,
+                    synced_seq: ChangeSeq(42),
+                    revision_no: RevisionNo(1),
+                    content_digest: Some("sha256:new-local-file".to_owned()),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "draft.txt".to_owned(),
+                }),
+            }
+        );
+        assert_eq!(
+            db.load_pending_client_mutation("client-req-0001")
+                .expect("load pending mutation after bind"),
+            None
+        );
+        assert_eq!(
+            db.load_local_only_file(&client_file_id)
+                .expect("load temp local-only state after bind"),
+            None
+        );
+    }
+
     fn sample_remote() -> RemoteFileStateRow {
         RemoteFileStateRow {
             namespace_id: NamespaceId::from("ns-1"),
@@ -1660,6 +1999,34 @@ mod tests {
             parent_inode_id: Some(InodeId(2)),
             display_name: "draft.txt".to_owned(),
             is_deleted: false,
+        }
+    }
+
+    fn sample_client_create_file_request() -> ClientMutationRequest {
+        ClientMutationRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            client_request_id: "client-req-0001".to_owned(),
+            op: ClientMutationOp::CreateFile {
+                parent_inode_id: InodeId(2),
+                display_name: "draft.txt".to_owned(),
+                content_manifest_digest: "sha256:new-local-file".to_owned(),
+            },
+        }
+    }
+
+    fn sample_client_create_file_response() -> ClientMutationResponse {
+        ClientMutationResponse {
+            namespace_id: NamespaceId::from("ns-1"),
+            client_request_id: "client-req-0001".to_owned(),
+            committed_seq: ChangeSeq(42),
+            created_inode: CreatedRemoteInode {
+                inode_id: InodeId(501),
+                inode_kind: InodeKind::File,
+                revision_no: RevisionNo(1),
+                parent_inode_id: InodeId(2),
+                display_name: "draft.txt".to_owned(),
+                content_digest: Some("sha256:new-local-file".to_owned()),
+            },
         }
     }
 

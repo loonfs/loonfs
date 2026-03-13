@@ -973,10 +973,13 @@ dependencies = [
 name = "loon-client"
 version = "0.1.0"
 dependencies = [
+ "loon-objectstore",
+ "loon-server",
  "loon-testkit",
  "loon-types",
  "rusqlite",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
