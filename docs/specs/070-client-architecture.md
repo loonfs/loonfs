@@ -166,6 +166,46 @@ The planned row must reference `client_file_id`, not a guessed path identity.
 
 This rule is intentionally small. It proves that local-only files can survive restart with a durable temporary identity before the client learns a canonical remote inode.
 
+## First local-only bind rule
+
+After a local-only create is successfully published and the client later observes the authoritative remote inode, the client must bind the temporary `client_file_id` into the inode-keyed tables.
+
+The first bind preconditions are intentionally strict:
+
+- `local_only_state.namespace_id` must equal the observed remote namespace
+- the observed remote file must not be deleted
+- `local_only_state.exists_on_disk` must still be true
+- `content_digest`, `parent_inode_id`, and `display_name` must still match between the local-only row and the observed remote row
+
+On success, one SQLite transaction must do all of the following:
+
+1. upsert `remote_state(namespace_id, inode_id)` from the observed remote file
+2. upsert `local_state(namespace_id, inode_id)` from the local-only row, but mark `dirty = false`
+3. upsert `sync_anchor(namespace_id, inode_id)` from the observed remote file
+4. clear any `planned_actions(namespace_id, inode_id)` row because the file is converged at bind time
+5. delete the old `planned_local_only_actions(client_file_id)` row
+6. delete the old `local_only_state(client_file_id)` row
+
+Why this rule exists:
+
+- the planner must not forget that the uploaded local-only create is now the synced anchor
+- later planner passes must key the file by canonical inode identity, not by a temporary local id
+
+Failure modes prevented:
+
+- upload success followed by remote observation causing the client to upload the same create again
+- deleting the temp identity before durable `sync_anchor` exists
+- binding a temp identity to a different remote file after a local rename or edit changed the local observation
+
+Failure modes named for the first implementation:
+
+- `local_only_file_missing`
+- `bind_namespace_mismatch`
+- `bind_remote_deleted`
+- `bind_observation_mismatch`
+
+If any bind precondition fails, the transaction must abort without partially migrating rows.
+
 ## Local data model inspiration
 
 The client should keep separate, individually consistent views of:

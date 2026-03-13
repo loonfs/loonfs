@@ -113,6 +113,32 @@ pub enum StateDbError {
     IntegerOutOfRange { field: &'static str, value: i64 },
     #[error("value out of range for SQLite {field}: {value}")]
     UnsignedOutOfRange { field: &'static str, value: u64 },
+    #[error("local_only_file_missing: `{client_file_id}`")]
+    LocalOnlyFileMissing { client_file_id: String },
+    #[error(
+        "bind_namespace_mismatch: `{client_file_id}` local namespace `{local_namespace_id}` != remote namespace `{remote_namespace_id}`"
+    )]
+    BindNamespaceMismatch {
+        client_file_id: String,
+        local_namespace_id: String,
+        remote_namespace_id: String,
+    },
+    #[error(
+        "bind_remote_deleted: `{client_file_id}` cannot bind to deleted remote inode `{inode_id}`"
+    )]
+    BindRemoteDeleted {
+        client_file_id: String,
+        inode_id: u64,
+    },
+    #[error(
+        "bind_observation_mismatch: `{client_file_id}` field `{field}` local `{local}` != remote `{remote}`"
+    )]
+    BindObservationMismatch {
+        client_file_id: String,
+        field: &'static str,
+        local: String,
+        remote: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +234,13 @@ pub struct LocalOnlyPlannedActionRow {
     pub created_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundLocalOnlyFile {
+    pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+}
+
 pub struct SqliteStateDb {
     conn: Connection,
 }
@@ -296,6 +329,16 @@ impl SqliteStateDb {
         client_file_id: &ClientFileId,
     ) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
         load_planned_local_only_action(&self.conn, client_file_id)
+    }
+
+    pub fn bind_local_only_file_to_remote(
+        &mut self,
+        client_file_id: &ClientFileId,
+        remote: &RemoteFileStateRow,
+    ) -> Result<BoundLocalOnlyFile, StateDbError> {
+        self.planner_transaction("bind_local_only_file_to_remote", |tx| {
+            tx.bind_local_only_file_to_remote(client_file_id, remote)
+        })
     }
 
     fn apply_migrations(&mut self) -> Result<(), StateDbError> {
@@ -492,6 +535,91 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    pub fn bind_local_only_file_to_remote(
+        &mut self,
+        client_file_id: &ClientFileId,
+        remote: &RemoteFileStateRow,
+    ) -> Result<BoundLocalOnlyFile, StateDbError> {
+        let local_only = self.load_local_only_file(client_file_id)?.ok_or_else(|| {
+            StateDbError::LocalOnlyFileMissing {
+                client_file_id: client_file_id.as_str().to_owned(),
+            }
+        })?;
+
+        if local_only.namespace_id != remote.namespace_id {
+            return Err(StateDbError::BindNamespaceMismatch {
+                client_file_id: client_file_id.as_str().to_owned(),
+                local_namespace_id: local_only.namespace_id.as_str().to_owned(),
+                remote_namespace_id: remote.namespace_id.as_str().to_owned(),
+            });
+        }
+
+        if remote.is_deleted {
+            return Err(StateDbError::BindRemoteDeleted {
+                client_file_id: client_file_id.as_str().to_owned(),
+                inode_id: remote.inode_id.0,
+            });
+        }
+
+        ensure_bind_match(
+            client_file_id,
+            "exists_on_disk",
+            local_only.exists_on_disk.to_string(),
+            "true".to_owned(),
+        )?;
+        ensure_bind_match(
+            client_file_id,
+            "content_digest",
+            format!("{:?}", local_only.content_digest),
+            format!("{:?}", remote.content_digest),
+        )?;
+        ensure_bind_match(
+            client_file_id,
+            "parent_inode_id",
+            format!("{:?}", local_only.parent_inode_id),
+            format!("{:?}", remote.parent_inode_id),
+        )?;
+        ensure_bind_match(
+            client_file_id,
+            "display_name",
+            local_only.display_name.clone(),
+            remote.display_name.clone(),
+        )?;
+
+        let local_row = LocalFileStateRow {
+            namespace_id: remote.namespace_id.clone(),
+            inode_id: remote.inode_id,
+            content_digest: local_only.content_digest.clone(),
+            parent_inode_id: local_only.parent_inode_id,
+            display_name: local_only.display_name.clone(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: local_only.last_local_change_ms,
+        };
+        let anchor_row = SyncAnchorRow {
+            namespace_id: remote.namespace_id.clone(),
+            inode_id: remote.inode_id,
+            synced_seq: remote.observed_seq,
+            revision_no: remote.revision_no,
+            content_digest: remote.content_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name.clone(),
+        };
+
+        self.upsert_remote_file(remote)?;
+        self.upsert_local_file(&local_row)?;
+        self.upsert_sync_anchor(&anchor_row)?;
+        self.delete_planned_action(&remote.namespace_id, remote.inode_id)?;
+        self.delete_planned_local_only_action(client_file_id)?;
+        self.delete_local_only_file(client_file_id)?;
+
+        Ok(BoundLocalOnlyFile {
+            client_file_id: client_file_id.clone(),
+            namespace_id: remote.namespace_id.clone(),
+            inode_id: remote.inode_id,
+        })
+    }
+
     pub fn load_file_sync_views(
         &self,
         namespace_id: &NamespaceId,
@@ -583,6 +711,17 @@ impl PlannerTxn<'_> {
     ) -> Result<(), StateDbError> {
         self.tx.execute(
             "DELETE FROM planned_local_only_actions WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_local_only_file(
+        &mut self,
+        client_file_id: &ClientFileId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM local_only_state WHERE client_file_id = ?1",
             params![client_file_id.as_str()],
         )?;
         Ok(())
@@ -869,6 +1008,24 @@ fn load_planned_local_only_action(
     .transpose()
 }
 
+fn ensure_bind_match(
+    client_file_id: &ClientFileId,
+    field: &'static str,
+    local: String,
+    remote: String,
+) -> Result<(), StateDbError> {
+    if local == remote {
+        return Ok(());
+    }
+
+    Err(StateDbError::BindObservationMismatch {
+        client_file_id: client_file_id.as_str().to_owned(),
+        field,
+        local,
+        remote,
+    })
+}
+
 fn to_sql_u64(value: u64, field: &'static str) -> Result<i64, StateDbError> {
     i64::try_from(value).map_err(|_| StateDbError::UnsignedOutOfRange { field, value })
 }
@@ -880,8 +1037,9 @@ fn from_sql_u64(value: i64, field: &'static str) -> Result<u64, StateDbError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow, RemoteFileStateRow,
-        SqliteStateDb, StateDbError, SyncAnchorRow, SCHEMA_VERSION,
+        BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
+        LocalOnlyPlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError, SyncAnchorRow,
+        SCHEMA_VERSION,
     };
     use loon_types::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
 
@@ -998,6 +1156,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bind_local_only_file_to_remote_migrates_into_inode_keyed_tables() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+        let remote = sample_bound_remote();
+
+        db.planner_transaction("seed-bindable-local-only", |tx| {
+            tx.upsert_local_only_file(&sample_local_only())?;
+            tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+                client_file_id: client_file_id.clone(),
+                namespace_id: NamespaceId::from("ns-1"),
+                decision: "upload_local_create".to_owned(),
+                reason: "local_only_file_without_remote_identity".to_owned(),
+                created_at_ms: 1_700_000_105_000,
+            })?;
+            Ok(())
+        })
+        .expect("seed bindable local-only state");
+
+        let bound = db
+            .bind_local_only_file_to_remote(&client_file_id, &remote)
+            .expect("bind local-only file");
+
+        assert_eq!(
+            bound,
+            BoundLocalOnlyFile {
+                client_file_id: client_file_id.clone(),
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(901),
+            }
+        );
+        assert_eq!(
+            db.load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(901))
+                .expect("load bound views"),
+            FileSyncViews {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(901),
+                remote: Some(remote.clone()),
+                local: Some(LocalFileStateRow {
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_id: InodeId(901),
+                    content_digest: Some("sha256:new-local-file".to_owned()),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "draft.txt".to_owned(),
+                    exists_on_disk: true,
+                    dirty: false,
+                    last_local_change_ms: 1_700_000_100_000,
+                }),
+                sync_anchor: Some(SyncAnchorRow {
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_id: InodeId(901),
+                    synced_seq: ChangeSeq(500),
+                    revision_no: RevisionNo(1),
+                    content_digest: Some("sha256:new-local-file".to_owned()),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "draft.txt".to_owned(),
+                }),
+            }
+        );
+        assert_eq!(
+            db.load_local_only_file(&client_file_id)
+                .expect("load temp local-only state"),
+            None
+        );
+        assert_eq!(
+            db.load_planned_local_only_action(&client_file_id)
+                .expect("load temp planned action"),
+            None
+        );
+    }
+
+    #[test]
+    fn bind_local_only_file_to_remote_rejects_mismatched_observation_without_partial_write() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+        let mut remote = sample_bound_remote();
+        remote.display_name = "renamed.txt".to_owned();
+
+        db.planner_transaction("seed-mismatched-local-only", |tx| {
+            tx.upsert_local_only_file(&sample_local_only())?;
+            Ok(())
+        })
+        .expect("seed local-only state");
+
+        let error = db
+            .bind_local_only_file_to_remote(&client_file_id, &remote)
+            .expect_err("bind should reject mismatched observation");
+
+        assert!(matches!(
+            error,
+            StateDbError::BindObservationMismatch {
+                field: "display_name",
+                ..
+            }
+        ));
+        assert_eq!(
+            db.load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(901))
+                .expect("load views after rejected bind"),
+            FileSyncViews {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(901),
+                remote: None,
+                local: None,
+                sync_anchor: None,
+            }
+        );
+        assert_eq!(
+            db.load_local_only_file(&client_file_id)
+                .expect("load temp local-only state after rejection"),
+            Some(sample_local_only())
+        );
+    }
+
     fn sample_remote() -> RemoteFileStateRow {
         RemoteFileStateRow {
             namespace_id: NamespaceId::from("ns-1"),
@@ -1046,6 +1317,19 @@ mod tests {
             exists_on_disk: true,
             dirty: true,
             last_local_change_ms: 1_700_000_100_000,
+        }
+    }
+
+    fn sample_bound_remote() -> RemoteFileStateRow {
+        RemoteFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(901),
+            observed_seq: ChangeSeq(500),
+            revision_no: RevisionNo(1),
+            content_digest: Some("sha256:new-local-file".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "draft.txt".to_owned(),
+            is_deleted: false,
         }
     }
 }

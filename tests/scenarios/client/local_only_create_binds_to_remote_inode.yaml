@@ -1,0 +1,67 @@
+name: local_only_create_binds_to_remote_inode
+initial:
+  local_only_state:
+    client_file_id: tmp:ns-1:00000000000000000001
+    namespace_id: ns-1
+    parent_inode_id: 2
+    display_name: draft.txt
+    content_digest: sha256:new-local-file
+    exists_on_disk: true
+    dirty: true
+    last_local_change_ms: 1700000100000
+  planned_local_only_action:
+    client_file_id: tmp:ns-1:00000000000000000001
+    namespace_id: ns-1
+    decision: upload_local_create
+    reason: local_only_file_without_remote_identity
+    created_at_ms: 1700000105000
+actions:
+  - bind_local_only_identity:
+      client_file_id: tmp:ns-1:00000000000000000001
+      remote_state:
+        namespace_id: ns-1
+        inode_id: 901
+        observed_seq: 500
+        revision_no: 1
+        content_digest: sha256:new-local-file
+        parent_inode_id: 2
+        display_name: draft.txt
+        is_deleted: false
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 901
+      now_ms: 1700000110000
+expect:
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 901
+    observed_seq: 500
+    revision_no: 1
+    content_digest: sha256:new-local-file
+    parent_inode_id: 2
+    display_name: draft.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 901
+    content_digest: sha256:new-local-file
+    parent_inode_id: 2
+    display_name: draft.txt
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700000100000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 901
+    synced_seq: 500
+    revision_no: 1
+    content_digest: sha256:new-local-file
+    parent_inode_id: 2
+    display_name: draft.txt
+  local_only_state_cleared: true
+  planned_local_only_action_cleared: true
+  planner_result:
+    namespace_id: ns-1
+    inode_id: 901
+    decision: no_op
+    reason: already_converged
