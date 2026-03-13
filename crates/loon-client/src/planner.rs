@@ -1,5 +1,6 @@
 use crate::state_db::{
-    FileSyncViews, PlannedActionRow, SqliteStateDb, StateDbError, SyncAnchorRow,
+    ClientFileId, FileSyncViews, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
+    PlannedActionRow, SqliteStateDb, StateDbError, SyncAnchorRow,
 };
 use loon_types::{InodeId, NamespaceId};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlannerDecision {
+    UploadLocalCreate,
     UploadLocalEdit,
     DownloadRemoteEdit,
     CreateConflictCopy,
@@ -19,6 +21,7 @@ pub enum PlannerDecision {
 pub enum PlannerReason {
     AlreadyConverged,
     NoObservedState,
+    LocalOnlyFileWithoutRemoteIdentity,
     LocalDiffersFromAnchor,
     RemoteDiffersFromAnchor,
     LocalAndRemoteDifferFromAnchor,
@@ -31,6 +34,15 @@ pub enum PlannerReason {
 pub struct PlannedActionRecord {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
+    pub decision: PlannerDecision,
+    pub reason: PlannerReason,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedLocalOnlyActionRecord {
+    pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
     pub decision: PlannerDecision,
     pub reason: PlannerReason,
     pub created_at_ms: u64,
@@ -60,6 +72,28 @@ pub fn plan_file(
             tx.delete_planned_action(namespace_id, inode_id)?;
         } else {
             tx.upsert_planned_action(&action.to_row())?;
+        }
+
+        Ok(action)
+    })
+    .map_err(PlannerError::from)
+}
+
+pub fn plan_local_only_file(
+    db: &mut SqliteStateDb,
+    client_file_id: &ClientFileId,
+    now_ms: u64,
+) -> Result<PlannedLocalOnlyActionRecord, PlannerError> {
+    db.planner_transaction("plan_local_only_file", |tx| {
+        let local_only = tx
+            .load_local_only_file(client_file_id)?
+            .ok_or_else(|| StateDbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        let action = decide_local_only_file_action(&local_only, now_ms);
+
+        if action.decision == PlannerDecision::NoOp {
+            tx.delete_planned_local_only_action(client_file_id)?;
+        } else {
+            tx.upsert_planned_local_only_action(&action.to_row())?;
         }
 
         Ok(action)
@@ -133,11 +167,45 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
     }
 }
 
+pub fn decide_local_only_file_action(
+    local_only: &LocalOnlyFileStateRow,
+    now_ms: u64,
+) -> PlannedLocalOnlyActionRecord {
+    let (decision, reason) = if local_only.exists_on_disk && local_only.dirty {
+        (
+            PlannerDecision::UploadLocalCreate,
+            PlannerReason::LocalOnlyFileWithoutRemoteIdentity,
+        )
+    } else {
+        (PlannerDecision::NoOp, PlannerReason::NoObservedState)
+    };
+
+    PlannedLocalOnlyActionRecord {
+        client_file_id: local_only.client_file_id.clone(),
+        namespace_id: local_only.namespace_id.clone(),
+        decision,
+        reason,
+        created_at_ms: now_ms,
+    }
+}
+
 impl PlannedActionRecord {
     pub fn to_row(&self) -> PlannedActionRow {
         PlannedActionRow {
             namespace_id: self.namespace_id.clone(),
             inode_id: self.inode_id,
+            decision: self.decision.as_str().to_owned(),
+            reason: self.reason.as_str().to_owned(),
+            created_at_ms: self.created_at_ms,
+        }
+    }
+}
+
+impl PlannedLocalOnlyActionRecord {
+    pub fn to_row(&self) -> LocalOnlyPlannedActionRow {
+        LocalOnlyPlannedActionRow {
+            client_file_id: self.client_file_id.clone(),
+            namespace_id: self.namespace_id.clone(),
             decision: self.decision.as_str().to_owned(),
             reason: self.reason.as_str().to_owned(),
             created_at_ms: self.created_at_ms,
@@ -159,9 +227,24 @@ impl TryFrom<PlannedActionRow> for PlannedActionRecord {
     }
 }
 
+impl TryFrom<LocalOnlyPlannedActionRow> for PlannedLocalOnlyActionRecord {
+    type Error = PlannerError;
+
+    fn try_from(value: LocalOnlyPlannedActionRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            client_file_id: value.client_file_id,
+            namespace_id: value.namespace_id,
+            decision: PlannerDecision::from_str(&value.decision)?,
+            reason: PlannerReason::from_str(&value.reason)?,
+            created_at_ms: value.created_at_ms,
+        })
+    }
+}
+
 impl PlannerDecision {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::UploadLocalCreate => "upload_local_create",
             Self::UploadLocalEdit => "upload_local_edit",
             Self::DownloadRemoteEdit => "download_remote_edit",
             Self::CreateConflictCopy => "create_conflict_copy",
@@ -171,6 +254,7 @@ impl PlannerDecision {
 
     fn from_str(value: &str) -> Result<Self, PlannerError> {
         match value {
+            "upload_local_create" => Ok(Self::UploadLocalCreate),
             "upload_local_edit" => Ok(Self::UploadLocalEdit),
             "download_remote_edit" => Ok(Self::DownloadRemoteEdit),
             "create_conflict_copy" => Ok(Self::CreateConflictCopy),
@@ -185,6 +269,7 @@ impl PlannerReason {
         match self {
             Self::AlreadyConverged => "already_converged",
             Self::NoObservedState => "no_observed_state",
+            Self::LocalOnlyFileWithoutRemoteIdentity => "local_only_file_without_remote_identity",
             Self::LocalDiffersFromAnchor => "local_differs_from_anchor",
             Self::RemoteDiffersFromAnchor => "remote_differs_from_anchor",
             Self::LocalAndRemoteDifferFromAnchor => "local_and_remote_differ_from_anchor",
@@ -198,6 +283,9 @@ impl PlannerReason {
         match value {
             "already_converged" => Ok(Self::AlreadyConverged),
             "no_observed_state" => Ok(Self::NoObservedState),
+            "local_only_file_without_remote_identity" => {
+                Ok(Self::LocalOnlyFileWithoutRemoteIdentity)
+            }
             "local_differs_from_anchor" => Ok(Self::LocalDiffersFromAnchor),
             "remote_differs_from_anchor" => Ok(Self::RemoteDiffersFromAnchor),
             "local_and_remote_differ_from_anchor" => Ok(Self::LocalAndRemoteDifferFromAnchor),
@@ -235,8 +323,13 @@ fn local_matches_anchor(
 
 #[cfg(test)]
 mod tests {
-    use super::{decide_file_action, PlannerDecision, PlannerReason};
-    use crate::state_db::{FileSyncViews, LocalFileStateRow, RemoteFileStateRow, SyncAnchorRow};
+    use super::{
+        decide_file_action, decide_local_only_file_action, PlannerDecision, PlannerReason,
+    };
+    use crate::state_db::{
+        ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow, RemoteFileStateRow,
+        SyncAnchorRow,
+    };
     use loon_types::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
 
     #[test]
@@ -281,6 +374,28 @@ mod tests {
         assert_eq!(
             planned.reason,
             PlannerReason::LocalAndRemoteDifferFromAnchor
+        );
+    }
+
+    #[test]
+    fn planner_marks_local_only_file_for_create_upload() {
+        let local_only = LocalOnlyFileStateRow {
+            client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            namespace_id: NamespaceId::from("ns-1"),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "draft.txt".to_owned(),
+            content_digest: Some("sha256:new-local-file".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_100_000,
+        };
+
+        let planned = decide_local_only_file_action(&local_only, 1_700_000_105_000);
+
+        assert_eq!(planned.decision, PlannerDecision::UploadLocalCreate);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::LocalOnlyFileWithoutRemoteIdentity
         );
     }
 }

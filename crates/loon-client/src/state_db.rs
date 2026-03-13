@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
     namespace_id TEXT NOT NULL,
@@ -74,6 +74,35 @@ CREATE TABLE conflicts_and_errors (
 );
 "#;
 
+const SCHEMA_V2_SQL: &str = r#"
+CREATE TABLE client_metadata (
+    key TEXT NOT NULL PRIMARY KEY,
+    value_integer INTEGER NOT NULL
+);
+
+INSERT INTO client_metadata (key, value_integer)
+VALUES ('next_local_file_id', 1);
+
+CREATE TABLE local_only_state (
+    client_file_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    parent_inode_id INTEGER,
+    display_name TEXT NOT NULL,
+    content_digest TEXT,
+    exists_on_disk INTEGER NOT NULL,
+    dirty INTEGER NOT NULL,
+    last_local_change_ms INTEGER NOT NULL
+);
+
+CREATE TABLE planned_local_only_actions (
+    client_file_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+"#;
+
 #[derive(Debug, Error)]
 pub enum StateDbError {
     #[error("SQLite error: {0}")]
@@ -84,6 +113,25 @@ pub enum StateDbError {
     IntegerOutOfRange { field: &'static str, value: i64 },
     #[error("value out of range for SQLite {field}: {value}")]
     UnsignedOutOfRange { field: &'static str, value: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientFileId(pub String);
+
+impl ClientFileId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for ClientFileId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +182,27 @@ pub struct FileSyncViews {
 pub struct PlannedActionRow {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
+    pub decision: String,
+    pub reason: String,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalOnlyFileStateRow {
+    pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+    pub content_digest: Option<String>,
+    pub exists_on_disk: bool,
+    pub dirty: bool,
+    pub last_local_change_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalOnlyPlannedActionRow {
+    pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
     pub decision: String,
     pub reason: String,
     pub created_at_ms: u64,
@@ -206,8 +275,31 @@ impl SqliteStateDb {
         load_planned_action(&self.conn, namespace_id, inode_id)
     }
 
+    pub fn allocate_local_file_id(
+        &mut self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ClientFileId, StateDbError> {
+        self.planner_transaction("allocate_local_file_id", |tx| {
+            tx.allocate_local_file_id(namespace_id)
+        })
+    }
+
+    pub fn load_local_only_file(
+        &self,
+        client_file_id: &ClientFileId,
+    ) -> Result<Option<LocalOnlyFileStateRow>, StateDbError> {
+        load_local_only_file(&self.conn, client_file_id)
+    }
+
+    pub fn load_planned_local_only_action(
+        &self,
+        client_file_id: &ClientFileId,
+    ) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
+        load_planned_local_only_action(&self.conn, client_file_id)
+    }
+
     fn apply_migrations(&mut self) -> Result<(), StateDbError> {
-        let current_version = self.schema_version()?;
+        let mut current_version = self.schema_version()?;
         if current_version > SCHEMA_VERSION {
             return Err(StateDbError::UnsupportedSchemaVersion(current_version));
         }
@@ -215,6 +307,14 @@ impl SqliteStateDb {
         if current_version == 0 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V1_SQL)?;
+            tx.pragma_update(None, "user_version", 1)?;
+            tx.commit()?;
+            current_version = 1;
+        }
+
+        if current_version == 1 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V2_SQL)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -224,6 +324,33 @@ impl SqliteStateDb {
 }
 
 impl PlannerTxn<'_> {
+    pub fn allocate_local_file_id(
+        &mut self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ClientFileId, StateDbError> {
+        let next_counter = self.tx.query_row(
+            "SELECT value_integer FROM client_metadata WHERE key = 'next_local_file_id'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let next_counter = from_sql_u64(next_counter, "next_local_file_id")?;
+
+        self.tx.execute(
+            "UPDATE client_metadata
+            SET value_integer = ?1
+            WHERE key = 'next_local_file_id'",
+            params![to_sql_u64(
+                next_counter.saturating_add(1),
+                "next_local_file_id"
+            )?],
+        )?;
+
+        Ok(ClientFileId::new(format!(
+            "tmp:{}:{next_counter:020}",
+            namespace_id.as_str()
+        )))
+    }
+
     pub fn upsert_remote_file(&mut self, row: &RemoteFileStateRow) -> Result<(), StateDbError> {
         self.tx.execute(
             "INSERT INTO remote_state (
@@ -326,6 +453,45 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    pub fn upsert_local_only_file(
+        &mut self,
+        row: &LocalOnlyFileStateRow,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "INSERT INTO local_only_state (
+                client_file_id,
+                namespace_id,
+                parent_inode_id,
+                display_name,
+                content_digest,
+                exists_on_disk,
+                dirty,
+                last_local_change_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(client_file_id) DO UPDATE SET
+                namespace_id = excluded.namespace_id,
+                parent_inode_id = excluded.parent_inode_id,
+                display_name = excluded.display_name,
+                content_digest = excluded.content_digest,
+                exists_on_disk = excluded.exists_on_disk,
+                dirty = excluded.dirty,
+                last_local_change_ms = excluded.last_local_change_ms",
+            params![
+                row.client_file_id.as_str(),
+                row.namespace_id.as_str(),
+                row.parent_inode_id
+                    .map(|inode_id| to_sql_u64(inode_id.0, "parent_inode_id"))
+                    .transpose()?,
+                &row.display_name,
+                row.content_digest.as_deref(),
+                row.exists_on_disk,
+                row.dirty,
+                to_sql_u64(row.last_local_change_ms, "last_local_change_ms")?,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn load_file_sync_views(
         &self,
         namespace_id: &NamespaceId,
@@ -338,6 +504,13 @@ impl PlannerTxn<'_> {
             local: load_local_file(&self.tx, namespace_id, inode_id)?,
             sync_anchor: load_sync_anchor(&self.tx, namespace_id, inode_id)?,
         })
+    }
+
+    pub fn load_local_only_file(
+        &self,
+        client_file_id: &ClientFileId,
+    ) -> Result<Option<LocalOnlyFileStateRow>, StateDbError> {
+        load_local_only_file(&self.tx, client_file_id)
     }
 
     pub fn upsert_planned_action(&mut self, row: &PlannedActionRow) -> Result<(), StateDbError> {
@@ -364,6 +537,34 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    pub fn upsert_planned_local_only_action(
+        &mut self,
+        row: &LocalOnlyPlannedActionRow,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "INSERT INTO planned_local_only_actions (
+                client_file_id,
+                namespace_id,
+                decision,
+                reason,
+                created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(client_file_id) DO UPDATE SET
+                namespace_id = excluded.namespace_id,
+                decision = excluded.decision,
+                reason = excluded.reason,
+                created_at_ms = excluded.created_at_ms",
+            params![
+                row.client_file_id.as_str(),
+                row.namespace_id.as_str(),
+                &row.decision,
+                &row.reason,
+                to_sql_u64(row.created_at_ms, "created_at_ms")?,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_planned_action(
         &mut self,
         namespace_id: &NamespaceId,
@@ -372,6 +573,17 @@ impl PlannerTxn<'_> {
         self.tx.execute(
             "DELETE FROM planned_actions WHERE namespace_id = ?1 AND inode_id = ?2",
             params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_planned_local_only_action(
+        &mut self,
+        client_file_id: &ClientFileId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM planned_local_only_actions WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
         )?;
         Ok(())
     }
@@ -566,6 +778,97 @@ fn load_planned_action(
     .transpose()
 }
 
+fn load_local_only_file(
+    conn: &Connection,
+    client_file_id: &ClientFileId,
+) -> Result<Option<LocalOnlyFileStateRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT
+                namespace_id,
+                parent_inode_id,
+                display_name,
+                content_digest,
+                exists_on_disk,
+                dirty,
+                last_local_change_ms
+            FROM local_only_state
+            WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(
+            namespace_id,
+            parent_inode_id,
+            display_name,
+            content_digest,
+            exists_on_disk,
+            dirty,
+            last_local_change_ms,
+        )| {
+            Ok(LocalOnlyFileStateRow {
+                client_file_id: client_file_id.clone(),
+                namespace_id: NamespaceId::from(namespace_id),
+                parent_inode_id: parent_inode_id
+                    .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
+                    .transpose()?,
+                display_name,
+                content_digest,
+                exists_on_disk,
+                dirty,
+                last_local_change_ms: from_sql_u64(last_local_change_ms, "last_local_change_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn load_planned_local_only_action(
+    conn: &Connection,
+    client_file_id: &ClientFileId,
+) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT namespace_id, decision, reason, created_at_ms
+            FROM planned_local_only_actions
+            WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(|(namespace_id, decision, reason, created_at_ms)| {
+        Ok(LocalOnlyPlannedActionRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: NamespaceId::from(namespace_id),
+            decision,
+            reason,
+            created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+        })
+    })
+    .transpose()
+}
+
 fn to_sql_u64(value: u64, field: &'static str) -> Result<i64, StateDbError> {
     i64::try_from(value).map_err(|_| StateDbError::UnsignedOutOfRange { field, value })
 }
@@ -577,13 +880,13 @@ fn from_sql_u64(value: i64, field: &'static str) -> Result<u64, StateDbError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileSyncViews, LocalFileStateRow, RemoteFileStateRow, SqliteStateDb, StateDbError,
-        SyncAnchorRow, SCHEMA_VERSION,
+        ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow, RemoteFileStateRow,
+        SqliteStateDb, StateDbError, SyncAnchorRow, SCHEMA_VERSION,
     };
     use loon_types::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
 
     #[test]
-    fn sqlite_state_db_applies_schema_v1() {
+    fn sqlite_state_db_applies_schema_v2() {
         let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
         assert_eq!(
@@ -596,6 +899,9 @@ mod tests {
             "local_state",
             "sync_anchor",
             "planned_actions",
+            "client_metadata",
+            "local_only_state",
+            "planned_local_only_actions",
             "transfer_ledger",
             "conflicts_and_errors",
         ] {
@@ -660,6 +966,38 @@ mod tests {
         assert_eq!(views.sync_anchor, Some(sample_anchor()));
     }
 
+    #[test]
+    fn allocate_local_file_ids_monotonically() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let first = db
+            .allocate_local_file_id(&NamespaceId::from("ns-1"))
+            .expect("allocate first temp id");
+        let second = db
+            .allocate_local_file_id(&NamespaceId::from("ns-1"))
+            .expect("allocate second temp id");
+
+        assert_eq!(first, ClientFileId::from("tmp:ns-1:00000000000000000001"));
+        assert_eq!(second, ClientFileId::from("tmp:ns-1:00000000000000000002"));
+    }
+
+    #[test]
+    fn planner_transaction_persists_local_only_state() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let local_only = sample_local_only();
+
+        db.planner_transaction("seed-local-only", |tx| {
+            tx.upsert_local_only_file(&local_only)?;
+            Ok(())
+        })
+        .expect("seed local-only state");
+
+        assert_eq!(
+            db.load_local_only_file(&local_only.client_file_id)
+                .expect("load local-only state"),
+            Some(local_only)
+        );
+    }
+
     fn sample_remote() -> RemoteFileStateRow {
         RemoteFileStateRow {
             namespace_id: NamespaceId::from("ns-1"),
@@ -695,6 +1033,19 @@ mod tests {
             content_digest: Some("sha256:anchor-17".to_owned()),
             parent_inode_id: Some(InodeId(2)),
             display_name: "report.txt".to_owned(),
+        }
+    }
+
+    fn sample_local_only() -> LocalOnlyFileStateRow {
+        LocalOnlyFileStateRow {
+            client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            namespace_id: NamespaceId::from("ns-1"),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "draft.txt".to_owned(),
+            content_digest: Some("sha256:new-local-file".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_100_000,
         }
     }
 }

@@ -82,6 +82,46 @@ Failure modes prevented:
 - the client forgetting whether two observed paths refer to the same canonical file
 - local restart logic inventing sync identity from a mutable path string
 
+## Schema v2: temporary local identities
+
+The next schema version adds durable identity for local-only files that do not yet have a remote inode.
+
+It adds:
+
+- `client_metadata`: small durable counters and schema-owned allocator state
+- `local_only_state`: durable local observations for files that exist only on the client so far
+- `planned_local_only_actions`: durable planner output for those temporary local identities
+
+The durable key for one local-only file is:
+
+```text
+client_file_id
+```
+
+Rules:
+
+- `client_file_id` is generated inside SQLite, never guessed from a path
+- the id must be stable across restart until the file is bound to a real remote inode
+- `client_file_id` does not replace canonical inode identity; it is a temporary local bridge until authoritative remote identity exists
+- the allocator must be monotonic so later debugging can tell whether two client-local ids were created in order
+
+The first temporary id format is:
+
+```text
+tmp:{namespace_id}:{counter:020}
+```
+
+Why this rule exists:
+
+- local-only creates still need durable identity before the server assigns an inode
+- the client should not key unsynced files only by mutable paths
+
+Failure modes prevented:
+
+- restart losing track of which local-only file a queued upload refers to
+- rename-before-upload causing the client to treat one unsynced file as two separate creations
+- local planner output pointing at a path string that no longer identifies the same file
+
 ## Planner transaction boundary
 
 One planner pass for one mirrored file must happen inside one SQLite transaction.
@@ -114,6 +154,17 @@ The first deterministic planner rule compares the three durable views for one kn
 - if both still match the sync anchor, clear any pending action and return `no_op`
 
 This first rule is intentionally narrow. It is enough to prove that restart-safe planner state can drive one hot-file case before the client grows broader sync semantics.
+
+## First local-only create rule
+
+For one local-only file with no remote inode yet:
+
+- if `local_only_state` says the file exists and is dirty, plan `upload_local_create`
+- if it no longer exists on disk, clear any planned local-only action and return `no_op`
+
+The planned row must reference `client_file_id`, not a guessed path identity.
+
+This rule is intentionally small. It proves that local-only files can survive restart with a durable temporary identity before the client learns a canonical remote inode.
 
 ## Local data model inspiration
 
