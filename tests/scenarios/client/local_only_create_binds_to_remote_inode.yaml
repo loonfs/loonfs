@@ -3,6 +3,7 @@ initial:
   local_only_state:
     client_file_id: tmp:ns-1:00000000000000000001
     namespace_id: ns-1
+    inode_kind: file
     parent_inode_id: 2
     display_name: draft.txt
     content_digest: sha256:new-local-file
@@ -21,6 +22,7 @@ actions:
       remote_state:
         namespace_id: ns-1
         inode_id: 901
+        inode_kind: file
         observed_seq: 500
         revision_no: 1
         content_digest: sha256:new-local-file
@@ -35,6 +37,7 @@ expect:
   remote_state:
     namespace_id: ns-1
     inode_id: 901
+    inode_kind: file
     observed_seq: 500
     revision_no: 1
     content_digest: sha256:new-local-file
@@ -44,6 +47,7 @@ expect:
   local_state:
     namespace_id: ns-1
     inode_id: 901
+    inode_kind: file
     content_digest: sha256:new-local-file
     parent_inode_id: 2
     display_name: draft.txt
@@ -53,6 +57,7 @@ expect:
   sync_anchor:
     namespace_id: ns-1
     inode_id: 901
+    inode_kind: file
     synced_seq: 500
     revision_no: 1
     content_digest: sha256:new-local-file

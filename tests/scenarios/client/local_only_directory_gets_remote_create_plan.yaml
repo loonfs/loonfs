@@ -1,0 +1,22 @@
+name: local_only_directory_gets_remote_create_plan
+initial:
+  local_only_state:
+    client_file_id: tmp:ns-1:00000000000000000002
+    namespace_id: ns-1
+    inode_kind: dir
+    parent_inode_id: 2
+    display_name: drafts
+    content_digest:
+    exists_on_disk: true
+    dirty: true
+    last_local_change_ms: 1700000200000
+actions:
+  - planner_tick_local_only:
+      client_file_id: tmp:ns-1:00000000000000000002
+      now_ms: 1700000205000
+expect:
+  planned_local_only_action:
+    client_file_id: tmp:ns-1:00000000000000000002
+    namespace_id: ns-1
+    decision: create_remote_dir
+    reason: local_only_directory_without_remote_identity

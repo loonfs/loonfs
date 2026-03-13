@@ -3,6 +3,7 @@ initial:
   local_only_state:
     client_file_id: tmp:ns-1:00000000000000000001
     namespace_id: ns-1
+    inode_kind: file
     parent_inode_id: 2
     display_name: draft.txt
     content_digest: sha256:new-local-file

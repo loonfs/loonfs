@@ -1,10 +1,10 @@
-use loon_types::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
+use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
     namespace_id TEXT NOT NULL,
@@ -103,6 +103,20 @@ CREATE TABLE planned_local_only_actions (
 );
 "#;
 
+const SCHEMA_V3_SQL: &str = r#"
+ALTER TABLE remote_state
+ADD COLUMN inode_kind TEXT NOT NULL DEFAULT 'file';
+
+ALTER TABLE local_state
+ADD COLUMN inode_kind TEXT NOT NULL DEFAULT 'file';
+
+ALTER TABLE sync_anchor
+ADD COLUMN inode_kind TEXT NOT NULL DEFAULT 'file';
+
+ALTER TABLE local_only_state
+ADD COLUMN inode_kind TEXT NOT NULL DEFAULT 'file';
+"#;
+
 #[derive(Debug, Error)]
 pub enum StateDbError {
     #[error("SQLite error: {0}")]
@@ -113,8 +127,20 @@ pub enum StateDbError {
     IntegerOutOfRange { field: &'static str, value: i64 },
     #[error("value out of range for SQLite {field}: {value}")]
     UnsignedOutOfRange { field: &'static str, value: u64 },
+    #[error("unknown inode kind `{0}` in SQLite row")]
+    UnknownInodeKind(String),
+    #[error("unsupported local-only inode kind `{0:?}`")]
+    UnsupportedLocalOnlyInodeKind(InodeKind),
     #[error("local_only_file_missing: `{client_file_id}`")]
     LocalOnlyFileMissing { client_file_id: String },
+    #[error(
+        "bind_kind_mismatch: `{client_file_id}` local kind `{local_kind}` != remote kind `{remote_kind}`"
+    )]
+    BindKindMismatch {
+        client_file_id: String,
+        local_kind: String,
+        remote_kind: String,
+    },
     #[error(
         "bind_namespace_mismatch: `{client_file_id}` local namespace `{local_namespace_id}` != remote namespace `{remote_namespace_id}`"
     )]
@@ -164,6 +190,7 @@ impl From<&str> for ClientFileId {
 pub struct RemoteFileStateRow {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
     pub observed_seq: ChangeSeq,
     pub revision_no: RevisionNo,
     pub content_digest: Option<String>,
@@ -176,6 +203,7 @@ pub struct RemoteFileStateRow {
 pub struct LocalFileStateRow {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
     pub content_digest: Option<String>,
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
@@ -188,6 +216,7 @@ pub struct LocalFileStateRow {
 pub struct SyncAnchorRow {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
     pub synced_seq: ChangeSeq,
     pub revision_no: RevisionNo,
     pub content_digest: Option<String>,
@@ -217,6 +246,7 @@ pub struct PlannedActionRow {
 pub struct LocalOnlyFileStateRow {
     pub client_file_id: ClientFileId,
     pub namespace_id: NamespaceId,
+    pub inode_kind: InodeKind,
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
     pub content_digest: Option<String>,
@@ -336,8 +366,16 @@ impl SqliteStateDb {
         client_file_id: &ClientFileId,
         remote: &RemoteFileStateRow,
     ) -> Result<BoundLocalOnlyFile, StateDbError> {
-        self.planner_transaction("bind_local_only_file_to_remote", |tx| {
-            tx.bind_local_only_file_to_remote(client_file_id, remote)
+        self.bind_local_only_inode_to_remote(client_file_id, remote)
+    }
+
+    pub fn bind_local_only_inode_to_remote(
+        &mut self,
+        client_file_id: &ClientFileId,
+        remote: &RemoteFileStateRow,
+    ) -> Result<BoundLocalOnlyFile, StateDbError> {
+        self.planner_transaction("bind_local_only_inode_to_remote", |tx| {
+            tx.bind_local_only_inode_to_remote(client_file_id, remote)
         })
     }
 
@@ -358,6 +396,14 @@ impl SqliteStateDb {
         if current_version == 1 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V2_SQL)?;
+            tx.pragma_update(None, "user_version", 2)?;
+            tx.commit()?;
+            current_version = 2;
+        }
+
+        if current_version == 2 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V3_SQL)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -399,14 +445,16 @@ impl PlannerTxn<'_> {
             "INSERT INTO remote_state (
                 namespace_id,
                 inode_id,
+                inode_kind,
                 observed_seq,
                 revision_no,
                 content_digest,
                 parent_inode_id,
                 display_name,
                 is_deleted
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(namespace_id, inode_id) DO UPDATE SET
+                inode_kind = excluded.inode_kind,
                 observed_seq = excluded.observed_seq,
                 revision_no = excluded.revision_no,
                 content_digest = excluded.content_digest,
@@ -416,6 +464,7 @@ impl PlannerTxn<'_> {
             params![
                 row.namespace_id.as_str(),
                 to_sql_u64(row.inode_id.0, "inode_id")?,
+                inode_kind_as_str(&row.inode_kind),
                 to_sql_u64(row.observed_seq.0, "observed_seq")?,
                 to_sql_u64(row.revision_no.0, "revision_no")?,
                 row.content_digest.as_deref(),
@@ -434,14 +483,16 @@ impl PlannerTxn<'_> {
             "INSERT INTO local_state (
                 namespace_id,
                 inode_id,
+                inode_kind,
                 content_digest,
                 parent_inode_id,
                 display_name,
                 exists_on_disk,
                 dirty,
                 last_local_change_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(namespace_id, inode_id) DO UPDATE SET
+                inode_kind = excluded.inode_kind,
                 content_digest = excluded.content_digest,
                 parent_inode_id = excluded.parent_inode_id,
                 display_name = excluded.display_name,
@@ -451,6 +502,7 @@ impl PlannerTxn<'_> {
             params![
                 row.namespace_id.as_str(),
                 to_sql_u64(row.inode_id.0, "inode_id")?,
+                inode_kind_as_str(&row.inode_kind),
                 row.content_digest.as_deref(),
                 row.parent_inode_id
                     .map(|inode_id| to_sql_u64(inode_id.0, "parent_inode_id"))
@@ -469,13 +521,15 @@ impl PlannerTxn<'_> {
             "INSERT INTO sync_anchor (
                 namespace_id,
                 inode_id,
+                inode_kind,
                 synced_seq,
                 revision_no,
                 content_digest,
                 parent_inode_id,
                 display_name
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(namespace_id, inode_id) DO UPDATE SET
+                inode_kind = excluded.inode_kind,
                 synced_seq = excluded.synced_seq,
                 revision_no = excluded.revision_no,
                 content_digest = excluded.content_digest,
@@ -484,6 +538,7 @@ impl PlannerTxn<'_> {
             params![
                 row.namespace_id.as_str(),
                 to_sql_u64(row.inode_id.0, "inode_id")?,
+                inode_kind_as_str(&row.inode_kind),
                 to_sql_u64(row.synced_seq.0, "synced_seq")?,
                 to_sql_u64(row.revision_no.0, "revision_no")?,
                 row.content_digest.as_deref(),
@@ -504,15 +559,17 @@ impl PlannerTxn<'_> {
             "INSERT INTO local_only_state (
                 client_file_id,
                 namespace_id,
+                inode_kind,
                 parent_inode_id,
                 display_name,
                 content_digest,
                 exists_on_disk,
                 dirty,
                 last_local_change_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(client_file_id) DO UPDATE SET
                 namespace_id = excluded.namespace_id,
+                inode_kind = excluded.inode_kind,
                 parent_inode_id = excluded.parent_inode_id,
                 display_name = excluded.display_name,
                 content_digest = excluded.content_digest,
@@ -522,6 +579,7 @@ impl PlannerTxn<'_> {
             params![
                 row.client_file_id.as_str(),
                 row.namespace_id.as_str(),
+                inode_kind_as_str(&row.inode_kind),
                 row.parent_inode_id
                     .map(|inode_id| to_sql_u64(inode_id.0, "parent_inode_id"))
                     .transpose()?,
@@ -535,7 +593,7 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
-    pub fn bind_local_only_file_to_remote(
+    pub fn bind_local_only_inode_to_remote(
         &mut self,
         client_file_id: &ClientFileId,
         remote: &RemoteFileStateRow,
@@ -551,6 +609,14 @@ impl PlannerTxn<'_> {
                 client_file_id: client_file_id.as_str().to_owned(),
                 local_namespace_id: local_only.namespace_id.as_str().to_owned(),
                 remote_namespace_id: remote.namespace_id.as_str().to_owned(),
+            });
+        }
+
+        if local_only.inode_kind != remote.inode_kind {
+            return Err(StateDbError::BindKindMismatch {
+                client_file_id: client_file_id.as_str().to_owned(),
+                local_kind: inode_kind_as_str(&local_only.inode_kind).to_owned(),
+                remote_kind: inode_kind_as_str(&remote.inode_kind).to_owned(),
             });
         }
 
@@ -589,6 +655,7 @@ impl PlannerTxn<'_> {
         let local_row = LocalFileStateRow {
             namespace_id: remote.namespace_id.clone(),
             inode_id: remote.inode_id,
+            inode_kind: local_only.inode_kind.clone(),
             content_digest: local_only.content_digest.clone(),
             parent_inode_id: local_only.parent_inode_id,
             display_name: local_only.display_name.clone(),
@@ -599,6 +666,7 @@ impl PlannerTxn<'_> {
         let anchor_row = SyncAnchorRow {
             namespace_id: remote.namespace_id.clone(),
             inode_id: remote.inode_id,
+            inode_kind: remote.inode_kind.clone(),
             synced_seq: remote.observed_seq,
             revision_no: remote.revision_no,
             content_digest: remote.content_digest.clone(),
@@ -741,6 +809,7 @@ fn load_remote_file(
     let raw = conn
         .query_row(
             "SELECT
+            inode_kind,
             observed_seq,
             revision_no,
             content_digest,
@@ -752,22 +821,32 @@ fn load_remote_file(
             params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
             |row| {
                 Ok((
-                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, bool>(5)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, bool>(6)?,
                 ))
             },
         )
         .optional()?;
 
     raw.map(
-        |(observed_seq, revision_no, content_digest, parent_inode_id, display_name, is_deleted)| {
+        |(
+            inode_kind,
+            observed_seq,
+            revision_no,
+            content_digest,
+            parent_inode_id,
+            display_name,
+            is_deleted,
+        )| {
             Ok(RemoteFileStateRow {
                 namespace_id: namespace_id.clone(),
                 inode_id,
+                inode_kind: inode_kind_from_str(&inode_kind)?,
                 observed_seq: ChangeSeq(from_sql_u64(observed_seq, "observed_seq")?),
                 revision_no: RevisionNo(from_sql_u64(revision_no, "revision_no")?),
                 content_digest,
@@ -790,6 +869,7 @@ fn load_local_file(
     let raw = conn
         .query_row(
             "SELECT
+            inode_kind,
             content_digest,
             parent_inode_id,
             display_name,
@@ -801,12 +881,13 @@ fn load_local_file(
             params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
             |row| {
                 Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, bool>(3)?,
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
                     row.get::<_, bool>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             },
         )
@@ -814,6 +895,7 @@ fn load_local_file(
 
     raw.map(
         |(
+            inode_kind,
             content_digest,
             parent_inode_id,
             display_name,
@@ -824,6 +906,7 @@ fn load_local_file(
             Ok(LocalFileStateRow {
                 namespace_id: namespace_id.clone(),
                 inode_id,
+                inode_kind: inode_kind_from_str(&inode_kind)?,
                 content_digest,
                 parent_inode_id: parent_inode_id
                     .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
@@ -846,6 +929,7 @@ fn load_sync_anchor(
     let raw = conn
         .query_row(
             "SELECT
+            inode_kind,
             synced_seq,
             revision_no,
             content_digest,
@@ -856,21 +940,23 @@ fn load_sync_anchor(
             params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
             |row| {
                 Ok((
-                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             },
         )
         .optional()?;
 
     raw.map(
-        |(synced_seq, revision_no, content_digest, parent_inode_id, display_name)| {
+        |(inode_kind, synced_seq, revision_no, content_digest, parent_inode_id, display_name)| {
             Ok(SyncAnchorRow {
                 namespace_id: namespace_id.clone(),
                 inode_id,
+                inode_kind: inode_kind_from_str(&inode_kind)?,
                 synced_seq: ChangeSeq(from_sql_u64(synced_seq, "synced_seq")?),
                 revision_no: RevisionNo(from_sql_u64(revision_no, "revision_no")?),
                 content_digest,
@@ -925,6 +1011,7 @@ fn load_local_only_file(
         .query_row(
             "SELECT
                 namespace_id,
+                inode_kind,
                 parent_inode_id,
                 display_name,
                 content_digest,
@@ -937,12 +1024,13 @@ fn load_local_only_file(
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, bool>(4)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                     row.get::<_, bool>(5)?,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, bool>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             },
         )
@@ -951,6 +1039,7 @@ fn load_local_only_file(
     raw.map(
         |(
             namespace_id,
+            inode_kind,
             parent_inode_id,
             display_name,
             content_digest,
@@ -961,6 +1050,7 @@ fn load_local_only_file(
             Ok(LocalOnlyFileStateRow {
                 client_file_id: client_file_id.clone(),
                 namespace_id: NamespaceId::from(namespace_id),
+                inode_kind: inode_kind_from_str(&inode_kind)?,
                 parent_inode_id: parent_inode_id
                     .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
                     .transpose()?,
@@ -1008,6 +1098,25 @@ fn load_planned_local_only_action(
     .transpose()
 }
 
+fn inode_kind_as_str(kind: &InodeKind) -> &'static str {
+    match kind {
+        InodeKind::File => "file",
+        InodeKind::Dir => "dir",
+        InodeKind::Symlink => "symlink",
+        InodeKind::Mount => "mount",
+    }
+}
+
+fn inode_kind_from_str(value: &str) -> Result<InodeKind, StateDbError> {
+    match value {
+        "file" => Ok(InodeKind::File),
+        "dir" => Ok(InodeKind::Dir),
+        "symlink" => Ok(InodeKind::Symlink),
+        "mount" => Ok(InodeKind::Mount),
+        other => Err(StateDbError::UnknownInodeKind(other.to_owned())),
+    }
+}
+
 fn ensure_bind_match(
     client_file_id: &ClientFileId,
     field: &'static str,
@@ -1041,10 +1150,10 @@ mod tests {
         LocalOnlyPlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError, SyncAnchorRow,
         SCHEMA_VERSION,
     };
-    use loon_types::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
+    use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 
     #[test]
-    fn sqlite_state_db_applies_schema_v2() {
+    fn sqlite_state_db_applies_schema_v3() {
         let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
         assert_eq!(
@@ -1197,6 +1306,7 @@ mod tests {
                 local: Some(LocalFileStateRow {
                     namespace_id: NamespaceId::from("ns-1"),
                     inode_id: InodeId(901),
+                    inode_kind: InodeKind::File,
                     content_digest: Some("sha256:new-local-file".to_owned()),
                     parent_inode_id: Some(InodeId(2)),
                     display_name: "draft.txt".to_owned(),
@@ -1207,6 +1317,7 @@ mod tests {
                 sync_anchor: Some(SyncAnchorRow {
                     namespace_id: NamespaceId::from("ns-1"),
                     inode_id: InodeId(901),
+                    inode_kind: InodeKind::File,
                     synced_seq: ChangeSeq(500),
                     revision_no: RevisionNo(1),
                     content_digest: Some("sha256:new-local-file".to_owned()),
@@ -1273,6 +1384,7 @@ mod tests {
         RemoteFileStateRow {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
             observed_seq: ChangeSeq(420),
             revision_no: RevisionNo(18),
             content_digest: Some("sha256:remote-18".to_owned()),
@@ -1286,6 +1398,7 @@ mod tests {
         LocalFileStateRow {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
             content_digest: Some("sha256:local-edit".to_owned()),
             parent_inode_id: Some(InodeId(2)),
             display_name: "report.txt".to_owned(),
@@ -1299,6 +1412,7 @@ mod tests {
         SyncAnchorRow {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
             synced_seq: ChangeSeq(419),
             revision_no: RevisionNo(17),
             content_digest: Some("sha256:anchor-17".to_owned()),
@@ -1311,6 +1425,7 @@ mod tests {
         LocalOnlyFileStateRow {
             client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
             namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::File,
             parent_inode_id: Some(InodeId(2)),
             display_name: "draft.txt".to_owned(),
             content_digest: Some("sha256:new-local-file".to_owned()),
@@ -1324,6 +1439,7 @@ mod tests {
         RemoteFileStateRow {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(901),
+            inode_kind: InodeKind::File,
             observed_seq: ChangeSeq(500),
             revision_no: RevisionNo(1),
             content_digest: Some("sha256:new-local-file".to_owned()),

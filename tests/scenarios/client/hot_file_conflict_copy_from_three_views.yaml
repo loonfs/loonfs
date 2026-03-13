@@ -3,6 +3,7 @@ initial:
   remote_state:
     namespace_id: ns-1
     inode_id: 42
+    inode_kind: file
     observed_seq: 420
     revision_no: 18
     content_digest: sha256:remote-18
@@ -12,6 +13,7 @@ initial:
   local_state:
     namespace_id: ns-1
     inode_id: 42
+    inode_kind: file
     content_digest: sha256:local-edit
     parent_inode_id: 2
     display_name: report.txt
@@ -21,6 +23,7 @@ initial:
   sync_anchor:
     namespace_id: ns-1
     inode_id: 42
+    inode_kind: file
     synced_seq: 419
     revision_no: 17
     content_digest: sha256:anchor-17

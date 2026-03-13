@@ -2,13 +2,14 @@ use crate::state_db::{
     ClientFileId, FileSyncViews, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
     PlannedActionRow, SqliteStateDb, StateDbError, SyncAnchorRow,
 };
-use loon_types::{InodeId, NamespaceId};
+use loon_types::{InodeId, InodeKind, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlannerDecision {
+    CreateRemoteDir,
     UploadLocalCreate,
     UploadLocalEdit,
     DownloadRemoteEdit,
@@ -21,6 +22,7 @@ pub enum PlannerDecision {
 pub enum PlannerReason {
     AlreadyConverged,
     NoObservedState,
+    LocalOnlyDirectoryWithoutRemoteIdentity,
     LocalOnlyFileWithoutRemoteIdentity,
     LocalDiffersFromAnchor,
     RemoteDiffersFromAnchor,
@@ -84,11 +86,19 @@ pub fn plan_local_only_file(
     client_file_id: &ClientFileId,
     now_ms: u64,
 ) -> Result<PlannedLocalOnlyActionRecord, PlannerError> {
-    db.planner_transaction("plan_local_only_file", |tx| {
+    plan_local_only_inode(db, client_file_id, now_ms)
+}
+
+pub fn plan_local_only_inode(
+    db: &mut SqliteStateDb,
+    client_file_id: &ClientFileId,
+    now_ms: u64,
+) -> Result<PlannedLocalOnlyActionRecord, PlannerError> {
+    db.planner_transaction("plan_local_only_inode", |tx| {
         let local_only = tx
             .load_local_only_file(client_file_id)?
             .ok_or_else(|| StateDbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-        let action = decide_local_only_file_action(&local_only, now_ms);
+        let action = decide_local_only_inode_action(&local_only, now_ms)?;
 
         if action.decision == PlannerDecision::NoOp {
             tx.delete_planned_local_only_action(client_file_id)?;
@@ -142,6 +152,7 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
         (Some(remote), Some(local), None) => {
             if local.exists_on_disk
                 && !local.dirty
+                && local.inode_kind == remote.inode_kind
                 && local.content_digest == remote.content_digest
                 && local.parent_inode_id == remote.parent_inode_id
                 && local.display_name == remote.display_name
@@ -170,23 +181,47 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
 pub fn decide_local_only_file_action(
     local_only: &LocalOnlyFileStateRow,
     now_ms: u64,
-) -> PlannedLocalOnlyActionRecord {
-    let (decision, reason) = if local_only.exists_on_disk && local_only.dirty {
-        (
-            PlannerDecision::UploadLocalCreate,
-            PlannerReason::LocalOnlyFileWithoutRemoteIdentity,
-        )
-    } else {
+) -> Result<PlannedLocalOnlyActionRecord, StateDbError> {
+    decide_local_only_inode_action(local_only, now_ms)
+}
+
+pub fn decide_local_only_inode_action(
+    local_only: &LocalOnlyFileStateRow,
+    now_ms: u64,
+) -> Result<PlannedLocalOnlyActionRecord, StateDbError> {
+    let (decision, reason) = if !local_only.exists_on_disk {
         (PlannerDecision::NoOp, PlannerReason::NoObservedState)
+    } else {
+        match local_only.inode_kind {
+            InodeKind::File => {
+                if local_only.dirty {
+                    (
+                        PlannerDecision::UploadLocalCreate,
+                        PlannerReason::LocalOnlyFileWithoutRemoteIdentity,
+                    )
+                } else {
+                    (PlannerDecision::NoOp, PlannerReason::NoObservedState)
+                }
+            }
+            InodeKind::Dir => (
+                PlannerDecision::CreateRemoteDir,
+                PlannerReason::LocalOnlyDirectoryWithoutRemoteIdentity,
+            ),
+            InodeKind::Symlink | InodeKind::Mount => {
+                return Err(StateDbError::UnsupportedLocalOnlyInodeKind(
+                    local_only.inode_kind.clone(),
+                ))
+            }
+        }
     };
 
-    PlannedLocalOnlyActionRecord {
+    Ok(PlannedLocalOnlyActionRecord {
         client_file_id: local_only.client_file_id.clone(),
         namespace_id: local_only.namespace_id.clone(),
         decision,
         reason,
         created_at_ms: now_ms,
-    }
+    })
 }
 
 impl PlannedActionRecord {
@@ -244,6 +279,7 @@ impl TryFrom<LocalOnlyPlannedActionRow> for PlannedLocalOnlyActionRecord {
 impl PlannerDecision {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::CreateRemoteDir => "create_remote_dir",
             Self::UploadLocalCreate => "upload_local_create",
             Self::UploadLocalEdit => "upload_local_edit",
             Self::DownloadRemoteEdit => "download_remote_edit",
@@ -254,6 +290,7 @@ impl PlannerDecision {
 
     fn from_str(value: &str) -> Result<Self, PlannerError> {
         match value {
+            "create_remote_dir" => Ok(Self::CreateRemoteDir),
             "upload_local_create" => Ok(Self::UploadLocalCreate),
             "upload_local_edit" => Ok(Self::UploadLocalEdit),
             "download_remote_edit" => Ok(Self::DownloadRemoteEdit),
@@ -269,6 +306,9 @@ impl PlannerReason {
         match self {
             Self::AlreadyConverged => "already_converged",
             Self::NoObservedState => "no_observed_state",
+            Self::LocalOnlyDirectoryWithoutRemoteIdentity => {
+                "local_only_directory_without_remote_identity"
+            }
             Self::LocalOnlyFileWithoutRemoteIdentity => "local_only_file_without_remote_identity",
             Self::LocalDiffersFromAnchor => "local_differs_from_anchor",
             Self::RemoteDiffersFromAnchor => "remote_differs_from_anchor",
@@ -283,6 +323,9 @@ impl PlannerReason {
         match value {
             "already_converged" => Ok(Self::AlreadyConverged),
             "no_observed_state" => Ok(Self::NoObservedState),
+            "local_only_directory_without_remote_identity" => {
+                Ok(Self::LocalOnlyDirectoryWithoutRemoteIdentity)
+            }
             "local_only_file_without_remote_identity" => {
                 Ok(Self::LocalOnlyFileWithoutRemoteIdentity)
             }
@@ -304,6 +347,7 @@ fn remote_matches_anchor(
     anchor: &SyncAnchorRow,
 ) -> bool {
     !remote.is_deleted
+        && remote.inode_kind == anchor.inode_kind
         && remote.revision_no == anchor.revision_no
         && remote.content_digest == anchor.content_digest
         && remote.parent_inode_id == anchor.parent_inode_id
@@ -316,6 +360,7 @@ fn local_matches_anchor(
 ) -> bool {
     local.exists_on_disk
         && !local.dirty
+        && local.inode_kind == anchor.inode_kind
         && local.content_digest == anchor.content_digest
         && local.parent_inode_id == anchor.parent_inode_id
         && local.display_name == anchor.display_name
@@ -330,7 +375,7 @@ mod tests {
         ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow, RemoteFileStateRow,
         SyncAnchorRow,
     };
-    use loon_types::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
+    use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 
     #[test]
     fn planner_prefers_conflict_copy_when_local_and_remote_both_diverge() {
@@ -340,6 +385,7 @@ mod tests {
             remote: Some(RemoteFileStateRow {
                 namespace_id: NamespaceId::from("ns-1"),
                 inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
                 observed_seq: ChangeSeq(420),
                 revision_no: RevisionNo(18),
                 content_digest: Some("sha256:remote-18".to_owned()),
@@ -350,6 +396,7 @@ mod tests {
             local: Some(LocalFileStateRow {
                 namespace_id: NamespaceId::from("ns-1"),
                 inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
                 content_digest: Some("sha256:local-edit".to_owned()),
                 parent_inode_id: Some(InodeId(2)),
                 display_name: "report.txt".to_owned(),
@@ -360,6 +407,7 @@ mod tests {
             sync_anchor: Some(SyncAnchorRow {
                 namespace_id: NamespaceId::from("ns-1"),
                 inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
                 synced_seq: ChangeSeq(419),
                 revision_no: RevisionNo(17),
                 content_digest: Some("sha256:anchor-17".to_owned()),
@@ -382,6 +430,7 @@ mod tests {
         let local_only = LocalOnlyFileStateRow {
             client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
             namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::File,
             parent_inode_id: Some(InodeId(2)),
             display_name: "draft.txt".to_owned(),
             content_digest: Some("sha256:new-local-file".to_owned()),
@@ -390,12 +439,37 @@ mod tests {
             last_local_change_ms: 1_700_000_100_000,
         };
 
-        let planned = decide_local_only_file_action(&local_only, 1_700_000_105_000);
+        let planned =
+            decide_local_only_file_action(&local_only, 1_700_000_105_000).expect("plan file");
 
         assert_eq!(planned.decision, PlannerDecision::UploadLocalCreate);
         assert_eq!(
             planned.reason,
             PlannerReason::LocalOnlyFileWithoutRemoteIdentity
+        );
+    }
+
+    #[test]
+    fn planner_marks_local_only_directory_for_remote_create() {
+        let local_only = LocalOnlyFileStateRow {
+            client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000002"),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::Dir,
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "drafts".to_owned(),
+            content_digest: None,
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_200_000,
+        };
+
+        let planned =
+            decide_local_only_file_action(&local_only, 1_700_000_205_000).expect("plan directory");
+
+        assert_eq!(planned.decision, PlannerDecision::CreateRemoteDir);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::LocalOnlyDirectoryWithoutRemoteIdentity
         );
     }
 }

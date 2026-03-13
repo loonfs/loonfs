@@ -122,6 +122,31 @@ Failure modes prevented:
 - rename-before-upload causing the client to treat one unsynced file as two separate creations
 - local planner output pointing at a path string that no longer identifies the same file
 
+## Schema v3: kind-aware local truth
+
+The next schema version adds explicit `inode_kind` to the durable client views that already exist:
+
+- `remote_state`
+- `local_state`
+- `sync_anchor`
+- `local_only_state`
+
+Rules:
+
+- `inode_kind` must use the same canonical values as namespace metadata: `file`, `dir`, `symlink`, `mount`
+- planner decisions must not infer directory-vs-file from `content_digest = null`
+- migration from the earlier client-only schema may default existing rows to `file`, because all v1/v2 client fixtures only modeled files
+
+Why this rule exists:
+
+- an empty file and a directory are different sync behaviors, even when both have no content digest
+- later local-only bind and planner logic must preserve inode kind when moving from temporary identity to canonical inode identity
+
+Failure modes prevented:
+
+- treating an empty file like a directory create
+- binding a temporary directory identity into file-keyed planner state
+
 ## Planner transaction boundary
 
 One planner pass for one mirrored file must happen inside one SQLite transaction.
@@ -166,6 +191,24 @@ The planned row must reference `client_file_id`, not a guessed path identity.
 
 This rule is intentionally small. It proves that local-only files can survive restart with a durable temporary identity before the client learns a canonical remote inode.
 
+## First local-only directory create rule
+
+For one local-only directory with no remote inode yet:
+
+- if `local_only_state.inode_kind = dir` and `exists_on_disk = true`, plan `create_remote_dir`
+- if it no longer exists on disk, clear any planned local-only action and return `no_op`
+
+The planned row must still reference `client_file_id`, not a guessed path identity.
+
+Why this rule exists:
+
+- directory creates need restart-safe durable identity too, even though they do not upload content blocks
+
+Failure modes prevented:
+
+- creating the same local-only directory twice because restart forgot the temporary identity
+- treating a directory create like a file upload just because both are unsynced local-only items
+
 ## First local-only bind rule
 
 After a local-only create is successfully published and the client later observes the authoritative remote inode, the client must bind the temporary `client_file_id` into the inode-keyed tables.
@@ -173,6 +216,7 @@ After a local-only create is successfully published and the client later observe
 The first bind preconditions are intentionally strict:
 
 - `local_only_state.namespace_id` must equal the observed remote namespace
+- `local_only_state.inode_kind` must equal the observed remote inode kind
 - the observed remote file must not be deleted
 - `local_only_state.exists_on_disk` must still be true
 - `content_digest`, `parent_inode_id`, and `display_name` must still match between the local-only row and the observed remote row
@@ -200,6 +244,7 @@ Failure modes prevented:
 Failure modes named for the first implementation:
 
 - `local_only_file_missing`
+- `bind_kind_mismatch`
 - `bind_namespace_mismatch`
 - `bind_remote_deleted`
 - `bind_observation_mismatch`
