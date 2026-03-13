@@ -195,6 +195,10 @@ pub enum ModelAction {
         inode_id: InodeId,
         writer_fence_token: FenceToken,
     },
+    CreateFile {
+        inode_id: InodeId,
+        writer_fence_token: FenceToken,
+    },
     DeleteSubtree {
         root_inode: InodeId,
         writer_fence_token: FenceToken,
@@ -509,6 +513,10 @@ impl ModelNamespace {
     pub fn apply(&mut self, action: ModelAction) -> Result<(), ModelError> {
         match action {
             ModelAction::CreateDir {
+                inode_id,
+                writer_fence_token,
+            }
+            | ModelAction::CreateFile {
                 inode_id,
                 writer_fence_token,
             } => {
@@ -1055,6 +1063,19 @@ mod tests {
             writer_fence_token: FenceToken(0),
         })
         .expect("create dir should advance next inode id");
+
+        assert_eq!(ns.head_seq, ChangeSeq(1));
+        assert_eq!(ns.next_inode_id, InodeId(8));
+    }
+
+    #[test]
+    fn model_create_file_advances_next_inode_id() {
+        let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+        ns.apply(ModelAction::CreateFile {
+            inode_id: InodeId(7),
+            writer_fence_token: FenceToken(0),
+        })
+        .expect("create file should advance next inode id");
 
         assert_eq!(ns.head_seq, ChangeSeq(1));
         assert_eq!(ns.next_inode_id, InodeId(8));

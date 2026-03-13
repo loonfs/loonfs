@@ -1032,6 +1032,11 @@ dependencies = [
  "loon-core",
  "loon-objectstore",
  "loon-queue",
+ "loon-testkit",
+ "loon-types",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

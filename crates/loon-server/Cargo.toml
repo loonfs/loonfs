@@ -10,3 +10,10 @@ anyhow.workspace = true
 loon-core = { path = "../loon-core" }
 loon-objectstore = { path = "../loon-objectstore" }
 loon-queue = { path = "../loon-queue" }
+loon-types = { path = "../loon-types" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+loon-testkit = { path = "../loon-testkit" }

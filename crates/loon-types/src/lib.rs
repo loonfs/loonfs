@@ -86,6 +86,27 @@ pub struct Identity {
     pub inode_id: InodeId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientMutationRequest {
+    pub namespace_id: NamespaceId,
+    pub client_request_id: String,
+    pub op: ClientMutationOp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientMutationOp {
+    CreateDir {
+        parent_inode_id: InodeId,
+        display_name: String,
+    },
+    CreateFile {
+        parent_inode_id: InodeId,
+        display_name: String,
+        content_manifest_digest: String,
+    },
+}
+
 pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
 pub const WAL_FORMAT_VERSION: u32 = 1;
 pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 1;
@@ -336,6 +357,17 @@ impl CheckpointManifestEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalOp {
+    CreateDir {
+        inode_id: InodeId,
+        parent_inode: InodeId,
+        display_name: String,
+    },
+    CreateFile {
+        inode_id: InodeId,
+        parent_inode: InodeId,
+        display_name: String,
+        content_manifest_digest: String,
+    },
     ReplaceFile {
         inode_id: InodeId,
         base_revision: RevisionNo,

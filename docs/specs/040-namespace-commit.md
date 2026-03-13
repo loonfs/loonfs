@@ -42,6 +42,46 @@ they make races observable and reviewable.
 Failure mode prevented:
 silent last-writer-wins corruption.
 
+## Create mutations
+
+The initial mutation set adds two authoritative create operations:
+
+- `create_dir(parent_inode, display_name)`
+- `create_file(parent_inode, display_name, content_manifest_digest)`
+
+Rules:
+
+- the namespace head still owns inode allocation
+- each create operation consumes exactly one inode id from `head.next_inode_id`
+- `create_file` requires durable content before publish, just like `replace_file`
+- `create_dir` does not require a content manifest
+
+The first create preconditions are:
+
+- `HeadSeqIs(current_head.seq)`
+- `ChildNameAbsent(parent_inode, name_key)`
+- `AncestorsNotSubtreeDeleted(parent_inode)`
+
+For the current create-mutation contract, `name_key` may equal `display_name` until the shared versioned
+name-policy layer is wired into request construction.
+
+Why these rules exist:
+
+- create operations need canonical inode allocation, not client-guessed ids
+- the initial create-mutation contract should still reject obvious lost-update races
+- file creates must not publish metadata before their content is durable
+
+Failure modes prevented:
+
+- two writers silently creating different children with the same allocated inode id
+- file metadata publishing without durable content
+- a create under a deleted ancestor becoming visible
+
+Failure modes named for the first implementation:
+
+- `create_mutation_consumes_next_inode_id`
+- `create_file_requires_durable_content`
+
 ## Fencing
 
 Lease ownership changes must change the active fencing token.
@@ -170,6 +210,9 @@ The envelope must carry:
 
 For the current skeleton, `commit_id` may equal `request_id`.
 
+For create mutations, the WAL must carry the allocated inode id inside the durable op body so
+replay can reproduce `next_inode_id` advancement from immutable history alone.
+
 Why these fields exist:
 
 - `seq` and `base_head_seq` make the visible ordering explicit
@@ -183,6 +226,28 @@ Failure modes prevented:
 - head advancement that points at missing WAL history
 - opaque commit history that cannot explain why metadata changed
 - silent corruption of immutable WAL payload bytes
+
+## Head publish rule for create mutations
+
+After the WAL create-if-absent succeeds, the authoritative writer prepares the next `head.json`
+summary for CAS.
+
+For the current create mutations, head publication must:
+
+1. advance `seq` to the validated next seq
+2. preserve `active_fence_token`
+3. advance `next_inode_id` by the number of create operations in the request
+4. preserve `snapshot_hint_seq` and `retention_floor_seq`
+
+Why this rule exists:
+
+- inode allocation is part of authoritative metadata publish, not a side channel
+- replay and live publish should agree on how create mutations consume head state
+
+Failure modes prevented:
+
+- allocating a new inode without advancing durable head state
+- WAL replay and live publish disagreeing about the next free inode id
 
 ## Write ordering rule
 

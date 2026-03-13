@@ -4,6 +4,8 @@ pub const INVARIANTS: &[&str] = &[
     "stale_writer_cannot_publish",
     "head_and_lease_fence_tokens_agree",
     "next_inode_id_is_monotonic",
+    "create_mutation_consumes_next_inode_id",
+    "create_file_requires_durable_content",
     "wal_payload_checksum_matches_payload",
     "wal_key_matches_committed_seq",
     "head_publish_requires_durable_wal",

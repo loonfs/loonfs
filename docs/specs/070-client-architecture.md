@@ -249,6 +249,49 @@ Failure modes named for the first implementation:
 - `local_only_parent_not_directory`
 - `local_only_parent_not_bound`
 
+## Client mutation contract
+
+The first executor does not invent a separate long-lived sync protocol. It emits
+one narrow request shape that the authoritative side can translate directly into one namespace
+commit request:
+
+```json
+{
+  "namespace_id": "ns-1",
+  "client_request_id": "client-req-0001",
+  "op": {
+    "create_file": {
+      "parent_inode_id": 902,
+      "display_name": "note.txt",
+      "content_manifest_digest": "sha256:child-note"
+    }
+  }
+}
+```
+
+The initial client mutation contract supports only:
+
+- `create_remote_dir` -> `ClientMutationOp::CreateDir`
+- `upload_local_create` -> `ClientMutationOp::CreateFile`
+
+Rules:
+
+- one planned local-only action maps to one client mutation request
+- the request carries canonical `parent_inode_id`, never a parent path string
+- `client_request_id` is stable for retries and becomes the authoritative `request_id`
+- for the first file-create skeleton, the executor may reuse the local observed digest as `content_manifest_digest`
+
+Why this rule exists:
+
+- we want one thin happy-path bridge from planner output to authoritative commit publish
+- the initial contract should prove end-to-end request shaping before broader API design lands
+
+Failure modes prevented:
+
+- the executor guessing parent identity from mutable paths
+- planner output being coupled to a transport shape that cannot become a namespace commit request
+- retrying the same local-only action with a different authoritative request id
+
 ## First local-only bind rule
 
 After a local-only create is successfully published and the client later observes the authoritative remote inode, the client must bind the temporary `client_file_id` into the inode-keyed tables.

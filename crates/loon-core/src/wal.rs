@@ -2,7 +2,7 @@ use crate::commit::{CommitOp, CommitPlan, CommitRequest, Precondition};
 use loon_objectstore::keys::wal_commit;
 use loon_types::{
     decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, ChangeSeq, HeadState,
-    NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+    InodeId, NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,10 @@ pub enum WalBuildError {
     BaseHeadSeqMismatch {
         request: ChangeSeq,
         plan: ChangeSeq,
+    },
+    AllocatedInodeCountMismatch {
+        request_create_ops: usize,
+        plan_allocated_count: usize,
     },
     Codec(String),
 }
@@ -101,7 +105,7 @@ pub fn prepare_wal_commit(
         request_id: request.request_id.clone(),
         writer_id: request.writer_id.clone(),
         writer_fence_token: request.writer_fence_token,
-        ops: request.ops.iter().map(WalOp::from).collect(),
+        ops: build_wal_ops(request, plan)?,
         preconditions: request
             .preconditions
             .iter()
@@ -173,6 +177,16 @@ pub fn replay_wal_commit(
         });
     }
 
+    let next_inode_id = envelope.payload.ops.iter().fold(
+        current_head.next_inode_id,
+        |current_next_inode_id, op| match op {
+            WalOp::CreateDir { inode_id, .. } | WalOp::CreateFile { inode_id, .. } => {
+                InodeId(current_next_inode_id.0.max(inode_id.0.saturating_add(1)))
+            }
+            _ => current_next_inode_id,
+        },
+    );
+
     Ok(ReplayedWalCommit {
         object_key: wal_object.object_key.clone(),
         envelope: envelope.clone(),
@@ -180,7 +194,7 @@ pub fn replay_wal_commit(
             namespace_id: current_head.namespace_id.clone(),
             seq: envelope.payload.seq,
             active_fence_token: envelope.payload.writer_fence_token,
-            next_inode_id: current_head.next_inode_id,
+            next_inode_id,
             snapshot_hint_seq: current_head.snapshot_hint_seq,
             retention_floor_seq: current_head.retention_floor_seq,
         },
@@ -216,14 +230,57 @@ impl From<&PreparedWalCommit> for StoredWalObject {
     }
 }
 
-impl From<&CommitOp> for WalOp {
-    fn from(value: &CommitOp) -> Self {
-        match value {
+fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp>, WalBuildError> {
+    let request_create_ops = request
+        .ops
+        .iter()
+        .filter(|op| matches!(op, CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. }))
+        .count();
+    if request_create_ops != plan.allocated_inode_ids.len() {
+        return Err(WalBuildError::AllocatedInodeCountMismatch {
+            request_create_ops,
+            plan_allocated_count: plan.allocated_inode_ids.len(),
+        });
+    }
+
+    let mut allocated_inode_ids = plan.allocated_inode_ids.iter().copied();
+    let mut wal_ops = Vec::with_capacity(request.ops.len());
+
+    for op in &request.ops {
+        let wal_op = match op {
+            CommitOp::CreateDir {
+                parent_inode,
+                display_name,
+            } => WalOp::CreateDir {
+                inode_id: allocated_inode_ids.next().ok_or(
+                    WalBuildError::AllocatedInodeCountMismatch {
+                        request_create_ops,
+                        plan_allocated_count: plan.allocated_inode_ids.len(),
+                    },
+                )?,
+                parent_inode: *parent_inode,
+                display_name: display_name.clone(),
+            },
+            CommitOp::CreateFile {
+                parent_inode,
+                display_name,
+                content_manifest_digest,
+            } => WalOp::CreateFile {
+                inode_id: allocated_inode_ids.next().ok_or(
+                    WalBuildError::AllocatedInodeCountMismatch {
+                        request_create_ops,
+                        plan_allocated_count: plan.allocated_inode_ids.len(),
+                    },
+                )?,
+                parent_inode: *parent_inode,
+                display_name: display_name.clone(),
+                content_manifest_digest: content_manifest_digest.clone(),
+            },
             CommitOp::ReplaceFile {
                 inode_id,
                 base_revision,
                 content_manifest_digest,
-            } => Self::ReplaceFile {
+            } => WalOp::ReplaceFile {
                 inode_id: *inode_id,
                 base_revision: *base_revision,
                 content_manifest_digest: content_manifest_digest.clone(),
@@ -232,22 +289,46 @@ impl From<&CommitOp> for WalOp {
                 inode_id,
                 new_parent_inode,
                 new_display_name,
-            } => Self::Rename {
+            } => WalOp::Rename {
                 inode_id: *inode_id,
                 new_parent_inode: *new_parent_inode,
                 new_display_name: new_display_name.clone(),
             },
-            CommitOp::DeleteSubtree { root_inode } => Self::DeleteSubtree {
+            CommitOp::DeleteSubtree { root_inode } => WalOp::DeleteSubtree {
                 root_inode: *root_inode,
             },
             CommitOp::RestoreRevision {
                 inode_id,
                 restore_from_revision,
-            } => Self::RestoreRevision {
+            } => WalOp::RestoreRevision {
                 inode_id: *inode_id,
                 restore_from_revision: *restore_from_revision,
             },
-        }
+        };
+        wal_ops.push(wal_op);
+    }
+
+    Ok(wal_ops)
+}
+
+#[cfg(test)]
+fn with_create_ops(
+    seq: ChangeSeq,
+    base_head_seq: ChangeSeq,
+    commit_id: &str,
+    writer_fence_token: loon_types::FenceToken,
+    ops: Vec<WalOp>,
+) -> WalCommitPayload {
+    WalCommitPayload {
+        namespace_id: NamespaceId::from("ns-1"),
+        seq,
+        base_head_seq,
+        commit_id: commit_id.to_owned(),
+        request_id: commit_id.to_owned(),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token,
+        ops,
+        preconditions: vec![WalPrecondition::HeadSeqIs(base_head_seq)],
     }
 }
 
@@ -278,8 +359,8 @@ impl From<&Precondition> for WalPrecondition {
 #[cfg(test)]
 mod tests {
     use super::{
-        prepare_wal_commit, replay_wal_commit, replay_wal_tail, StoredWalObject, WalBuildError,
-        WalReplayError,
+        prepare_wal_commit, replay_wal_commit, replay_wal_tail, with_create_ops, StoredWalObject,
+        WalBuildError, WalReplayError,
     };
     use crate::commit::{
         build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, Precondition,
@@ -346,6 +427,46 @@ mod tests {
     }
 
     #[test]
+    fn prepare_wal_commit_embeds_allocated_inode_ids_for_create_ops() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-create-file".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![CommitOp::CreateFile {
+                parent_inode: InodeId(902),
+                display_name: "note.txt".to_owned(),
+                content_manifest_digest: "sha256:child-note".to_owned(),
+            }],
+            preconditions: vec![
+                Precondition::HeadSeqIs(ChangeSeq(41)),
+                Precondition::ChildNameAbsent {
+                    parent_inode: InodeId(902),
+                    name_key: "note.txt".to_owned(),
+                },
+            ],
+        };
+        let plan =
+            build_commit_plan(&request, &validation_context(999)).expect("validated commit plan");
+
+        let prepared =
+            prepare_wal_commit(&request, &plan, "loon-core-test").expect("prepare wal commit");
+        let decoded = decode_wal_commit_envelope_zstd(&prepared.encoded_bytes)
+            .expect("decode shared WAL envelope");
+
+        assert_eq!(
+            decoded.payload.ops,
+            vec![WalOp::CreateFile {
+                inode_id: InodeId(501),
+                parent_inode: InodeId(902),
+                display_name: "note.txt".to_owned(),
+                content_manifest_digest: "sha256:child-note".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
     fn prepare_wal_commit_rejects_namespace_mismatch() {
         let mut request = sample_request();
         let plan =
@@ -384,6 +505,35 @@ mod tests {
         assert!(replayed
             .checked_invariants
             .contains(&"wal_tail_seq_is_contiguous".to_owned()));
+    }
+
+    #[test]
+    fn replay_wal_commit_advances_next_inode_id_for_create_ops() {
+        let current_head = replay_basis_head();
+        let wal_object = stored_wal_object(with_create_ops(
+            ChangeSeq(41),
+            ChangeSeq(40),
+            "req-20260311-create-0001",
+            FenceToken(8),
+            vec![
+                WalOp::CreateDir {
+                    inode_id: InodeId(501),
+                    parent_inode: InodeId(2),
+                    display_name: "drafts".to_owned(),
+                },
+                WalOp::CreateFile {
+                    inode_id: InodeId(502),
+                    parent_inode: InodeId(501),
+                    display_name: "note.txt".to_owned(),
+                    content_manifest_digest: "sha256:child-note".to_owned(),
+                },
+            ],
+        ));
+
+        let replayed = replay_wal_commit(&current_head, &wal_object).expect("replay should work");
+
+        assert_eq!(replayed.resulting_head.seq, ChangeSeq(41));
+        assert_eq!(replayed.resulting_head.next_inode_id, InodeId(503));
     }
 
     #[test]
@@ -553,19 +703,15 @@ mod tests {
         commit_id: &str,
         writer_fence_token: FenceToken,
     ) -> WalCommitPayload {
-        WalCommitPayload {
-            namespace_id: NamespaceId::from("ns-1"),
+        with_create_ops(
             seq,
             base_head_seq,
-            commit_id: commit_id.to_owned(),
-            request_id: commit_id.to_owned(),
-            writer_id: "writer-a".to_owned(),
+            commit_id,
             writer_fence_token,
-            ops: vec![WalOp::DeleteSubtree {
+            vec![WalOp::DeleteSubtree {
                 root_inode: InodeId(2),
             }],
-            preconditions: vec![WalPrecondition::HeadSeqIs(base_head_seq)],
-        }
+        )
     }
 
     fn stored_wal_object(payload: WalCommitPayload) -> StoredWalObject {
