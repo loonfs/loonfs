@@ -131,6 +131,27 @@ pub enum StateDbError {
     UnknownInodeKind(String),
     #[error("unsupported local-only inode kind `{0:?}`")]
     UnsupportedLocalOnlyInodeKind(InodeKind),
+    #[error(
+        "local_only_parent_missing: namespace `{namespace_id}` parent inode `{parent_inode_id}`"
+    )]
+    LocalOnlyParentMissing {
+        namespace_id: String,
+        parent_inode_id: u64,
+    },
+    #[error(
+        "local_only_parent_not_directory: namespace `{namespace_id}` parent inode `{parent_inode_id}`"
+    )]
+    LocalOnlyParentNotDirectory {
+        namespace_id: String,
+        parent_inode_id: u64,
+    },
+    #[error(
+        "local_only_parent_not_bound: namespace `{namespace_id}` parent inode `{parent_inode_id}`"
+    )]
+    LocalOnlyParentNotBound {
+        namespace_id: String,
+        parent_inode_id: u64,
+    },
     #[error("local_only_file_missing: `{client_file_id}`")]
     LocalOnlyFileMissing { client_file_id: String },
     #[error(
@@ -255,6 +276,18 @@ pub struct LocalOnlyFileStateRow {
     pub last_local_change_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLocalOnlyInode {
+    pub namespace_id: NamespaceId,
+    pub inode_kind: InodeKind,
+    pub parent_inode_id: InodeId,
+    pub display_name: String,
+    pub content_digest: Option<String>,
+    pub exists_on_disk: bool,
+    pub dirty: bool,
+    pub last_local_change_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalOnlyPlannedActionRow {
     pub client_file_id: ClientFileId,
@@ -359,6 +392,15 @@ impl SqliteStateDb {
         client_file_id: &ClientFileId,
     ) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
         load_planned_local_only_action(&self.conn, client_file_id)
+    }
+
+    pub fn observe_local_only_inode_under_parent(
+        &mut self,
+        observed: &ObservedLocalOnlyInode,
+    ) -> Result<LocalOnlyFileStateRow, StateDbError> {
+        self.planner_transaction("observe_local_only_inode_under_parent", |tx| {
+            tx.observe_local_only_inode_under_parent(observed)
+        })
     }
 
     pub fn bind_local_only_file_to_remote(
@@ -593,6 +635,28 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    pub fn observe_local_only_inode_under_parent(
+        &mut self,
+        observed: &ObservedLocalOnlyInode,
+    ) -> Result<LocalOnlyFileStateRow, StateDbError> {
+        self.ensure_bound_parent_directory(&observed.namespace_id, observed.parent_inode_id)?;
+
+        let client_file_id = self.allocate_local_file_id(&observed.namespace_id)?;
+        let row = LocalOnlyFileStateRow {
+            client_file_id,
+            namespace_id: observed.namespace_id.clone(),
+            inode_kind: observed.inode_kind.clone(),
+            parent_inode_id: Some(observed.parent_inode_id),
+            display_name: observed.display_name.clone(),
+            content_digest: observed.content_digest.clone(),
+            exists_on_disk: observed.exists_on_disk,
+            dirty: observed.dirty,
+            last_local_change_ms: observed.last_local_change_ms,
+        };
+        self.upsert_local_only_file(&row)?;
+        Ok(row)
+    }
+
     pub fn bind_local_only_inode_to_remote(
         &mut self,
         client_file_id: &ClientFileId,
@@ -792,6 +856,53 @@ impl PlannerTxn<'_> {
             "DELETE FROM local_only_state WHERE client_file_id = ?1",
             params![client_file_id.as_str()],
         )?;
+        Ok(())
+    }
+
+    pub fn ensure_bound_parent_directory(
+        &self,
+        namespace_id: &NamespaceId,
+        parent_inode_id: InodeId,
+    ) -> Result<(), StateDbError> {
+        let views = self.load_file_sync_views(namespace_id, parent_inode_id)?;
+        let (remote, local, anchor) = match (views.remote, views.local, views.sync_anchor) {
+            (Some(remote), Some(local), Some(anchor)) => (remote, local, anchor),
+            _ => {
+                return Err(StateDbError::LocalOnlyParentMissing {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    parent_inode_id: parent_inode_id.0,
+                })
+            }
+        };
+
+        if remote.inode_kind != InodeKind::Dir
+            || local.inode_kind != InodeKind::Dir
+            || anchor.inode_kind != InodeKind::Dir
+        {
+            return Err(StateDbError::LocalOnlyParentNotDirectory {
+                namespace_id: namespace_id.as_str().to_owned(),
+                parent_inode_id: parent_inode_id.0,
+            });
+        }
+
+        if remote.is_deleted
+            || !local.exists_on_disk
+            || local.dirty
+            || remote.inode_kind != anchor.inode_kind
+            || local.inode_kind != anchor.inode_kind
+            || remote.content_digest != anchor.content_digest
+            || local.content_digest != anchor.content_digest
+            || remote.parent_inode_id != anchor.parent_inode_id
+            || local.parent_inode_id != anchor.parent_inode_id
+            || remote.display_name != anchor.display_name
+            || local.display_name != anchor.display_name
+        {
+            return Err(StateDbError::LocalOnlyParentNotBound {
+                namespace_id: namespace_id.as_str().to_owned(),
+                parent_inode_id: parent_inode_id.0,
+            });
+        }
+
         Ok(())
     }
 }
@@ -1147,8 +1258,8 @@ fn from_sql_u64(value: i64, field: &'static str) -> Result<u64, StateDbError> {
 mod tests {
     use super::{
         BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
-        LocalOnlyPlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError, SyncAnchorRow,
-        SCHEMA_VERSION,
+        LocalOnlyPlannedActionRow, ObservedLocalOnlyInode, RemoteFileStateRow, SqliteStateDb,
+        StateDbError, SyncAnchorRow, SCHEMA_VERSION,
     };
     use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 
@@ -1263,6 +1374,109 @@ mod tests {
                 .expect("load local-only state"),
             Some(local_only)
         );
+    }
+
+    #[test]
+    fn observe_local_only_inode_under_bound_parent_allocates_and_persists_child() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        seed_bound_directory_parent(&mut db, InodeId(902));
+
+        let observed = ObservedLocalOnlyInode {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::File,
+            parent_inode_id: InodeId(902),
+            display_name: "note.txt".to_owned(),
+            content_digest: Some("sha256:child-note".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_300_000,
+        };
+
+        let persisted = db
+            .observe_local_only_inode_under_parent(&observed)
+            .expect("observe local-only child");
+
+        assert_eq!(
+            persisted,
+            LocalOnlyFileStateRow {
+                client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_kind: InodeKind::File,
+                parent_inode_id: Some(InodeId(902)),
+                display_name: "note.txt".to_owned(),
+                content_digest: Some("sha256:child-note".to_owned()),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_700_000_300_000,
+            }
+        );
+        assert_eq!(
+            db.load_local_only_file(&persisted.client_file_id)
+                .expect("load persisted child"),
+            Some(persisted)
+        );
+    }
+
+    #[test]
+    fn observe_local_only_inode_under_parent_rejects_unbound_parent() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        db.planner_transaction("seed-unbound-parent", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(902),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(501),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "drafts".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(902),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "drafts-renamed".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_200_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(902),
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(501),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "drafts".to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed unbound parent");
+
+        let error = db
+            .observe_local_only_inode_under_parent(&ObservedLocalOnlyInode {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_kind: InodeKind::File,
+                parent_inode_id: InodeId(902),
+                display_name: "note.txt".to_owned(),
+                content_digest: Some("sha256:child-note".to_owned()),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_700_000_300_000,
+            })
+            .expect_err("observe should reject unbound parent");
+
+        assert!(matches!(
+            error,
+            StateDbError::LocalOnlyParentNotBound {
+                parent_inode_id: 902,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1447,5 +1661,44 @@ mod tests {
             display_name: "draft.txt".to_owned(),
             is_deleted: false,
         }
+    }
+
+    fn seed_bound_directory_parent(db: &mut SqliteStateDb, inode_id: InodeId) {
+        db.planner_transaction("seed-bound-directory-parent", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id,
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(501),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "drafts".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id,
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "drafts".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_200_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id,
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(501),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "drafts".to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed bound directory parent");
     }
 }

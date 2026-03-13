@@ -1,0 +1,60 @@
+name: bound_directory_child_file_gets_upload_plan
+initial:
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 902
+    inode_kind: dir
+    observed_seq: 501
+    revision_no: 1
+    content_digest:
+    parent_inode_id: 2
+    display_name: drafts
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 902
+    inode_kind: dir
+    content_digest:
+    parent_inode_id: 2
+    display_name: drafts
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700000200000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 902
+    inode_kind: dir
+    synced_seq: 501
+    revision_no: 1
+    content_digest:
+    parent_inode_id: 2
+    display_name: drafts
+actions:
+  - observe_local_only_inode:
+      namespace_id: ns-1
+      inode_kind: file
+      parent_inode_id: 902
+      display_name: note.txt
+      content_digest: sha256:child-note
+      exists_on_disk: true
+      dirty: true
+      last_local_change_ms: 1700000300000
+  - planner_tick_local_only:
+      client_file_id: tmp:ns-1:00000000000000000001
+      now_ms: 1700000305000
+expect:
+  local_only_state:
+    client_file_id: tmp:ns-1:00000000000000000001
+    namespace_id: ns-1
+    inode_kind: file
+    parent_inode_id: 902
+    display_name: note.txt
+    content_digest: sha256:child-note
+    exists_on_disk: true
+    dirty: true
+    last_local_change_ms: 1700000300000
+  planned_local_only_action:
+    client_file_id: tmp:ns-1:00000000000000000001
+    namespace_id: ns-1
+    decision: upload_local_create
+    reason: local_only_file_without_remote_identity

@@ -209,6 +209,46 @@ Failure modes prevented:
 - creating the same local-only directory twice because restart forgot the temporary identity
 - treating a directory create like a file upload just because both are unsynced local-only items
 
+## First bound-directory child observation rule
+
+After a directory is already bound to a canonical remote inode, the client may persist newly observed local-only children beneath that bound parent.
+
+The first child-observation preconditions are intentionally strict:
+
+- `parent_inode_id` must already exist in `remote_state`, `local_state`, and `sync_anchor`
+- those three rows must all agree that the parent `inode_kind = dir`
+- the remote parent row must not be deleted
+- the local parent row must still exist on disk and must not be dirty
+- the three parent rows must still agree on `inode_kind`, `parent_inode_id`, `display_name`, and `content_digest`
+
+On success, one SQLite transaction must:
+
+1. allocate a fresh `client_file_id`
+2. persist one `local_only_state(client_file_id)` row for the child
+3. store the canonical `parent_inode_id` of the already-bound directory on that child row
+
+After that persistence step, normal local-only planning rules apply:
+
+- a child `file` plans `upload_local_create`
+- a child `dir` plans `create_remote_dir`
+
+Why this rule exists:
+
+- child creates under a known directory should immediately use canonical parent identity, not a mutable path string
+- restart should not lose which bound parent a local-only child belongs under
+
+Failure modes prevented:
+
+- persisting a child under a file inode
+- planning a child create against a parent directory whose local and remote views already diverged
+- watcher code inventing child identity from `"/path/to/dir/name"` after restart instead of durable `(parent_inode_id, client_file_id)`
+
+Failure modes named for the first implementation:
+
+- `local_only_parent_missing`
+- `local_only_parent_not_directory`
+- `local_only_parent_not_bound`
+
 ## First local-only bind rule
 
 After a local-only create is successfully published and the client later observes the authoritative remote inode, the client must bind the temporary `client_file_id` into the inode-keyed tables.
