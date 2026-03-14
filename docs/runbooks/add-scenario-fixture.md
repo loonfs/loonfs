@@ -11,6 +11,7 @@ Add a test case that is readable outside the implementation.
 3. Use stable names for inodes, revisions, and namespaces.
 4. Name the invariant directly in `expect.invariants`.
 5. Render the fixture with `cargo run -p xtask -- render-case <path>`.
+   You can pass either a real file path or a fixture key like `client/foo.yaml`.
 6. Save a snapshot output if the harness already supports it.
 7. Link the fixture in the PR description.
 
