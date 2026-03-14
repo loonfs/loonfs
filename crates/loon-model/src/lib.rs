@@ -3,7 +3,7 @@
 use loon_types::{
     content_manifest_digest_sha256, sha256_digest, ChangeSeq, ContentBlockDescriptor,
     ContentManifestCodecError, ContentManifestEnvelope, ContentManifestPayload, FenceToken,
-    InodeId, LeaseState, NamespaceId, CONTENT_BLOCK_SIZE_BYTES,
+    InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +16,8 @@ pub struct ModelNamespace {
     pub next_inode_id: InodeId,
     pub snapshot_hint_seq: Option<ChangeSeq>,
     pub retention_floor_seq: ChangeSeq,
+    #[serde(default)]
+    pub metadata_state: ModelMetadataState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +60,48 @@ pub struct ModelCheckpointSegment {
 pub struct ModelCheckpointTable {
     pub family: ModelCheckpointFamily,
     pub segments: Vec<ModelCheckpointSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModelMetadataState {
+    #[serde(default)]
+    pub inodes: Vec<ModelInodeRecord>,
+    #[serde(default)]
+    pub direntries: Vec<ModelDirentryRecord>,
+    #[serde(default)]
+    pub revisions: Vec<ModelRevisionRecord>,
+    #[serde(default)]
+    pub subtree_tombstones: Vec<ModelSubtreeTombstoneRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInodeRecord {
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub created_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDirentryRecord {
+    pub parent_inode_id: InodeId,
+    pub name_key: String,
+    pub display_name: String,
+    pub child_inode_id: InodeId,
+    pub bind_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRevisionRecord {
+    pub inode_id: InodeId,
+    pub revision_no: RevisionNo,
+    pub committed_seq: ChangeSeq,
+    pub content_manifest_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSubtreeTombstoneRecord {
+    pub root_inode_id: InodeId,
+    pub tombstone_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +217,39 @@ pub struct ModelLocalOnlyObservationCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelRemoteObservationSelectionError {
     AmbiguousLocalOnlyBind { matches: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelMetadataPreconditionError {
+    ParentMissing {
+        parent_inode_id: InodeId,
+    },
+    ParentNotDirectory {
+        parent_inode_id: InodeId,
+        actual_kind: InodeKind,
+    },
+    ChildNameCollision {
+        parent_inode_id: InodeId,
+        name_key: String,
+        child_inode_id: InodeId,
+    },
+    InodeMissing {
+        inode_id: InodeId,
+    },
+    InodeNotFile {
+        inode_id: InodeId,
+        actual_kind: InodeKind,
+    },
+    InodeRevisionMismatch {
+        inode_id: InodeId,
+        expected: RevisionNo,
+        actual: Option<RevisionNo>,
+    },
+    AncestorCoveredBySubtreeTombstone {
+        inode_id: InodeId,
+        root_inode_id: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,6 +748,7 @@ impl ModelNamespace {
             next_inode_id: InodeId(1),
             snapshot_hint_seq: None,
             retention_floor_seq: ChangeSeq(0),
+            metadata_state: ModelMetadataState::default(),
         }
     }
 
@@ -1108,6 +1186,7 @@ impl ModelNamespace {
             next_inode_id: checkpoint.next_inode_id,
             snapshot_hint_seq: Some(checkpoint.checkpoint_seq),
             retention_floor_seq: checkpoint.retention_floor_seq,
+            metadata_state: ModelMetadataState::default(),
         })
     }
 }
@@ -1351,6 +1430,213 @@ pub fn select_local_only_observation_bind_candidate(
     }
 }
 
+impl ModelMetadataState {
+    pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<ModelInodeRecord> {
+        self.inodes
+            .iter()
+            .find(|inode| inode.inode_id == inode_id && inode.created_seq <= base_seq)
+            .cloned()
+    }
+
+    pub fn latest_revision_head_at_seq(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelRevisionRecord> {
+        self.revisions
+            .iter()
+            .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
+            .max_by_key(|revision| revision.revision_no)
+            .cloned()
+    }
+
+    pub fn bound_child_at_seq(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelDirentryRecord> {
+        self.direntries
+            .iter()
+            .filter(|direntry| {
+                direntry.parent_inode_id == parent_inode_id
+                    && direntry.name_key == name_key
+                    && direntry.bind_seq <= base_seq
+            })
+            .max_by_key(|direntry| direntry.bind_seq)
+            .cloned()
+    }
+
+    pub fn active_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelSubtreeTombstoneRecord> {
+        self.subtree_tombstones
+            .iter()
+            .filter(|tombstone| {
+                tombstone.root_inode_id == root_inode_id && tombstone.tombstone_seq <= base_seq
+            })
+            .max_by_key(|tombstone| tombstone.tombstone_seq)
+            .cloned()
+    }
+
+    pub fn covering_subtree_tombstone(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelSubtreeTombstoneRecord> {
+        let mut current = Some(inode_id);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+
+            if let Some(tombstone) = self.active_subtree_tombstone(candidate_inode_id, base_seq) {
+                return Some(tombstone);
+            }
+
+            current = self
+                .latest_parent_binding_for_child_at_seq(candidate_inode_id, base_seq)
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        None
+    }
+
+    pub fn visible_inode(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelInodeRecord> {
+        let inode = self.inode_at_seq(inode_id, base_seq)?;
+        if self
+            .covering_subtree_tombstone(inode_id, base_seq)
+            .is_some()
+        {
+            return None;
+        }
+
+        Some(inode)
+    }
+
+    pub fn current_revision_head(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelRevisionRecord> {
+        self.visible_inode(inode_id, base_seq)?;
+        self.latest_revision_head_at_seq(inode_id, base_seq)
+    }
+
+    pub fn visible_child(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelDirentryRecord> {
+        let parent = self.visible_inode(parent_inode_id, base_seq)?;
+        if parent.inode_kind != InodeKind::Dir {
+            return None;
+        }
+
+        let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
+        self.visible_inode(direntry.child_inode_id, base_seq)?;
+        Some(direntry)
+    }
+
+    pub fn ensure_child_name_absent(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<(), ModelMetadataPreconditionError> {
+        let parent = self
+            .inode_at_seq(parent_inode_id, base_seq)
+            .ok_or(ModelMetadataPreconditionError::ParentMissing { parent_inode_id })?;
+        if parent.inode_kind != InodeKind::Dir {
+            return Err(ModelMetadataPreconditionError::ParentNotDirectory {
+                parent_inode_id,
+                actual_kind: parent.inode_kind,
+            });
+        }
+
+        if let Some(existing) = self.bound_child_at_seq(parent_inode_id, name_key, base_seq) {
+            return Err(ModelMetadataPreconditionError::ChildNameCollision {
+                parent_inode_id,
+                name_key: name_key.to_owned(),
+                child_inode_id: existing.child_inode_id,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn ensure_inode_revision_is(
+        &self,
+        inode_id: InodeId,
+        expected_revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Result<(), ModelMetadataPreconditionError> {
+        let inode = self
+            .inode_at_seq(inode_id, base_seq)
+            .ok_or(ModelMetadataPreconditionError::InodeMissing { inode_id })?;
+        if inode.inode_kind != InodeKind::File {
+            return Err(ModelMetadataPreconditionError::InodeNotFile {
+                inode_id,
+                actual_kind: inode.inode_kind,
+            });
+        }
+
+        let actual_revision_no = self
+            .latest_revision_head_at_seq(inode_id, base_seq)
+            .map(|revision| revision.revision_no);
+        if actual_revision_no != Some(expected_revision_no) {
+            return Err(ModelMetadataPreconditionError::InodeRevisionMismatch {
+                inode_id,
+                expected: expected_revision_no,
+                actual: actual_revision_no,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn ensure_ancestors_not_subtree_deleted(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<(), ModelMetadataPreconditionError> {
+        if let Some(tombstone) = self.covering_subtree_tombstone(inode_id, base_seq) {
+            return Err(
+                ModelMetadataPreconditionError::AncestorCoveredBySubtreeTombstone {
+                    inode_id,
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    fn latest_parent_binding_for_child_at_seq(
+        &self,
+        child_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelDirentryRecord> {
+        self.direntries
+            .iter()
+            .filter(|direntry| {
+                direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
+            })
+            .max_by_key(|direntry| direntry.bind_seq)
+            .cloned()
+    }
+}
+
 pub fn validate_uploaded_content_reference(
     namespace_id: &NamespaceId,
     content_manifest_digest: &str,
@@ -1540,6 +1826,80 @@ impl ModelCheckpointFamily {
 mod tests {
     use super::*;
     use loon_types::{InodeKind, RevisionNo};
+
+    fn seeded_metadata_state() -> ModelMetadataState {
+        ModelMetadataState {
+            inodes: vec![
+                ModelInodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(7),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(5),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(42),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(12),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(88),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(21),
+                },
+            ],
+            direntries: vec![
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "note.txt".to_owned(),
+                    display_name: "note.txt".to_owned(),
+                    child_inode_id: InodeId(42),
+                    bind_seq: ChangeSeq(41),
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(7),
+                    bind_seq: ChangeSeq(5),
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(7),
+                    name_key: "report.txt".to_owned(),
+                    display_name: "report.txt".to_owned(),
+                    child_inode_id: InodeId(88),
+                    bind_seq: ChangeSeq(21),
+                },
+            ],
+            revisions: vec![
+                ModelRevisionRecord {
+                    inode_id: InodeId(42),
+                    revision_no: RevisionNo(1),
+                    committed_seq: ChangeSeq(17),
+                    content_manifest_digest: "sha256:note-v1".to_owned(),
+                },
+                ModelRevisionRecord {
+                    inode_id: InodeId(42),
+                    revision_no: RevisionNo(2),
+                    committed_seq: ChangeSeq(41),
+                    content_manifest_digest: "sha256:note-v2".to_owned(),
+                },
+                ModelRevisionRecord {
+                    inode_id: InodeId(88),
+                    revision_no: RevisionNo(1),
+                    committed_seq: ChangeSeq(21),
+                    content_manifest_digest: "sha256:report-v1".to_owned(),
+                },
+            ],
+            subtree_tombstones: vec![ModelSubtreeTombstoneRecord {
+                root_inode_id: InodeId(7),
+                tombstone_seq: ChangeSeq(40),
+            }],
+        }
+    }
 
     #[test]
     fn model_advances_seq() {
@@ -2062,6 +2422,98 @@ mod tests {
     }
 
     #[test]
+    fn model_child_name_absent_rejects_existing_bound_name() {
+        let metadata = seeded_metadata_state();
+
+        let error = metadata
+            .ensure_child_name_absent(InodeId(2), "note.txt", ChangeSeq(41))
+            .expect_err("existing child name should collide");
+
+        assert_eq!(
+            error,
+            ModelMetadataPreconditionError::ChildNameCollision {
+                parent_inode_id: InodeId(2),
+                name_key: "note.txt".to_owned(),
+                child_inode_id: InodeId(42),
+            }
+        );
+    }
+
+    #[test]
+    fn model_inode_revision_is_rejects_stale_revision() {
+        let metadata = seeded_metadata_state();
+
+        let error = metadata
+            .ensure_inode_revision_is(InodeId(42), RevisionNo(1), ChangeSeq(41))
+            .expect_err("stale base revision should be rejected");
+
+        assert_eq!(
+            error,
+            ModelMetadataPreconditionError::InodeRevisionMismatch {
+                inode_id: InodeId(42),
+                expected: RevisionNo(1),
+                actual: Some(RevisionNo(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn model_ancestors_not_subtree_deleted_rejects_covered_inode() {
+        let metadata = seeded_metadata_state();
+
+        let error = metadata
+            .ensure_ancestors_not_subtree_deleted(InodeId(88), ChangeSeq(41))
+            .expect_err("covered descendant should be rejected");
+
+        assert_eq!(
+            error,
+            ModelMetadataPreconditionError::AncestorCoveredBySubtreeTombstone {
+                inode_id: InodeId(88),
+                root_inode_id: InodeId(7),
+                tombstone_seq: ChangeSeq(40),
+            }
+        );
+    }
+
+    #[test]
+    fn model_distinguishes_raw_and_visible_metadata_queries() {
+        let metadata = seeded_metadata_state();
+
+        assert_eq!(
+            metadata.inode_at_seq(InodeId(7), ChangeSeq(41)),
+            Some(ModelInodeRecord {
+                inode_id: InodeId(7),
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(5),
+            })
+        );
+        assert_eq!(metadata.visible_inode(InodeId(7), ChangeSeq(41)), None);
+        assert_eq!(
+            metadata.bound_child_at_seq(InodeId(2), "docs", ChangeSeq(41)),
+            Some(ModelDirentryRecord {
+                parent_inode_id: InodeId(2),
+                name_key: "docs".to_owned(),
+                display_name: "docs".to_owned(),
+                child_inode_id: InodeId(7),
+                bind_seq: ChangeSeq(5),
+            })
+        );
+        assert_eq!(
+            metadata.visible_child(InodeId(2), "docs", ChangeSeq(41)),
+            None
+        );
+        assert_eq!(
+            metadata.current_revision_head(InodeId(42), ChangeSeq(41)),
+            Some(ModelRevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(2),
+                committed_seq: ChangeSeq(41),
+                content_manifest_digest: "sha256:note-v2".to_owned(),
+            })
+        );
+    }
+
+    #[test]
     fn model_rejects_local_only_upload_record_when_digest_mismatches() {
         let upload = ModelLocalOnlyUploadRecord {
             namespace_id: NamespaceId::from("ns-1"),
@@ -2147,6 +2599,7 @@ mod tests {
             next_inode_id: InodeId(501),
             snapshot_hint_seq: Some(ChangeSeq(40)),
             retention_floor_seq: ChangeSeq(40),
+            metadata_state: ModelMetadataState::default(),
         };
         let lease = LeaseState {
             namespace_id: NamespaceId::from("ns-1"),
@@ -2182,6 +2635,7 @@ mod tests {
             next_inode_id: InodeId(504),
             snapshot_hint_seq: Some(ChangeSeq(40)),
             retention_floor_seq: ChangeSeq(40),
+            metadata_state: ModelMetadataState::default(),
         };
         let lease = LeaseState {
             namespace_id: NamespaceId::from("ns-1"),

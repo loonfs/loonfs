@@ -151,6 +151,19 @@ Failure mode prevented:
 The first semantic-core implementation does not need to lock one final checkpoint row encoding, but
 it must answer these derived queries deterministically at a chosen `base_seq`.
 
+It must also answer the corresponding raw history lookups that do not hide rows behind subtree
+tombstones. Commit-precondition evaluation uses those raw lookups first, then evaluates tombstone
+coverage explicitly.
+
+### `inode_at_seq(namespace_id, inode_id, base_seq)`
+
+Returns the inode row only if:
+
+- the inode exists in the inode family
+- the inode's creation seq is at or before `base_seq`
+
+This is the raw existence/kind lookup. It does not hide the inode because of a subtree tombstone.
+
 ### `visible_inode(namespace_id, inode_id, base_seq)`
 
 Returns the inode row only if:
@@ -168,6 +181,11 @@ Returns the visible revision head only if:
 
 The visible head is the highest `revision_no` satisfying those rules.
 
+### `latest_revision_head_at_seq(namespace_id, inode_id, base_seq)`
+
+Returns the highest `revision_no` with `committed_seq <= base_seq`, without hiding the result
+because of subtree-tombstone coverage.
+
 ### `visible_child(namespace_id, parent_inode_id, name_key, base_seq)`
 
 Returns the active direntry binding only if:
@@ -177,6 +195,11 @@ Returns the active direntry binding only if:
 - at least one direntry row for `(parent_inode_id, name_key)` is bound at or before `base_seq`
 - no later binding for the same `(parent_inode_id, name_key)` supersedes it by `base_seq`
 - the bound child inode is still visible at `base_seq`
+
+### `bound_child_at_seq(namespace_id, parent_inode_id, name_key, base_seq)`
+
+Returns the latest direntry binding for `(parent_inode_id, name_key)` at or before `base_seq`,
+without hiding the result because the parent or child is later covered by a subtree tombstone.
 
 ### `active_subtree_tombstone(namespace_id, root_inode_id, base_seq)`
 
@@ -195,6 +218,13 @@ able to answer at minimum:
 - is `(parent_inode_id, name_key)` already occupied at `base_seq`?
 - is inode `X`, or any ancestor on its visible parent chain, covered by an active subtree tombstone
   at `base_seq`?
+
+For commit-precondition evaluation specifically, the engine must also be able to answer the raw
+lookups before tombstone coverage is applied:
+
+- `inode_at_seq(...)`
+- `latest_revision_head_at_seq(...)`
+- `bound_child_at_seq(...)`
 
 These lookups are the semantic center for:
 

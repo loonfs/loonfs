@@ -5,7 +5,7 @@ use loon_core::checkpoint::{
 use loon_core::wal::{replay_wal_commit, replay_wal_tail, StoredWalObject};
 use loon_model::{
     ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointSegment, ModelCheckpointTable,
-    ModelNamespace, ModelWalCommit,
+    ModelMetadataState, ModelNamespace, ModelWalCommit,
 };
 use loon_objectstore::keys::{snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily};
 use loon_testkit::render::render_trace;
@@ -381,6 +381,7 @@ fn model_namespace_from_head(head: &HeadState) -> ModelNamespace {
         next_inode_id: head.next_inode_id,
         snapshot_hint_seq: head.snapshot_hint_seq,
         retention_floor_seq: head.retention_floor_seq,
+        metadata_state: ModelMetadataState::default(),
     }
 }
 

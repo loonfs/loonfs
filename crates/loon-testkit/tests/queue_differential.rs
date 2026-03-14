@@ -1,8 +1,8 @@
 use loon_model::{
     ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobCompleteOutcome,
-    ModelNamespace, ModelProgressObject, ModelQueueBroker, ModelQueueClaim, ModelQueueJob,
-    ModelQueueJobState, ModelQueueRepairOutcome, ModelQueueSeqPayload, ModelQueueShard,
-    ModelQueueWorkClass,
+    ModelMetadataState, ModelNamespace, ModelProgressObject, ModelQueueBroker, ModelQueueClaim,
+    ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome, ModelQueueSeqPayload,
+    ModelQueueShard, ModelQueueWorkClass,
 };
 use loon_queue::broker::{renew_broker_lease, BrokerLeaseError, BrokerLeaseOutcome};
 use loon_queue::repair::{
@@ -699,6 +699,7 @@ fn model_namespace_from_head(head: &HeadState) -> ModelNamespace {
         next_inode_id: head.next_inode_id,
         snapshot_hint_seq: head.snapshot_hint_seq,
         retention_floor_seq: head.retention_floor_seq,
+        metadata_state: ModelMetadataState::default(),
     }
 }
 

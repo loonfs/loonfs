@@ -152,11 +152,11 @@ Why it exists:
 
 Lookup rule:
 
-1. resolve `visible_inode(namespace_id, parent_inode_id, base_seq)`
+1. resolve `inode_at_seq(namespace_id, parent_inode_id, base_seq)`
 2. require the parent inode to exist
 3. require the parent inode kind to be `DIR`
-4. resolve `visible_child(namespace_id, parent_inode_id, name_key, base_seq)`
-5. require that lookup to return no visible child binding
+4. resolve `bound_child_at_seq(namespace_id, parent_inode_id, name_key, base_seq)`
+5. require that lookup to return no bound child binding
 
 The current create contract may still use `display_name` as `name_key`, but the lookup rule itself
 is in terms of canonical `name_key`.
@@ -171,11 +171,11 @@ Failure modes named for the first implementation:
 
 Lookup rule:
 
-1. resolve `visible_inode(namespace_id, inode_id, base_seq)`
+1. resolve `inode_at_seq(namespace_id, inode_id, base_seq)`
 2. require the inode to exist
 3. require the inode kind to be `FILE` for the current `replace_file` mutation family
-4. resolve `current_revision_head(namespace_id, inode_id, base_seq)`
-5. require the visible head revision to equal `revision_no`
+4. resolve `latest_revision_head_at_seq(namespace_id, inode_id, base_seq)`
+5. require the resolved head revision to equal `revision_no`
 
 Failure modes named for the first implementation:
 

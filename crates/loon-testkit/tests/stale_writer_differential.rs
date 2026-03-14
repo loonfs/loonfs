@@ -4,7 +4,8 @@ use loon_core::commit::{
 };
 use loon_core::namespace::head_and_lease_fence_tokens_agree;
 use loon_model::{
-    ModelAction, ModelCommitValidationError, ModelCommitValidationRequest, ModelNamespace,
+    ModelAction, ModelCommitValidationError, ModelCommitValidationRequest, ModelMetadataState,
+    ModelNamespace,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -376,6 +377,7 @@ fn model_namespace_from_head(head: &HeadState) -> ModelNamespace {
         next_inode_id: head.next_inode_id,
         snapshot_hint_seq: head.snapshot_hint_seq,
         retention_floor_seq: head.retention_floor_seq,
+        metadata_state: ModelMetadataState::default(),
     }
 }
 
