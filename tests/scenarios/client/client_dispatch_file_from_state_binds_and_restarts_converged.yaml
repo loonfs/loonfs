@@ -77,6 +77,7 @@ expect:
     observed_seq: 42
     revision_no: 1
     content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
     parent_inode_id: 2
     display_name: draft.txt
     is_deleted: false
@@ -97,6 +98,7 @@ expect:
     synced_seq: 42
     revision_no: 1
     content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
     parent_inode_id: 2
     display_name: draft.txt
   local_only_state_cleared: true

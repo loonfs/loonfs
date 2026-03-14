@@ -1,3 +1,4 @@
+use crate::download::{download_file_to_bytes, DownloadError};
 use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision, PlannerError};
 use crate::state_db::{
     AppliedInodeMutation, BoundLocalOnlyFile, ClientFileId, InodeUploadRow, LocalFileStateRow,
@@ -10,6 +11,7 @@ use loon_types::{
     ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind,
     NamespaceId,
 };
+use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -137,6 +139,13 @@ pub struct ExecutedUploadLocalEdit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedDownloadRemoteEdit {
+    pub downloaded_content_manifest_digest: String,
+    pub downloaded_file_digest_sha256: String,
+    pub applied: AppliedInodeMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutedLocalOnlyCreate {
     UploadLocalCreate(ExecutedUploadLocalCreate),
     CreateRemoteDir(ExecutedCreateRemoteDir),
@@ -220,6 +229,45 @@ pub enum ExecuteUploadLocalEditError {
     SourcePathMissing { namespace_id: String, inode_id: u64 },
 }
 
+#[derive(Debug, Error)]
+pub enum ExecuteDownloadRemoteEditError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Planner(#[from] PlannerError),
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+    #[error(
+        "download_remote_edit_decision_missing: namespace `{namespace_id}` inode `{inode_id}` decision `{decision:?}`"
+    )]
+    DownloadRemoteEditDecisionMissing {
+        namespace_id: String,
+        inode_id: u64,
+        decision: PlannerDecision,
+    },
+    #[error(
+        "download_remote_edit_source_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    SourcePathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "download_remote_edit_remote_digest_mismatch: namespace `{namespace_id}` inode `{inode_id}` remote `{remote_content_digest}` != downloaded `{downloaded_file_digest}`"
+    )]
+    RemoteDigestMismatch {
+        namespace_id: String,
+        inode_id: u64,
+        remote_content_digest: String,
+        downloaded_file_digest: String,
+    },
+    #[error("download_remote_edit_local_write_failed: path `{path}` {source}")]
+    LocalWriteFailed {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutedNextLocalOnlyCreate {
     pub planned_action: LocalOnlyPlannedActionRow,
@@ -238,6 +286,7 @@ pub enum ExecuteNextLocalOnlyCreateError {
 pub enum NextClientAction {
     ExecutedLocalOnlyCreate(ExecutedNextLocalOnlyCreate),
     ExecutedUploadLocalEdit(ExecutedUploadLocalEdit),
+    ExecutedDownloadRemoteEdit(ExecutedDownloadRemoteEdit),
     SelectedPlannedAction(PlannedActionRow),
 }
 
@@ -249,6 +298,8 @@ pub enum ExecuteNextClientActionError {
     LocalOnlyCreate(#[from] ExecuteLocalOnlyCreateError),
     #[error(transparent)]
     UploadLocalEdit(#[from] ExecuteUploadLocalEditError),
+    #[error(transparent)]
+    DownloadRemoteEdit(#[from] ExecuteDownloadRemoteEditError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,26 +353,36 @@ where
             )))
         }
         NextClientActionCandidate::PlannedAction(planned_action) => {
-            if planned_action.decision == PlannerDecision::UploadLocalEdit.as_str() {
-                let source_path = resolve_inode_source_path(
-                    &planned_action.namespace_id,
-                    planned_action.inode_id,
-                );
-                let executed = execute_upload_local_edit(
-                    db,
-                    store,
-                    &planned_action.namespace_id,
-                    planned_action.inode_id,
-                    source_path.as_deref(),
-                    uploaded_at_ms,
-                    created_at_ms,
-                    dispatch,
-                )?;
-                Ok(Some(NextClientAction::ExecutedUploadLocalEdit(executed)))
-            } else {
-                Ok(Some(NextClientAction::SelectedPlannedAction(
-                    planned_action,
-                )))
+            let namespace_id = planned_action.namespace_id.clone();
+            let inode_id = planned_action.inode_id;
+            match planned_action.decision.as_str() {
+                value if value == PlannerDecision::UploadLocalEdit.as_str() => {
+                    let source_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let executed = execute_upload_local_edit(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        source_path.as_deref(),
+                        uploaded_at_ms,
+                        created_at_ms,
+                        dispatch,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedUploadLocalEdit(executed)))
+                }
+                value if value == PlannerDecision::DownloadRemoteEdit.as_str() => {
+                    let target_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let executed = execute_download_remote_edit(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        target_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedDownloadRemoteEdit(executed)))
+                }
+                _ => Ok(Some(NextClientAction::SelectedPlannedAction(planned_action))),
             }
         }
     }
@@ -562,6 +623,24 @@ where
     )
 }
 
+pub fn execute_download_remote_edit_to_path<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    target_path: &Path,
+    applied_at_ms: u64,
+) -> Result<ExecutedDownloadRemoteEdit, ExecuteDownloadRemoteEditError> {
+    execute_download_remote_edit(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        Some(target_path),
+        applied_at_ms,
+    )
+}
+
 fn execute_upload_local_edit<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -600,6 +679,58 @@ where
         ensured_upload,
         upload_reused,
         dispatched,
+    })
+}
+
+fn execute_download_remote_edit<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+) -> Result<ExecutedDownloadRemoteEdit, ExecuteDownloadRemoteEditError> {
+    let remote = ensure_download_remote_edit_ready(db, namespace_id, inode_id)?;
+    let target_path = target_path.ok_or_else(|| ExecuteDownloadRemoteEditError::SourcePathMissing {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+    })?;
+    let manifest_digest = remote
+        .content_manifest_digest
+        .as_deref()
+        .expect("download_remote_edit should require manifest digest");
+    let downloaded = download_file_to_bytes(store, namespace_id, manifest_digest)?;
+    let remote_content_digest = remote
+        .content_digest
+        .as_deref()
+        .expect("download_remote_edit should require remote content digest");
+    if downloaded.file_digest_sha256 != remote_content_digest {
+        return Err(ExecuteDownloadRemoteEditError::RemoteDigestMismatch {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            remote_content_digest: remote_content_digest.to_owned(),
+            downloaded_file_digest: downloaded.file_digest_sha256.clone(),
+        });
+    }
+
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| ExecuteDownloadRemoteEditError::LocalWriteFailed {
+            path: target_path.display().to_string(),
+            source,
+        })?;
+    }
+    fs::write(target_path, &downloaded.bytes).map_err(|source| {
+        ExecuteDownloadRemoteEditError::LocalWriteFailed {
+            path: target_path.display().to_string(),
+            source,
+        }
+    })?;
+
+    let applied = db.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)?;
+    Ok(ExecutedDownloadRemoteEdit {
+        downloaded_content_manifest_digest: downloaded.content_manifest_digest,
+        downloaded_file_digest_sha256: downloaded.file_digest_sha256,
+        applied,
     })
 }
 
@@ -674,6 +805,32 @@ where
         response,
         applied,
     })
+}
+
+fn ensure_download_remote_edit_ready(
+    db: &SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<crate::state_db::RemoteFileStateRow, ExecuteDownloadRemoteEditError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = crate::planner::PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::DownloadRemoteEdit {
+        return Err(
+            ExecuteDownloadRemoteEditError::DownloadRemoteEditDecisionMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                decision: planned.decision,
+            },
+        );
+    }
+
+    let (remote, _local, _anchor) = db.load_bound_download_remote_edit_views(namespace_id, inode_id)?;
+    Ok(remote)
 }
 
 fn ensure_upload_local_create_ready<S: ObjectStore>(

@@ -159,6 +159,13 @@ pub struct ModelValidatedContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelMaterializedContent {
+    pub file_size_bytes: u64,
+    pub file_digest_sha256: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelContentValidationError {
     ManifestDigestMismatch {
         expected: String,
@@ -1257,6 +1264,26 @@ pub fn validate_uploaded_content_reference(
     manifest_envelope: &ContentManifestEnvelope,
     available_blocks: &BTreeMap<String, Vec<u8>>,
 ) -> Result<ModelValidatedContent, ModelContentValidationError> {
+    let materialized = materialize_uploaded_content_reference(
+        namespace_id,
+        content_manifest_digest,
+        manifest_envelope,
+        available_blocks,
+    )?;
+
+    Ok(ModelValidatedContent {
+        file_size_bytes: materialized.file_size_bytes,
+        file_digest_sha256: materialized.file_digest_sha256,
+        block_count: manifest_envelope.payload.blocks.len(),
+    })
+}
+
+pub fn materialize_uploaded_content_reference(
+    namespace_id: &NamespaceId,
+    content_manifest_digest: &str,
+    manifest_envelope: &ContentManifestEnvelope,
+    available_blocks: &BTreeMap<String, Vec<u8>>,
+) -> Result<ModelMaterializedContent, ModelContentValidationError> {
     let actual_manifest_digest = content_manifest_digest_sha256(manifest_envelope)
         .expect("content manifest envelope should always re-encode");
     if actual_manifest_digest != content_manifest_digest {
@@ -1316,10 +1343,10 @@ pub fn validate_uploaded_content_reference(
         });
     }
 
-    Ok(ModelValidatedContent {
+    Ok(ModelMaterializedContent {
         file_size_bytes: actual_file_size,
         file_digest_sha256: actual_file_digest,
-        block_count: manifest_envelope.payload.blocks.len(),
+        bytes: reconstructed,
     })
 }
 
@@ -1516,6 +1543,32 @@ mod tests {
             "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
         );
         assert_eq!(validated.block_count, 1);
+    }
+
+    #[test]
+    fn model_materializes_uploaded_content_reference() {
+        let uploaded = build_uploaded_content(NamespaceId::from("ns-1"), b"hello from loon\n")
+            .expect("build uploaded content");
+        let mut blocks = BTreeMap::new();
+        blocks.insert(
+            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9".to_owned(),
+            b"hello from loon\n".to_vec(),
+        );
+
+        let materialized = materialize_uploaded_content_reference(
+            &NamespaceId::from("ns-1"),
+            &uploaded.content_manifest_digest,
+            &uploaded.manifest_envelope,
+            &blocks,
+        )
+        .expect("materialize uploaded content reference");
+
+        assert_eq!(materialized.file_size_bytes, 16);
+        assert_eq!(
+            materialized.file_digest_sha256,
+            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+        );
+        assert_eq!(materialized.bytes, b"hello from loon\n");
     }
 
     #[test]

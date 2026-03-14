@@ -1,7 +1,7 @@
 use crate::upload::UploadedContent;
 use loon_types::{
-    ChangeSeq, ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind, NamespaceId,
-    RevisionNo,
+    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId,
+    InodeKind, NamespaceId, RevisionNo,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use serde_json;
 use std::path::Path;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
     namespace_id TEXT NOT NULL,
@@ -171,6 +171,14 @@ CREATE TABLE pending_inode_mutations (
     created_at_ms INTEGER NOT NULL,
     UNIQUE (namespace_id, inode_id)
 );
+"#;
+
+const SCHEMA_V8_SQL: &str = r#"
+ALTER TABLE remote_state
+ADD COLUMN content_manifest_digest TEXT;
+
+ALTER TABLE sync_anchor
+ADD COLUMN content_manifest_digest TEXT;
 "#;
 
 #[derive(Debug, Error)]
@@ -350,6 +358,34 @@ pub enum StateDbError {
         remote: String,
         anchor: String,
     },
+    #[error("download_remote_edit_manifest_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    DownloadRemoteEditManifestMissing { namespace_id: String, inode_id: u64 },
+    #[error("download_remote_edit_remote_digest_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    DownloadRemoteEditRemoteDigestMissing { namespace_id: String, inode_id: u64 },
+    #[error("download_remote_edit_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    DownloadRemoteEditStateMissing { namespace_id: String, inode_id: u64 },
+    #[error("download_remote_edit_requires_file: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
+    DownloadRemoteEditRequiresFile {
+        namespace_id: String,
+        inode_id: u64,
+        inode_kind: String,
+    },
+    #[error("download_remote_edit_path_change_not_supported: namespace `{namespace_id}` inode `{inode_id}` field `{field}` remote `{remote}` != anchor `{anchor}`")]
+    DownloadRemoteEditPathChangeNotSupported {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        remote: String,
+        anchor: String,
+    },
+    #[error("download_remote_edit_local_not_converged: namespace `{namespace_id}` inode `{inode_id}` field `{field}` local `{local}` != anchor `{anchor}`")]
+    DownloadRemoteEditLocalNotConverged {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        local: String,
+        anchor: String,
+    },
     #[error(
         "bind_kind_mismatch: `{client_file_id}` local kind `{local_kind}` != remote kind `{remote_kind}`"
     )]
@@ -411,6 +447,7 @@ pub struct RemoteFileStateRow {
     pub observed_seq: ChangeSeq,
     pub revision_no: RevisionNo,
     pub content_digest: Option<String>,
+    pub content_manifest_digest: Option<String>,
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
     pub is_deleted: bool,
@@ -437,6 +474,7 @@ pub struct SyncAnchorRow {
     pub synced_seq: ChangeSeq,
     pub revision_no: RevisionNo,
     pub content_digest: Option<String>,
+    pub content_manifest_digest: Option<String>,
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
 }
@@ -611,6 +649,14 @@ impl SqliteStateDb {
         inode_id: InodeId,
     ) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
         load_bound_upload_local_edit_views_from_conn(&self.conn, namespace_id, inode_id)
+    }
+
+    pub fn load_bound_download_remote_edit_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
+        load_bound_download_remote_edit_views_from_conn(&self.conn, namespace_id, inode_id)
     }
 
     pub fn load_planned_action(
@@ -822,6 +868,17 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn apply_download_remote_edit(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_download_remote_edit", |tx| {
+            tx.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
     fn apply_migrations(&mut self) -> Result<(), StateDbError> {
         let mut current_version = self.schema_version()?;
         if current_version > SCHEMA_VERSION {
@@ -879,6 +936,14 @@ impl SqliteStateDb {
         if current_version == 6 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V7_SQL)?;
+            tx.pragma_update(None, "user_version", 7)?;
+            tx.commit()?;
+            current_version = 7;
+        }
+
+        if current_version == 7 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V8_SQL)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -945,15 +1010,17 @@ impl PlannerTxn<'_> {
                 observed_seq,
                 revision_no,
                 content_digest,
+                content_manifest_digest,
                 parent_inode_id,
                 display_name,
                 is_deleted
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(namespace_id, inode_id) DO UPDATE SET
                 inode_kind = excluded.inode_kind,
                 observed_seq = excluded.observed_seq,
                 revision_no = excluded.revision_no,
                 content_digest = excluded.content_digest,
+                content_manifest_digest = excluded.content_manifest_digest,
                 parent_inode_id = excluded.parent_inode_id,
                 display_name = excluded.display_name,
                 is_deleted = excluded.is_deleted",
@@ -964,6 +1031,7 @@ impl PlannerTxn<'_> {
                 to_sql_u64(row.observed_seq.0, "observed_seq")?,
                 to_sql_u64(row.revision_no.0, "revision_no")?,
                 row.content_digest.as_deref(),
+                row.content_manifest_digest.as_deref(),
                 row.parent_inode_id
                     .map(|inode_id| to_sql_u64(inode_id.0, "parent_inode_id"))
                     .transpose()?,
@@ -1021,14 +1089,16 @@ impl PlannerTxn<'_> {
                 synced_seq,
                 revision_no,
                 content_digest,
+                content_manifest_digest,
                 parent_inode_id,
                 display_name
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(namespace_id, inode_id) DO UPDATE SET
                 inode_kind = excluded.inode_kind,
                 synced_seq = excluded.synced_seq,
                 revision_no = excluded.revision_no,
                 content_digest = excluded.content_digest,
+                content_manifest_digest = excluded.content_manifest_digest,
                 parent_inode_id = excluded.parent_inode_id,
                 display_name = excluded.display_name",
             params![
@@ -1038,6 +1108,7 @@ impl PlannerTxn<'_> {
                 to_sql_u64(row.synced_seq.0, "synced_seq")?,
                 to_sql_u64(row.revision_no.0, "revision_no")?,
                 row.content_digest.as_deref(),
+                row.content_manifest_digest.as_deref(),
                 row.parent_inode_id
                     .map(|inode_id| to_sql_u64(inode_id.0, "parent_inode_id"))
                     .transpose()?,
@@ -1384,6 +1455,14 @@ impl PlannerTxn<'_> {
                 client_request_id: response.client_request_id.clone(),
             }
         })?;
+        let content_manifest_digest = match &pending.request.op {
+            ClientMutationOp::CreateFile {
+                content_manifest_digest,
+                ..
+            } => Some(content_manifest_digest.clone()),
+            ClientMutationOp::CreateDir { .. } => None,
+            ClientMutationOp::ReplaceFile { .. } => None,
+        };
         let remote = RemoteFileStateRow {
             namespace_id: response.namespace_id.clone(),
             inode_id: created_inode.inode_id,
@@ -1391,6 +1470,7 @@ impl PlannerTxn<'_> {
             observed_seq: response.committed_seq,
             revision_no: created_inode.revision_no,
             content_digest: created_inode.content_digest.clone(),
+            content_manifest_digest,
             parent_inode_id: Some(created_inode.parent_inode_id),
             display_name: created_inode.display_name.clone(),
             is_deleted: false,
@@ -1444,6 +1524,13 @@ impl PlannerTxn<'_> {
             observed_seq: response.committed_seq,
             revision_no: replaced.revision_no,
             content_digest: Some(replaced.content_digest.clone()),
+            content_manifest_digest: match &pending.request.op {
+                ClientMutationOp::ReplaceFile {
+                    content_manifest_digest,
+                    ..
+                } => Some(content_manifest_digest.clone()),
+                _ => None,
+            },
             parent_inode_id: remote.parent_inode_id,
             display_name: remote.display_name,
             is_deleted: false,
@@ -1466,6 +1553,13 @@ impl PlannerTxn<'_> {
             synced_seq: response.committed_seq,
             revision_no: replaced.revision_no,
             content_digest: Some(replaced.content_digest.clone()),
+            content_manifest_digest: match &pending.request.op {
+                ClientMutationOp::ReplaceFile {
+                    content_manifest_digest,
+                    ..
+                } => Some(content_manifest_digest.clone()),
+                _ => None,
+            },
             parent_inode_id: anchor.parent_inode_id,
             display_name: anchor.display_name,
         };
@@ -1479,6 +1573,47 @@ impl PlannerTxn<'_> {
         Ok(AppliedInodeMutation {
             namespace_id: pending.namespace_id,
             inode_id: pending.inode_id,
+        })
+    }
+
+    pub fn apply_download_remote_edit(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let (remote, local, _anchor) =
+            load_bound_download_remote_edit_views_from_conn(&self.tx, namespace_id, inode_id)?;
+        let next_local = LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: local.inode_kind,
+            content_digest: remote.content_digest.clone(),
+            parent_inode_id: local.parent_inode_id,
+            display_name: local.display_name,
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: applied_at_ms,
+        };
+        let next_anchor = SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            synced_seq: remote.observed_seq,
+            revision_no: remote.revision_no,
+            content_digest: remote.content_digest.clone(),
+            content_manifest_digest: remote.content_manifest_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name,
+        };
+
+        self.upsert_local_file(&next_local)?;
+        self.upsert_sync_anchor(&next_anchor)?;
+        self.delete_planned_action(namespace_id, inode_id)?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
         })
     }
 
@@ -1559,6 +1694,7 @@ impl PlannerTxn<'_> {
             synced_seq: remote.observed_seq,
             revision_no: remote.revision_no,
             content_digest: remote.content_digest.clone(),
+            content_manifest_digest: remote.content_manifest_digest.clone(),
             parent_inode_id: remote.parent_inode_id,
             display_name: remote.display_name.clone(),
         };
@@ -1803,6 +1939,7 @@ fn load_remote_file(
             observed_seq,
             revision_no,
             content_digest,
+            content_manifest_digest,
             parent_inode_id,
             display_name,
             is_deleted
@@ -1815,9 +1952,10 @@ fn load_remote_file(
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, bool>(6)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, bool>(7)?,
                 ))
             },
         )
@@ -1829,6 +1967,7 @@ fn load_remote_file(
             observed_seq,
             revision_no,
             content_digest,
+            content_manifest_digest,
             parent_inode_id,
             display_name,
             is_deleted,
@@ -1840,6 +1979,7 @@ fn load_remote_file(
                 observed_seq: ChangeSeq(from_sql_u64(observed_seq, "observed_seq")?),
                 revision_no: RevisionNo(from_sql_u64(revision_no, "revision_no")?),
                 content_digest,
+                content_manifest_digest,
                 parent_inode_id: parent_inode_id
                     .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
                     .transpose()?,
@@ -1923,6 +2063,7 @@ fn load_sync_anchor(
             synced_seq,
             revision_no,
             content_digest,
+            content_manifest_digest,
             parent_inode_id,
             display_name
         FROM sync_anchor
@@ -1934,15 +2075,24 @@ fn load_sync_anchor(
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             },
         )
         .optional()?;
 
     raw.map(
-        |(inode_kind, synced_seq, revision_no, content_digest, parent_inode_id, display_name)| {
+        |(
+            inode_kind,
+            synced_seq,
+            revision_no,
+            content_digest,
+            content_manifest_digest,
+            parent_inode_id,
+            display_name,
+        )| {
             Ok(SyncAnchorRow {
                 namespace_id: namespace_id.clone(),
                 inode_id,
@@ -1950,6 +2100,7 @@ fn load_sync_anchor(
                 synced_seq: ChangeSeq(from_sql_u64(synced_seq, "synced_seq")?),
                 revision_no: RevisionNo(from_sql_u64(revision_no, "revision_no")?),
                 content_digest,
+                content_manifest_digest,
                 parent_inode_id: parent_inode_id
                     .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
                     .transpose()?,
@@ -2088,6 +2239,13 @@ fn load_bound_upload_local_edit_views_from_conn(
     ensure_upload_local_edit_remote_anchor_match(
         namespace_id,
         inode_id,
+        "content_manifest_digest",
+        format!("{:?}", remote.content_manifest_digest),
+        format!("{:?}", anchor.content_manifest_digest),
+    )?;
+    ensure_upload_local_edit_remote_anchor_match(
+        namespace_id,
+        inode_id,
         "parent_inode_id",
         format!("{:?}", remote.parent_inode_id),
         format!("{:?}", anchor.parent_inode_id),
@@ -2107,6 +2265,115 @@ fn load_bound_upload_local_edit_views_from_conn(
             field: "is_deleted",
             remote: "true".to_owned(),
             anchor: "false".to_owned(),
+        });
+    }
+
+    Ok((remote, local, anchor))
+}
+
+fn load_bound_download_remote_edit_views_from_conn(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
+    let remote = load_remote_file(conn, namespace_id, inode_id)?;
+    let local = load_local_file(conn, namespace_id, inode_id)?;
+    let anchor = load_sync_anchor(conn, namespace_id, inode_id)?;
+    let (remote, local, anchor) = match (remote, local, anchor) {
+        (Some(remote), Some(local), Some(anchor)) => (remote, local, anchor),
+        _ => {
+            return Err(StateDbError::DownloadRemoteEditStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })
+        }
+    };
+
+    if remote.inode_kind != InodeKind::File
+        || local.inode_kind != InodeKind::File
+        || anchor.inode_kind != InodeKind::File
+    {
+        return Err(StateDbError::DownloadRemoteEditRequiresFile {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            inode_kind: inode_kind_as_str(&local.inode_kind).to_owned(),
+        });
+    }
+
+    ensure_download_remote_edit_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "parent_inode_id",
+        format!("{:?}", remote.parent_inode_id),
+        format!("{:?}", anchor.parent_inode_id),
+    )?;
+    ensure_download_remote_edit_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "display_name",
+        remote.display_name.clone(),
+        anchor.display_name.clone(),
+    )?;
+
+    ensure_download_remote_edit_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_digest",
+        format!("{:?}", local.content_digest),
+        format!("{:?}", anchor.content_digest),
+    )?;
+    ensure_download_remote_edit_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "parent_inode_id",
+        format!("{:?}", local.parent_inode_id),
+        format!("{:?}", anchor.parent_inode_id),
+    )?;
+    ensure_download_remote_edit_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "display_name",
+        local.display_name.clone(),
+        anchor.display_name.clone(),
+    )?;
+
+    if !local.exists_on_disk {
+        return Err(StateDbError::DownloadRemoteEditLocalNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "exists_on_disk",
+            local: "false".to_owned(),
+            anchor: "true".to_owned(),
+        });
+    }
+    if local.dirty {
+        return Err(StateDbError::DownloadRemoteEditLocalNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "dirty",
+            local: "true".to_owned(),
+            anchor: "false".to_owned(),
+        });
+    }
+    if remote.is_deleted {
+        return Err(StateDbError::DownloadRemoteEditPathChangeNotSupported {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "is_deleted",
+            remote: "true".to_owned(),
+            anchor: "false".to_owned(),
+        });
+    }
+    if remote.content_manifest_digest.is_none() {
+        return Err(StateDbError::DownloadRemoteEditManifestMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        });
+    }
+    if remote.content_digest.is_none() {
+        return Err(StateDbError::DownloadRemoteEditRemoteDigestMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
         });
     }
 
@@ -2540,6 +2807,46 @@ fn ensure_upload_local_edit_remote_anchor_match(
     })
 }
 
+fn ensure_download_remote_edit_remote_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    remote: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if remote == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::DownloadRemoteEditPathChangeNotSupported {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        remote,
+        anchor,
+    })
+}
+
+fn ensure_download_remote_edit_local_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    local: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if local == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::DownloadRemoteEditLocalNotConverged {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        local,
+        anchor,
+    })
+}
+
 fn validate_local_only_upload(
     local_only: &LocalOnlyFileStateRow,
     upload_namespace_id: &NamespaceId,
@@ -2642,7 +2949,7 @@ mod tests {
     };
 
     #[test]
-    fn sqlite_state_db_applies_schema_v7() {
+    fn sqlite_state_db_applies_schema_v8() {
         let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
         assert_eq!(
@@ -3073,6 +3380,7 @@ mod tests {
                 observed_seq: ChangeSeq(501),
                 revision_no: RevisionNo(1),
                 content_digest: None,
+                content_manifest_digest: None,
                 parent_inode_id: Some(InodeId(2)),
                 display_name: "drafts".to_owned(),
                 is_deleted: false,
@@ -3095,6 +3403,7 @@ mod tests {
                 synced_seq: ChangeSeq(501),
                 revision_no: RevisionNo(1),
                 content_digest: None,
+                content_manifest_digest: None,
                 parent_inode_id: Some(InodeId(2)),
                 display_name: "drafts".to_owned(),
             })?;
@@ -3185,6 +3494,9 @@ mod tests {
                     synced_seq: ChangeSeq(500),
                     revision_no: RevisionNo(1),
                     content_digest: Some("sha256:new-local-file".to_owned()),
+                    content_manifest_digest: Some(
+                        "sha256:manifest-new-local-file".to_owned(),
+                    ),
                     parent_inode_id: Some(InodeId(2)),
                     display_name: "draft.txt".to_owned(),
                 }),
@@ -3300,6 +3612,9 @@ mod tests {
                     observed_seq: ChangeSeq(42),
                     revision_no: RevisionNo(1),
                     content_digest: Some("sha256:new-local-file".to_owned()),
+                    content_manifest_digest: Some(
+                        "sha256:new-local-file".to_owned(),
+                    ),
                     parent_inode_id: Some(InodeId(2)),
                     display_name: "draft.txt".to_owned(),
                     is_deleted: false,
@@ -3322,6 +3637,9 @@ mod tests {
                     synced_seq: ChangeSeq(42),
                     revision_no: RevisionNo(1),
                     content_digest: Some("sha256:new-local-file".to_owned()),
+                    content_manifest_digest: Some(
+                        "sha256:new-local-file".to_owned(),
+                    ),
                     parent_inode_id: Some(InodeId(2)),
                     display_name: "draft.txt".to_owned(),
                 }),
@@ -3352,6 +3670,7 @@ mod tests {
             observed_seq: ChangeSeq(420),
             revision_no: RevisionNo(18),
             content_digest: Some("sha256:remote-18".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-remote-18".to_owned()),
             parent_inode_id: Some(InodeId(2)),
             display_name: "report.txt".to_owned(),
             is_deleted: false,
@@ -3380,6 +3699,7 @@ mod tests {
             synced_seq: ChangeSeq(419),
             revision_no: RevisionNo(17),
             content_digest: Some("sha256:anchor-17".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
             parent_inode_id: Some(InodeId(2)),
             display_name: "report.txt".to_owned(),
         }
@@ -3407,6 +3727,7 @@ mod tests {
             observed_seq: ChangeSeq(500),
             revision_no: RevisionNo(1),
             content_digest: Some("sha256:new-local-file".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-new-local-file".to_owned()),
             parent_inode_id: Some(InodeId(2)),
             display_name: "draft.txt".to_owned(),
             is_deleted: false,
@@ -3471,6 +3792,7 @@ mod tests {
                 observed_seq: ChangeSeq(501),
                 revision_no: RevisionNo(1),
                 content_digest: None,
+                content_manifest_digest: None,
                 parent_inode_id: Some(InodeId(2)),
                 display_name: "drafts".to_owned(),
                 is_deleted: false,
@@ -3493,6 +3815,7 @@ mod tests {
                 synced_seq: ChangeSeq(501),
                 revision_no: RevisionNo(1),
                 content_digest: None,
+                content_manifest_digest: None,
                 parent_inode_id: Some(InodeId(2)),
                 display_name: "drafts".to_owned(),
             })?;

@@ -65,9 +65,10 @@ Rules:
 
 The first table contents are:
 
-- `remote_state`: latest observed `seq`, `revision_no`, content digest, and current observed path view
+- `remote_state`: latest observed `seq`, `revision_no`, content digest, optional downloadable
+  content reference, and current observed path view
 - `local_state`: latest observed local content digest, current observed path view, `dirty`, and local observation time
-- `sync_anchor`: last fully synced remote revision and content digest
+- `sync_anchor`: last fully synced remote revision, content digest, and optional downloadable content reference
 - `planned_actions`: the current planner output for one `(namespace_id, inode_id)` when work is needed
 - `transfer_ledger`: resumable transfer progress keyed to namespace file identity
 - `conflicts_and_errors`: durable user-visible explanations
@@ -559,6 +560,94 @@ Failure modes named for the first implementation:
 - `upload_local_edit_remote_not_converged`
 - `upload_local_edit_source_path_missing`
 
+## Schema v8: bound remote content references
+
+The next schema version adds one nullable field to the bound remote views for file revisions:
+
+- `remote_state.content_manifest_digest`
+- `sync_anchor.content_manifest_digest`
+
+Rules:
+
+- the field is only meaningful for `inode_kind = file`
+- the field may stay `null` for older rows or for observations that do not yet carry a durable
+  content reference
+- when present, the field must be the immutable manifest object digest that can reproduce the
+  authoritative file bytes for that revision
+- local-only rows do not need this field, because uploads already use `local_only_uploads`
+  or `inode_uploads`
+
+Why this rule exists:
+
+- `content_digest` alone is not enough to fetch bytes from object storage
+- the first download executor needs a durable object-store locator for the remote file body
+
+Failure modes prevented:
+
+- planning `download_remote_edit` without any way to fetch the referenced remote bytes
+- using a whole-file digest as though it were a manifest object key
+
+Failure modes named for the first implementation:
+
+- `download_remote_edit_manifest_missing`
+
+## First bound-file download executor
+
+The first inode-keyed download executor is also intentionally narrow. It only handles:
+
+- `download_remote_edit`
+
+The executor takes:
+
+- `namespace_id`
+- `inode_id`
+- one caller-supplied local filesystem path
+- one explicit local apply timestamp
+
+Rules:
+
+- the executor must load `planned_actions(namespace_id, inode_id)` and require
+  `decision = download_remote_edit`
+- the first implementation only supports content replacement, not rename or move, so the executor
+  must require `remote_state`, `local_state`, and `sync_anchor` to exist and to agree on
+  `inode_kind = file`, `parent_inode_id`, and `display_name`
+- the executor must require `local_state` to still match `sync_anchor` before download
+- the executor must require `remote_state.content_digest` to be present
+- the executor must require `remote_state.content_manifest_digest` to be present
+- the executor must fetch and verify the immutable manifest and blocks from object storage before
+  writing the local path
+- the executor must require the downloaded whole-file digest to match
+  `remote_state.content_digest`
+- after the local write succeeds, one SQLite transaction must:
+  - update `local_state` to the remote digest
+  - clear `dirty`
+  - advance `sync_anchor` to the current `remote_state` revision and manifest reference
+  - clear `planned_actions(namespace_id, inode_id)`
+
+Why this rule exists:
+
+- the first two-way bound-file sync demo needs a real downward content path, not only uploads
+- the client should only claim convergence after it has both durable remote bytes and a durable
+  local state transition
+
+Failure modes prevented:
+
+- overwriting a locally diverged file with remote bytes
+- downloading remote bytes without a durable manifest reference
+- applying a remote observation whose manifest bytes do not match the observed file digest
+- claiming convergence after a partial or unverified local file write
+
+Failure modes named for the first implementation:
+
+- `download_remote_edit_decision_missing`
+- `download_remote_edit_state_missing`
+- `download_remote_edit_requires_file`
+- `download_remote_edit_path_change_not_supported`
+- `download_remote_edit_local_not_converged`
+- `download_remote_edit_remote_digest_missing`
+- `download_remote_edit_remote_digest_mismatch`
+- `download_remote_edit_source_path_missing`
+
 ## Pending client mutation request ledger (schema v6)
 
 The next schema version widens the durable bridge for in-flight authoritative creates:
@@ -794,6 +883,7 @@ It is still intentionally partial. In this first implementation it may:
 
 - execute one selected local-only create immediately
 - execute one selected inode-keyed `upload_local_edit`
+- execute one selected inode-keyed `download_remote_edit`
 - or surface one selected inode-keyed planned action as the next scheduled work item
 
 Rules:
@@ -808,6 +898,8 @@ Rules:
   existing local-only create loop
 - if the selected row comes from `planned_actions` and `decision = upload_local_edit`, the tick
   must execute it through the bound-file edit executor
+- if the selected row comes from `planned_actions` and `decision = download_remote_edit`, the tick
+  must execute it through the bound-file download executor
 - if the selected row comes from `planned_actions` and the decision is anything else, the tick must
   return that planned action as the next scheduled work item without trying to silently emulate
   download/conflict behavior yet
@@ -817,7 +909,7 @@ Why this rule exists:
 
 - one scheduler surface is more valuable than separate “creates only” and “everything else later”
   entrypoints
-- we should not fake support for inode-keyed download/conflict actions before their executors exist
+- we should not fake support for inode-keyed conflict actions before their executors exist
 - a deterministic cross-table tie-break keeps restart behavior and tests reproducible
 
 Failure modes prevented:
