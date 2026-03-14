@@ -86,6 +86,42 @@ Head, lease, and queue objects must stay small enough for simple conditional wri
 Large immutable file content may use multipart upload.
 Small mutable control objects should not.
 
+## Immutable content objects
+
+File content is stored as immutable per-namespace block objects plus one immutable
+content manifest object.
+
+The durable object families are:
+
+```text
+namespaces/{namespace_id}/blobs/{block_digest_sha256}
+namespaces/{namespace_id}/manifests/{content_manifest_digest}.json
+```
+
+Rules:
+
+- block digests use `sha256:<hex>` over plaintext block bytes
+- the v1 block size is fixed at `16 MiB`, except the final block may be shorter
+- block object bodies are the raw plaintext block bytes
+- the manifest body is deterministic JSON `ContentManifestEnvelope`
+- `content_manifest_digest` is `sha256:<hex>` of the canonical manifest JSON bytes
+- the manifest payload must carry `namespace_id`, `file_size_bytes`, `file_digest_sha256`,
+  `block_size_bytes`, and the ordered list of block digests and block sizes
+- immutable content writes use create-if-absent; if an object already exists, the writer must
+  verify byte-for-byte equality before reusing it
+
+Why these rules exist:
+
+- `create_file` must be able to point at durable immutable content
+- identical content must not depend on provider ETags or uploader identity
+- future readers must be able to validate a manifest against the exact bytes it names
+
+Failure modes prevented:
+
+- metadata publishing before file bytes are durable
+- two uploaders writing different bytes under the same content-addressed key
+- content manifests becoming uploader-version-specific even when file content is identical
+
 ## Initial durable key layout
 
 The first object-store key builders should encode these stable families:
@@ -93,6 +129,8 @@ The first object-store key builders should encode these stable families:
 ```text
 namespaces/{namespace_id}/head.json
 namespaces/{namespace_id}/lease.json
+namespaces/{namespace_id}/blobs/{block_digest_sha256}
+namespaces/{namespace_id}/manifests/{content_manifest_digest}.json
 namespaces/{namespace_id}/wal/{seq:020}-{commit_id}.cbor.zst
 namespaces/{namespace_id}/snapshots/{seq:020}/manifest.json
 namespaces/{namespace_id}/snapshots/{seq:020}/tables/{family}-{segment_index:05}.sst.zst

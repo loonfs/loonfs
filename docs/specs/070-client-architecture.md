@@ -249,6 +249,47 @@ Failure modes named for the first implementation:
 - `local_only_parent_not_directory`
 - `local_only_parent_not_bound`
 
+## First durable content upload path
+
+Before the client can publish `create_file`, it must turn one observed local file into
+immutable durable content objects.
+
+The first upload helper takes:
+
+- `namespace_id`
+- a caller-supplied local filesystem path
+
+One successful upload must:
+
+1. read the local file bytes
+2. split them into fixed `16 MiB` plaintext blocks
+3. write each block immutably at `namespaces/{namespace_id}/blobs/{block_digest_sha256}`
+4. build deterministic JSON `ContentManifestEnvelope` bytes
+5. write that manifest immutably at
+   `namespaces/{namespace_id}/manifests/{content_manifest_digest}.json`
+6. return `file_digest_sha256` plus `content_manifest_digest`
+
+Rules:
+
+- block digests and whole-file digests use `sha256:<hex>` over plaintext bytes
+- the content manifest object must be content-addressed and uploader-independent
+- if an immutable block or manifest object already exists, the client may reuse it only after
+  verifying the existing bytes are identical
+- the first slice may read the whole file from the supplied path and does not yet need resumable
+  transfer state
+
+Why this rule exists:
+
+- file bytes must become durable before metadata publish
+- the first create-file happy path should already use the same immutable content layout the rest
+  of the system will read later
+
+Failure modes prevented:
+
+- publishing `create_file` with only a local digest string and no durable manifest object
+- different uploaders writing different manifest bytes under the same manifest digest
+- treating provider-side existence as proof that the immutable object body matches the local file
+
 ## Client mutation contract
 
 The first executor does not invent a separate long-lived sync protocol. It emits
@@ -279,7 +320,8 @@ Rules:
 - one planned local-only action maps to one client mutation request
 - the request carries canonical `parent_inode_id`, never a parent path string
 - `client_request_id` is stable for retries and becomes the authoritative `request_id`
-- for the first file-create skeleton, the executor may reuse the local observed digest as `content_manifest_digest`
+- for `create_file`, the executor must use the `content_manifest_digest` returned by the durable
+  upload step, not the local observed file digest
 
 Why this rule exists:
 

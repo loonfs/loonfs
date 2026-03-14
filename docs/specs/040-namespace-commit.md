@@ -54,6 +54,8 @@ Rules:
 - the namespace head still owns inode allocation
 - each create operation consumes exactly one inode id from `head.next_inode_id`
 - `create_file` requires durable content before publish, just like `replace_file`
+- `content_manifest_digest` must identify one immutable manifest object at
+  `namespaces/{namespace_id}/manifests/{content_manifest_digest}.json`
 - `create_dir` does not require a content manifest
 
 The first create preconditions are:

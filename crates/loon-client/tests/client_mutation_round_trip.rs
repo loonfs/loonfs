@@ -62,6 +62,7 @@ fn run_fixture(relative_path: &str) {
         &build.client_request_id,
         &initial.local_only_state,
         &planned,
+        initial.local_only_state.content_digest.as_deref(),
     )
     .expect("build client mutation request");
 

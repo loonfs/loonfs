@@ -23,9 +23,13 @@ fn upload_local_create_fixture_translates_to_client_create_file_request() {
         created_at_ms: planner_tick.now_ms,
     };
 
-    let request =
-        build_client_mutation_request("client-req-0001", &initial.local_only_state, &planned)
-            .expect("translate upload-local-create request");
+    let request = build_client_mutation_request(
+        "client-req-0001",
+        &initial.local_only_state,
+        &planned,
+        Some("sha256:new-local-file"),
+    )
+    .expect("translate upload-local-create request");
 
     assert_eq!(
         request,
@@ -59,7 +63,7 @@ fn create_remote_dir_fixture_translates_to_client_create_dir_request() {
     };
 
     let request =
-        build_client_mutation_request("client-req-0002", &initial.local_only_state, &planned)
+        build_client_mutation_request("client-req-0002", &initial.local_only_state, &planned, None)
             .expect("translate create-remote-dir request");
 
     assert_eq!(

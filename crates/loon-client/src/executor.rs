@@ -23,8 +23,8 @@ pub enum ExecutorError {
     },
     #[error("missing parent inode for `{client_file_id}`")]
     MissingParentInode { client_file_id: String },
-    #[error("missing content digest for `{client_file_id}`")]
-    MissingContentDigest { client_file_id: String },
+    #[error("missing content manifest digest for `{client_file_id}`")]
+    MissingContentManifestDigest { client_file_id: String },
     #[error("unsupported planner decision `{0:?}` for client mutation executor")]
     UnsupportedDecision(PlannerDecision),
     #[error(
@@ -41,6 +41,7 @@ pub fn build_client_mutation_request(
     client_request_id: &str,
     local_only: &LocalOnlyFileStateRow,
     planned: &PlannedLocalOnlyActionRecord,
+    content_manifest_digest: Option<&str>,
 ) -> Result<ClientMutationRequest, ExecutorError> {
     if client_request_id.trim().is_empty() {
         return Err(ExecutorError::EmptyClientRequestId);
@@ -94,11 +95,11 @@ pub fn build_client_mutation_request(
             ClientMutationOp::CreateFile {
                 parent_inode_id,
                 display_name: local_only.display_name.clone(),
-                content_manifest_digest: local_only.content_digest.clone().ok_or_else(|| {
-                    ExecutorError::MissingContentDigest {
+                content_manifest_digest: content_manifest_digest.map(str::to_owned).ok_or_else(
+                    || ExecutorError::MissingContentManifestDigest {
                         client_file_id: local_only.client_file_id.as_str().to_owned(),
-                    }
-                })?,
+                    },
+                )?,
             }
         }
         ref other => return Err(ExecutorError::UnsupportedDecision(other.clone())),

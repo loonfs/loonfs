@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-use loon_types::{ChangeSeq, FenceToken, InodeId, LeaseState, NamespaceId};
+use loon_types::{
+    content_manifest_digest_sha256, sha256_digest, ChangeSeq, ContentBlockDescriptor,
+    ContentManifestCodecError, ContentManifestEnvelope, ContentManifestPayload, FenceToken,
+    InodeId, LeaseState, NamespaceId, CONTENT_BLOCK_SIZE_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -61,6 +65,14 @@ pub struct ModelProgressObject {
     pub namespace_id: NamespaceId,
     pub work_class: String,
     pub through_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUploadedContent {
+    pub file_size_bytes: u64,
+    pub file_digest_sha256: String,
+    pub content_manifest_digest: String,
+    pub manifest_envelope: ContentManifestEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -948,6 +960,35 @@ impl ModelNamespace {
     }
 }
 
+pub fn build_uploaded_content(
+    namespace_id: NamespaceId,
+    bytes: &[u8],
+) -> Result<ModelUploadedContent, ContentManifestCodecError> {
+    let blocks = bytes
+        .chunks(CONTENT_BLOCK_SIZE_BYTES as usize)
+        .map(|block_bytes| ContentBlockDescriptor {
+            content_digest_sha256: sha256_digest(block_bytes),
+            plaintext_size_bytes: block_bytes.len() as u64,
+        })
+        .collect();
+    let payload = ContentManifestPayload {
+        namespace_id,
+        file_size_bytes: bytes.len() as u64,
+        file_digest_sha256: sha256_digest(bytes),
+        block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
+        blocks,
+    };
+    let manifest_envelope = ContentManifestEnvelope::from_payload(payload)?;
+    let content_manifest_digest = content_manifest_digest_sha256(&manifest_envelope)?;
+
+    Ok(ModelUploadedContent {
+        file_size_bytes: manifest_envelope.payload.file_size_bytes,
+        file_digest_sha256: manifest_envelope.payload.file_digest_sha256.clone(),
+        content_manifest_digest,
+        manifest_envelope,
+    })
+}
+
 fn ensure_checkpoint_is_restorable(
     checkpoint: &ModelCheckpoint,
     available_segment_keys: &[String],
@@ -1079,6 +1120,42 @@ mod tests {
 
         assert_eq!(ns.head_seq, ChangeSeq(1));
         assert_eq!(ns.next_inode_id, InodeId(8));
+    }
+
+    #[test]
+    fn model_builds_uploaded_content_for_small_file() {
+        let uploaded = build_uploaded_content(NamespaceId::from("ns-1"), b"hello from loon\n")
+            .expect("build uploaded content");
+
+        assert_eq!(uploaded.file_size_bytes, 16);
+        assert_eq!(
+            uploaded.file_digest_sha256,
+            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+        );
+        assert_eq!(uploaded.manifest_envelope.payload.blocks.len(), 1);
+        assert_eq!(
+            uploaded.manifest_envelope.payload.blocks[0].plaintext_size_bytes,
+            16
+        );
+    }
+
+    #[test]
+    fn model_splits_content_at_fixed_block_boundary() {
+        let mut bytes = vec![b'a'; CONTENT_BLOCK_SIZE_BYTES as usize];
+        bytes.push(b'b');
+
+        let uploaded = build_uploaded_content(NamespaceId::from("ns-1"), &bytes)
+            .expect("build uploaded content");
+
+        assert_eq!(uploaded.manifest_envelope.payload.blocks.len(), 2);
+        assert_eq!(
+            uploaded.manifest_envelope.payload.blocks[0].plaintext_size_bytes,
+            CONTENT_BLOCK_SIZE_BYTES
+        );
+        assert_eq!(
+            uploaded.manifest_envelope.payload.blocks[1].plaintext_size_bytes,
+            1
+        );
     }
 
     #[test]

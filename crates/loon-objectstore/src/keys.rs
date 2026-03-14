@@ -33,6 +33,10 @@ pub fn blob(namespace: &str, digest: &str) -> String {
     format!("namespaces/{namespace}/blobs/{digest}")
 }
 
+pub fn content_manifest(namespace: &str, digest: &str) -> String {
+    format!("namespaces/{namespace}/manifests/{digest}.json")
+}
+
 pub fn snapshot_manifest(namespace: &str, seq: u64) -> String {
     format!("namespaces/{namespace}/snapshots/{seq:020}/manifest.json")
 }
@@ -60,8 +64,8 @@ pub fn queue_shard(shard_index: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        blob, derived_progress, namespace_head, namespace_lease, queue_shard, snapshot_manifest,
-        snapshot_table, wal_commit, SnapshotTableFamily,
+        blob, content_manifest, derived_progress, namespace_head, namespace_lease, queue_shard,
+        snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily,
     };
 
     #[test]
@@ -88,6 +92,10 @@ mod tests {
         assert_eq!(
             blob("ns-1", "sha256:abcd"),
             "namespaces/ns-1/blobs/sha256:abcd"
+        );
+        assert_eq!(
+            content_manifest("ns-1", "sha256:manifest-abcd"),
+            "namespaces/ns-1/manifests/sha256:manifest-abcd.json"
         );
     }
 }

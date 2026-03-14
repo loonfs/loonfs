@@ -973,6 +973,7 @@ dependencies = [
 name = "loon-client"
 version = "0.1.0"
 dependencies = [
+ "loon-model",
  "loon-objectstore",
  "loon-server",
  "loon-testkit",

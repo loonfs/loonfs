@@ -126,9 +126,11 @@ pub enum ClientMutationOp {
 }
 
 pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
+pub const CONTENT_MANIFEST_FORMAT_VERSION: u32 = 1;
 pub const WAL_FORMAT_VERSION: u32 = 1;
 pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 1;
 pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 1;
+pub const CONTENT_BLOCK_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -229,6 +231,12 @@ where
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ContentManifestKind {
+    NamespaceContentManifest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
     NamespaceWalCommit,
 }
@@ -252,6 +260,49 @@ pub enum CheckpointTableFamily {
     Direntries,
     Revisions,
     Tombstones,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentBlockDescriptor {
+    pub content_digest_sha256: String,
+    pub plaintext_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentManifestPayload {
+    pub namespace_id: NamespaceId,
+    pub file_size_bytes: u64,
+    pub file_digest_sha256: String,
+    pub block_size_bytes: u64,
+    pub blocks: Vec<ContentBlockDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentManifestEnvelope {
+    pub kind: ContentManifestKind,
+    pub format_version: u32,
+    pub payload_checksum_sha256: String,
+    pub payload: ContentManifestPayload,
+}
+
+impl ContentManifestEnvelope {
+    pub fn from_payload(
+        payload: ContentManifestPayload,
+    ) -> Result<Self, ContentManifestCodecError> {
+        Ok(Self {
+            kind: ContentManifestKind::NamespaceContentManifest,
+            format_version: CONTENT_MANIFEST_FORMAT_VERSION,
+            payload_checksum_sha256: content_manifest_payload_checksum_sha256(&payload)?,
+            payload,
+        })
+    }
+
+    pub fn has_valid_payload_checksum(&self) -> Result<bool, ContentManifestCodecError> {
+        Ok(
+            self.payload_checksum_sha256
+                == content_manifest_payload_checksum_sha256(&self.payload)?,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,6 +514,18 @@ impl WalCommitEnvelope {
 }
 
 #[derive(Debug, Error)]
+pub enum ContentManifestCodecError {
+    #[error("failed to encode content manifest payload to JSON: {0}")]
+    PayloadEncode(String),
+    #[error("failed to encode content manifest envelope to JSON: {0}")]
+    EnvelopeEncode(String),
+    #[error("failed to decode content manifest envelope from JSON: {0}")]
+    EnvelopeDecode(String),
+    #[error("content manifest payload checksum mismatch: expected {expected}, actual {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+}
+
+#[derive(Debug, Error)]
 pub enum WalCodecError {
     #[error("failed to encode WAL payload to CBOR: {0}")]
     PayloadEncode(String),
@@ -506,6 +569,32 @@ pub enum CheckpointSegmentCodecError {
     Decompress(String),
     #[error("checkpoint segment payload checksum mismatch: expected {expected}, actual {actual}")]
     ChecksumMismatch { expected: String, actual: String },
+}
+
+pub fn sha256_digest(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
+pub fn content_manifest_payload_checksum_sha256(
+    payload: &ContentManifestPayload,
+) -> Result<String, ContentManifestCodecError> {
+    let bytes = serde_json::to_vec(payload)
+        .map_err(|err| ContentManifestCodecError::PayloadEncode(err.to_string()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+pub fn encode_content_manifest_json(
+    envelope: &ContentManifestEnvelope,
+) -> Result<Vec<u8>, ContentManifestCodecError> {
+    serde_json::to_vec(envelope)
+        .map_err(|err| ContentManifestCodecError::EnvelopeEncode(err.to_string()))
+}
+
+pub fn content_manifest_digest_sha256(
+    envelope: &ContentManifestEnvelope,
+) -> Result<String, ContentManifestCodecError> {
+    let encoded = encode_content_manifest_json(envelope)?;
+    Ok(sha256_digest(&encoded))
 }
 
 pub fn wal_payload_checksum_sha256(payload: &WalCommitPayload) -> Result<String, WalCodecError> {
@@ -569,6 +658,23 @@ pub fn decode_checkpoint_manifest_json(
 
     if actual != envelope.payload_checksum_sha256 {
         return Err(CheckpointManifestCodecError::ChecksumMismatch {
+            expected: envelope.payload_checksum_sha256.clone(),
+            actual,
+        });
+    }
+
+    Ok(envelope)
+}
+
+pub fn decode_content_manifest_json(
+    bytes: &[u8],
+) -> Result<ContentManifestEnvelope, ContentManifestCodecError> {
+    let envelope: ContentManifestEnvelope = serde_json::from_slice(bytes)
+        .map_err(|err| ContentManifestCodecError::EnvelopeDecode(err.to_string()))?;
+    let actual = content_manifest_payload_checksum_sha256(&envelope.payload)?;
+
+    if actual != envelope.payload_checksum_sha256 {
+        return Err(ContentManifestCodecError::ChecksumMismatch {
             expected: envelope.payload_checksum_sha256.clone(),
             actual,
         });
@@ -660,19 +766,24 @@ impl fmt::Display for InodeId {
 mod tests {
     use super::{
         checkpoint_manifest_payload_checksum_sha256, checkpoint_page_checksum_sha256,
-        checkpoint_segment_payload_checksum_sha256, decode_checkpoint_manifest_json,
-        decode_checkpoint_segment_envelope_zstd, decode_wal_commit_envelope_zstd,
-        encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
-        encode_wal_commit_envelope_zstd, payload_checksum_sha256, wal_payload_checksum_sha256,
-        ChangeSeq, CheckpointManifestCodecError, CheckpointManifestEnvelope,
-        CheckpointManifestKind, CheckpointManifestPayload, CheckpointPage,
-        CheckpointSegmentCodecError, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-        CheckpointSegmentKind, CheckpointSegmentPayload, CheckpointTableFamily,
-        CheckpointTableManifest, ControlObjectEnvelope, ControlObjectKind, FenceToken, HeadState,
+        checkpoint_segment_payload_checksum_sha256, content_manifest_digest_sha256,
+        content_manifest_payload_checksum_sha256, decode_checkpoint_manifest_json,
+        decode_checkpoint_segment_envelope_zstd, decode_content_manifest_json,
+        decode_wal_commit_envelope_zstd, encode_checkpoint_manifest_json,
+        encode_checkpoint_segment_envelope_zstd, encode_content_manifest_json,
+        encode_wal_commit_envelope_zstd, payload_checksum_sha256, sha256_digest,
+        wal_payload_checksum_sha256, ChangeSeq, CheckpointManifestCodecError,
+        CheckpointManifestEnvelope, CheckpointManifestKind, CheckpointManifestPayload,
+        CheckpointPage, CheckpointSegmentCodecError, CheckpointSegmentDescriptor,
+        CheckpointSegmentEnvelope, CheckpointSegmentKind, CheckpointSegmentPayload,
+        CheckpointTableFamily, CheckpointTableManifest, ContentBlockDescriptor,
+        ContentManifestCodecError, ContentManifestEnvelope, ContentManifestKind,
+        ContentManifestPayload, ControlObjectEnvelope, ControlObjectKind, FenceToken, HeadState,
         InodeId, LeaseState, NamespaceId, ProgressState, RevisionNo, WalCodecError,
         WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
         CHECKPOINT_MANIFEST_FORMAT_VERSION, CHECKPOINT_SEGMENT_FORMAT_VERSION,
-        CONTROL_OBJECT_FORMAT_VERSION, WAL_FORMAT_VERSION,
+        CONTENT_BLOCK_SIZE_BYTES, CONTENT_MANIFEST_FORMAT_VERSION, CONTROL_OBJECT_FORMAT_VERSION,
+        WAL_FORMAT_VERSION,
     };
 
     #[test]
@@ -769,6 +880,58 @@ mod tests {
         assert!(decoded
             .has_valid_payload_checksum()
             .expect("recompute progress checksum"));
+    }
+
+    #[test]
+    fn content_manifest_round_trips_through_json() {
+        let payload = sample_content_manifest_payload();
+        let envelope = ContentManifestEnvelope::from_payload(payload.clone())
+            .expect("build content manifest envelope");
+
+        let encoded = encode_content_manifest_json(&envelope).expect("encode content manifest");
+        let decoded = decode_content_manifest_json(&encoded).expect("decode content manifest");
+
+        assert_eq!(decoded.kind, ContentManifestKind::NamespaceContentManifest);
+        assert_eq!(decoded.format_version, CONTENT_MANIFEST_FORMAT_VERSION);
+        assert_eq!(decoded.payload, payload);
+        assert!(decoded
+            .has_valid_payload_checksum()
+            .expect("recompute content manifest checksum"));
+    }
+
+    #[test]
+    fn content_manifest_checksum_detects_tampering() {
+        let payload = sample_content_manifest_payload();
+        let mut envelope =
+            ContentManifestEnvelope::from_payload(payload).expect("build content manifest");
+        envelope.payload.file_size_bytes = 17;
+
+        let encoded = encode_content_manifest_json(&envelope).expect("encode content manifest");
+        let error =
+            decode_content_manifest_json(&encoded).expect_err("tampered manifest should fail");
+
+        assert!(matches!(
+            error,
+            ContentManifestCodecError::ChecksumMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn content_manifest_digest_is_content_addressed() {
+        let payload = sample_content_manifest_payload();
+        let envelope =
+            ContentManifestEnvelope::from_payload(payload.clone()).expect("build content manifest");
+        let encoded = encode_content_manifest_json(&envelope).expect("encode content manifest");
+
+        assert_eq!(
+            content_manifest_digest_sha256(&envelope).expect("compute content manifest digest"),
+            sha256_digest(&encoded)
+        );
+        assert_eq!(
+            envelope.payload_checksum_sha256,
+            content_manifest_payload_checksum_sha256(&payload)
+                .expect("recompute content manifest payload checksum")
+        );
     }
 
     #[test]
@@ -943,6 +1106,19 @@ mod tests {
                     revision: RevisionNo(7),
                 },
             ],
+        }
+    }
+
+    fn sample_content_manifest_payload() -> ContentManifestPayload {
+        ContentManifestPayload {
+            namespace_id: NamespaceId::from("ns-1"),
+            file_size_bytes: 16,
+            file_digest_sha256: sha256_digest(b"hello from loon\n"),
+            block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
+            blocks: vec![ContentBlockDescriptor {
+                content_digest_sha256: sha256_digest(b"hello from loon\n"),
+                plaintext_size_bytes: 16,
+            }],
         }
     }
 
