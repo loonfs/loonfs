@@ -1,12 +1,12 @@
 use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision, PlannerError};
 use crate::state_db::{
-    BoundLocalOnlyFile, ClientFileId, LocalOnlyFileStateRow, LocalOnlyUploadRow,
-    PendingClientMutationRow, SqliteStateDb, StateDbError,
+    BoundLocalOnlyFile, ClientFileId, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
+    LocalOnlyUploadRow, PendingClientMutationRow, SqliteStateDb, StateDbError,
 };
 use crate::upload::{upload_small_file_from_path, UploadError};
 use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeKind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -139,6 +139,56 @@ pub enum ExecuteLocalOnlyCreateError {
     UploadLocalCreate(#[from] ExecuteUploadLocalCreateError),
     #[error(transparent)]
     CreateRemoteDir(#[from] ExecuteCreateRemoteDirError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedNextLocalOnlyCreate {
+    pub planned_action: LocalOnlyPlannedActionRow,
+    pub executed: ExecutedLocalOnlyCreate,
+}
+
+#[derive(Debug, Error)]
+pub enum ExecuteNextLocalOnlyCreateError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    LocalOnlyCreate(#[from] ExecuteLocalOnlyCreateError),
+}
+
+pub fn execute_next_local_only_create<S, P, F>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    resolve_source_path: P,
+    uploaded_at_ms: u64,
+    created_at_ms: u64,
+    dispatch: F,
+) -> Result<Option<ExecutedNextLocalOnlyCreate>, ExecuteNextLocalOnlyCreateError>
+where
+    S: ObjectStore,
+    P: FnOnce(&ClientFileId) -> Option<PathBuf>,
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
+    let planned_action = match db.load_next_planned_local_only_action()? {
+        Some(action) => action,
+        None => return Ok(None),
+    };
+
+    let client_file_id = planned_action.client_file_id.clone();
+    let source_path = resolve_source_path(&client_file_id);
+    let executed = execute_local_only_create(
+        db,
+        store,
+        &client_file_id,
+        source_path.as_deref(),
+        uploaded_at_ms,
+        created_at_ms,
+        dispatch,
+    )?;
+
+    Ok(Some(ExecutedNextLocalOnlyCreate {
+        planned_action,
+        executed,
+    }))
 }
 
 pub fn execute_local_only_create<S: ObjectStore, F>(

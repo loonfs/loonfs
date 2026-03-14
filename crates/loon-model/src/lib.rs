@@ -104,6 +104,12 @@ pub enum ModelLocalOnlyUploadDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelPlannedLocalOnlyAction {
+    pub client_file_id: String,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelValidatedContent {
     pub file_size_bytes: u64,
     pub file_digest_sha256: String,
@@ -1117,6 +1123,19 @@ pub fn reuse_or_allocate_client_request_id(
     }
 }
 
+pub fn select_next_local_only_action(
+    actions: &[ModelPlannedLocalOnlyAction],
+) -> Option<ModelPlannedLocalOnlyAction> {
+    actions
+        .iter()
+        .min_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.client_file_id.cmp(&right.client_file_id))
+        })
+        .cloned()
+}
+
 pub fn validate_uploaded_content_reference(
     namespace_id: &NamespaceId,
     content_manifest_digest: &str,
@@ -1491,6 +1510,33 @@ mod tests {
 
         assert_eq!(request_id, "client-req-00000000000000000007");
         assert!(!allocated_new);
+    }
+
+    #[test]
+    fn model_selects_next_local_only_action_deterministically() {
+        let selected = select_next_local_only_action(&[
+            ModelPlannedLocalOnlyAction {
+                client_file_id: "tmp:ns-1:00000000000000000003".to_owned(),
+                created_at_ms: 1_700_000_300_000,
+            },
+            ModelPlannedLocalOnlyAction {
+                client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            },
+            ModelPlannedLocalOnlyAction {
+                client_file_id: "tmp:ns-1:00000000000000000002".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            },
+        ])
+        .expect("one action should be selected");
+
+        assert_eq!(
+            selected,
+            ModelPlannedLocalOnlyAction {
+                client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            }
+        );
     }
 
     #[test]

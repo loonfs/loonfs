@@ -509,6 +509,12 @@ impl SqliteStateDb {
         load_planned_local_only_action(&self.conn, client_file_id)
     }
 
+    pub fn load_next_planned_local_only_action(
+        &self,
+    ) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
+        load_next_planned_local_only_action(&self.conn)
+    }
+
     pub fn load_local_only_upload(
         &self,
         client_file_id: &ClientFileId,
@@ -1612,6 +1618,42 @@ fn load_planned_local_only_action(
     .transpose()
 }
 
+fn load_next_planned_local_only_action(
+    conn: &Connection,
+) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT client_file_id, namespace_id, decision, reason, created_at_ms
+            FROM planned_local_only_actions
+            ORDER BY created_at_ms ASC, client_file_id ASC
+            LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(client_file_id, namespace_id, decision, reason, created_at_ms)| {
+            Ok(LocalOnlyPlannedActionRow {
+                client_file_id: ClientFileId::from(client_file_id.as_str()),
+                namespace_id: NamespaceId::from(namespace_id),
+                decision,
+                reason,
+                created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn load_local_only_upload(
     conn: &Connection,
     client_file_id: &ClientFileId,
@@ -1946,6 +1988,49 @@ mod tests {
             db.load_local_only_file(&local_only.client_file_id)
                 .expect("load local-only state"),
             Some(local_only)
+        );
+    }
+
+    #[test]
+    fn load_next_planned_local_only_action_orders_deterministically() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+
+        db.planner_transaction("seed-planned-local-only-actions", |tx| {
+            tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+                client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000003"),
+                namespace_id: NamespaceId::from("ns-1"),
+                decision: "upload_local_create".to_owned(),
+                reason: "local_only_file_without_remote_identity".to_owned(),
+                created_at_ms: 1_700_000_300_000,
+            })?;
+            tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+                client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000002"),
+                namespace_id: NamespaceId::from("ns-1"),
+                decision: "create_remote_dir".to_owned(),
+                reason: "local_only_directory_without_remote_identity".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            })?;
+            tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+                client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+                namespace_id: NamespaceId::from("ns-1"),
+                decision: "upload_local_create".to_owned(),
+                reason: "local_only_file_without_remote_identity".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            })?;
+            Ok(())
+        })
+        .expect("seed planned local-only actions");
+
+        assert_eq!(
+            db.load_next_planned_local_only_action()
+                .expect("load next planned local-only action"),
+            Some(LocalOnlyPlannedActionRow {
+                client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+                namespace_id: NamespaceId::from("ns-1"),
+                decision: "upload_local_create".to_owned(),
+                reason: "local_only_file_without_remote_identity".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            })
         );
     }
 

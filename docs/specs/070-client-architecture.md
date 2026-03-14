@@ -578,6 +578,41 @@ Failure modes named for the first implementation:
 
 - `local_only_create_source_path_missing`
 
+## First local-only create scheduler loop
+
+The first automatic client sync loop for local-only creates is intentionally small. It does not
+scan the filesystem itself and it does not run multiple creates concurrently. It performs one step:
+
+1. select one row from `planned_local_only_actions`
+2. resolve an optional source path for that `client_file_id`
+3. run the unified local-only create executor for that row
+
+Rules:
+
+- row selection must be deterministic:
+  - lowest `created_at_ms` first
+  - then lexicographically smallest `client_file_id` as the tie-breaker
+- if there is no row in `planned_local_only_actions`, the loop must return `no_work`
+- the loop must pass the selected `client_file_id` into the unified local-only create executor and
+  must not rebuild separate file-vs-directory logic of its own
+- the loop may ask a caller-supplied resolver for a source path only for the selected
+  `client_file_id`
+- if the selected row is a directory create, the resolver result is ignored
+- if the selected row is a file create and durable uploaded content is already present, the loop
+  may still succeed even when the resolver returns no path
+
+Why this rule exists:
+
+- one deterministic “next create” loop is enough to demonstrate automatic client progress
+- the caller should provide path lookup, not orchestration policy
+- tie-breaking must be explicit so tests and restart behavior stay reproducible
+
+Failure modes prevented:
+
+- two equivalent clients choosing different next local-only creates from the same SQLite state
+- a scheduler accidentally reimplementing file-vs-directory branching differently from the
+  underlying executor
+
 ## Bind-after-publish loop
 
 After a successful `create_file` or `create_dir`, the authoritative side returns one committed
