@@ -1,9 +1,12 @@
 use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision, PlannerError};
 use crate::state_db::{
-    BoundLocalOnlyFile, ClientFileId, LocalOnlyFileStateRow, PendingClientMutationRow,
-    SqliteStateDb, StateDbError,
+    BoundLocalOnlyFile, ClientFileId, LocalOnlyFileStateRow, LocalOnlyUploadRow,
+    PendingClientMutationRow, SqliteStateDb, StateDbError,
 };
+use crate::upload::{upload_small_file_from_path, UploadError};
+use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeKind};
+use std::path::Path;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -67,6 +70,71 @@ pub enum DispatchClientMutationError {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedUploadLocalCreate {
+    pub ensured_upload: Option<LocalOnlyUploadRow>,
+    pub upload_reused: bool,
+    pub dispatched: DispatchedClientMutation,
+}
+
+#[derive(Debug, Error)]
+pub enum ExecuteUploadLocalCreateError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Planner(#[from] PlannerError),
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    Upload(#[from] UploadError),
+    #[error(transparent)]
+    Dispatch(#[from] DispatchClientMutationError),
+    #[error("upload_local_create_decision_missing: `{client_file_id}` decision `{decision:?}`")]
+    UploadLocalCreateDecisionMissing {
+        client_file_id: String,
+        decision: PlannerDecision,
+    },
+}
+
+pub fn execute_upload_local_create_from_path<S: ObjectStore, F>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    client_file_id: &ClientFileId,
+    source_path: &Path,
+    uploaded_at_ms: u64,
+    created_at_ms: u64,
+    dispatch: F,
+) -> Result<ExecutedUploadLocalCreate, ExecuteUploadLocalCreateError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
+    let had_pending_request = db
+        .load_pending_client_mutation_for_client_file(client_file_id)?
+        .is_some();
+
+    let (ensured_upload, upload_reused) = if had_pending_request {
+        (db.load_local_only_upload(client_file_id)?, true)
+    } else {
+        let (upload_row, reused_existing) = ensure_upload_local_create_ready_from_path(
+            db,
+            store,
+            client_file_id,
+            source_path,
+            uploaded_at_ms,
+        )?;
+        (Some(upload_row), reused_existing)
+    };
+
+    let dispatched =
+        dispatch_client_mutation_from_state(db, client_file_id, created_at_ms, dispatch)?;
+
+    Ok(ExecutedUploadLocalCreate {
+        ensured_upload,
+        upload_reused,
+        dispatched,
+    })
+}
+
 pub fn dispatch_client_mutation_from_state<F>(
     db: &mut SqliteStateDb,
     client_file_id: &ClientFileId,
@@ -99,6 +167,49 @@ where
         response,
         bound_identity,
     })
+}
+
+fn ensure_upload_local_create_ready_from_path<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    client_file_id: &ClientFileId,
+    source_path: &Path,
+    uploaded_at_ms: u64,
+) -> Result<(LocalOnlyUploadRow, bool), ExecuteUploadLocalCreateError> {
+    let local_only = db.load_local_only_file(client_file_id)?.ok_or_else(|| {
+        StateDbError::LocalOnlyFileMissing {
+            client_file_id: client_file_id.as_str().to_owned(),
+        }
+    })?;
+    let planned_row = db
+        .load_planned_local_only_action(client_file_id)?
+        .ok_or_else(|| ExecutorError::PlannedLocalOnlyActionMissing {
+            client_file_id: client_file_id.as_str().to_owned(),
+        })?;
+    let planned = PlannedLocalOnlyActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::UploadLocalCreate {
+        return Err(
+            ExecuteUploadLocalCreateError::UploadLocalCreateDecisionMissing {
+                client_file_id: client_file_id.as_str().to_owned(),
+                decision: planned.decision,
+            },
+        );
+    }
+
+    if let Some(existing_upload) = db.load_local_only_upload(client_file_id)? {
+        if existing_upload.namespace_id == local_only.namespace_id
+            && local_only.content_digest.as_deref()
+                == Some(existing_upload.file_digest_sha256.as_str())
+        {
+            return Ok((existing_upload, true));
+        }
+    }
+
+    let uploaded = upload_small_file_from_path(store, &local_only.namespace_id, source_path)?;
+    let recorded = db
+        .record_local_only_upload(client_file_id, &uploaded, uploaded_at_ms)
+        .map_err(ExecuteUploadLocalCreateError::from)?;
+    Ok((recorded, false))
 }
 
 pub fn build_client_mutation_request_from_state(

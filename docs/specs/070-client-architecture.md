@@ -445,6 +445,53 @@ Failure modes named for the first implementation:
 - `pending_client_mutation_namespace_mismatch`
 - `pending_client_mutation_request_missing`
 
+## First small-file create executor
+
+The first end-to-end file-create executor is intentionally narrow. It only handles one local-only
+planner outcome:
+
+- `upload_local_create`
+
+The executor takes:
+
+- `client_file_id`
+- one caller-supplied local filesystem path
+- upload and dispatch timestamps
+
+Rules:
+
+- if `pending_client_mutations` already contains a row for `client_file_id`, the executor must
+  reuse that durable `request_json` and must not rebuild the request from current local state
+- if no pending row exists, the executor must load `planned_local_only_actions(client_file_id)` and
+  require `decision = upload_local_create`
+- if `local_only_uploads(client_file_id)` already matches the current local-only digest, the
+  executor may reuse that upload row and skip rereading the local path
+- otherwise the executor must upload the supplied local file path, then persist the resulting
+  upload row before building the request
+- persisting the upload row must still validate that the uploaded file digest matches the current
+  `local_only_state.content_digest`
+- after upload is ensured, the executor must dispatch through the same pending-request flow and
+  bind the authoritative success response in the same way as any other create
+
+Why this rule exists:
+
+- the first client happy path should be one executable action, not separate upload and dispatch
+  choreography in the caller
+- retries after a failed dispatch must stay stable even if the local file changes afterward
+- a caller-supplied path is only for producing durable content, never for guessing metadata identity
+
+Failure modes prevented:
+
+- rereading a local file path during retry and silently publishing different bytes under the same
+  create intent
+- dispatching `create_file` without first freezing durable content into `local_only_uploads`
+- running a file-content executor against a non-file local-only planner action
+
+Failure modes named for the first implementation:
+
+- `upload_local_create_decision_missing`
+- `uploaded_content_digest_mismatch`
+
 ## Bind-after-publish loop
 
 After a successful `create_file` or `create_dir`, the authoritative side returns one committed

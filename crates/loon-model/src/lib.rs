@@ -98,6 +98,12 @@ pub enum ModelLocalOnlyUploadValidationError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelLocalOnlyUploadDecision {
+    ReuseExisting { content_manifest_digest: String },
+    UploadFresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelValidatedContent {
     pub file_size_bytes: u64,
     pub file_digest_sha256: String,
@@ -1075,6 +1081,28 @@ pub fn validate_local_only_upload_record(
     Ok(upload.content_manifest_digest.clone())
 }
 
+pub fn decide_local_only_upload_action(
+    namespace_id: &NamespaceId,
+    local_content_digest: Option<&str>,
+    existing_upload: Option<&ModelLocalOnlyUploadRecord>,
+) -> Result<ModelLocalOnlyUploadDecision, ModelLocalOnlyUploadValidationError> {
+    match existing_upload {
+        Some(upload) => {
+            match validate_local_only_upload_record(namespace_id, local_content_digest, upload) {
+                Ok(content_manifest_digest) => Ok(ModelLocalOnlyUploadDecision::ReuseExisting {
+                    content_manifest_digest,
+                }),
+                Err(ModelLocalOnlyUploadValidationError::NamespaceMismatch { .. })
+                | Err(ModelLocalOnlyUploadValidationError::FileDigestMismatch { .. }) => {
+                    Ok(ModelLocalOnlyUploadDecision::UploadFresh)
+                }
+                Err(other) => Err(other),
+            }
+        }
+        None => Ok(ModelLocalOnlyUploadDecision::UploadFresh),
+    }
+}
+
 pub fn allocate_client_request_id(next_counter: u64) -> String {
     format!("client-req-{next_counter:020}")
 }
@@ -1383,6 +1411,65 @@ mod tests {
             resolved,
             "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
         );
+    }
+
+    #[test]
+    fn model_reuses_matching_local_only_upload_record() {
+        let upload = ModelLocalOnlyUploadRecord {
+            namespace_id: NamespaceId::from("ns-1"),
+            file_digest_sha256:
+                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            content_manifest_digest:
+                "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                    .to_owned(),
+            manifest_object_key:
+                "namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json"
+                    .to_owned(),
+            file_size_bytes: 16,
+        };
+
+        let decision = decide_local_only_upload_action(
+            &NamespaceId::from("ns-1"),
+            Some("sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"),
+            Some(&upload),
+        )
+        .expect("decide upload action");
+
+        assert_eq!(
+            decision,
+            ModelLocalOnlyUploadDecision::ReuseExisting {
+                content_manifest_digest:
+                    "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                        .to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn model_reuploads_when_existing_local_only_upload_is_stale() {
+        let upload = ModelLocalOnlyUploadRecord {
+            namespace_id: NamespaceId::from("ns-1"),
+            file_digest_sha256:
+                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            content_manifest_digest:
+                "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                    .to_owned(),
+            manifest_object_key:
+                "namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json"
+                    .to_owned(),
+            file_size_bytes: 16,
+        };
+
+        let decision = decide_local_only_upload_action(
+            &NamespaceId::from("ns-1"),
+            Some("sha256:edited-after-upload"),
+            Some(&upload),
+        )
+        .expect("stale upload should trigger reupload");
+
+        assert_eq!(decision, ModelLocalOnlyUploadDecision::UploadFresh);
     }
 
     #[test]
