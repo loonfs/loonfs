@@ -154,6 +154,18 @@ pub enum CommitValidationError {
         root_inode: InodeId,
         tombstone_seq: ChangeSeq,
     },
+    DeleteSubtreeRootMissing {
+        root_inode: InodeId,
+    },
+    DeleteSubtreeRootNotDirectory {
+        root_inode: InodeId,
+        actual_kind: InodeKind,
+    },
+    DeleteSubtreeRootCoveredByTombstone {
+        root_inode: InodeId,
+        covering_root_inode: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
     StaleWriterFenceToken {
         active: FenceToken,
         requested: FenceToken,
@@ -492,9 +504,16 @@ fn validate_metadata_preconditions(
                     false,
                 )?;
             }
-            CommitOp::Rename { .. }
-            | CommitOp::DeleteSubtree { .. }
-            | CommitOp::RestoreRevision { .. } => {}
+            CommitOp::DeleteSubtree { root_inode } => {
+                validate_delete_subtree_root(metadata_state, *root_inode, base_seq)?;
+                validate_delete_subtree_not_covered(
+                    metadata_state,
+                    *root_inode,
+                    base_seq,
+                    checked_invariants,
+                )?;
+            }
+            CommitOp::Rename { .. } | CommitOp::RestoreRevision { .. } => {}
         }
     }
 
@@ -589,6 +608,45 @@ fn validate_ancestors_not_subtree_deleted(
     Ok(())
 }
 
+fn validate_delete_subtree_root(
+    metadata_state: &MetadataState,
+    root_inode: InodeId,
+    base_seq: ChangeSeq,
+) -> Result<(), CommitValidationError> {
+    let inode = metadata_state
+        .inode_at_seq(root_inode, base_seq)
+        .ok_or(CommitValidationError::DeleteSubtreeRootMissing { root_inode })?;
+    if inode.inode_kind != InodeKind::Dir {
+        return Err(CommitValidationError::DeleteSubtreeRootNotDirectory {
+            root_inode,
+            actual_kind: inode.inode_kind,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_delete_subtree_not_covered(
+    metadata_state: &MetadataState,
+    root_inode: InodeId,
+    base_seq: ChangeSeq,
+    checked_invariants: &mut Vec<String>,
+) -> Result<(), CommitValidationError> {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(root_inode, base_seq) {
+        return Err(CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
+            root_inode,
+            covering_root_inode: tombstone.root_inode_id,
+            tombstone_seq: tombstone.tombstone_seq,
+        });
+    }
+
+    push_unique_invariant(
+        checked_invariants,
+        "subtree_tombstone_blocks_descendant_mutation",
+    );
+    Ok(())
+}
+
 fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
     if !invariants.iter().any(|existing| existing == name) {
         invariants.push(name.to_owned());
@@ -605,7 +663,9 @@ mod tests {
         build_commit_plan, prepare_commit_head_publish, publish_commit_head, CommitOp,
         CommitRequest, CommitValidationContext, CommitValidationError, Precondition,
     };
-    use crate::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
+    use crate::metadata::{
+        DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+    };
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
     use loon_objectstore::ObjectStore;
@@ -675,6 +735,38 @@ mod tests {
         .expect("valid plan");
 
         assert!(plan.durable_content_required);
+    }
+
+    #[test]
+    fn build_commit_plan_accepts_delete_subtree_for_visible_directory_root() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-delete-subtree".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![CommitOp::DeleteSubtree {
+                root_inode: InodeId(7),
+            }],
+            preconditions: vec![
+                Precondition::HeadSeqIs(ChangeSeq(41)),
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: InodeId(7),
+                },
+            ],
+        };
+
+        let plan = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, delete_root_metadata_state()),
+        )
+        .expect("delete subtree should validate");
+
+        assert_eq!(plan.next_seq, ChangeSeq(42));
+        assert_eq!(plan.resulting_next_inode_id, InodeId(501));
+        assert!(plan
+            .checked_invariants
+            .contains(&"subtree_tombstone_blocks_descendant_mutation".to_owned()));
     }
 
     #[test]
@@ -829,6 +921,81 @@ mod tests {
                 inode_id: InodeId(42),
                 expected: RevisionNo(16),
                 actual: Some(RevisionNo(17)),
+            }
+        );
+    }
+
+    #[test]
+    fn build_commit_plan_rejects_delete_subtree_for_file_root() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-delete-file-root".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![CommitOp::DeleteSubtree {
+                root_inode: InodeId(42),
+            }],
+            preconditions: vec![
+                Precondition::HeadSeqIs(ChangeSeq(41)),
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: InodeId(42),
+                },
+            ],
+        };
+
+        let error = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, delete_root_metadata_state()),
+        )
+        .expect_err("file root should be rejected");
+
+        assert_eq!(
+            error,
+            CommitValidationError::DeleteSubtreeRootNotDirectory {
+                root_inode: InodeId(42),
+                actual_kind: InodeKind::File,
+            }
+        );
+    }
+
+    #[test]
+    fn build_commit_plan_rejects_create_under_active_subtree_tombstone() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-create-under-delete".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![CommitOp::CreateFile {
+                parent_inode: InodeId(7),
+                display_name: "new.txt".to_owned(),
+                content_manifest_digest: "sha256:new-v1".to_owned(),
+            }],
+            preconditions: vec![
+                Precondition::HeadSeqIs(ChangeSeq(41)),
+                Precondition::ChildNameAbsent {
+                    parent_inode: InodeId(7),
+                    name_key: "new.txt".to_owned(),
+                },
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: InodeId(7),
+                },
+            ],
+        };
+
+        let error = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, delete_covered_parent_metadata_state()),
+        )
+        .expect_err("create under tombstone should be rejected");
+
+        assert_eq!(
+            error,
+            CommitValidationError::CreateUnderSubtreeTombstone {
+                parent_inode: InodeId(7),
+                root_inode: InodeId(7),
+                tombstone_seq: ChangeSeq(41),
             }
         );
     }
@@ -1119,6 +1286,62 @@ mod tests {
             ],
             subtree_tombstones: Vec::new(),
         }
+    }
+
+    fn delete_root_metadata_state() -> MetadataState {
+        MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(7),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(5),
+                },
+                InodeRecord {
+                    inode_id: InodeId(42),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(17),
+                },
+            ],
+            direntries: vec![
+                DirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(7),
+                    bind_seq: ChangeSeq(5),
+                },
+                DirentryRecord {
+                    parent_inode_id: InodeId(7),
+                    name_key: "report.txt".to_owned(),
+                    display_name: "report.txt".to_owned(),
+                    child_inode_id: InodeId(42),
+                    bind_seq: ChangeSeq(17),
+                },
+            ],
+            revisions: vec![RevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(1),
+                committed_seq: ChangeSeq(17),
+                content_manifest_digest: "sha256:report-v1".to_owned(),
+            }],
+            subtree_tombstones: Vec::new(),
+        }
+    }
+
+    fn delete_covered_parent_metadata_state() -> MetadataState {
+        let mut metadata_state = delete_root_metadata_state();
+        metadata_state
+            .subtree_tombstones
+            .push(SubtreeTombstoneRecord {
+                root_inode_id: InodeId(7),
+                tombstone_seq: ChangeSeq(41),
+            });
+        metadata_state
     }
 
     #[derive(Debug)]

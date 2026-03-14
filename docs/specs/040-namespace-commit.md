@@ -129,6 +129,43 @@ Failure modes named for the first implementation:
 - `replace_file_under_subtree_tombstone`
 - `replace_file_path_change_not_supported`
 
+## Delete-subtree mutation
+
+The first recursive delete mutation is:
+
+- `delete_subtree(root_inode)`
+
+Rules:
+
+- `delete_subtree` targets one existing directory inode
+- it appends one subtree tombstone rooted at `root_inode`
+- it does not eagerly erase inode, direntry, or revision history for descendants
+- once the tombstone commits, `visible_inode(...)` and `visible_child(...)` must hide the deleted
+  root and every reachable descendant at later seq values
+
+The first delete-subtree preconditions are:
+
+- `HeadSeqIs(current_head.seq)`
+- `AncestorsNotSubtreeDeleted(root_inode)`
+
+Why these rules exist:
+
+- recursive delete should be cheap, append-only, and replayable from history
+- descendant history must remain available for later restore and audit work
+- repeated delete requests against an already deleted subtree should fail deterministically
+
+Failure modes prevented:
+
+- rewriting or eagerly erasing descendant metadata during delete
+- silently deleting a file inode through a subtree-only mutation
+- publishing a second delete under an already active subtree tombstone
+
+Failure modes named for the first implementation:
+
+- `delete_subtree_root_missing`
+- `delete_subtree_root_not_directory`
+- `delete_subtree_root_covered_by_tombstone`
+
 ## Authoritative metadata precondition lookups
 
 The semantic meaning of a commit precondition comes from the authoritative metadata state at:
@@ -198,6 +235,7 @@ Failure modes named for the first implementation:
 
 - `create_under_subtree_tombstone`
 - `replace_file_under_subtree_tombstone`
+- `delete_subtree_root_covered_by_tombstone`
 
 ## Metadata evaluation order
 
@@ -207,7 +245,8 @@ frame validation succeeds:
 1. `HeadSeqIs`
 2. inode existence / kind lookups needed by the request ops
 3. `ChildNameAbsent` and `InodeRevisionIs`
-4. `AncestorsNotSubtreeDeleted`
+4. delete-root existence / kind lookups needed by `delete_subtree`
+5. `AncestorsNotSubtreeDeleted`
 
 Why this order exists:
 
@@ -220,6 +259,9 @@ Failure modes prevented:
 
 - a request reporting different failures depending on incidental lookup order
 - spending inode allocation or WAL work on a request that already loses at metadata validation
+
+For the first delete-subtree contract, root existence and root kind are op validation rules even
+though the explicit precondition list only names `AncestorsNotSubtreeDeleted(root_inode)`.
 
 ## First authoritative metadata transition rules
 
@@ -265,6 +307,20 @@ The committed transition must append:
 It must not append or rewrite an inode row.
 It must not append or rewrite a direntry row.
 
+### `delete_subtree(root_inode)`
+
+The committed transition must append:
+
+- one subtree tombstone row with:
+  `root_inode_id = root_inode` and `tombstone_seq = commit_seq`
+
+It must not append inode, direntry, or revision rows.
+
+At any later `base_seq >= commit_seq`, visibility queries must treat:
+
+- `visible_inode(root_inode, base_seq)` as hidden
+- every descendant reachable from `root_inode` by the raw direntry history as hidden
+
 ### Allocation ordering rule
 
 If one request contains multiple create operations, allocated inode ids are consumed in request-op
@@ -288,6 +344,7 @@ Failure modes named for the first implementation:
 - `create_dir_writes_inode_and_direntry_rows`
 - `create_file_writes_inode_direntry_and_initial_revision`
 - `replace_file_appends_new_revision_head`
+- `delete_subtree_writes_tombstone_row`
 
 ## Authoritative durable content validation
 

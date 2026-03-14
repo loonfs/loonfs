@@ -151,9 +151,19 @@ impl MetadataState {
                     });
                 }
                 WalOp::DeleteSubtree { .. } => {
-                    return Err(MetadataApplyError::UnsupportedWalOp {
-                        op_name: "delete_subtree".to_owned(),
-                    });
+                    let WalOp::DeleteSubtree { root_inode } = op else {
+                        unreachable!();
+                    };
+                    metadata_state
+                        .subtree_tombstones
+                        .push(SubtreeTombstoneRecord {
+                            root_inode_id: *root_inode,
+                            tombstone_seq: committed_seq,
+                        });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "delete_subtree_writes_tombstone_row",
+                    );
                 }
                 WalOp::RestoreRevision { .. } => {
                     return Err(MetadataApplyError::UnsupportedWalOp {
@@ -440,6 +450,70 @@ mod tests {
         assert!(applied
             .checked_invariants
             .contains(&"replace_file_appends_new_revision_head".to_owned()));
+    }
+
+    #[test]
+    fn apply_committed_wal_ops_appends_delete_subtree_tombstone() {
+        let applied = MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(7),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(5),
+                },
+                InodeRecord {
+                    inode_id: InodeId(42),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(17),
+                },
+            ],
+            direntries: vec![
+                DirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(7),
+                    bind_seq: ChangeSeq(5),
+                },
+                DirentryRecord {
+                    parent_inode_id: InodeId(7),
+                    name_key: "report.txt".to_owned(),
+                    display_name: "report.txt".to_owned(),
+                    child_inode_id: InodeId(42),
+                    bind_seq: ChangeSeq(17),
+                },
+            ],
+            revisions: vec![RevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(1),
+                committed_seq: ChangeSeq(17),
+                content_manifest_digest: "sha256:report-v1".to_owned(),
+            }],
+            subtree_tombstones: Vec::new(),
+        }
+        .apply_committed_wal_ops(
+            ChangeSeq(42),
+            &[WalOp::DeleteSubtree {
+                root_inode: InodeId(7),
+            }],
+        )
+        .expect("apply delete_subtree");
+
+        assert_eq!(
+            applied.metadata_state.subtree_tombstones,
+            vec![SubtreeTombstoneRecord {
+                root_inode_id: InodeId(7),
+                tombstone_seq: ChangeSeq(42),
+            }]
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"delete_subtree_writes_tombstone_row".to_owned()));
     }
 
     #[test]

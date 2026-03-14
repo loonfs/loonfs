@@ -31,7 +31,20 @@ const TEST_WRITER_VERSION: &str = "loon-testkit-differential";
 
 #[test]
 fn wal_tail_replay_fixture_matches_model_and_core() {
-    let scenario = load_fixture("native/wal_tail_replay_advances_head.yaml");
+    run_wal_replay_fixture("native/wal_tail_replay_advances_head.yaml");
+    run_wal_replay_fixture("native/wal_tail_replay_applies_delete_subtree_tombstone.yaml");
+}
+
+#[test]
+fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
+    run_checkpoint_replay_fixture("native/checkpoint_manifest_plus_wal_tail_reproduces_head.yaml");
+    run_checkpoint_replay_fixture(
+        "native/checkpoint_manifest_plus_delete_subtree_wal_tail_hides_descendants.yaml",
+    );
+}
+
+fn run_wal_replay_fixture(relative_path: &str) {
+    let scenario = load_fixture(relative_path);
     let initial: WalReplayInitial = scenario.decode_initial().expect("decode initial state");
     let actions: Vec<ReplayActionEnvelope> = scenario.decode_actions().expect("decode actions");
     let expect: ReplayExpect = scenario.decode_expect().expect("decode expectations");
@@ -133,9 +146,8 @@ fn wal_tail_replay_fixture_matches_model_and_core() {
     assert_expected_invariants(&scenario, &trace, &expect.invariants, &observed_invariants);
 }
 
-#[test]
-fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
-    let scenario = load_fixture("native/checkpoint_manifest_plus_wal_tail_reproduces_head.yaml");
+fn run_checkpoint_replay_fixture(relative_path: &str) {
+    let scenario = load_fixture(relative_path);
     let initial: CheckpointReplayInitial = scenario.decode_initial().expect("decode initial state");
     let actions: Vec<ReplayActionEnvelope> = scenario.decode_actions().expect("decode actions");
     let expect: ReplayExpect = scenario.decode_expect().expect("decode expectations");
@@ -888,10 +900,11 @@ fn model_metadata_mutation_from_fixture(op: &FixtureWalOp) -> ModelMetadataMutat
             base_revision_no: *base_revision,
             content_manifest_digest: content_manifest_digest.clone(),
         },
-        FixtureWalOp::Rename { .. }
-        | FixtureWalOp::DeleteSubtree { .. }
-        | FixtureWalOp::RestoreRevision { .. } => {
-            panic!("replay differential fixtures only support create/replace WAL ops")
+        FixtureWalOp::DeleteSubtree { root_inode } => ModelMetadataMutation::DeleteSubtree {
+            root_inode_id: *root_inode,
+        },
+        FixtureWalOp::Rename { .. } | FixtureWalOp::RestoreRevision { .. } => {
+            panic!("replay differential fixtures only support create/replace/delete WAL ops")
         }
     }
 }

@@ -32,6 +32,11 @@ fn replace_file_fixture_matches_model_and_core_metadata() {
     run_fixture("native/replace_file_commit_appends_new_revision_row.yaml");
 }
 
+#[test]
+fn delete_subtree_fixture_matches_model_and_core_metadata() {
+    run_fixture("native/delete_subtree_commit_appends_tombstone_row.yaml");
+}
+
 fn run_fixture(relative_path: &str) {
     let scenario = load_fixture(relative_path);
     let initial: MetadataFixtureInitial = scenario.decode_initial().expect("decode initial state");
@@ -82,6 +87,12 @@ fn run_fixture(relative_path: &str) {
         request.planned_head_seq,
     )
     .expect("model metadata preconditions");
+    validate_model_request_ops(
+        &model_namespace.metadata_state,
+        &initial.request.ops,
+        request.planned_head_seq,
+    )
+    .expect("model op validation");
     let (model_mutations, model_allocated_inode_ids, model_next_inode_id) =
         materialize_model_mutations(&initial.request, initial.head.next_inode_id);
     let model_metadata = model_namespace
@@ -191,6 +202,7 @@ enum RawCommitOp {
     CreateDir { create_dir: RawCreateDir },
     CreateFile { create_file: RawCreateFile },
     ReplaceFile { replace_file: RawReplaceFile },
+    DeleteSubtree { delete_subtree: RawDeleteSubtree },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -211,6 +223,11 @@ struct RawReplaceFile {
     inode_id: InodeId,
     base_revision_no: RevisionNo,
     content_manifest_digest: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawDeleteSubtree {
+    root_inode_id: InodeId,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -287,6 +304,9 @@ impl From<RawCommitOp> for CommitOp {
                 inode_id: replace_file.inode_id,
                 base_revision: replace_file.base_revision_no,
                 content_manifest_digest: replace_file.content_manifest_digest,
+            },
+            RawCommitOp::DeleteSubtree { delete_subtree } => CommitOp::DeleteSubtree {
+                root_inode: delete_subtree.root_inode_id,
             },
         }
     }
@@ -479,10 +499,27 @@ fn materialize_model_mutations(
                 base_revision_no: replace_file.base_revision_no,
                 content_manifest_digest: replace_file.content_manifest_digest.clone(),
             },
+            RawCommitOp::DeleteSubtree { delete_subtree } => ModelMetadataMutation::DeleteSubtree {
+                root_inode_id: delete_subtree.root_inode_id,
+            },
         })
         .collect();
 
     (mutations, allocated_inode_ids, next_inode)
+}
+
+fn validate_model_request_ops(
+    metadata_state: &ModelMetadataState,
+    ops: &[RawCommitOp],
+    base_seq: ChangeSeq,
+) -> Result<(), ModelMetadataPreconditionError> {
+    for op in ops {
+        if let RawCommitOp::DeleteSubtree { delete_subtree } = op {
+            metadata_state.ensure_inode_is_directory(delete_subtree.root_inode_id, base_seq)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn extend_invariants(out: &mut Vec<String>, incoming: &[String]) {

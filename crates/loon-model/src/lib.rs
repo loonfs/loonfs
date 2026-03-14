@@ -278,6 +278,10 @@ pub enum ModelMetadataPreconditionError {
     InodeMissing {
         inode_id: InodeId,
     },
+    InodeNotDirectory {
+        inode_id: InodeId,
+        actual_kind: InodeKind,
+    },
     InodeNotFile {
         inode_id: InodeId,
         actual_kind: InodeKind,
@@ -311,6 +315,9 @@ pub enum ModelMetadataMutation {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
         content_manifest_digest: String,
+    },
+    DeleteSubtree {
+        root_inode_id: InodeId,
     },
 }
 
@@ -1001,7 +1008,8 @@ impl ModelNamespace {
                     | ModelMetadataMutation::CreateFile { inode_id, .. } => {
                         InodeId(current.0.max(inode_id.0.saturating_add(1)))
                     }
-                    ModelMetadataMutation::ReplaceFile { .. } => current,
+                    ModelMetadataMutation::ReplaceFile { .. }
+                    | ModelMetadataMutation::DeleteSubtree { .. } => current,
                 });
         self.next_inode_id = replay_next_inode_id;
         Ok(())
@@ -1637,6 +1645,18 @@ impl ModelMetadataState {
                         "replace_file_appends_new_revision_head",
                     );
                 }
+                ModelMetadataMutation::DeleteSubtree { root_inode_id } => {
+                    metadata_state
+                        .subtree_tombstones
+                        .push(ModelSubtreeTombstoneRecord {
+                            root_inode_id: *root_inode_id,
+                            tombstone_seq: committed_seq,
+                        });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "delete_subtree_writes_tombstone_row",
+                    );
+                }
             }
         }
 
@@ -1813,6 +1833,24 @@ impl ModelMetadataState {
                 inode_id,
                 expected: expected_revision_no,
                 actual: actual_revision_no,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn ensure_inode_is_directory(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<(), ModelMetadataPreconditionError> {
+        let inode = self
+            .inode_at_seq(inode_id, base_seq)
+            .ok_or(ModelMetadataPreconditionError::InodeMissing { inode_id })?;
+        if inode.inode_kind != InodeKind::Dir {
+            return Err(ModelMetadataPreconditionError::InodeNotDirectory {
+                inode_id,
+                actual_kind: inode.inode_kind,
             });
         }
 
@@ -2845,6 +2883,23 @@ mod tests {
     }
 
     #[test]
+    fn model_inode_is_directory_rejects_file_inode() {
+        let metadata = seeded_metadata_state();
+
+        let error = metadata
+            .ensure_inode_is_directory(InodeId(42), ChangeSeq(41))
+            .expect_err("file inode should be rejected");
+
+        assert_eq!(
+            error,
+            ModelMetadataPreconditionError::InodeNotDirectory {
+                inode_id: InodeId(42),
+                actual_kind: InodeKind::File,
+            }
+        );
+    }
+
+    #[test]
     fn model_ancestors_not_subtree_deleted_rejects_covered_inode() {
         let metadata = seeded_metadata_state();
 
@@ -3010,6 +3065,82 @@ mod tests {
         assert!(applied
             .checked_invariants
             .contains(&"replace_file_appends_new_revision_head".to_owned()));
+    }
+
+    #[test]
+    fn model_apply_delete_subtree_appends_tombstone_row_and_hides_descendants() {
+        let applied = ModelMetadataState {
+            inodes: vec![
+                ModelInodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(7),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(5),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(42),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(17),
+                },
+            ],
+            direntries: vec![
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(7),
+                    bind_seq: ChangeSeq(5),
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(7),
+                    name_key: "report.txt".to_owned(),
+                    display_name: "report.txt".to_owned(),
+                    child_inode_id: InodeId(42),
+                    bind_seq: ChangeSeq(17),
+                },
+            ],
+            revisions: vec![ModelRevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(1),
+                committed_seq: ChangeSeq(17),
+                content_manifest_digest: "sha256:report-v1".to_owned(),
+            }],
+            subtree_tombstones: Vec::new(),
+        }
+        .apply_committed_mutations(
+            ChangeSeq(42),
+            &[ModelMetadataMutation::DeleteSubtree {
+                root_inode_id: InodeId(7),
+            }],
+        )
+        .expect("apply delete_subtree metadata");
+
+        assert_eq!(
+            applied.metadata_state.subtree_tombstones,
+            vec![ModelSubtreeTombstoneRecord {
+                root_inode_id: InodeId(7),
+                tombstone_seq: ChangeSeq(42),
+            }]
+        );
+        assert_eq!(
+            applied
+                .metadata_state
+                .visible_inode(InodeId(7), ChangeSeq(42)),
+            None
+        );
+        assert_eq!(
+            applied
+                .metadata_state
+                .visible_inode(InodeId(42), ChangeSeq(42)),
+            None
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"delete_subtree_writes_tombstone_row".to_owned()));
     }
 
     #[test]
