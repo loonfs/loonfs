@@ -1042,6 +1042,67 @@ Failure modes named for the first implementation:
 
 If any bind precondition fails, the transaction must abort without partially migrating rows.
 
+## First remote observation apply path
+
+The first remote observation path is intentionally narrower than a full remote crawl. It accepts
+one explicit observed inode shape:
+
+- `namespace_id`
+- `inode_id`
+- `inode_kind`
+- `observed_seq`
+- `revision_no`
+- `content_digest`
+- `content_manifest_digest`
+- `parent_inode_id`
+- `display_name`
+- `is_deleted`
+
+Rules:
+
+- if the client already has `remote_state(namespace_id, inode_id)` and the incoming
+  `observed_seq` is not newer, the observation must be ignored as stale
+- if the client already has a bound inode for `(namespace_id, inode_id)`, the client may upsert
+  the newer `remote_state` row from the observation
+- if that bound inode's `local_state` still matches the observed inode on:
+  - `inode_kind`
+  - `content_digest`
+  - `parent_inode_id`
+  - `display_name`
+  - `exists_on_disk = true`
+  then the client must treat the observation as authoritative convergence:
+  - clear `dirty`
+  - advance `sync_anchor`
+  - clear `planned_actions(namespace_id, inode_id)`
+  - delete any matching `pending_inode_mutations` row for that inode
+- otherwise, for an already bound inode, the client must only update `remote_state` and leave the
+  planner to decide between later download or conflict handling
+- if there is no bound inode yet, the client may bind exactly one matching `local_only_state` row
+  when all of the strict local-only bind preconditions still hold
+- after a late bind succeeds, the client must also clear any matching
+  `pending_client_mutations(client_file_id)` row
+- if more than one `local_only_state` row matches the same observation, the apply step must fail
+  without partial migration
+- the first implementation ignores unmatched remote-only observations because the repo does not yet
+  have a full remote discovery and path-materialization loop
+
+Why this rule exists:
+
+- authoritative success should still converge the client when the immediate response is lost
+- the first remote-observation path should repair known create/edit flows without pretending the
+  client already has full remote tree ingestion
+- temp identities should only bind through one deterministic matching rule
+
+Failure modes prevented:
+
+- a successful `replace_file` remaining dirty forever because the success response was dropped
+- a successful local-only create being uploaded again after a later remote observation
+- two temp identities both binding to the same observed remote inode
+
+Failure modes named for the first implementation:
+
+- `remote_observation_bind_ambiguous`
+
 ## Local data model inspiration
 
 The client should keep separate, individually consistent views of:

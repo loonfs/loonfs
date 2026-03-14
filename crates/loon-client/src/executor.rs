@@ -382,7 +382,9 @@ where
                     )?;
                     Ok(Some(NextClientAction::ExecutedDownloadRemoteEdit(executed)))
                 }
-                _ => Ok(Some(NextClientAction::SelectedPlannedAction(planned_action))),
+                _ => Ok(Some(NextClientAction::SelectedPlannedAction(
+                    planned_action,
+                ))),
             }
         }
     }
@@ -691,10 +693,11 @@ fn execute_download_remote_edit<S: ObjectStore>(
     applied_at_ms: u64,
 ) -> Result<ExecutedDownloadRemoteEdit, ExecuteDownloadRemoteEditError> {
     let remote = ensure_download_remote_edit_ready(db, namespace_id, inode_id)?;
-    let target_path = target_path.ok_or_else(|| ExecuteDownloadRemoteEditError::SourcePathMissing {
-        namespace_id: namespace_id.as_str().to_owned(),
-        inode_id: inode_id.0,
-    })?;
+    let target_path =
+        target_path.ok_or_else(|| ExecuteDownloadRemoteEditError::SourcePathMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
     let manifest_digest = remote
         .content_manifest_digest
         .as_deref()
@@ -714,9 +717,11 @@ fn execute_download_remote_edit<S: ObjectStore>(
     }
 
     if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).map_err(|source| ExecuteDownloadRemoteEditError::LocalWriteFailed {
-            path: target_path.display().to_string(),
-            source,
+        fs::create_dir_all(parent).map_err(|source| {
+            ExecuteDownloadRemoteEditError::LocalWriteFailed {
+                path: target_path.display().to_string(),
+                source,
+            }
         })?;
     }
     fs::write(target_path, &downloaded.bytes).map_err(|source| {
@@ -829,7 +834,8 @@ fn ensure_download_remote_edit_ready(
         );
     }
 
-    let (remote, _local, _anchor) = db.load_bound_download_remote_edit_views(namespace_id, inode_id)?;
+    let (remote, _local, _anchor) =
+        db.load_bound_download_remote_edit_views(namespace_id, inode_id)?;
     Ok(remote)
 }
 

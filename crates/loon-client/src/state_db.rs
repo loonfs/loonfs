@@ -1,7 +1,7 @@
 use crate::upload::UploadedContent;
 use loon_types::{
-    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId,
-    InodeKind, NamespaceId, RevisionNo,
+    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind,
+    NamespaceId, RevisionNo,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -358,9 +358,13 @@ pub enum StateDbError {
         remote: String,
         anchor: String,
     },
-    #[error("download_remote_edit_manifest_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    #[error(
+        "download_remote_edit_manifest_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
     DownloadRemoteEditManifestMissing { namespace_id: String, inode_id: u64 },
-    #[error("download_remote_edit_remote_digest_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    #[error(
+        "download_remote_edit_remote_digest_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
     DownloadRemoteEditRemoteDigestMissing { namespace_id: String, inode_id: u64 },
     #[error("download_remote_edit_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
     DownloadRemoteEditStateMissing { namespace_id: String, inode_id: u64 },
@@ -385,6 +389,12 @@ pub enum StateDbError {
         field: &'static str,
         local: String,
         anchor: String,
+    },
+    #[error("remote_observation_bind_ambiguous: namespace `{namespace_id}` inode `{inode_id}` matches `{matches}`")]
+    RemoteObservationBindAmbiguous {
+        namespace_id: String,
+        inode_id: u64,
+        matches: usize,
     },
     #[error(
         "bind_kind_mismatch: `{client_file_id}` local kind `{local_kind}` != remote kind `{remote_kind}`"
@@ -584,12 +594,62 @@ pub struct AppliedInodeMutation {
     pub inode_id: InodeId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedRemoteInode {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub observed_seq: ChangeSeq,
+    pub revision_no: RevisionNo,
+    pub content_digest: Option<String>,
+    pub content_manifest_digest: Option<String>,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppliedRemoteObservation {
+    BoundLocalOnly(BoundLocalOnlyFile),
+    ConvergedBoundInode(AppliedInodeMutation),
+    UpdatedBoundRemoteState {
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+    },
+    IgnoredStale {
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+    },
+    IgnoredUnmatched {
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+    },
+}
+
 pub struct SqliteStateDb {
     conn: Connection,
 }
 
 pub struct PlannerTxn<'db> {
     tx: Transaction<'db>,
+}
+
+impl ObservedRemoteInode {
+    fn as_remote_file_state(&self) -> RemoteFileStateRow {
+        RemoteFileStateRow {
+            namespace_id: self.namespace_id.clone(),
+            inode_id: self.inode_id,
+            inode_kind: self.inode_kind.clone(),
+            observed_seq: self.observed_seq,
+            revision_no: self.revision_no,
+            content_digest: self.content_digest.clone(),
+            content_manifest_digest: self.content_manifest_digest.clone(),
+            parent_inode_id: self.parent_inode_id,
+            display_name: self.display_name.clone(),
+            is_deleted: self.is_deleted,
+        }
+    }
 }
 
 impl SqliteStateDb {
@@ -876,6 +936,16 @@ impl SqliteStateDb {
     ) -> Result<AppliedInodeMutation, StateDbError> {
         self.planner_transaction("apply_download_remote_edit", |tx| {
             tx.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_remote_observation(
+        &mut self,
+        observed: &ObservedRemoteInode,
+        applied_at_ms: u64,
+    ) -> Result<AppliedRemoteObservation, StateDbError> {
+        self.planner_transaction("apply_remote_observation", |tx| {
+            tx.apply_remote_observation(observed, applied_at_ms)
         })
     }
 
@@ -1615,6 +1685,107 @@ impl PlannerTxn<'_> {
             namespace_id: namespace_id.clone(),
             inode_id,
         })
+    }
+
+    pub fn apply_remote_observation(
+        &mut self,
+        observed: &ObservedRemoteInode,
+        applied_at_ms: u64,
+    ) -> Result<AppliedRemoteObservation, StateDbError> {
+        let observed_remote = observed.as_remote_file_state();
+        let current_remote = load_remote_file(&self.tx, &observed.namespace_id, observed.inode_id)?;
+        if let Some(current_remote) = current_remote.as_ref() {
+            if observed.observed_seq <= current_remote.observed_seq {
+                return Ok(AppliedRemoteObservation::IgnoredStale {
+                    namespace_id: observed.namespace_id.clone(),
+                    inode_id: observed.inode_id,
+                });
+            }
+        }
+
+        let views = self.load_file_sync_views(&observed.namespace_id, observed.inode_id)?;
+        if let (Some(_remote), Some(local), Some(_anchor)) = (
+            views.remote.as_ref(),
+            views.local.as_ref(),
+            views.sync_anchor.as_ref(),
+        ) {
+            self.upsert_remote_file(&observed_remote)?;
+            if bound_local_matches_remote_observation(local, &observed_remote) {
+                let next_local = LocalFileStateRow {
+                    namespace_id: observed.namespace_id.clone(),
+                    inode_id: observed.inode_id,
+                    inode_kind: local.inode_kind.clone(),
+                    content_digest: observed_remote.content_digest.clone(),
+                    parent_inode_id: local.parent_inode_id,
+                    display_name: local.display_name.clone(),
+                    exists_on_disk: true,
+                    dirty: false,
+                    last_local_change_ms: applied_at_ms,
+                };
+                let next_anchor = SyncAnchorRow {
+                    namespace_id: observed.namespace_id.clone(),
+                    inode_id: observed.inode_id,
+                    inode_kind: observed.inode_kind.clone(),
+                    synced_seq: observed.observed_seq,
+                    revision_no: observed.revision_no,
+                    content_digest: observed.content_digest.clone(),
+                    content_manifest_digest: observed.content_manifest_digest.clone(),
+                    parent_inode_id: observed.parent_inode_id,
+                    display_name: observed.display_name.clone(),
+                };
+                self.upsert_local_file(&next_local)?;
+                self.upsert_sync_anchor(&next_anchor)?;
+                self.delete_planned_action(&observed.namespace_id, observed.inode_id)?;
+                if let Some(pending) = load_pending_inode_mutation_for_inode(
+                    &self.tx,
+                    &observed.namespace_id,
+                    observed.inode_id,
+                )? {
+                    self.delete_pending_inode_mutation(&pending.client_request_id)?;
+                }
+                return Ok(AppliedRemoteObservation::ConvergedBoundInode(
+                    AppliedInodeMutation {
+                        namespace_id: observed.namespace_id.clone(),
+                        inode_id: observed.inode_id,
+                    },
+                ));
+            }
+
+            return Ok(AppliedRemoteObservation::UpdatedBoundRemoteState {
+                namespace_id: observed.namespace_id.clone(),
+                inode_id: observed.inode_id,
+            });
+        }
+
+        let matching_local_only =
+            load_local_only_candidates_for_namespace(&self.tx, &observed.namespace_id)?
+                .into_iter()
+                .filter(|candidate| {
+                    local_only_matches_remote_observation(candidate, &observed_remote)
+                })
+                .collect::<Vec<_>>();
+        match matching_local_only.as_slice() {
+            [] => Ok(AppliedRemoteObservation::IgnoredUnmatched {
+                namespace_id: observed.namespace_id.clone(),
+                inode_id: observed.inode_id,
+            }),
+            [candidate] => {
+                let bound = self
+                    .bind_local_only_inode_to_remote(&candidate.client_file_id, &observed_remote)?;
+                if let Some(pending) = load_pending_client_mutation_for_client_file(
+                    &self.tx,
+                    &candidate.client_file_id,
+                )? {
+                    self.delete_pending_client_mutation(&pending.client_request_id)?;
+                }
+                Ok(AppliedRemoteObservation::BoundLocalOnly(bound))
+            }
+            many => Err(StateDbError::RemoteObservationBindAmbiguous {
+                namespace_id: observed.namespace_id.as_str().to_owned(),
+                inode_id: observed.inode_id.0,
+                matches: many.len(),
+            }),
+        }
     }
 
     pub fn bind_local_only_inode_to_remote(
@@ -2442,6 +2613,64 @@ fn load_local_only_file(
     .transpose()
 }
 
+fn load_local_only_candidates_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            client_file_id,
+            inode_kind,
+            parent_inode_id,
+            display_name,
+            content_digest,
+            exists_on_disk,
+            dirty,
+            last_local_change_ms
+        FROM local_only_state
+        WHERE namespace_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![namespace_id.as_str()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, bool>(5)?,
+            row.get::<_, bool>(6)?,
+            row.get::<_, i64>(7)?,
+        ))
+    })?;
+
+    rows.map(|row| {
+        let (
+            client_file_id,
+            inode_kind,
+            parent_inode_id,
+            display_name,
+            content_digest,
+            exists_on_disk,
+            dirty,
+            last_local_change_ms,
+        ) = row?;
+        Ok(LocalOnlyFileStateRow {
+            client_file_id: ClientFileId::new(client_file_id),
+            namespace_id: namespace_id.clone(),
+            inode_kind: inode_kind_from_str(&inode_kind)?,
+            parent_inode_id: parent_inode_id
+                .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
+                .transpose()?,
+            display_name,
+            content_digest,
+            exists_on_disk,
+            dirty,
+            last_local_change_ms: from_sql_u64(last_local_change_ms, "last_local_change_ms")?,
+        })
+    })
+    .collect()
+}
+
 fn load_planned_local_only_action(
     conn: &Connection,
     client_file_id: &ClientFileId,
@@ -2845,6 +3074,31 @@ fn ensure_download_remote_edit_local_anchor_match(
         local,
         anchor,
     })
+}
+
+fn bound_local_matches_remote_observation(
+    local: &LocalFileStateRow,
+    observed: &RemoteFileStateRow,
+) -> bool {
+    local.exists_on_disk
+        && !observed.is_deleted
+        && local.inode_kind == observed.inode_kind
+        && local.content_digest == observed.content_digest
+        && local.parent_inode_id == observed.parent_inode_id
+        && local.display_name == observed.display_name
+}
+
+fn local_only_matches_remote_observation(
+    local_only: &LocalOnlyFileStateRow,
+    observed: &RemoteFileStateRow,
+) -> bool {
+    local_only.exists_on_disk
+        && !observed.is_deleted
+        && local_only.namespace_id == observed.namespace_id
+        && local_only.inode_kind == observed.inode_kind
+        && local_only.content_digest == observed.content_digest
+        && local_only.parent_inode_id == observed.parent_inode_id
+        && local_only.display_name == observed.display_name
 }
 
 fn validate_local_only_upload(
@@ -3494,9 +3748,7 @@ mod tests {
                     synced_seq: ChangeSeq(500),
                     revision_no: RevisionNo(1),
                     content_digest: Some("sha256:new-local-file".to_owned()),
-                    content_manifest_digest: Some(
-                        "sha256:manifest-new-local-file".to_owned(),
-                    ),
+                    content_manifest_digest: Some("sha256:manifest-new-local-file".to_owned(),),
                     parent_inode_id: Some(InodeId(2)),
                     display_name: "draft.txt".to_owned(),
                 }),
@@ -3612,9 +3864,7 @@ mod tests {
                     observed_seq: ChangeSeq(42),
                     revision_no: RevisionNo(1),
                     content_digest: Some("sha256:new-local-file".to_owned()),
-                    content_manifest_digest: Some(
-                        "sha256:new-local-file".to_owned(),
-                    ),
+                    content_manifest_digest: Some("sha256:new-local-file".to_owned(),),
                     parent_inode_id: Some(InodeId(2)),
                     display_name: "draft.txt".to_owned(),
                     is_deleted: false,
@@ -3637,9 +3887,7 @@ mod tests {
                     synced_seq: ChangeSeq(42),
                     revision_no: RevisionNo(1),
                     content_digest: Some("sha256:new-local-file".to_owned()),
-                    content_manifest_digest: Some(
-                        "sha256:new-local-file".to_owned(),
-                    ),
+                    content_manifest_digest: Some("sha256:new-local-file".to_owned(),),
                     parent_inode_id: Some(InodeId(2)),
                     display_name: "draft.txt".to_owned(),
                 }),

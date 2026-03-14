@@ -146,6 +146,36 @@ pub struct ModelPlannedInodeAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelObservedRemoteInode {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub inode_kind: loon_types::InodeKind,
+    pub observed_seq: ChangeSeq,
+    pub revision_no: loon_types::RevisionNo,
+    pub content_digest: Option<String>,
+    pub content_manifest_digest: Option<String>,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelLocalOnlyObservationCandidate {
+    pub client_file_id: String,
+    pub namespace_id: NamespaceId,
+    pub inode_kind: loon_types::InodeKind,
+    pub content_digest: Option<String>,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+    pub exists_on_disk: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelRemoteObservationSelectionError {
+    AmbiguousLocalOnlyBind { matches: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelScheduledClientAction {
     LocalOnlyCreate(ModelPlannedLocalOnlyAction),
     PlannedInodeAction(ModelPlannedInodeAction),
@@ -1258,6 +1288,69 @@ pub fn select_next_client_action(
     }
 }
 
+pub fn remote_observation_is_stale(
+    current_observed_seq: Option<ChangeSeq>,
+    incoming_observed_seq: ChangeSeq,
+) -> bool {
+    matches!(current_observed_seq, Some(current) if incoming_observed_seq <= current)
+}
+
+pub fn bound_local_matches_remote_observation(
+    inode_kind: &loon_types::InodeKind,
+    content_digest: Option<&str>,
+    parent_inode_id: Option<InodeId>,
+    display_name: &str,
+    exists_on_disk: bool,
+    observed: &ModelObservedRemoteInode,
+) -> bool {
+    exists_on_disk
+        && !observed.is_deleted
+        && observed.inode_kind == *inode_kind
+        && observed.content_digest.as_deref() == content_digest
+        && observed.parent_inode_id == parent_inode_id
+        && observed.display_name == display_name
+}
+
+pub fn local_only_matches_remote_observation(
+    candidate: &ModelLocalOnlyObservationCandidate,
+    observed: &ModelObservedRemoteInode,
+) -> bool {
+    candidate.exists_on_disk
+        && !observed.is_deleted
+        && candidate.namespace_id == observed.namespace_id
+        && candidate.inode_kind == observed.inode_kind
+        && candidate.content_digest == observed.content_digest
+        && candidate.parent_inode_id == observed.parent_inode_id
+        && candidate.display_name == observed.display_name
+}
+
+pub fn select_local_only_observation_bind_candidate(
+    candidates: &[ModelLocalOnlyObservationCandidate],
+    observed: &ModelObservedRemoteInode,
+) -> Result<Option<String>, ModelRemoteObservationSelectionError> {
+    let mut matches = candidates
+        .iter()
+        .filter(|candidate| local_only_matches_remote_observation(candidate, observed))
+        .map(|candidate| candidate.client_file_id.clone());
+    let first = matches.next();
+    let second = matches.next();
+    match (first, second) {
+        (None, _) => Ok(None),
+        (Some(client_file_id), None) => Ok(Some(client_file_id)),
+        (Some(_), Some(_)) => {
+            let total_matches = candidates
+                .iter()
+                .filter(|candidate| local_only_matches_remote_observation(candidate, observed))
+                .count();
+            Err(
+                ModelRemoteObservationSelectionError::AmbiguousLocalOnlyBind {
+                    matches: total_matches,
+                },
+            )
+        }
+    }
+}
+
 pub fn validate_uploaded_content_reference(
     namespace_id: &NamespaceId,
     content_manifest_digest: &str,
@@ -1446,6 +1539,7 @@ impl ModelCheckpointFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loon_types::{InodeKind, RevisionNo};
 
     #[test]
     fn model_advances_seq() {
@@ -1820,6 +1914,151 @@ mod tests {
                 created_at_ms: 1_700_000_200_000,
             })
         );
+    }
+
+    #[test]
+    fn model_selects_unique_local_only_bind_candidate_for_remote_observation() {
+        let selected = select_local_only_observation_bind_candidate(
+            &[
+                ModelLocalOnlyObservationCandidate {
+                    client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_kind: InodeKind::File,
+                    content_digest: Some(
+                        "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                            .to_owned(),
+                    ),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "draft.txt".to_owned(),
+                    exists_on_disk: true,
+                },
+                ModelLocalOnlyObservationCandidate {
+                    client_file_id: "tmp:ns-1:00000000000000000002".to_owned(),
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_kind: InodeKind::File,
+                    content_digest: Some("sha256:different".to_owned()),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "other.txt".to_owned(),
+                    exists_on_disk: true,
+                },
+            ],
+            &ModelObservedRemoteInode {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(501),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(1),
+                content_digest: Some(
+                    "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                        .to_owned(),
+                ),
+                content_manifest_digest: Some(
+                    "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                        .to_owned(),
+                ),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "draft.txt".to_owned(),
+                is_deleted: false,
+            },
+        )
+        .expect("select unique bind candidate");
+
+        assert_eq!(selected, Some("tmp:ns-1:00000000000000000001".to_owned()));
+    }
+
+    #[test]
+    fn model_rejects_ambiguous_local_only_bind_candidate_for_remote_observation() {
+        let error = select_local_only_observation_bind_candidate(
+            &[
+                ModelLocalOnlyObservationCandidate {
+                    client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_kind: InodeKind::File,
+                    content_digest: Some(
+                        "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                            .to_owned(),
+                    ),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "draft.txt".to_owned(),
+                    exists_on_disk: true,
+                },
+                ModelLocalOnlyObservationCandidate {
+                    client_file_id: "tmp:ns-1:00000000000000000002".to_owned(),
+                    namespace_id: NamespaceId::from("ns-1"),
+                    inode_kind: InodeKind::File,
+                    content_digest: Some(
+                        "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                            .to_owned(),
+                    ),
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: "draft.txt".to_owned(),
+                    exists_on_disk: true,
+                },
+            ],
+            &ModelObservedRemoteInode {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(501),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(1),
+                content_digest: Some(
+                    "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                        .to_owned(),
+                ),
+                content_manifest_digest: Some(
+                    "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                        .to_owned(),
+                ),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "draft.txt".to_owned(),
+                is_deleted: false,
+            },
+        )
+        .expect_err("ambiguous local-only bind should be rejected");
+
+        assert_eq!(
+            error,
+            ModelRemoteObservationSelectionError::AmbiguousLocalOnlyBind { matches: 2 }
+        );
+    }
+
+    #[test]
+    fn model_detects_bound_local_match_for_remote_observation() {
+        let matches = bound_local_matches_remote_observation(
+            &InodeKind::File,
+            Some("sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"),
+            Some(InodeId(2)),
+            "report.txt",
+            true,
+            &ModelObservedRemoteInode {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(18),
+                content_digest: Some(
+                    "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                        .to_owned(),
+                ),
+                content_manifest_digest: Some(
+                    "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                        .to_owned(),
+                ),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                is_deleted: false,
+            },
+        );
+
+        assert!(matches);
+        assert!(remote_observation_is_stale(
+            Some(ChangeSeq(42)),
+            ChangeSeq(42)
+        ));
+        assert!(!remote_observation_is_stale(
+            Some(ChangeSeq(41)),
+            ChangeSeq(42)
+        ));
     }
 
     #[test]

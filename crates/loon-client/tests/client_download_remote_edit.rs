@@ -86,13 +86,9 @@ fn execute_next_client_action_download_remote_edit_updates_bound_inode() {
         &initial.planned_action,
     );
 
-    let executed = run_execute_next_client_action(
-        &db_path,
-        &store,
-        Some(local_path.as_path()),
-        &execute,
-    )
-    .expect("one action should be scheduled");
+    let executed =
+        run_execute_next_client_action(&db_path, &store, Some(local_path.as_path()), &execute)
+            .expect("one action should be scheduled");
 
     let download = match executed {
         NextClientAction::ExecutedDownloadRemoteEdit(result) => result,
