@@ -9,7 +9,7 @@ use serde_json;
 use std::path::Path;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
     namespace_id TEXT NOT NULL,
@@ -151,6 +151,28 @@ ALTER TABLE pending_client_mutations
 ADD COLUMN request_json TEXT;
 "#;
 
+const SCHEMA_V7_SQL: &str = r#"
+CREATE TABLE inode_uploads (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    file_digest_sha256 TEXT NOT NULL,
+    content_manifest_digest TEXT NOT NULL,
+    manifest_object_key TEXT NOT NULL,
+    file_size_bytes INTEGER NOT NULL,
+    uploaded_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace_id, inode_id)
+);
+
+CREATE TABLE pending_inode_mutations (
+    client_request_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    request_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE (namespace_id, inode_id)
+);
+"#;
+
 #[derive(Debug, Error)]
 pub enum StateDbError {
     #[error("SQLite error: {0}")]
@@ -215,6 +237,34 @@ pub enum StateDbError {
         local_content_digest: String,
         uploaded_file_digest: String,
     },
+    #[error("inode_upload_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    InodeUploadMissing { namespace_id: String, inode_id: u64 },
+    #[error("inode_upload_requires_file: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
+    InodeUploadRequiresFile {
+        namespace_id: String,
+        inode_id: u64,
+        inode_kind: String,
+    },
+    #[error("inode_upload_local_digest_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    InodeUploadLocalDigestMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "inode_upload_namespace_mismatch: namespace `{namespace_id}` inode `{inode_id}` local namespace `{local_namespace_id}` != uploaded namespace `{uploaded_namespace_id}`"
+    )]
+    InodeUploadNamespaceMismatch {
+        namespace_id: String,
+        inode_id: u64,
+        local_namespace_id: String,
+        uploaded_namespace_id: String,
+    },
+    #[error(
+        "inode_upload_digest_mismatch: namespace `{namespace_id}` inode `{inode_id}` local digest `{local_content_digest}` != uploaded digest `{uploaded_file_digest}`"
+    )]
+    InodeUploadDigestMismatch {
+        namespace_id: String,
+        inode_id: u64,
+        local_content_digest: String,
+        uploaded_file_digest: String,
+    },
     #[error("pending_client_mutation_missing: `{client_request_id}`")]
     PendingClientMutationMissing { client_request_id: String },
     #[error(
@@ -243,6 +293,63 @@ pub enum StateDbError {
     },
     #[error("pending_client_mutation_request_missing: `{client_request_id}`")]
     PendingClientMutationRequestMissing { client_request_id: String },
+    #[error("pending_inode_mutation_missing: `{client_request_id}`")]
+    PendingInodeMutationMissing { client_request_id: String },
+    #[error(
+        "pending_inode_mutation_conflict: `{client_request_id}` existing inode `{existing_inode_id}` != new inode `{new_inode_id}`"
+    )]
+    PendingInodeMutationConflict {
+        client_request_id: String,
+        existing_inode_id: u64,
+        new_inode_id: u64,
+    },
+    #[error(
+        "pending_inode_mutation_inode_conflict: namespace `{namespace_id}` inode `{inode_id}` existing request `{existing_client_request_id}` != new request `{new_client_request_id}`"
+    )]
+    PendingInodeMutationInodeConflict {
+        namespace_id: String,
+        inode_id: u64,
+        existing_client_request_id: String,
+        new_client_request_id: String,
+    },
+    #[error(
+        "pending_inode_mutation_namespace_mismatch: `{client_request_id}` pending namespace `{pending_namespace_id}` != response namespace `{response_namespace_id}`"
+    )]
+    PendingInodeMutationNamespaceMismatch {
+        client_request_id: String,
+        pending_namespace_id: String,
+        response_namespace_id: String,
+    },
+    #[error("pending_inode_mutation_request_missing: `{client_request_id}`")]
+    PendingInodeMutationRequestMissing { client_request_id: String },
+    #[error("client_mutation_response_missing_result: `{client_request_id}`")]
+    ClientMutationResponseMissingResult { client_request_id: String },
+    #[error("client_mutation_response_conflicting_results: `{client_request_id}`")]
+    ClientMutationResponseConflictingResults { client_request_id: String },
+    #[error("upload_local_edit_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    UploadLocalEditStateMissing { namespace_id: String, inode_id: u64 },
+    #[error("upload_local_edit_requires_file: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
+    UploadLocalEditRequiresFile {
+        namespace_id: String,
+        inode_id: u64,
+        inode_kind: String,
+    },
+    #[error("upload_local_edit_path_change_not_supported: namespace `{namespace_id}` inode `{inode_id}` field `{field}` local `{local}` != anchor `{anchor}`")]
+    UploadLocalEditPathChangeNotSupported {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        local: String,
+        anchor: String,
+    },
+    #[error("upload_local_edit_remote_not_converged: namespace `{namespace_id}` inode `{inode_id}` field `{field}` remote `{remote}` != anchor `{anchor}`")]
+    UploadLocalEditRemoteNotConverged {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        remote: String,
+        anchor: String,
+    },
     #[error(
         "bind_kind_mismatch: `{client_file_id}` local kind `{local_kind}` != remote kind `{remote_kind}`"
     )]
@@ -398,6 +505,17 @@ pub struct LocalOnlyUploadRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InodeUploadRow {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub file_digest_sha256: String,
+    pub content_manifest_digest: String,
+    pub manifest_object_key: String,
+    pub file_size_bytes: u64,
+    pub uploaded_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingClientMutationRow {
     pub client_request_id: String,
     pub namespace_id: NamespaceId,
@@ -407,8 +525,23 @@ pub struct PendingClientMutationRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingInodeMutationRow {
+    pub client_request_id: String,
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub request: ClientMutationRequest,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundLocalOnlyFile {
     pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedInodeMutation {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
 }
@@ -472,6 +605,14 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn load_bound_upload_local_edit_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
+        load_bound_upload_local_edit_views_from_conn(&self.conn, namespace_id, inode_id)
+    }
+
     pub fn load_planned_action(
         &self,
         namespace_id: &NamespaceId,
@@ -526,6 +667,14 @@ impl SqliteStateDb {
         load_local_only_upload(&self.conn, client_file_id)
     }
 
+    pub fn load_inode_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<Option<InodeUploadRow>, StateDbError> {
+        load_inode_upload(&self.conn, namespace_id, inode_id)
+    }
+
     pub fn load_pending_client_mutation(
         &self,
         client_request_id: &str,
@@ -538,6 +687,21 @@ impl SqliteStateDb {
         client_file_id: &ClientFileId,
     ) -> Result<Option<PendingClientMutationRow>, StateDbError> {
         load_pending_client_mutation_for_client_file(&self.conn, client_file_id)
+    }
+
+    pub fn load_pending_inode_mutation(
+        &self,
+        client_request_id: &str,
+    ) -> Result<Option<PendingInodeMutationRow>, StateDbError> {
+        load_pending_inode_mutation(&self.conn, client_request_id)
+    }
+
+    pub fn load_pending_inode_mutation_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<Option<PendingInodeMutationRow>, StateDbError> {
+        load_pending_inode_mutation_for_inode(&self.conn, namespace_id, inode_id)
     }
 
     pub fn observe_local_only_inode_under_parent(
@@ -578,6 +742,18 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn record_inode_upload(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        uploaded: &UploadedContent,
+        uploaded_at_ms: u64,
+    ) -> Result<InodeUploadRow, StateDbError> {
+        self.planner_transaction("record_inode_upload", |tx| {
+            tx.record_inode_upload(namespace_id, inode_id, uploaded, uploaded_at_ms)
+        })
+    }
+
     pub fn resolve_local_only_upload_content_manifest_digest(
         &self,
         local_only: &LocalOnlyFileStateRow,
@@ -588,6 +764,20 @@ impl SqliteStateDb {
                 client_file_id: local_only.client_file_id.as_str().to_owned(),
             })?;
         validate_local_only_upload(local_only, &upload.namespace_id, &upload.file_digest_sha256)?;
+        Ok(upload.content_manifest_digest)
+    }
+
+    pub fn resolve_inode_upload_content_manifest_digest(
+        &self,
+        local: &LocalFileStateRow,
+    ) -> Result<String, StateDbError> {
+        let upload = self
+            .load_inode_upload(&local.namespace_id, local.inode_id)?
+            .ok_or_else(|| StateDbError::InodeUploadMissing {
+                namespace_id: local.namespace_id.as_str().to_owned(),
+                inode_id: local.inode_id.0,
+            })?;
+        validate_inode_upload(local, &upload.namespace_id, &upload.file_digest_sha256)?;
         Ok(upload.content_manifest_digest)
     }
 
@@ -602,12 +792,33 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn record_pending_inode_mutation(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: &ClientMutationRequest,
+        created_at_ms: u64,
+    ) -> Result<PendingInodeMutationRow, StateDbError> {
+        self.planner_transaction("record_pending_inode_mutation", |tx| {
+            tx.record_pending_inode_mutation(namespace_id, inode_id, request, created_at_ms)
+        })
+    }
+
     pub fn apply_client_mutation_response(
         &mut self,
         response: &ClientMutationResponse,
     ) -> Result<BoundLocalOnlyFile, StateDbError> {
         self.planner_transaction("apply_client_mutation_response", |tx| {
             tx.apply_client_mutation_response(response)
+        })
+    }
+
+    pub fn apply_inode_mutation_response(
+        &mut self,
+        response: &ClientMutationResponse,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_inode_mutation_response", |tx| {
+            tx.apply_inode_mutation_response(response)
         })
     }
 
@@ -660,6 +871,14 @@ impl SqliteStateDb {
         if current_version == 5 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V6_SQL)?;
+            tx.pragma_update(None, "user_version", 6)?;
+            tx.commit()?;
+            current_version = 6;
+        }
+
+        if current_version == 6 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V7_SQL)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -950,6 +1169,62 @@ impl PlannerTxn<'_> {
         Ok(row)
     }
 
+    pub fn record_inode_upload(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        uploaded: &UploadedContent,
+        uploaded_at_ms: u64,
+    ) -> Result<InodeUploadRow, StateDbError> {
+        let local = self
+            .load_file_sync_views(namespace_id, inode_id)?
+            .local
+            .ok_or_else(|| StateDbError::UploadLocalEditStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+        validate_inode_upload(&local, &uploaded.namespace_id, &uploaded.file_digest_sha256)?;
+
+        let row = InodeUploadRow {
+            namespace_id: uploaded.namespace_id.clone(),
+            inode_id,
+            file_digest_sha256: uploaded.file_digest_sha256.clone(),
+            content_manifest_digest: uploaded.content_manifest_digest.clone(),
+            manifest_object_key: uploaded.manifest_object_key.clone(),
+            file_size_bytes: uploaded.file_size_bytes,
+            uploaded_at_ms,
+        };
+
+        self.tx.execute(
+            "INSERT INTO inode_uploads (
+                namespace_id,
+                inode_id,
+                file_digest_sha256,
+                content_manifest_digest,
+                manifest_object_key,
+                file_size_bytes,
+                uploaded_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(namespace_id, inode_id) DO UPDATE SET
+                file_digest_sha256 = excluded.file_digest_sha256,
+                content_manifest_digest = excluded.content_manifest_digest,
+                manifest_object_key = excluded.manifest_object_key,
+                file_size_bytes = excluded.file_size_bytes,
+                uploaded_at_ms = excluded.uploaded_at_ms",
+            params![
+                row.namespace_id.as_str(),
+                to_sql_u64(row.inode_id.0, "inode_id")?,
+                &row.file_digest_sha256,
+                &row.content_manifest_digest,
+                &row.manifest_object_key,
+                to_sql_u64(row.file_size_bytes, "file_size_bytes")?,
+                to_sql_u64(row.uploaded_at_ms, "uploaded_at_ms")?,
+            ],
+        )?;
+
+        Ok(row)
+    }
+
     pub fn record_pending_client_mutation(
         &mut self,
         client_file_id: &ClientFileId,
@@ -1013,10 +1288,84 @@ impl PlannerTxn<'_> {
         Ok(row)
     }
 
+    pub fn record_pending_inode_mutation(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: &ClientMutationRequest,
+        created_at_ms: u64,
+    ) -> Result<PendingInodeMutationRow, StateDbError> {
+        if let Some(existing) = load_pending_inode_mutation(&self.tx, &request.client_request_id)? {
+            if existing.namespace_id == *namespace_id
+                && existing.inode_id == inode_id
+                && existing.request == *request
+            {
+                return Ok(existing);
+            }
+
+            return Err(StateDbError::PendingInodeMutationConflict {
+                client_request_id: request.client_request_id.clone(),
+                existing_inode_id: existing.inode_id.0,
+                new_inode_id: inode_id.0,
+            });
+        }
+
+        if let Some(existing) =
+            load_pending_inode_mutation_for_inode(&self.tx, namespace_id, inode_id)?
+        {
+            if existing.request == *request {
+                return Ok(existing);
+            }
+
+            return Err(StateDbError::PendingInodeMutationInodeConflict {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                existing_client_request_id: existing.client_request_id,
+                new_client_request_id: request.client_request_id.clone(),
+            });
+        }
+
+        let row = PendingInodeMutationRow {
+            client_request_id: request.client_request_id.clone(),
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            request: request.clone(),
+            created_at_ms,
+        };
+        self.tx.execute(
+            "INSERT INTO pending_inode_mutations (
+                client_request_id,
+                namespace_id,
+                inode_id,
+                request_json,
+                created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &row.client_request_id,
+                row.namespace_id.as_str(),
+                to_sql_u64(row.inode_id.0, "inode_id")?,
+                serde_json::to_string(&row.request)?,
+                to_sql_u64(row.created_at_ms, "created_at_ms")?,
+            ],
+        )?;
+
+        Ok(row)
+    }
+
     pub fn apply_client_mutation_response(
         &mut self,
         response: &ClientMutationResponse,
     ) -> Result<BoundLocalOnlyFile, StateDbError> {
+        if response.created_inode.is_none() && response.replaced_file.is_none() {
+            return Err(StateDbError::ClientMutationResponseMissingResult {
+                client_request_id: response.client_request_id.clone(),
+            });
+        }
+        if response.created_inode.is_some() && response.replaced_file.is_some() {
+            return Err(StateDbError::ClientMutationResponseConflictingResults {
+                client_request_id: response.client_request_id.clone(),
+            });
+        }
         let pending = load_pending_client_mutation(&self.tx, &response.client_request_id)?
             .ok_or_else(|| StateDbError::PendingClientMutationMissing {
                 client_request_id: response.client_request_id.clone(),
@@ -1030,21 +1379,107 @@ impl PlannerTxn<'_> {
             });
         }
 
+        let created_inode = response.created_inode.as_ref().ok_or_else(|| {
+            StateDbError::ClientMutationResponseMissingResult {
+                client_request_id: response.client_request_id.clone(),
+            }
+        })?;
         let remote = RemoteFileStateRow {
             namespace_id: response.namespace_id.clone(),
-            inode_id: response.created_inode.inode_id,
-            inode_kind: response.created_inode.inode_kind.clone(),
+            inode_id: created_inode.inode_id,
+            inode_kind: created_inode.inode_kind.clone(),
             observed_seq: response.committed_seq,
-            revision_no: response.created_inode.revision_no,
-            content_digest: response.created_inode.content_digest.clone(),
-            parent_inode_id: Some(response.created_inode.parent_inode_id),
-            display_name: response.created_inode.display_name.clone(),
+            revision_no: created_inode.revision_no,
+            content_digest: created_inode.content_digest.clone(),
+            parent_inode_id: Some(created_inode.parent_inode_id),
+            display_name: created_inode.display_name.clone(),
             is_deleted: false,
         };
         let bound = self.bind_local_only_inode_to_remote(&pending.client_file_id, &remote)?;
         self.delete_pending_client_mutation(&response.client_request_id)?;
 
         Ok(bound)
+    }
+
+    pub fn apply_inode_mutation_response(
+        &mut self,
+        response: &ClientMutationResponse,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        if response.created_inode.is_none() && response.replaced_file.is_none() {
+            return Err(StateDbError::ClientMutationResponseMissingResult {
+                client_request_id: response.client_request_id.clone(),
+            });
+        }
+        if response.created_inode.is_some() && response.replaced_file.is_some() {
+            return Err(StateDbError::ClientMutationResponseConflictingResults {
+                client_request_id: response.client_request_id.clone(),
+            });
+        }
+
+        let replaced = response.replaced_file.as_ref().ok_or_else(|| {
+            StateDbError::ClientMutationResponseMissingResult {
+                client_request_id: response.client_request_id.clone(),
+            }
+        })?;
+        let pending = load_pending_inode_mutation(&self.tx, &response.client_request_id)?
+            .ok_or_else(|| StateDbError::PendingInodeMutationMissing {
+                client_request_id: response.client_request_id.clone(),
+            })?;
+
+        if pending.namespace_id != response.namespace_id {
+            return Err(StateDbError::PendingInodeMutationNamespaceMismatch {
+                client_request_id: response.client_request_id.clone(),
+                pending_namespace_id: pending.namespace_id.as_str().to_owned(),
+                response_namespace_id: response.namespace_id.as_str().to_owned(),
+            });
+        }
+
+        let (remote, local, anchor) =
+            self.load_bound_upload_local_edit_views(&pending.namespace_id, pending.inode_id)?;
+
+        let next_remote = RemoteFileStateRow {
+            namespace_id: pending.namespace_id.clone(),
+            inode_id: pending.inode_id,
+            inode_kind: replaced.inode_kind.clone(),
+            observed_seq: response.committed_seq,
+            revision_no: replaced.revision_no,
+            content_digest: Some(replaced.content_digest.clone()),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name,
+            is_deleted: false,
+        };
+        let next_local = LocalFileStateRow {
+            namespace_id: pending.namespace_id.clone(),
+            inode_id: pending.inode_id,
+            inode_kind: local.inode_kind,
+            content_digest: Some(replaced.content_digest.clone()),
+            parent_inode_id: local.parent_inode_id,
+            display_name: local.display_name,
+            exists_on_disk: local.exists_on_disk,
+            dirty: false,
+            last_local_change_ms: local.last_local_change_ms,
+        };
+        let next_anchor = SyncAnchorRow {
+            namespace_id: pending.namespace_id.clone(),
+            inode_id: pending.inode_id,
+            inode_kind: anchor.inode_kind,
+            synced_seq: response.committed_seq,
+            revision_no: replaced.revision_no,
+            content_digest: Some(replaced.content_digest.clone()),
+            parent_inode_id: anchor.parent_inode_id,
+            display_name: anchor.display_name,
+        };
+
+        self.upsert_remote_file(&next_remote)?;
+        self.upsert_local_file(&next_local)?;
+        self.upsert_sync_anchor(&next_anchor)?;
+        self.delete_planned_action(&pending.namespace_id, pending.inode_id)?;
+        self.delete_pending_inode_mutation(&response.client_request_id)?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: pending.namespace_id,
+            inode_id: pending.inode_id,
+        })
     }
 
     pub fn bind_local_only_inode_to_remote(
@@ -1261,12 +1696,35 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    pub fn delete_inode_upload(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM inode_uploads WHERE namespace_id = ?1 AND inode_id = ?2",
+            params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_pending_client_mutation(
         &mut self,
         client_request_id: &str,
     ) -> Result<(), StateDbError> {
         self.tx.execute(
             "DELETE FROM pending_client_mutations WHERE client_request_id = ?1",
+            params![client_request_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_pending_inode_mutation(
+        &mut self,
+        client_request_id: &str,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM pending_inode_mutations WHERE client_request_id = ?1",
             params![client_request_id],
         )?;
         Ok(())
@@ -1317,6 +1775,14 @@ impl PlannerTxn<'_> {
         }
 
         Ok(())
+    }
+
+    pub fn load_bound_upload_local_edit_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
+        load_bound_upload_local_edit_views_from_conn(&self.tx, namespace_id, inode_id)
     }
 }
 
@@ -1561,6 +2027,92 @@ fn load_next_planned_action(conn: &Connection) -> Result<Option<PlannedActionRow
     .transpose()
 }
 
+fn load_bound_upload_local_edit_views_from_conn(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
+    let remote = load_remote_file(conn, namespace_id, inode_id)?;
+    let local = load_local_file(conn, namespace_id, inode_id)?;
+    let anchor = load_sync_anchor(conn, namespace_id, inode_id)?;
+    let (remote, local, anchor) = match (remote, local, anchor) {
+        (Some(remote), Some(local), Some(anchor)) => (remote, local, anchor),
+        _ => {
+            return Err(StateDbError::UploadLocalEditStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })
+        }
+    };
+
+    if remote.inode_kind != InodeKind::File
+        || local.inode_kind != InodeKind::File
+        || anchor.inode_kind != InodeKind::File
+    {
+        return Err(StateDbError::UploadLocalEditRequiresFile {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            inode_kind: inode_kind_as_str(&local.inode_kind).to_owned(),
+        });
+    }
+
+    ensure_upload_local_edit_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "parent_inode_id",
+        format!("{:?}", local.parent_inode_id),
+        format!("{:?}", anchor.parent_inode_id),
+    )?;
+    ensure_upload_local_edit_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "display_name",
+        local.display_name.clone(),
+        anchor.display_name.clone(),
+    )?;
+
+    ensure_upload_local_edit_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "revision_no",
+        remote.revision_no.0.to_string(),
+        anchor.revision_no.0.to_string(),
+    )?;
+    ensure_upload_local_edit_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_digest",
+        format!("{:?}", remote.content_digest),
+        format!("{:?}", anchor.content_digest),
+    )?;
+    ensure_upload_local_edit_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "parent_inode_id",
+        format!("{:?}", remote.parent_inode_id),
+        format!("{:?}", anchor.parent_inode_id),
+    )?;
+    ensure_upload_local_edit_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "display_name",
+        remote.display_name.clone(),
+        anchor.display_name.clone(),
+    )?;
+
+    if remote.is_deleted {
+        return Err(StateDbError::UploadLocalEditRemoteNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "is_deleted",
+            remote: "true".to_owned(),
+            anchor: "false".to_owned(),
+        });
+    }
+
+    Ok((remote, local, anchor))
+}
+
 fn load_local_only_file(
     conn: &Connection,
     client_file_id: &ClientFileId,
@@ -1744,6 +2296,56 @@ fn load_local_only_upload(
     .transpose()
 }
 
+fn load_inode_upload(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<Option<InodeUploadRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT
+                file_digest_sha256,
+                content_manifest_digest,
+                manifest_object_key,
+                file_size_bytes,
+                uploaded_at_ms
+            FROM inode_uploads
+            WHERE namespace_id = ?1 AND inode_id = ?2",
+            params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(
+            file_digest_sha256,
+            content_manifest_digest,
+            manifest_object_key,
+            file_size_bytes,
+            uploaded_at_ms,
+        )| {
+            Ok(InodeUploadRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                file_digest_sha256,
+                content_manifest_digest,
+                manifest_object_key,
+                file_size_bytes: from_sql_u64(file_size_bytes, "file_size_bytes")?,
+                uploaded_at_ms: from_sql_u64(uploaded_at_ms, "uploaded_at_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn load_pending_client_mutation(
     conn: &Connection,
     client_request_id: &str,
@@ -1803,6 +2405,64 @@ fn load_pending_client_mutation_for_client_file(
     }
 }
 
+fn load_pending_inode_mutation(
+    conn: &Connection,
+    client_request_id: &str,
+) -> Result<Option<PendingInodeMutationRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT namespace_id, inode_id, request_json, created_at_ms
+            FROM pending_inode_mutations
+            WHERE client_request_id = ?1",
+            params![client_request_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(|(namespace_id, inode_id, request_json, created_at_ms)| {
+        let request_json =
+            request_json.ok_or_else(|| StateDbError::PendingInodeMutationRequestMissing {
+                client_request_id: client_request_id.to_owned(),
+            })?;
+        Ok(PendingInodeMutationRow {
+            client_request_id: client_request_id.to_owned(),
+            namespace_id: NamespaceId::from(namespace_id),
+            inode_id: InodeId(from_sql_u64(inode_id, "inode_id")?),
+            request: serde_json::from_str(&request_json)?,
+            created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+        })
+    })
+    .transpose()
+}
+
+fn load_pending_inode_mutation_for_inode(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<Option<PendingInodeMutationRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT client_request_id
+            FROM pending_inode_mutations
+            WHERE namespace_id = ?1 AND inode_id = ?2",
+            params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    match raw {
+        Some(client_request_id) => load_pending_inode_mutation(conn, &client_request_id),
+        None => Ok(None),
+    }
+}
+
 fn inode_kind_as_str(kind: &InodeKind) -> &'static str {
     match kind {
         InodeKind::File => "file",
@@ -1837,6 +2497,46 @@ fn ensure_bind_match(
         field,
         local,
         remote,
+    })
+}
+
+fn ensure_upload_local_edit_local_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    local: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if local == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::UploadLocalEditPathChangeNotSupported {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        local,
+        anchor,
+    })
+}
+
+fn ensure_upload_local_edit_remote_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    remote: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if remote == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::UploadLocalEditRemoteNotConverged {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        remote,
+        anchor,
     })
 }
 
@@ -1877,6 +2577,47 @@ fn validate_local_only_upload(
     Ok(())
 }
 
+fn validate_inode_upload(
+    local: &LocalFileStateRow,
+    upload_namespace_id: &NamespaceId,
+    uploaded_file_digest: &str,
+) -> Result<(), StateDbError> {
+    if local.inode_kind != InodeKind::File {
+        return Err(StateDbError::InodeUploadRequiresFile {
+            namespace_id: local.namespace_id.as_str().to_owned(),
+            inode_id: local.inode_id.0,
+            inode_kind: inode_kind_as_str(&local.inode_kind).to_owned(),
+        });
+    }
+
+    if local.namespace_id != *upload_namespace_id {
+        return Err(StateDbError::InodeUploadNamespaceMismatch {
+            namespace_id: local.namespace_id.as_str().to_owned(),
+            inode_id: local.inode_id.0,
+            local_namespace_id: local.namespace_id.as_str().to_owned(),
+            uploaded_namespace_id: upload_namespace_id.as_str().to_owned(),
+        });
+    }
+
+    let local_content_digest = local.content_digest.as_deref().ok_or_else(|| {
+        StateDbError::InodeUploadLocalDigestMissing {
+            namespace_id: local.namespace_id.as_str().to_owned(),
+            inode_id: local.inode_id.0,
+        }
+    })?;
+
+    if local_content_digest != uploaded_file_digest {
+        return Err(StateDbError::InodeUploadDigestMismatch {
+            namespace_id: local.namespace_id.as_str().to_owned(),
+            inode_id: local.inode_id.0,
+            local_content_digest: local_content_digest.to_owned(),
+            uploaded_file_digest: uploaded_file_digest.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 fn to_sql_u64(value: u64, field: &'static str) -> Result<i64, StateDbError> {
     i64::try_from(value).map_err(|_| StateDbError::UnsignedOutOfRange { field, value })
 }
@@ -1901,7 +2642,7 @@ mod tests {
     };
 
     #[test]
-    fn sqlite_state_db_applies_schema_v6() {
+    fn sqlite_state_db_applies_schema_v7() {
         let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
         assert_eq!(
@@ -1918,7 +2659,9 @@ mod tests {
             "local_only_state",
             "planned_local_only_actions",
             "local_only_uploads",
+            "inode_uploads",
             "pending_client_mutations",
+            "pending_inode_mutations",
             "transfer_ledger",
             "conflicts_and_errors",
         ] {
@@ -2687,14 +3430,15 @@ mod tests {
             namespace_id: NamespaceId::from("ns-1"),
             client_request_id: "client-req-0001".to_owned(),
             committed_seq: ChangeSeq(42),
-            created_inode: CreatedRemoteInode {
+            created_inode: Some(CreatedRemoteInode {
                 inode_id: InodeId(501),
                 inode_kind: InodeKind::File,
                 revision_no: RevisionNo(1),
                 parent_inode_id: InodeId(2),
                 display_name: "draft.txt".to_owned(),
                 content_digest: Some("sha256:new-local-file".to_owned()),
-            },
+            }),
+            replaced_file: None,
         }
     }
 

@@ -85,6 +85,16 @@ pub struct ModelLocalOnlyUploadRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInodeUploadRecord {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub file_digest_sha256: String,
+    pub content_manifest_digest: String,
+    pub manifest_object_key: String,
+    pub file_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelLocalOnlyUploadValidationError {
     MissingLocalContentDigest,
     NamespaceMismatch {
@@ -99,6 +109,25 @@ pub enum ModelLocalOnlyUploadValidationError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelLocalOnlyUploadDecision {
+    ReuseExisting { content_manifest_digest: String },
+    UploadFresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelInodeUploadValidationError {
+    MissingLocalContentDigest,
+    NamespaceMismatch {
+        expected: NamespaceId,
+        actual: NamespaceId,
+    },
+    FileDigestMismatch {
+        expected: String,
+        actual: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelInodeUploadDecision {
     ReuseExisting { content_manifest_digest: String },
     UploadFresh,
 }
@@ -1100,6 +1129,31 @@ pub fn validate_local_only_upload_record(
     Ok(upload.content_manifest_digest.clone())
 }
 
+pub fn validate_inode_upload_record(
+    namespace_id: &NamespaceId,
+    local_content_digest: Option<&str>,
+    upload: &ModelInodeUploadRecord,
+) -> Result<String, ModelInodeUploadValidationError> {
+    let local_content_digest =
+        local_content_digest.ok_or(ModelInodeUploadValidationError::MissingLocalContentDigest)?;
+
+    if &upload.namespace_id != namespace_id {
+        return Err(ModelInodeUploadValidationError::NamespaceMismatch {
+            expected: namespace_id.clone(),
+            actual: upload.namespace_id.clone(),
+        });
+    }
+
+    if upload.file_digest_sha256 != local_content_digest {
+        return Err(ModelInodeUploadValidationError::FileDigestMismatch {
+            expected: local_content_digest.to_owned(),
+            actual: upload.file_digest_sha256.clone(),
+        });
+    }
+
+    Ok(upload.content_manifest_digest.clone())
+}
+
 pub fn decide_local_only_upload_action(
     namespace_id: &NamespaceId,
     local_content_digest: Option<&str>,
@@ -1119,6 +1173,28 @@ pub fn decide_local_only_upload_action(
             }
         }
         None => Ok(ModelLocalOnlyUploadDecision::UploadFresh),
+    }
+}
+
+pub fn decide_inode_upload_action(
+    namespace_id: &NamespaceId,
+    local_content_digest: Option<&str>,
+    existing_upload: Option<&ModelInodeUploadRecord>,
+) -> Result<ModelInodeUploadDecision, ModelInodeUploadValidationError> {
+    match existing_upload {
+        Some(upload) => {
+            match validate_inode_upload_record(namespace_id, local_content_digest, upload) {
+                Ok(content_manifest_digest) => Ok(ModelInodeUploadDecision::ReuseExisting {
+                    content_manifest_digest,
+                }),
+                Err(ModelInodeUploadValidationError::NamespaceMismatch { .. })
+                | Err(ModelInodeUploadValidationError::FileDigestMismatch { .. }) => {
+                    Ok(ModelInodeUploadDecision::UploadFresh)
+                }
+                Err(other) => Err(other),
+            }
+        }
+        None => Ok(ModelInodeUploadDecision::UploadFresh),
     }
 }
 
@@ -1472,6 +1548,36 @@ mod tests {
     }
 
     #[test]
+    fn model_validates_inode_upload_record() {
+        let upload = ModelInodeUploadRecord {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            file_digest_sha256:
+                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            content_manifest_digest:
+                "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                    .to_owned(),
+            manifest_object_key:
+                "namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json"
+                    .to_owned(),
+            file_size_bytes: 16,
+        };
+
+        let resolved = validate_inode_upload_record(
+            &NamespaceId::from("ns-1"),
+            Some("sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"),
+            &upload,
+        )
+        .expect("validate inode upload");
+
+        assert_eq!(
+            resolved,
+            "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+        );
+    }
+
+    #[test]
     fn model_reuses_matching_local_only_upload_record() {
         let upload = ModelLocalOnlyUploadRecord {
             namespace_id: NamespaceId::from("ns-1"),
@@ -1505,6 +1611,40 @@ mod tests {
     }
 
     #[test]
+    fn model_reuses_matching_inode_upload_record() {
+        let upload = ModelInodeUploadRecord {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            file_digest_sha256:
+                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            content_manifest_digest:
+                "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                    .to_owned(),
+            manifest_object_key:
+                "namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json"
+                    .to_owned(),
+            file_size_bytes: 16,
+        };
+
+        let decision = decide_inode_upload_action(
+            &NamespaceId::from("ns-1"),
+            Some("sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"),
+            Some(&upload),
+        )
+        .expect("decide inode upload action");
+
+        assert_eq!(
+            decision,
+            ModelInodeUploadDecision::ReuseExisting {
+                content_manifest_digest:
+                    "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                        .to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn model_reuploads_when_existing_local_only_upload_is_stale() {
         let upload = ModelLocalOnlyUploadRecord {
             namespace_id: NamespaceId::from("ns-1"),
@@ -1528,6 +1668,33 @@ mod tests {
         .expect("stale upload should trigger reupload");
 
         assert_eq!(decision, ModelLocalOnlyUploadDecision::UploadFresh);
+    }
+
+    #[test]
+    fn model_reuploads_when_existing_inode_upload_is_stale() {
+        let upload = ModelInodeUploadRecord {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            file_digest_sha256:
+                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            content_manifest_digest:
+                "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                    .to_owned(),
+            manifest_object_key:
+                "namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json"
+                    .to_owned(),
+            file_size_bytes: 16,
+        };
+
+        let decision = decide_inode_upload_action(
+            &NamespaceId::from("ns-1"),
+            Some("sha256:edited-after-upload"),
+            Some(&upload),
+        )
+        .expect("stale inode upload should trigger reupload");
+
+        assert_eq!(decision, ModelInodeUploadDecision::UploadFresh);
     }
 
     #[test]

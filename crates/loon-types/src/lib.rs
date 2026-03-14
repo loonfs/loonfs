@@ -98,7 +98,10 @@ pub struct ClientMutationResponse {
     pub namespace_id: NamespaceId,
     pub client_request_id: String,
     pub committed_seq: ChangeSeq,
-    pub created_inode: CreatedRemoteInode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_inode: Option<CreatedRemoteInode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_file: Option<ReplacedRemoteFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +115,14 @@ pub struct CreatedRemoteInode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplacedRemoteFile {
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub revision_no: RevisionNo,
+    pub content_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientMutationOp {
     CreateDir {
@@ -121,6 +132,11 @@ pub enum ClientMutationOp {
     CreateFile {
         parent_inode_id: InodeId,
         display_name: String,
+        content_manifest_digest: String,
+    },
+    ReplaceFile {
+        inode_id: InodeId,
+        base_revision_no: RevisionNo,
         content_manifest_digest: String,
     },
 }

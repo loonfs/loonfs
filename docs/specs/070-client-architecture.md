@@ -360,6 +360,10 @@ The initial client mutation contract supports only:
 - `create_remote_dir` -> `ClientMutationOp::CreateDir`
 - `upload_local_create` -> `ClientMutationOp::CreateFile`
 
+The next bound-file edit extension adds:
+
+- `upload_local_edit` -> `ClientMutationOp::ReplaceFile`
+
 Rules:
 
 - one planned local-only action maps to one client mutation request
@@ -368,6 +372,10 @@ Rules:
 - for `create_file`, the executor must load `content_manifest_digest` from the durable
   `local_only_uploads(client_file_id)` row, not from caller memory and not from the local observed
   file digest
+- for `replace_file`, the executor must load `content_manifest_digest` from a durable inode-keyed
+  upload row, not from caller memory and not from the local observed file digest
+- `replace_file` must carry canonical `inode_id` plus the current bound `base_revision_no`, never
+  a path string
 
 Why this rule exists:
 
@@ -388,6 +396,168 @@ Failure modes named for the first implementation:
 - `uploaded_content_namespace_mismatch`
 - `uploaded_content_digest_mismatch`
 - `uploaded_content_local_digest_missing`
+
+## Inode upload ledger (schema v7)
+
+The first restart-safe inode-keyed file-edit path adds one narrow durable table:
+
+- `inode_uploads`
+
+One row is keyed by:
+
+```text
+(namespace_id, inode_id)
+```
+
+The row must durably map:
+
+- `namespace_id`
+- `inode_id`
+- `file_digest_sha256`
+- `content_manifest_digest`
+- `manifest_object_key`
+- `file_size_bytes`
+- `uploaded_at_ms`
+
+Rules:
+
+- the client may persist this row only for a bound `file` inode
+- persisting the row must validate that the uploaded namespace matches the bound inode row
+- persisting the row must validate that the uploaded `file_digest_sha256` still matches the
+  current `local_state.content_digest`
+- when building `replace_file`, the executor must load `content_manifest_digest` from this durable
+  row, not from an in-memory upload result
+- successful edit publish may keep the row, because immutable content can be safely reused by a
+  later retry or repeated content digest
+
+Why this rule exists:
+
+- bound-file edit should use the same durable upload-before-publish split as local-only create
+- restart should not force the client to rediscover uploaded edit content from an ambient path
+- if the local file changed after upload, the executor must refuse to publish stale content
+
+Failure modes prevented:
+
+- rebuilding `replace_file` from a local filesystem path after restart
+- publishing `replace_file` after the local file changed to a different digest
+- running a file-content executor against a directory inode
+
+Failure modes named for the first implementation:
+
+- `inode_upload_missing`
+- `inode_upload_requires_file`
+- `inode_upload_namespace_mismatch`
+- `inode_upload_digest_mismatch`
+- `inode_upload_local_digest_missing`
+
+## Pending inode mutation request ledger (schema v7)
+
+The first restart-safe inode-keyed mutation path adds:
+
+- `pending_inode_mutations`
+
+One row is keyed by:
+
+```text
+client_request_id
+```
+
+The row must durably map:
+
+- `client_request_id`
+- `namespace_id`
+- `inode_id`
+- `request_json`
+- `created_at_ms`
+
+Rules:
+
+- the client must persist this row before it treats a bound-file edit request as in flight
+- the mapping from `client_request_id` to `(namespace_id, inode_id)` must stay stable across
+  restart
+- `request_json` must be the exact `ClientMutationRequest` bytes that were dispatched
+- if a pending row already exists for one `(namespace_id, inode_id)`, retry must reuse the stored
+  `client_request_id` and stored `request_json` instead of allocating a new request id or
+  rebuilding from current local state
+- recording the same request twice is only valid if it still points at the same namespace, bound
+  inode, and exact request body
+
+Why this rule exists:
+
+- a successful authoritative edit may be observed after restart
+- retrying the same inode-keyed edit must not silently mutate the request body after the first
+  attempt
+
+Failure modes prevented:
+
+- post-restart success that cannot be matched back to the correct bound inode
+- retrying one bound-file edit with a newly generated request id
+- local state drifting after the first dispatch attempt and silently changing the retried request
+
+Failure modes named for the first implementation:
+
+- `pending_inode_mutation_missing`
+- `pending_inode_mutation_conflict`
+- `pending_inode_mutation_inode_conflict`
+- `pending_inode_mutation_namespace_mismatch`
+- `pending_inode_mutation_request_missing`
+
+## First bound-file edit executor
+
+The first inode-keyed executor is intentionally narrow. It only handles:
+
+- `upload_local_edit`
+
+The executor takes:
+
+- `namespace_id`
+- `inode_id`
+- an optional caller-supplied local filesystem path
+- one upload timestamp
+- one dispatch timestamp
+
+Rules:
+
+- if `pending_inode_mutations(namespace_id, inode_id)` already contains a row, the executor must
+  reuse that durable `request_json` and must not rebuild the request from current local state
+- if no pending row exists, the executor must load `planned_actions(namespace_id, inode_id)` and
+  require `decision = upload_local_edit`
+- the first implementation only supports content replacement, not rename or move, so the executor
+  must require `local_state`, `remote_state`, and `sync_anchor` to exist and to agree on
+  `inode_kind = file`, `parent_inode_id`, and `display_name`
+- the executor must require `remote_state` to still match `sync_anchor` for the current bound
+  revision before freezing the request
+- if `inode_uploads(namespace_id, inode_id)` already matches the current local digest, the
+  executor may reuse that upload row and skip rereading the local path
+- otherwise the executor must upload the supplied local file path, then persist the resulting
+  upload row before building the request
+- the frozen request must carry:
+  - canonical `inode_id`
+  - `base_revision_no = sync_anchor.revision_no`
+  - `content_manifest_digest` from the durable inode upload row
+
+Why this rule exists:
+
+- the first bound-file edit path should advance real file revisions, not only surface planned work
+- content replacement should become restart-safe before the client grows broader inode-keyed
+  download/conflict logic
+- rename or move needs a stricter protocol than a content-only replace request
+
+Failure modes prevented:
+
+- rereading a local file path during retry and silently publishing different bytes under the same
+  inode edit intent
+- emitting `replace_file` from a planner state that already includes an unmodeled rename or move
+- publishing a file edit against a stale bound revision
+
+Failure modes named for the first implementation:
+
+- `upload_local_edit_decision_missing`
+- `upload_local_edit_state_missing`
+- `upload_local_edit_requires_file`
+- `upload_local_edit_path_change_not_supported`
+- `upload_local_edit_remote_not_converged`
+- `upload_local_edit_source_path_missing`
 
 ## Pending client mutation request ledger (schema v6)
 
@@ -623,6 +793,7 @@ The first broader client tick arbitrates between:
 It is still intentionally partial. In this first implementation it may:
 
 - execute one selected local-only create immediately
+- execute one selected inode-keyed `upload_local_edit`
 - or surface one selected inode-keyed planned action as the next scheduled work item
 
 Rules:
@@ -635,21 +806,26 @@ Rules:
   - if `created_at_ms` ties, `planned_local_only_actions` wins over `planned_actions`
 - if the selected row comes from `planned_local_only_actions`, the tick must execute it through the
   existing local-only create loop
-- if the selected row comes from `planned_actions`, the tick must return that planned action as the
-  next scheduled work item without trying to silently emulate upload/download/conflict behavior yet
+- if the selected row comes from `planned_actions` and `decision = upload_local_edit`, the tick
+  must execute it through the bound-file edit executor
+- if the selected row comes from `planned_actions` and the decision is anything else, the tick must
+  return that planned action as the next scheduled work item without trying to silently emulate
+  download/conflict behavior yet
 - if both tables are empty, the tick must return `no_work`
 
 Why this rule exists:
 
 - one scheduler surface is more valuable than separate “creates only” and “everything else later”
   entrypoints
-- we should not fake support for inode-keyed upload/download actions before their executors exist
+- we should not fake support for inode-keyed download/conflict actions before their executors exist
 - a deterministic cross-table tie-break keeps restart behavior and tests reproducible
 
 Failure modes prevented:
 
 - local-only creates and inode-keyed planned actions being scheduled by unrelated policies
 - a partial implementation pretending it executed an inode-keyed action when it only selected it
+- a bound-file edit staying permanently stuck in `planned_actions` after the upload and replace
+  path already exists
 
 ## Bind-after-publish loop
 
@@ -677,6 +853,47 @@ On receipt of that response, one SQLite transaction must:
 3. bind the stored `client_file_id` into inode-keyed `remote_state`, `local_state`, and `sync_anchor`
 4. delete the matching `pending_client_mutations` row
 5. delete the temporary `local_only_state` and `planned_local_only_actions` rows
+
+## First apply-after-publish loop for bound-file edit
+
+After a successful `replace_file`, the authoritative side returns one committed edit summary:
+
+- `namespace_id`
+- `client_request_id`
+- `committed_seq`
+- `replaced_file.inode_id`
+- `replaced_file.inode_kind`
+- `replaced_file.revision_no`
+- `replaced_file.content_digest`
+
+On receipt of that response, one SQLite transaction must:
+
+1. load `pending_inode_mutations(client_request_id)`
+2. load the current bound `remote_state`, `local_state`, and `sync_anchor` rows for that inode
+3. derive the authoritative next `remote_state` row by updating `observed_seq`, `revision_no`,
+   and `content_digest` while preserving the current bound `parent_inode_id` and `display_name`
+4. update `local_state` to the same `content_digest` and clear `dirty`
+5. update `sync_anchor` to the same `committed_seq`, `revision_no`, and `content_digest`
+6. delete the matching `pending_inode_mutations` row
+7. clear any `planned_actions(namespace_id, inode_id)` row because the file is converged again
+
+Rules:
+
+- the first implementation only accepts `replaced_file` when the bound inode rows still represent
+  a plain file content edit, not a rename or move
+- the client must reject a response that carries both `created_inode` and `replaced_file`, or
+  neither of them
+
+Why this rule exists:
+
+- a restart-safe file edit needs the same durable response-apply step as local-only create
+- the local client should become converged from the authoritative result, not from optimistic local
+  memory
+
+Failure modes prevented:
+
+- losing which bound inode an acknowledged `replace_file` belonged to after restart
+- clearing a dirty local edit without actually advancing the authoritative revision anchor
 
 After that transaction commits, a restart and normal planner tick for the bound inode must return
 `no_op` / `already_converged`.

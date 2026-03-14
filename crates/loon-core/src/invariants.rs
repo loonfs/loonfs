@@ -6,6 +6,7 @@ pub const INVARIANTS: &[&str] = &[
     "next_inode_id_is_monotonic",
     "create_mutation_consumes_next_inode_id",
     "create_file_requires_durable_content",
+    "replace_file_requires_durable_content",
     "content_manifest_checksum_matches_payload",
     "content_manifest_digest_matches_object",
     "content_manifest_namespace_matches_request",

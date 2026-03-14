@@ -1,11 +1,15 @@
 use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision, PlannerError};
 use crate::state_db::{
-    BoundLocalOnlyFile, ClientFileId, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    LocalOnlyUploadRow, PendingClientMutationRow, PlannedActionRow, SqliteStateDb, StateDbError,
+    AppliedInodeMutation, BoundLocalOnlyFile, ClientFileId, InodeUploadRow, LocalFileStateRow,
+    LocalOnlyFileStateRow, LocalOnlyPlannedActionRow, LocalOnlyUploadRow, PendingClientMutationRow,
+    PendingInodeMutationRow, PlannedActionRow, SqliteStateDb, StateDbError, SyncAnchorRow,
 };
 use crate::upload::{upload_small_file_from_path, UploadError};
 use loon_objectstore::ObjectStore;
-use loon_types::{ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeKind};
+use loon_types::{
+    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind,
+    NamespaceId,
+};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -19,6 +23,8 @@ pub enum ExecutorError {
     EmptyClientRequestId,
     #[error("planned_local_only_action_missing: `{client_file_id}`")]
     PlannedLocalOnlyActionMissing { client_file_id: String },
+    #[error("planned_action_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    PlannedActionMissing { namespace_id: String, inode_id: u64 },
     #[error(
         "client_file_id mismatch: local `{local_client_file_id}` != planned `{planned_client_file_id}`"
     )]
@@ -33,10 +39,20 @@ pub enum ExecutorError {
         local_namespace_id: String,
         planned_namespace_id: String,
     },
+    #[error(
+        "planned inode namespace mismatch: local `{local_namespace_id}` != planned `{planned_namespace_id}` for inode `{inode_id}`"
+    )]
+    PlannedInodeNamespaceMismatch {
+        inode_id: u64,
+        local_namespace_id: String,
+        planned_namespace_id: String,
+    },
     #[error("missing parent inode for `{client_file_id}`")]
     MissingParentInode { client_file_id: String },
     #[error("missing content manifest digest for `{client_file_id}`")]
     MissingContentManifestDigest { client_file_id: String },
+    #[error("missing content manifest digest for namespace `{namespace_id}` inode `{inode_id}`")]
+    MissingInodeContentManifestDigest { namespace_id: String, inode_id: u64 },
     #[error("unsupported planner decision `{0:?}` for client mutation executor")]
     UnsupportedDecision(PlannerDecision),
     #[error(
@@ -44,6 +60,15 @@ pub enum ExecutorError {
     )]
     DecisionKindMismatch {
         client_file_id: String,
+        decision: PlannerDecision,
+        inode_kind: InodeKind,
+    },
+    #[error(
+        "planner decision `{decision:?}` is incompatible with inode kind `{inode_kind:?}` for namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    InodeDecisionKindMismatch {
+        namespace_id: String,
+        inode_id: u64,
         decision: PlannerDecision,
         inode_kind: InodeKind,
     },
@@ -57,8 +82,29 @@ pub struct DispatchedClientMutation {
     pub bound_identity: BoundLocalOnlyFile,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchedInodeMutation {
+    pub pending: PendingInodeMutationRow,
+    pub request: ClientMutationRequest,
+    pub response: ClientMutationResponse,
+    pub applied: AppliedInodeMutation,
+}
+
 #[derive(Debug, Error)]
 pub enum DispatchClientMutationError {
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error("dispatch_failed: `{client_request_id}` {message}")]
+    DispatchFailed {
+        client_request_id: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum DispatchInodeMutationError {
     #[error(transparent)]
     Executor(#[from] ExecutorError),
     #[error(transparent)]
@@ -81,6 +127,13 @@ pub struct ExecutedUploadLocalCreate {
 pub struct ExecutedCreateRemoteDir {
     pub reused_pending_request: bool,
     pub dispatched: DispatchedClientMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedUploadLocalEdit {
+    pub ensured_upload: Option<InodeUploadRow>,
+    pub upload_reused: bool,
+    pub dispatched: DispatchedInodeMutation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +194,32 @@ pub enum ExecuteLocalOnlyCreateError {
     CreateRemoteDir(#[from] ExecuteCreateRemoteDirError),
 }
 
+#[derive(Debug, Error)]
+pub enum ExecuteUploadLocalEditError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Planner(#[from] PlannerError),
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    Upload(#[from] UploadError),
+    #[error(transparent)]
+    Dispatch(#[from] DispatchInodeMutationError),
+    #[error(
+        "upload_local_edit_decision_missing: namespace `{namespace_id}` inode `{inode_id}` decision `{decision:?}`"
+    )]
+    UploadLocalEditDecisionMissing {
+        namespace_id: String,
+        inode_id: u64,
+        decision: PlannerDecision,
+    },
+    #[error(
+        "upload_local_edit_source_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    SourcePathMissing { namespace_id: String, inode_id: u64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutedNextLocalOnlyCreate {
     pub planned_action: LocalOnlyPlannedActionRow,
@@ -158,6 +237,7 @@ pub enum ExecuteNextLocalOnlyCreateError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextClientAction {
     ExecutedLocalOnlyCreate(ExecutedNextLocalOnlyCreate),
+    ExecutedUploadLocalEdit(ExecutedUploadLocalEdit),
     SelectedPlannedAction(PlannedActionRow),
 }
 
@@ -167,6 +247,8 @@ pub enum ExecuteNextClientActionError {
     StateDb(#[from] StateDbError),
     #[error(transparent)]
     LocalOnlyCreate(#[from] ExecuteLocalOnlyCreateError),
+    #[error(transparent)]
+    UploadLocalEdit(#[from] ExecuteUploadLocalEditError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,17 +257,19 @@ enum NextClientActionCandidate {
     PlannedAction(PlannedActionRow),
 }
 
-pub fn execute_next_client_action<S, P, F>(
+pub fn execute_next_client_action<S, LP, IP, F>(
     db: &mut SqliteStateDb,
     store: &S,
-    resolve_source_path: P,
+    resolve_local_only_source_path: LP,
+    resolve_inode_source_path: IP,
     uploaded_at_ms: u64,
     created_at_ms: u64,
     dispatch: F,
 ) -> Result<Option<NextClientAction>, ExecuteNextClientActionError>
 where
     S: ObjectStore,
-    P: FnOnce(&ClientFileId) -> Option<PathBuf>,
+    LP: FnOnce(&ClientFileId) -> Option<PathBuf>,
+    IP: FnOnce(&NamespaceId, InodeId) -> Option<PathBuf>,
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
     let next_action = match select_next_client_action_candidate(
@@ -199,7 +283,7 @@ where
     match next_action {
         NextClientActionCandidate::LocalOnlyCreate(planned_action) => {
             let client_file_id = planned_action.client_file_id.clone();
-            let source_path = resolve_source_path(&client_file_id);
+            let source_path = resolve_local_only_source_path(&client_file_id);
             let executed = execute_local_only_create(
                 db,
                 store,
@@ -217,9 +301,29 @@ where
                 },
             )))
         }
-        NextClientActionCandidate::PlannedAction(planned_action) => Ok(Some(
-            NextClientAction::SelectedPlannedAction(planned_action),
-        )),
+        NextClientActionCandidate::PlannedAction(planned_action) => {
+            if planned_action.decision == PlannerDecision::UploadLocalEdit.as_str() {
+                let source_path = resolve_inode_source_path(
+                    &planned_action.namespace_id,
+                    planned_action.inode_id,
+                );
+                let executed = execute_upload_local_edit(
+                    db,
+                    store,
+                    &planned_action.namespace_id,
+                    planned_action.inode_id,
+                    source_path.as_deref(),
+                    uploaded_at_ms,
+                    created_at_ms,
+                    dispatch,
+                )?;
+                Ok(Some(NextClientAction::ExecutedUploadLocalEdit(executed)))
+            } else {
+                Ok(Some(NextClientAction::SelectedPlannedAction(
+                    planned_action,
+                )))
+            }
+        }
     }
 }
 
@@ -309,6 +413,9 @@ where
             )
             .map(ExecutedLocalOnlyCreate::UploadLocalCreate)
             .map_err(ExecuteLocalOnlyCreateError::from),
+            ClientMutationOp::ReplaceFile { .. } => Err(ExecuteLocalOnlyCreateError::Executor(
+                ExecutorError::UnsupportedDecision(PlannerDecision::UploadLocalEdit),
+            )),
         };
     }
 
@@ -430,6 +537,72 @@ where
     })
 }
 
+pub fn execute_upload_local_edit_from_path<S: ObjectStore, F>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    source_path: &Path,
+    uploaded_at_ms: u64,
+    created_at_ms: u64,
+    dispatch: F,
+) -> Result<ExecutedUploadLocalEdit, ExecuteUploadLocalEditError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
+    execute_upload_local_edit(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        Some(source_path),
+        uploaded_at_ms,
+        created_at_ms,
+        dispatch,
+    )
+}
+
+fn execute_upload_local_edit<S: ObjectStore, F>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    source_path: Option<&Path>,
+    uploaded_at_ms: u64,
+    created_at_ms: u64,
+    dispatch: F,
+) -> Result<ExecutedUploadLocalEdit, ExecuteUploadLocalEditError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
+    let had_pending_request = db
+        .load_pending_inode_mutation_for_inode(namespace_id, inode_id)?
+        .is_some();
+
+    let (ensured_upload, upload_reused) = if had_pending_request {
+        (db.load_inode_upload(namespace_id, inode_id)?, true)
+    } else {
+        let (upload_row, reused_existing) = ensure_upload_local_edit_ready(
+            db,
+            store,
+            namespace_id,
+            inode_id,
+            source_path,
+            uploaded_at_ms,
+        )?;
+        (Some(upload_row), reused_existing)
+    };
+
+    let dispatched =
+        dispatch_inode_mutation_from_state(db, namespace_id, inode_id, created_at_ms, dispatch)?;
+
+    Ok(ExecutedUploadLocalEdit {
+        ensured_upload,
+        upload_reused,
+        dispatched,
+    })
+}
+
 pub fn dispatch_client_mutation_from_state<F>(
     db: &mut SqliteStateDb,
     client_file_id: &ClientFileId,
@@ -461,6 +634,45 @@ where
         request,
         response,
         bound_identity,
+    })
+}
+
+pub fn dispatch_inode_mutation_from_state<F>(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    created_at_ms: u64,
+    dispatch: F,
+) -> Result<DispatchedInodeMutation, DispatchInodeMutationError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
+    let pending = match db.load_pending_inode_mutation_for_inode(namespace_id, inode_id)? {
+        Some(existing) => existing,
+        None => {
+            let client_request_id = db.allocate_client_request_id()?;
+            let request = build_inode_mutation_request_from_state(
+                db,
+                &client_request_id,
+                namespace_id,
+                inode_id,
+            )?;
+            db.record_pending_inode_mutation(namespace_id, inode_id, &request, created_at_ms)?
+        }
+    };
+    let request = pending.request.clone();
+    let response =
+        dispatch(&request).map_err(|message| DispatchInodeMutationError::DispatchFailed {
+            client_request_id: request.client_request_id.clone(),
+            message,
+        })?;
+    let applied = db.apply_inode_mutation_response(&response)?;
+
+    Ok(DispatchedInodeMutation {
+        pending,
+        request,
+        response,
+        applied,
     })
 }
 
@@ -511,6 +723,53 @@ fn ensure_upload_local_create_ready<S: ObjectStore>(
     Ok((recorded, false))
 }
 
+fn ensure_upload_local_edit_ready<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    source_path: Option<&Path>,
+    uploaded_at_ms: u64,
+) -> Result<(InodeUploadRow, bool), ExecuteUploadLocalEditError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = crate::planner::PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::UploadLocalEdit {
+        return Err(
+            ExecuteUploadLocalEditError::UploadLocalEditDecisionMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                decision: planned.decision,
+            },
+        );
+    }
+
+    let (_remote, local, _anchor) =
+        db.load_bound_upload_local_edit_views(namespace_id, inode_id)?;
+    if let Some(existing_upload) = db.load_inode_upload(namespace_id, inode_id)? {
+        if existing_upload.namespace_id == *namespace_id
+            && local.content_digest.as_deref() == Some(existing_upload.file_digest_sha256.as_str())
+        {
+            return Ok((existing_upload, true));
+        }
+    }
+
+    let source_path =
+        source_path.ok_or_else(|| ExecuteUploadLocalEditError::SourcePathMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let uploaded = upload_small_file_from_path(store, namespace_id, source_path)?;
+    let recorded = db
+        .record_inode_upload(namespace_id, inode_id, &uploaded, uploaded_at_ms)
+        .map_err(ExecuteUploadLocalEditError::from)?;
+    Ok((recorded, false))
+}
+
 fn ensure_create_remote_dir_ready(
     db: &mut SqliteStateDb,
     client_file_id: &ClientFileId,
@@ -545,6 +804,94 @@ fn ensure_create_remote_dir_ready(
     }
 
     Ok(())
+}
+
+pub fn build_inode_mutation_request_from_state(
+    db: &SqliteStateDb,
+    client_request_id: &str,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<ClientMutationRequest, ExecutorError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = crate::planner::PlannedActionRecord::try_from(planned_row)?;
+    let (_remote, local, anchor) = db.load_bound_upload_local_edit_views(namespace_id, inode_id)?;
+    let content_manifest_digest = match planned.decision {
+        PlannerDecision::UploadLocalEdit => {
+            Some(db.resolve_inode_upload_content_manifest_digest(&local)?)
+        }
+        _ => None,
+    };
+
+    build_inode_mutation_request(
+        client_request_id,
+        &local,
+        &anchor,
+        &planned,
+        content_manifest_digest.as_deref(),
+    )
+}
+
+pub fn build_inode_mutation_request(
+    client_request_id: &str,
+    local: &LocalFileStateRow,
+    anchor: &SyncAnchorRow,
+    planned: &crate::planner::PlannedActionRecord,
+    content_manifest_digest: Option<&str>,
+) -> Result<ClientMutationRequest, ExecutorError> {
+    if client_request_id.trim().is_empty() {
+        return Err(ExecutorError::EmptyClientRequestId);
+    }
+
+    if local.namespace_id != planned.namespace_id {
+        return Err(ExecutorError::PlannedInodeNamespaceMismatch {
+            inode_id: local.inode_id.0,
+            local_namespace_id: local.namespace_id.as_str().to_owned(),
+            planned_namespace_id: planned.namespace_id.as_str().to_owned(),
+        });
+    }
+
+    if local.inode_id != planned.inode_id {
+        return Err(ExecutorError::PlannedActionMissing {
+            namespace_id: local.namespace_id.as_str().to_owned(),
+            inode_id: local.inode_id.0,
+        });
+    }
+
+    let op = match planned.decision {
+        PlannerDecision::UploadLocalEdit => {
+            if local.inode_kind != InodeKind::File {
+                return Err(ExecutorError::InodeDecisionKindMismatch {
+                    namespace_id: local.namespace_id.as_str().to_owned(),
+                    inode_id: local.inode_id.0,
+                    decision: planned.decision.clone(),
+                    inode_kind: local.inode_kind.clone(),
+                });
+            }
+
+            ClientMutationOp::ReplaceFile {
+                inode_id: local.inode_id,
+                base_revision_no: anchor.revision_no,
+                content_manifest_digest: content_manifest_digest.map(str::to_owned).ok_or_else(
+                    || ExecutorError::MissingInodeContentManifestDigest {
+                        namespace_id: local.namespace_id.as_str().to_owned(),
+                        inode_id: local.inode_id.0,
+                    },
+                )?,
+            }
+        }
+        ref other => return Err(ExecutorError::UnsupportedDecision(other.clone())),
+    };
+
+    Ok(ClientMutationRequest {
+        namespace_id: local.namespace_id.clone(),
+        client_request_id: client_request_id.to_owned(),
+        op,
+    })
 }
 
 pub fn build_client_mutation_request_from_state(

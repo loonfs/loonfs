@@ -1,0 +1,66 @@
+name: client_replace_file_commit_writes_wal_and_head
+initial:
+  head:
+    namespace_id: ns-1
+    seq: 41
+    active_fence_token: 8
+    next_inode_id: 501
+    snapshot_hint_seq: 40
+    retention_floor_seq: 40
+  lease:
+    namespace_id: ns-1
+    holder_id: writer-a
+    fence_token: 8
+    lease_expires_at_ms: 2000
+  content_objects:
+    manifest:
+      digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+      payload:
+        namespace_id: ns-1
+        file_size_bytes: 16
+        file_digest_sha256: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+        block_size_bytes: 16777216
+        blocks:
+          - content_digest_sha256: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+            plaintext_size_bytes: 16
+    blocks:
+      - digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+        body_utf8: |
+          hello from loon
+  client_request:
+    namespace_id: ns-1
+    client_request_id: client-req-0001
+    op:
+      replace_file:
+        inode_id: 42
+        base_revision_no: 17
+        content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+actions:
+  - translate_client_mutation: true
+  - validate_commit: true
+  - write_wal_object: true
+  - publish_head: true
+expect:
+  wal_object:
+    key: namespaces/ns-1/wal/00000000000000000042-client-req-0001.cbor.zst
+    payload:
+      seq: 42
+      base_head_seq: 41
+      commit_id: client-req-0001
+      writer_fence_token: 8
+      inode_id: 42
+      base_revision_no: 17
+  head:
+    namespace_id: ns-1
+    seq: 42
+    active_fence_token: 8
+    next_inode_id: 501
+    snapshot_hint_seq: 40
+    retention_floor_seq: 40
+  invariants:
+    - replace_file_requires_durable_content
+    - content_manifest_digest_matches_object
+    - content_manifest_namespace_matches_request
+    - content_manifest_blocks_match_descriptors
+    - content_manifest_file_digest_matches_blocks
+    - head_publish_requires_durable_wal

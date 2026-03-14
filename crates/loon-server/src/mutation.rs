@@ -13,7 +13,7 @@ use loon_objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{
     payload_checksum_sha256, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
     ControlObjectKind, CreatedRemoteInode, HeadState, HeadStateEnvelope, LeaseStateEnvelope,
-    NamespaceId, RevisionNo,
+    NamespaceId, ReplacedRemoteFile, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -96,6 +96,13 @@ pub enum ClientMutationTranslationError {
     EmptyDisplayName,
     #[error("empty content manifest digest")]
     EmptyContentManifestDigest,
+    #[error(
+        "replace file revision overflow for inode `{inode_id:?}` base revision `{base_revision:?}`"
+    )]
+    ReplaceFileRevisionOverflow {
+        inode_id: loon_types::InodeId,
+        base_revision: RevisionNo,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -188,6 +195,10 @@ fn validate_referenced_durable_content<S: ObjectStore>(
         ClientMutationOp::CreateFile {
             content_manifest_digest,
             ..
+        }
+        | ClientMutationOp::ReplaceFile {
+            content_manifest_digest,
+            ..
         } => validate_durable_content_reference(
             store,
             &request.namespace_id,
@@ -205,44 +216,85 @@ fn build_client_mutation_response(
     plan: &CommitPlan,
     head_publish: &PreparedCommitHeadPublish,
 ) -> Result<ClientMutationResponse, ClientMutationExecutionError> {
-    if plan.allocated_inode_ids.len() != 1 {
-        return Err(
-            ClientMutationExecutionError::UnexpectedAllocatedInodeCount {
-                actual: plan.allocated_inode_ids.len(),
-            },
-        );
-    }
-
-    let inode_id = plan.allocated_inode_ids[0];
-    let created_inode = match &request.op {
+    let (created_inode, replaced_file) = match &request.op {
         ClientMutationOp::CreateDir {
             parent_inode_id,
             display_name,
-        } => CreatedRemoteInode {
-            inode_id,
-            inode_kind: loon_types::InodeKind::Dir,
-            revision_no: RevisionNo(1),
-            parent_inode_id: *parent_inode_id,
-            display_name: display_name.clone(),
-            content_digest: None,
-        },
+        } => {
+            if plan.allocated_inode_ids.len() != 1 {
+                return Err(
+                    ClientMutationExecutionError::UnexpectedAllocatedInodeCount {
+                        actual: plan.allocated_inode_ids.len(),
+                    },
+                );
+            }
+            let inode_id = plan.allocated_inode_ids[0];
+            (
+                Some(CreatedRemoteInode {
+                    inode_id,
+                    inode_kind: loon_types::InodeKind::Dir,
+                    revision_no: RevisionNo(1),
+                    parent_inode_id: *parent_inode_id,
+                    display_name: display_name.clone(),
+                    content_digest: None,
+                }),
+                None,
+            )
+        }
         ClientMutationOp::CreateFile {
             parent_inode_id,
             display_name,
             ..
-        } => CreatedRemoteInode {
+        } => {
+            if plan.allocated_inode_ids.len() != 1 {
+                return Err(
+                    ClientMutationExecutionError::UnexpectedAllocatedInodeCount {
+                        actual: plan.allocated_inode_ids.len(),
+                    },
+                );
+            }
+            let inode_id = plan.allocated_inode_ids[0];
+            (
+                Some(CreatedRemoteInode {
+                    inode_id,
+                    inode_kind: loon_types::InodeKind::File,
+                    revision_no: RevisionNo(1),
+                    parent_inode_id: *parent_inode_id,
+                    display_name: display_name.clone(),
+                    content_digest: Some(
+                        validated_content
+                            .expect("create_file response requires validated durable content")
+                            .file_digest_sha256
+                            .clone(),
+                    ),
+                }),
+                None,
+            )
+        }
+        ClientMutationOp::ReplaceFile {
             inode_id,
-            inode_kind: loon_types::InodeKind::File,
-            revision_no: RevisionNo(1),
-            parent_inode_id: *parent_inode_id,
-            display_name: display_name.clone(),
-            content_digest: Some(
-                validated_content
-                    .expect("create_file response requires validated durable content")
-                    .file_digest_sha256
-                    .clone(),
-            ),
-        },
+            base_revision_no,
+            ..
+        } => {
+            let revision_no = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
+                ClientMutationTranslationError::ReplaceFileRevisionOverflow {
+                    inode_id: *inode_id,
+                    base_revision: *base_revision_no,
+                },
+            )?;
+            (
+                None,
+                Some(ReplacedRemoteFile {
+                    inode_id: *inode_id,
+                    inode_kind: loon_types::InodeKind::File,
+                    revision_no,
+                    content_digest: validated_content
+                        .expect("replace_file response requires validated durable content")
+                        .file_digest_sha256
+                        .clone(),
+                }),
+            )
+        }
     };
 
     Ok(ClientMutationResponse {
@@ -250,6 +302,7 @@ fn build_client_mutation_response(
         client_request_id: request.client_request_id.clone(),
         committed_seq: head_publish.resulting_head.seq,
         created_inode,
+        replaced_file,
     })
 }
 
@@ -266,7 +319,7 @@ fn translate_client_mutation_request(
         return Err(ClientMutationTranslationError::EmptyWriterId);
     }
 
-    let (op, parent_inode, display_name) = match &request.op {
+    let (op, preconditions) = match &request.op {
         ClientMutationOp::CreateDir {
             parent_inode_id,
             display_name,
@@ -275,8 +328,16 @@ fn translate_client_mutation_request(
                 parent_inode: *parent_inode_id,
                 display_name: display_name.clone(),
             },
-            *parent_inode_id,
-            display_name.clone(),
+            vec![
+                Precondition::HeadSeqIs(current_head.seq),
+                Precondition::ChildNameAbsent {
+                    parent_inode: *parent_inode_id,
+                    name_key: display_name.clone(),
+                },
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: *parent_inode_id,
+                },
+            ],
         ),
         ClientMutationOp::CreateFile {
             parent_inode_id,
@@ -293,13 +354,52 @@ fn translate_client_mutation_request(
                     display_name: display_name.clone(),
                     content_manifest_digest: content_manifest_digest.clone(),
                 },
-                *parent_inode_id,
-                display_name.clone(),
+                vec![
+                    Precondition::HeadSeqIs(current_head.seq),
+                    Precondition::ChildNameAbsent {
+                        parent_inode: *parent_inode_id,
+                        name_key: display_name.clone(),
+                    },
+                    Precondition::AncestorsNotSubtreeDeleted {
+                        inode_id: *parent_inode_id,
+                    },
+                ],
+            )
+        }
+        ClientMutationOp::ReplaceFile {
+            inode_id,
+            base_revision_no,
+            content_manifest_digest,
+        } => {
+            if content_manifest_digest.trim().is_empty() {
+                return Err(ClientMutationTranslationError::EmptyContentManifestDigest);
+            }
+
+            (
+                CommitOp::ReplaceFile {
+                    inode_id: *inode_id,
+                    base_revision: *base_revision_no,
+                    content_manifest_digest: content_manifest_digest.clone(),
+                },
+                vec![
+                    Precondition::HeadSeqIs(current_head.seq),
+                    Precondition::InodeRevisionIs {
+                        inode_id: *inode_id,
+                        revision: *base_revision_no,
+                    },
+                    Precondition::AncestorsNotSubtreeDeleted {
+                        inode_id: *inode_id,
+                    },
+                ],
             )
         }
     };
 
-    if display_name.trim().is_empty() {
+    if matches!(
+        &request.op,
+        ClientMutationOp::CreateDir { display_name, .. }
+            | ClientMutationOp::CreateFile { display_name, .. } if display_name.trim().is_empty()
+    ) {
         return Err(ClientMutationTranslationError::EmptyDisplayName);
     }
 
@@ -310,16 +410,7 @@ fn translate_client_mutation_request(
         writer_fence_token: current_head.active_fence_token,
         planned_head_seq: current_head.seq,
         ops: vec![op],
-        preconditions: vec![
-            Precondition::HeadSeqIs(current_head.seq),
-            Precondition::ChildNameAbsent {
-                parent_inode,
-                name_key: display_name,
-            },
-            Precondition::AncestorsNotSubtreeDeleted {
-                inode_id: parent_inode,
-            },
-        ],
+        preconditions,
     })
 }
 
@@ -566,6 +657,61 @@ mod tests {
     }
 
     #[test]
+    fn translate_replace_file_request_builds_replace_preconditions() {
+        let request = ClientMutationRequest {
+            namespace_id: loon_types::NamespaceId::from("ns-1"),
+            client_request_id: "client-req-0003".to_owned(),
+            op: loon_types::ClientMutationOp::ReplaceFile {
+                inode_id: loon_types::InodeId(42),
+                base_revision_no: loon_types::RevisionNo(17),
+                content_manifest_digest: "sha256:manifest-edit".to_owned(),
+            },
+        };
+        let params = ClientMutationExecutionParams {
+            writer_id: "writer-a".to_owned(),
+            writer_version: "loon-server-test".to_owned(),
+            now_ms: 1_500,
+        };
+        let head = HeadState {
+            namespace_id: loon_types::NamespaceId::from("ns-1"),
+            seq: loon_types::ChangeSeq(41),
+            active_fence_token: loon_types::FenceToken(8),
+            next_inode_id: loon_types::InodeId(501),
+            snapshot_hint_seq: Some(loon_types::ChangeSeq(40)),
+            retention_floor_seq: loon_types::ChangeSeq(40),
+        };
+
+        let translated = translate_client_mutation_request(&request, &params, &head)
+            .expect("translate replace file request");
+
+        assert_eq!(translated.request_id, "client-req-0003");
+        assert_eq!(translated.writer_id, "writer-a");
+        assert!(matches!(
+            &translated.ops[0],
+            loon_core::commit::CommitOp::ReplaceFile {
+                inode_id,
+                base_revision,
+                content_manifest_digest
+            } if *inode_id == loon_types::InodeId(42)
+                && *base_revision == loon_types::RevisionNo(17)
+                && content_manifest_digest == "sha256:manifest-edit"
+        ));
+        assert_eq!(
+            translated.preconditions,
+            vec![
+                loon_core::commit::Precondition::HeadSeqIs(loon_types::ChangeSeq(41)),
+                loon_core::commit::Precondition::InodeRevisionIs {
+                    inode_id: loon_types::InodeId(42),
+                    revision: loon_types::RevisionNo(17),
+                },
+                loon_core::commit::Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: loon_types::InodeId(42),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn client_create_file_fixture_writes_wal_and_publishes_head() {
         let scenario = load_fixture("native/client_create_file_commit_writes_wal_and_head.yaml");
         let initial: MutationInitial = scenario.decode_initial().expect("decode initial state");
@@ -633,7 +779,7 @@ mod tests {
         assert_eq!(executed.response.committed_seq, loon_types::ChangeSeq(42));
         assert_eq!(
             executed.response.created_inode,
-            loon_types::CreatedRemoteInode {
+            Some(loon_types::CreatedRemoteInode {
                 inode_id: loon_types::InodeId(501),
                 inode_kind: loon_types::InodeKind::File,
                 revision_no: loon_types::RevisionNo(1),
@@ -643,8 +789,9 @@ mod tests {
                     "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
                         .to_owned(),
                 ),
-            }
+            })
         );
+        assert_eq!(executed.response.replaced_file, None);
         assert_eq!(executed.head_publish.resulting_head, expect.head);
         for invariant in &expect.invariants {
             assert!(
@@ -666,6 +813,86 @@ mod tests {
         let stored_head: HeadStateEnvelope =
             serde_json::from_slice(&stored_head_bytes).expect("decode stored head");
         assert_eq!(stored_head.state, expect.head);
+    }
+
+    #[test]
+    fn client_replace_file_fixture_writes_wal_and_publishes_head() {
+        let scenario = load_fixture("native/client_replace_file_commit_writes_wal_and_head.yaml");
+        let initial: MutationInitial = scenario.decode_initial().expect("decode initial state");
+        let expect: ReplaceMutationExpect = scenario.decode_expect().expect("decode expectations");
+        let temp_dir = TestDir::new("client-replace-file");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+
+        seed_head_and_lease(&store, &initial.head, &initial.lease);
+        seed_content_objects(
+            &store,
+            &initial.head.namespace_id,
+            initial
+                .content_objects
+                .as_ref()
+                .expect("replace-file fixture should seed content objects"),
+        );
+
+        let content_manifest_digest = initial
+            .client_request
+            .content_manifest_digest()
+            .expect("replace-file fixture should carry content manifest digest")
+            .to_owned();
+
+        let executed = execute_client_mutation(
+            &store,
+            &ClientMutationRequest::from(initial.client_request.clone()),
+            &ClientMutationExecutionParams {
+                writer_id: initial.lease.holder_id.clone(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+            },
+        )
+        .expect("execute client replace-file mutation");
+
+        assert_eq!(executed.wal.object_key, expect.wal_object.key);
+        let decoded_wal = decode_wal_commit_envelope_zstd(&executed.wal.encoded_bytes)
+            .expect("decode written WAL envelope");
+        assert_eq!(decoded_wal.payload.seq, expect.wal_object.payload.seq);
+        assert_eq!(
+            decoded_wal.payload.base_head_seq,
+            expect.wal_object.payload.base_head_seq
+        );
+        assert_eq!(
+            decoded_wal.payload.commit_id,
+            expect.wal_object.payload.commit_id
+        );
+        assert_eq!(
+            decoded_wal.payload.writer_fence_token,
+            expect.wal_object.payload.writer_fence_token
+        );
+        assert_eq!(
+            decoded_wal.payload.ops,
+            vec![WalOp::ReplaceFile {
+                inode_id: expect.wal_object.payload.inode_id,
+                base_revision: expect.wal_object.payload.base_revision_no,
+                content_manifest_digest: content_manifest_digest,
+            }]
+        );
+        assert_eq!(
+            executed.response.replaced_file,
+            Some(loon_types::ReplacedRemoteFile {
+                inode_id: loon_types::InodeId(42),
+                inode_kind: loon_types::InodeKind::File,
+                revision_no: loon_types::RevisionNo(18),
+                content_digest:
+                    "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                        .to_owned(),
+            })
+        );
+        assert_eq!(executed.response.created_inode, None);
+        assert_eq!(executed.head_publish.resulting_head, expect.head);
+        for invariant in &expect.invariants {
+            assert!(
+                executed.checked_invariants.contains(invariant),
+                "missing invariant `{invariant}`"
+            );
+        }
     }
 
     #[test]
@@ -724,6 +951,13 @@ mod tests {
     }
 
     #[derive(Debug, Deserialize)]
+    struct ReplaceMutationExpect {
+        wal_object: ExpectedReplaceWalObject,
+        head: HeadState,
+        invariants: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
     struct MutationErrorExpect {
         error: String,
     }
@@ -732,6 +966,12 @@ mod tests {
     struct ExpectedWalObject {
         key: String,
         payload: ExpectedWalPayload,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ExpectedReplaceWalObject {
+        key: String,
+        payload: ExpectedReplaceWalPayload,
     }
 
     #[derive(Debug, Deserialize)]
@@ -761,6 +1001,16 @@ mod tests {
         create_file_inode_id: loon_types::InodeId,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct ExpectedReplaceWalPayload {
+        seq: loon_types::ChangeSeq,
+        base_head_seq: loon_types::ChangeSeq,
+        commit_id: String,
+        writer_fence_token: loon_types::FenceToken,
+        inode_id: loon_types::InodeId,
+        base_revision_no: loon_types::RevisionNo,
+    }
+
     #[derive(Debug, Clone, Deserialize)]
     struct RawClientMutationRequest {
         namespace_id: loon_types::NamespaceId,
@@ -773,6 +1023,7 @@ mod tests {
     enum RawClientMutationOp {
         CreateDir { create_dir: RawCreateDir },
         CreateFile { create_file: RawCreateFile },
+        ReplaceFile { replace_file: RawReplaceFile },
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -785,6 +1036,13 @@ mod tests {
     struct RawCreateFile {
         parent_inode_id: loon_types::InodeId,
         display_name: String,
+        content_manifest_digest: String,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    struct RawReplaceFile {
+        inode_id: loon_types::InodeId,
+        base_revision_no: loon_types::RevisionNo,
         content_manifest_digest: String,
     }
 
@@ -804,6 +1062,13 @@ mod tests {
                         content_manifest_digest: create_file.content_manifest_digest,
                     }
                 }
+                RawClientMutationOp::ReplaceFile { replace_file } => {
+                    loon_types::ClientMutationOp::ReplaceFile {
+                        inode_id: replace_file.inode_id,
+                        base_revision_no: replace_file.base_revision_no,
+                        content_manifest_digest: replace_file.content_manifest_digest,
+                    }
+                }
             };
 
             Self {
@@ -819,6 +1084,9 @@ mod tests {
             match &self.op {
                 RawClientMutationOp::CreateFile { create_file } => {
                     Some(create_file.content_manifest_digest.as_str())
+                }
+                RawClientMutationOp::ReplaceFile { replace_file } => {
+                    Some(replace_file.content_manifest_digest.as_str())
                 }
                 RawClientMutationOp::CreateDir { .. } => None,
             }

@@ -84,10 +84,48 @@ Failure modes named for the first implementation:
 - `create_mutation_consumes_next_inode_id`
 - `create_file_requires_durable_content`
 
+## Replace-file mutation
+
+The first inode-keyed edit mutation is:
+
+- `replace_file(inode_id, base_revision_no, content_manifest_digest)`
+
+Rules:
+
+- `replace_file` updates the content revision of one existing file inode
+- it does not rename the inode and it does not move the inode to a new parent
+- `content_manifest_digest` must identify one immutable manifest object at
+  `namespaces/{namespace_id}/manifests/{content_manifest_digest}.json`
+- `replace_file` requires durable content before publish
+
+The first replace-file preconditions are:
+
+- `HeadSeqIs(current_head.seq)`
+- `InodeRevisionIs(inode_id, base_revision_no)`
+- `AncestorsNotSubtreeDeleted(inode_id)`
+
+Why these rules exist:
+
+- the first bound-file edit path should use canonical inode identity, not path mutation guesses
+- the first client edit executor only covers content replacement, not rename or move
+- file edits must still prove durable content before metadata may publish
+
+Failure modes prevented:
+
+- uploading new bytes into the wrong inode after a local rename
+- publishing a file revision against a stale base revision
+- publishing metadata that points at missing or corrupted content
+
+Failure modes named for the first implementation:
+
+- `replace_file_requires_durable_content`
+- `replace_file_base_revision_mismatch`
+- `replace_file_path_change_not_supported`
+
 ## Authoritative durable content validation
 
-Before the authoritative side may publish `create_file`, it must validate the referenced
-immutable content objects against object storage.
+Before the authoritative side may publish `create_file` or `replace_file`, it must validate the
+referenced immutable content objects against object storage.
 
 Validation steps:
 
@@ -103,8 +141,8 @@ Validation steps:
 
 Why these rules exist:
 
-- `create_file_requires_durable_content` should be enforced against real durable objects,
-  not just against a non-empty digest string
+- `create_file_requires_durable_content` and `replace_file_requires_durable_content`
+  should be enforced against real durable objects, not just against a non-empty digest string
 - metadata should not publish if the referenced manifest or any referenced block is missing,
   corrupted, or namespace-crossed
 
@@ -123,6 +161,12 @@ Failure modes named for the first implementation:
 - `create_file_block_missing`
 - `create_file_block_descriptor_mismatch`
 - `create_file_file_digest_mismatch`
+- `replace_file_manifest_missing`
+- `replace_file_manifest_digest_mismatch`
+- `replace_file_manifest_namespace_mismatch`
+- `replace_file_block_missing`
+- `replace_file_block_descriptor_mismatch`
+- `replace_file_file_digest_mismatch`
 
 ## Fencing
 

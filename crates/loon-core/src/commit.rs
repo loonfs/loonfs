@@ -278,6 +278,16 @@ pub fn build_commit_plan(
             "create_file_requires_durable_content",
         );
     }
+    if request
+        .ops
+        .iter()
+        .any(|op| matches!(op, CommitOp::ReplaceFile { .. }))
+    {
+        push_unique_invariant(
+            &mut checked_invariants,
+            "replace_file_requires_durable_content",
+        );
+    }
 
     Ok(CommitPlan {
         namespace_id: request.namespace_id.clone(),
