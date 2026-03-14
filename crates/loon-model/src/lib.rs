@@ -291,6 +291,15 @@ pub enum ModelMetadataPreconditionError {
         expected: RevisionNo,
         actual: Option<RevisionNo>,
     },
+    SourceRevisionMissing {
+        inode_id: InodeId,
+        restore_from_revision: RevisionNo,
+    },
+    SourceRevisionNotHistorical {
+        inode_id: InodeId,
+        base_revision_no: RevisionNo,
+        restore_from_revision: RevisionNo,
+    },
     AncestorCoveredBySubtreeTombstone {
         inode_id: InodeId,
         root_inode_id: InodeId,
@@ -316,6 +325,11 @@ pub enum ModelMetadataMutation {
         base_revision_no: RevisionNo,
         content_manifest_digest: String,
     },
+    RestoreRevision {
+        inode_id: InodeId,
+        base_revision_no: RevisionNo,
+        restore_from_revision_no: RevisionNo,
+    },
     DeleteSubtree {
         root_inode_id: InodeId,
     },
@@ -332,6 +346,10 @@ pub enum ModelMetadataApplyError {
     RevisionOverflow {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
+    },
+    RestoreSourceRevisionMissing {
+        inode_id: InodeId,
+        restore_from_revision_no: RevisionNo,
     },
 }
 
@@ -635,6 +653,10 @@ pub enum ModelError {
     MetadataRevisionOverflow {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
+    },
+    MetadataRestoreSourceRevisionMissing {
+        inode_id: InodeId,
+        restore_from_revision_no: RevisionNo,
     },
 }
 
@@ -995,6 +1017,13 @@ impl ModelNamespace {
                     inode_id,
                     base_revision_no,
                 },
+                ModelMetadataApplyError::RestoreSourceRevisionMissing {
+                    inode_id,
+                    restore_from_revision_no,
+                } => ModelError::MetadataRestoreSourceRevisionMissing {
+                    inode_id,
+                    restore_from_revision_no,
+                },
             })?;
 
         self.head_seq = wal.seq;
@@ -1009,6 +1038,7 @@ impl ModelNamespace {
                         InodeId(current.0.max(inode_id.0.saturating_add(1)))
                     }
                     ModelMetadataMutation::ReplaceFile { .. }
+                    | ModelMetadataMutation::RestoreRevision { .. }
                     | ModelMetadataMutation::DeleteSubtree { .. } => current,
                 });
         self.next_inode_id = replay_next_inode_id;
@@ -1645,6 +1675,35 @@ impl ModelMetadataState {
                         "replace_file_appends_new_revision_head",
                     );
                 }
+                ModelMetadataMutation::RestoreRevision {
+                    inode_id,
+                    base_revision_no,
+                    restore_from_revision_no,
+                } => {
+                    let next_revision_no =
+                        base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
+                            ModelMetadataApplyError::RevisionOverflow {
+                                inode_id: *inode_id,
+                                base_revision_no: *base_revision_no,
+                            },
+                        )?;
+                    let source_revision = metadata_state
+                        .revision_at_seq(*inode_id, *restore_from_revision_no, committed_seq)
+                        .ok_or(ModelMetadataApplyError::RestoreSourceRevisionMissing {
+                            inode_id: *inode_id,
+                            restore_from_revision_no: *restore_from_revision_no,
+                        })?;
+                    metadata_state.revisions.push(ModelRevisionRecord {
+                        inode_id: *inode_id,
+                        revision_no: next_revision_no,
+                        committed_seq,
+                        content_manifest_digest: source_revision.content_manifest_digest,
+                    });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "restore_creates_new_revision_head",
+                    );
+                }
                 ModelMetadataMutation::DeleteSubtree { root_inode_id } => {
                     metadata_state
                         .subtree_tombstones
@@ -1682,6 +1741,23 @@ impl ModelMetadataState {
             .iter()
             .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
             .max_by_key(|revision| revision.revision_no)
+            .cloned()
+    }
+
+    pub fn revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelRevisionRecord> {
+        self.revisions
+            .iter()
+            .filter(|revision| {
+                revision.inode_id == inode_id
+                    && revision.revision_no == revision_no
+                    && revision.committed_seq <= base_seq
+            })
+            .max_by_key(|revision| revision.committed_seq)
             .cloned()
     }
 
@@ -1852,6 +1928,35 @@ impl ModelMetadataState {
                 inode_id,
                 actual_kind: inode.inode_kind,
             });
+        }
+
+        Ok(())
+    }
+
+    pub fn ensure_restore_source_revision_exists(
+        &self,
+        inode_id: InodeId,
+        base_revision_no: RevisionNo,
+        restore_from_revision: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Result<(), ModelMetadataPreconditionError> {
+        if self
+            .revision_at_seq(inode_id, restore_from_revision, base_seq)
+            .is_none()
+        {
+            return Err(ModelMetadataPreconditionError::SourceRevisionMissing {
+                inode_id,
+                restore_from_revision,
+            });
+        }
+        if restore_from_revision >= base_revision_no {
+            return Err(
+                ModelMetadataPreconditionError::SourceRevisionNotHistorical {
+                    inode_id,
+                    base_revision_no,
+                    restore_from_revision,
+                },
+            );
         }
 
         Ok(())
@@ -3068,6 +3173,36 @@ mod tests {
     }
 
     #[test]
+    fn model_apply_restore_revision_appends_new_head_from_historical_content() {
+        let applied = seeded_metadata_state()
+            .apply_committed_mutations(
+                ChangeSeq(42),
+                &[ModelMetadataMutation::RestoreRevision {
+                    inode_id: InodeId(42),
+                    base_revision_no: RevisionNo(2),
+                    restore_from_revision_no: RevisionNo(1),
+                }],
+            )
+            .expect("apply restore_revision metadata");
+
+        assert_eq!(
+            applied
+                .metadata_state
+                .latest_revision_head_at_seq(InodeId(42), ChangeSeq(42))
+                .expect("revision head after restore"),
+            ModelRevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(3),
+                committed_seq: ChangeSeq(42),
+                content_manifest_digest: "sha256:note-v1".to_owned(),
+            }
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"restore_creates_new_revision_head".to_owned()));
+    }
+
+    #[test]
     fn model_apply_delete_subtree_appends_tombstone_row_and_hides_descendants() {
         let applied = ModelMetadataState {
             inodes: vec![
@@ -3141,6 +3276,27 @@ mod tests {
         assert!(applied
             .checked_invariants
             .contains(&"delete_subtree_writes_tombstone_row".to_owned()));
+    }
+
+    #[test]
+    fn model_restore_source_must_be_historical() {
+        let error = seeded_metadata_state()
+            .ensure_restore_source_revision_exists(
+                InodeId(42),
+                RevisionNo(2),
+                RevisionNo(2),
+                ChangeSeq(41),
+            )
+            .expect_err("current head cannot be restore source");
+
+        assert_eq!(
+            error,
+            ModelMetadataPreconditionError::SourceRevisionNotHistorical {
+                inode_id: InodeId(42),
+                base_revision_no: RevisionNo(2),
+                restore_from_revision: RevisionNo(2),
+            }
+        );
     }
 
     #[test]

@@ -315,9 +315,11 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
             },
             CommitOp::RestoreRevision {
                 inode_id,
+                base_revision,
                 restore_from_revision,
             } => WalOp::RestoreRevision {
                 inode_id: *inode_id,
+                base_revision: *base_revision,
                 restore_from_revision: *restore_from_revision,
             },
         };

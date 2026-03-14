@@ -520,6 +520,7 @@ pub enum WalOp {
     },
     RestoreRevision {
         inode_id: InodeId,
+        base_revision: RevisionNo,
         restore_from_revision: RevisionNo,
     },
 }

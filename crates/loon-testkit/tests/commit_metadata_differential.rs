@@ -37,6 +37,11 @@ fn delete_subtree_fixture_matches_model_and_core_metadata() {
     run_fixture("native/delete_subtree_commit_appends_tombstone_row.yaml");
 }
 
+#[test]
+fn restore_revision_fixture_matches_model_and_core_metadata() {
+    run_fixture("native/restore_revision_commit_appends_new_head_from_historical_content.yaml");
+}
+
 fn run_fixture(relative_path: &str) {
     let scenario = load_fixture(relative_path);
     let initial: MetadataFixtureInitial = scenario.decode_initial().expect("decode initial state");
@@ -199,10 +204,21 @@ struct RawCommitRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum RawCommitOp {
-    CreateDir { create_dir: RawCreateDir },
-    CreateFile { create_file: RawCreateFile },
-    ReplaceFile { replace_file: RawReplaceFile },
-    DeleteSubtree { delete_subtree: RawDeleteSubtree },
+    CreateDir {
+        create_dir: RawCreateDir,
+    },
+    CreateFile {
+        create_file: RawCreateFile,
+    },
+    ReplaceFile {
+        replace_file: RawReplaceFile,
+    },
+    DeleteSubtree {
+        delete_subtree: RawDeleteSubtree,
+    },
+    RestoreRevision {
+        restore_revision: RawRestoreRevision,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -228,6 +244,13 @@ struct RawReplaceFile {
 #[derive(Debug, Clone, Deserialize)]
 struct RawDeleteSubtree {
     root_inode_id: InodeId,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawRestoreRevision {
+    inode_id: InodeId,
+    base_revision_no: RevisionNo,
+    restore_from_revision_no: RevisionNo,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -307,6 +330,11 @@ impl From<RawCommitOp> for CommitOp {
             },
             RawCommitOp::DeleteSubtree { delete_subtree } => CommitOp::DeleteSubtree {
                 root_inode: delete_subtree.root_inode_id,
+            },
+            RawCommitOp::RestoreRevision { restore_revision } => CommitOp::RestoreRevision {
+                inode_id: restore_revision.inode_id,
+                base_revision: restore_revision.base_revision_no,
+                restore_from_revision: restore_revision.restore_from_revision_no,
             },
         }
     }
@@ -502,6 +530,13 @@ fn materialize_model_mutations(
             RawCommitOp::DeleteSubtree { delete_subtree } => ModelMetadataMutation::DeleteSubtree {
                 root_inode_id: delete_subtree.root_inode_id,
             },
+            RawCommitOp::RestoreRevision { restore_revision } => {
+                ModelMetadataMutation::RestoreRevision {
+                    inode_id: restore_revision.inode_id,
+                    base_revision_no: restore_revision.base_revision_no,
+                    restore_from_revision_no: restore_revision.restore_from_revision_no,
+                }
+            }
         })
         .collect();
 
@@ -514,8 +549,26 @@ fn validate_model_request_ops(
     base_seq: ChangeSeq,
 ) -> Result<(), ModelMetadataPreconditionError> {
     for op in ops {
-        if let RawCommitOp::DeleteSubtree { delete_subtree } = op {
-            metadata_state.ensure_inode_is_directory(delete_subtree.root_inode_id, base_seq)?;
+        match op {
+            RawCommitOp::DeleteSubtree { delete_subtree } => {
+                metadata_state.ensure_inode_is_directory(delete_subtree.root_inode_id, base_seq)?;
+            }
+            RawCommitOp::RestoreRevision { restore_revision } => {
+                metadata_state.ensure_inode_revision_is(
+                    restore_revision.inode_id,
+                    restore_revision.base_revision_no,
+                    base_seq,
+                )?;
+                metadata_state.ensure_restore_source_revision_exists(
+                    restore_revision.inode_id,
+                    restore_revision.base_revision_no,
+                    restore_revision.restore_from_revision_no,
+                    base_seq,
+                )?;
+            }
+            RawCommitOp::CreateDir { .. }
+            | RawCommitOp::CreateFile { .. }
+            | RawCommitOp::ReplaceFile { .. } => {}
         }
     }
 

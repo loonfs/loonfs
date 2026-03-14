@@ -59,6 +59,10 @@ pub enum MetadataApplyError {
         inode_id: InodeId,
         base_revision: RevisionNo,
     },
+    RestoreSourceRevisionMissing {
+        inode_id: InodeId,
+        restore_from_revision: RevisionNo,
+    },
 }
 
 impl MetadataState {
@@ -165,10 +169,33 @@ impl MetadataState {
                         "delete_subtree_writes_tombstone_row",
                     );
                 }
-                WalOp::RestoreRevision { .. } => {
-                    return Err(MetadataApplyError::UnsupportedWalOp {
-                        op_name: "restore_revision".to_owned(),
+                WalOp::RestoreRevision {
+                    inode_id,
+                    base_revision,
+                    restore_from_revision,
+                } => {
+                    let next_revision = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
+                        MetadataApplyError::RevisionOverflow {
+                            inode_id: *inode_id,
+                            base_revision: *base_revision,
+                        },
+                    )?;
+                    let source_revision = metadata_state
+                        .revision_at_seq(*inode_id, *restore_from_revision, committed_seq)
+                        .ok_or(MetadataApplyError::RestoreSourceRevisionMissing {
+                            inode_id: *inode_id,
+                            restore_from_revision: *restore_from_revision,
+                        })?;
+                    metadata_state.revisions.push(RevisionRecord {
+                        inode_id: *inode_id,
+                        revision_no: next_revision,
+                        committed_seq,
+                        content_manifest_digest: source_revision.content_manifest_digest,
                     });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "restore_creates_new_revision_head",
+                    );
                 }
             }
         }
@@ -195,6 +222,23 @@ impl MetadataState {
             .iter()
             .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
             .max_by_key(|revision| revision.revision_no)
+            .cloned()
+    }
+
+    pub fn revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        self.revisions
+            .iter()
+            .filter(|revision| {
+                revision.inode_id == inode_id
+                    && revision.revision_no == revision_no
+                    && revision.committed_seq <= base_seq
+            })
+            .max_by_key(|revision| revision.committed_seq)
             .cloned()
     }
 
@@ -514,6 +558,68 @@ mod tests {
         assert!(applied
             .checked_invariants
             .contains(&"delete_subtree_writes_tombstone_row".to_owned()));
+    }
+
+    #[test]
+    fn apply_committed_wal_ops_restores_historical_revision_as_new_head() {
+        let applied = MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(42),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(9),
+                },
+            ],
+            direntries: vec![DirentryRecord {
+                parent_inode_id: InodeId(2),
+                name_key: "report.txt".to_owned(),
+                display_name: "report.txt".to_owned(),
+                child_inode_id: InodeId(42),
+                bind_seq: ChangeSeq(9),
+            }],
+            revisions: vec![
+                RevisionRecord {
+                    inode_id: InodeId(42),
+                    revision_no: RevisionNo(3),
+                    committed_seq: ChangeSeq(17),
+                    content_manifest_digest: "sha256:report-v3".to_owned(),
+                },
+                RevisionRecord {
+                    inode_id: InodeId(42),
+                    revision_no: RevisionNo(5),
+                    committed_seq: ChangeSeq(52),
+                    content_manifest_digest: "sha256:report-v5".to_owned(),
+                },
+            ],
+            subtree_tombstones: Vec::new(),
+        }
+        .apply_committed_wal_ops(
+            ChangeSeq(53),
+            &[WalOp::RestoreRevision {
+                inode_id: InodeId(42),
+                base_revision: RevisionNo(5),
+                restore_from_revision: RevisionNo(3),
+            }],
+        )
+        .expect("apply restore_revision");
+
+        assert_eq!(
+            applied.metadata_state.revisions.last(),
+            Some(&RevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(6),
+                committed_seq: ChangeSeq(53),
+                content_manifest_digest: "sha256:report-v3".to_owned(),
+            })
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"restore_creates_new_revision_head".to_owned()));
     }
 
     #[test]

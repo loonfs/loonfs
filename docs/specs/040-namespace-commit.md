@@ -166,6 +166,49 @@ Failure modes named for the first implementation:
 - `delete_subtree_root_not_directory`
 - `delete_subtree_root_covered_by_tombstone`
 
+## Restore-revision mutation
+
+The first file-history restore mutation is:
+
+- `restore_revision(inode_id, base_revision_no, restore_from_revision_no)`
+
+Rules:
+
+- `restore_revision` targets one existing visible file inode
+- `base_revision_no` names the caller's expected current visible revision head
+- `restore_from_revision_no` names one older committed revision for the same inode
+- a successful restore appends one new revision row whose content digest matches the historical
+  source revision
+- restoring a file revision does not rewrite inode, direntry, or older revision rows
+- the first implementation does not clear subtree tombstones or make deleted ancestors visible
+
+The first restore-revision preconditions are:
+
+- `HeadSeqIs(current_head.seq)`
+- `InodeRevisionIs(inode_id, base_revision_no)`
+- `AncestorsNotSubtreeDeleted(inode_id)`
+
+Why these rules exist:
+
+- restore should preserve monotonic revision history instead of rewinding the head
+- the source of restored content must be reconstructible from durable metadata alone
+- the first restore contract should stay narrower than undelete or path-restore semantics
+
+Failure modes prevented:
+
+- overwriting the current visible head revision in place during restore
+- restoring from a revision that does not exist in authoritative history
+- publishing a restore under an already deleted subtree
+
+Failure modes named for the first implementation:
+
+- `restore_revision_inode_missing`
+- `restore_revision_inode_not_file`
+- `restore_revision_base_revision_mismatch`
+- `restore_revision_source_missing`
+- `restore_revision_source_not_historical`
+- `restore_revision_under_subtree_tombstone`
+
 ## Authoritative metadata precondition lookups
 
 The semantic meaning of a commit precondition comes from the authoritative metadata state at:
@@ -219,6 +262,11 @@ Failure modes named for the first implementation:
 - `replace_file_inode_missing`
 - `replace_file_inode_not_file`
 - `replace_file_base_revision_mismatch`
+- `restore_revision_inode_missing`
+- `restore_revision_inode_not_file`
+- `restore_revision_base_revision_mismatch`
+- `restore_revision_source_missing`
+- `restore_revision_source_not_historical`
 
 ### `AncestorsNotSubtreeDeleted(inode_id)`
 
@@ -236,6 +284,7 @@ Failure modes named for the first implementation:
 - `create_under_subtree_tombstone`
 - `replace_file_under_subtree_tombstone`
 - `delete_subtree_root_covered_by_tombstone`
+- `restore_revision_under_subtree_tombstone`
 
 ## Metadata evaluation order
 
@@ -245,7 +294,7 @@ frame validation succeeds:
 1. `HeadSeqIs`
 2. inode existence / kind lookups needed by the request ops
 3. `ChildNameAbsent` and `InodeRevisionIs`
-4. delete-root existence / kind lookups needed by `delete_subtree`
+4. delete-root and restore-source lookups needed by `delete_subtree` and `restore_revision`
 5. `AncestorsNotSubtreeDeleted`
 
 Why this order exists:
@@ -262,6 +311,10 @@ Failure modes prevented:
 
 For the first delete-subtree contract, root existence and root kind are op validation rules even
 though the explicit precondition list only names `AncestorsNotSubtreeDeleted(root_inode)`.
+
+For the first restore-revision contract, source revision existence and “historical source” checks
+are op validation rules even though the explicit precondition list already carries
+`InodeRevisionIs(inode_id, base_revision_no)`.
 
 ## First authoritative metadata transition rules
 
@@ -321,6 +374,20 @@ At any later `base_seq >= commit_seq`, visibility queries must treat:
 - `visible_inode(root_inode, base_seq)` as hidden
 - every descendant reachable from `root_inode` by the raw direntry history as hidden
 
+### `restore_revision(inode_id, base_revision_no, restore_from_revision_no)`
+
+The committed transition must append:
+
+- one revision row for `inode_id` with:
+  `revision_no = base_revision_no + 1`,
+  `committed_seq = commit_seq`,
+  and `content_manifest_digest = content_manifest_digest` from the already committed source
+  revision row `(inode_id, restore_from_revision_no)`
+
+It must not append or rewrite an inode row.
+It must not append or rewrite a direntry row.
+It must not rewrite the source revision row.
+
 ### Allocation ordering rule
 
 If one request contains multiple create operations, allocated inode ids are consumed in request-op
@@ -345,6 +412,7 @@ Failure modes named for the first implementation:
 - `create_file_writes_inode_direntry_and_initial_revision`
 - `replace_file_appends_new_revision_head`
 - `delete_subtree_writes_tombstone_row`
+- `restore_creates_new_revision_head`
 
 ## Authoritative durable content validation
 
