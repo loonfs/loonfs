@@ -33,27 +33,24 @@ pub fn select_next_local_only_action(
 
 pub fn select_next_client_action(
     next_local_only: Option<&ModelPlannedLocalOnlyAction>,
-    next_inode_action: Option<&ModelPlannedInodeAction>,
+    next_executable_inode_action: Option<&ModelPlannedInodeAction>,
+    next_deferred_inode_action: Option<&ModelPlannedInodeAction>,
 ) -> Option<ModelScheduledClientAction> {
-    match (next_local_only, next_inode_action) {
-        (Some(local_only), Some(inode_action)) => {
-            if local_only.created_at_ms <= inode_action.created_at_ms {
-                Some(ModelScheduledClientAction::LocalOnlyCreate(
-                    local_only.clone(),
-                ))
-            } else {
-                Some(ModelScheduledClientAction::PlannedInodeAction(
-                    inode_action.clone(),
-                ))
-            }
-        }
-        (Some(local_only), None) => Some(ModelScheduledClientAction::LocalOnlyCreate(
+    match (
+        next_local_only,
+        next_executable_inode_action,
+        next_deferred_inode_action,
+    ) {
+        (Some(local_only), _, _) => Some(ModelScheduledClientAction::LocalOnlyCreate(
             local_only.clone(),
         )),
-        (None, Some(inode_action)) => Some(ModelScheduledClientAction::PlannedInodeAction(
+        (None, Some(inode_action), _) => Some(ModelScheduledClientAction::PlannedInodeAction(
             inode_action.clone(),
         )),
-        (None, None) => None,
+        (None, None, Some(inode_action)) => Some(ModelScheduledClientAction::PlannedInodeAction(
+            inode_action.clone(),
+        )),
+        (None, None, None) => None,
     }
 }
 

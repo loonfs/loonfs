@@ -229,6 +229,92 @@ fn load_next_planned_action_orders_deterministically() {
 }
 
 #[test]
+fn load_next_executable_planned_action_skips_deferred_rows() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+
+    db.planner_transaction("seed-executable-and-deferred-actions", |tx| {
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(7),
+            decision: "create_conflict_copy".to_owned(),
+            reason: "local_and_remote_differ_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_200_000,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(8),
+            decision: "download_remote_edit".to_owned(),
+            reason: "remote_differs_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_205_000,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(9),
+            decision: "upload_local_edit".to_owned(),
+            reason: "local_differs_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_210_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed planned actions");
+
+    assert_eq!(
+        db.load_next_executable_planned_action()
+            .expect("load next executable planned action"),
+        Some(PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(8),
+            decision: "download_remote_edit".to_owned(),
+            reason: "remote_differs_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_205_000,
+        })
+    );
+}
+
+#[test]
+fn load_next_deferred_planned_action_skips_executable_rows() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+
+    db.planner_transaction("seed-executable-and-deferred-actions", |tx| {
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(8),
+            decision: "download_remote_edit".to_owned(),
+            reason: "remote_differs_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_205_000,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(7),
+            decision: "create_conflict_copy".to_owned(),
+            reason: "local_and_remote_differ_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_200_000,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(9),
+            decision: "upload_local_edit".to_owned(),
+            reason: "local_differs_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_210_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed planned actions");
+
+    assert_eq!(
+        db.load_next_deferred_planned_action()
+            .expect("load next deferred planned action"),
+        Some(PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(7),
+            decision: "create_conflict_copy".to_owned(),
+            reason: "local_and_remote_differ_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_200_000,
+        })
+    );
+}
+
+#[test]
 fn record_local_only_upload_persists_and_resolves_manifest_digest() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
     let local_only = sample_local_only();

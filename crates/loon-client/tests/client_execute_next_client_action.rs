@@ -214,6 +214,84 @@ fn execute_next_client_action_returns_none_without_work() {
 }
 
 #[test]
+fn execute_next_client_action_prefers_local_only_create_over_older_inode_action() {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_local_only_create_binds_and_restarts_converged.yaml",
+    );
+    let initial: LocalOnlyInitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<LocalOnlyFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let execute = actions[0].execute().expect("execute action first");
+    let temp_dir = TestDir::new("client-execute-next-client-action-tie");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    seed_local_only_client_state(
+        &db_path,
+        &initial.local_only_state,
+        &initial.planned_local_only_action,
+    );
+    {
+        let mut db =
+            SqliteStateDb::open(&db_path).expect("open client state DB to seed inode action");
+        db.planner_transaction("seed-inode-planned-action", |tx| {
+            tx.upsert_planned_action(&PlannedActionRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(77),
+                decision: "download_remote_edit".to_owned(),
+                reason: "remote_differs_from_anchor".to_owned(),
+                created_at_ms: initial.planned_local_only_action.created_at_ms - 1_000,
+            })?;
+            Ok(())
+        })
+        .expect("seed inode planned action");
+    }
+
+    let source_path = write_source_file(
+        &source_root,
+        execute
+            .source_path_relative
+            .as_ref()
+            .expect("tie fixture should include source path"),
+        &initial.local_file,
+    );
+
+    let executed =
+        run_execute_next_client_action(&db_path, &store, Some(source_path.as_path()), &execute)
+            .expect("one action should be scheduled");
+
+    match executed {
+        NextClientAction::ExecutedLocalOnlyCreate(ExecutedNextLocalOnlyCreate {
+            planned_action,
+            ..
+        }) => {
+            assert_eq!(
+                planned_action.client_file_id,
+                initial.local_only_state.client_file_id
+            );
+        }
+        other => panic!("expected local-only create to win tie, got {other:?}"),
+    }
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen client state DB after tick");
+    assert_eq!(
+        db.load_next_planned_action()
+            .expect("load remaining inode planned action"),
+        Some(PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(77),
+            decision: "download_remote_edit".to_owned(),
+            reason: "remote_differs_from_anchor".to_owned(),
+            created_at_ms: initial.planned_local_only_action.created_at_ms - 1_000,
+        })
+    );
+}
+
+#[test]
 fn execute_next_client_action_prefers_local_only_create_on_equal_created_at_ms() {
     let scenario = load_fixture(
         "client/execute_next_client_action_local_only_create_binds_and_restarts_converged.yaml",

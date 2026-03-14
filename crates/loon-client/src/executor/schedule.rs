@@ -9,7 +9,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NextClientActionCandidate {
     LocalOnlyCreate(LocalOnlyPlannedActionRow),
-    PlannedAction(PlannedActionRow),
+    ExecutablePlannedAction(PlannedActionRow),
+    DeferredPlannedAction(PlannedActionRow),
 }
 
 pub fn execute_next_client_action<S, LP, IP, F>(
@@ -29,7 +30,8 @@ where
 {
     let next_action = match select_next_client_action_candidate(
         db.load_next_planned_local_only_action()?,
-        db.load_next_planned_action()?,
+        db.load_next_executable_planned_action()?,
+        db.load_next_deferred_planned_action()?,
     ) {
         Some(action) => action,
         None => return Ok(None),
@@ -56,7 +58,8 @@ where
                 },
             )))
         }
-        NextClientActionCandidate::PlannedAction(planned_action) => {
+        NextClientActionCandidate::ExecutablePlannedAction(planned_action)
+        | NextClientActionCandidate::DeferredPlannedAction(planned_action) => {
             let namespace_id = planned_action.namespace_id.clone();
             let inode_id = planned_action.inode_id;
             match planned_action.decision.as_str() {
@@ -132,20 +135,21 @@ where
 
 fn select_next_client_action_candidate(
     next_local_only: Option<LocalOnlyPlannedActionRow>,
-    next_planned_action: Option<PlannedActionRow>,
+    next_executable_planned_action: Option<PlannedActionRow>,
+    next_deferred_planned_action: Option<PlannedActionRow>,
 ) -> Option<NextClientActionCandidate> {
-    match (next_local_only, next_planned_action) {
-        (Some(local_only), Some(planned_action)) => {
-            if local_only.created_at_ms <= planned_action.created_at_ms {
-                Some(NextClientActionCandidate::LocalOnlyCreate(local_only))
-            } else {
-                Some(NextClientActionCandidate::PlannedAction(planned_action))
-            }
-        }
-        (Some(local_only), None) => Some(NextClientActionCandidate::LocalOnlyCreate(local_only)),
-        (None, Some(planned_action)) => {
-            Some(NextClientActionCandidate::PlannedAction(planned_action))
-        }
-        (None, None) => None,
+    match (
+        next_local_only,
+        next_executable_planned_action,
+        next_deferred_planned_action,
+    ) {
+        (Some(local_only), _, _) => Some(NextClientActionCandidate::LocalOnlyCreate(local_only)),
+        (None, Some(planned_action), _) => Some(
+            NextClientActionCandidate::ExecutablePlannedAction(planned_action),
+        ),
+        (None, None, Some(planned_action)) => Some(
+            NextClientActionCandidate::DeferredPlannedAction(planned_action),
+        ),
+        (None, None, None) => None,
     }
 }

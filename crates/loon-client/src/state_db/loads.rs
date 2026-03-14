@@ -221,23 +221,55 @@ pub(super) fn load_planned_action(
 pub(super) fn load_next_planned_action(
     conn: &Connection,
 ) -> Result<Option<PlannedActionRow>, StateDbError> {
+    load_next_planned_action_query(
+        conn,
+        "SELECT namespace_id, inode_id, decision, reason, created_at_ms
+        FROM planned_actions
+        ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
+        LIMIT 1",
+    )
+}
+
+pub(super) fn load_next_executable_planned_action(
+    conn: &Connection,
+) -> Result<Option<PlannedActionRow>, StateDbError> {
+    load_next_planned_action_query(
+        conn,
+        "SELECT namespace_id, inode_id, decision, reason, created_at_ms
+        FROM planned_actions
+        WHERE decision IN ('upload_local_edit', 'download_remote_edit')
+        ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
+        LIMIT 1",
+    )
+}
+
+pub(super) fn load_next_deferred_planned_action(
+    conn: &Connection,
+) -> Result<Option<PlannedActionRow>, StateDbError> {
+    load_next_planned_action_query(
+        conn,
+        "SELECT namespace_id, inode_id, decision, reason, created_at_ms
+        FROM planned_actions
+        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit')
+        ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
+        LIMIT 1",
+    )
+}
+
+fn load_next_planned_action_query(
+    conn: &Connection,
+    query: &str,
+) -> Result<Option<PlannedActionRow>, StateDbError> {
     let raw = conn
-        .query_row(
-            "SELECT namespace_id, inode_id, decision, reason, created_at_ms
-            FROM planned_actions
-            ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
-            LIMIT 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
+        .query_row(query, [], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
         .optional()?;
 
     raw.map(

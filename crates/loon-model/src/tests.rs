@@ -440,6 +440,7 @@ fn model_selects_next_client_action_preferring_local_only_on_tie() {
             inode_id: InodeId(42),
             created_at_ms: 1_700_000_200_000,
         }),
+        None,
     )
     .expect("one action should be selected");
 
@@ -448,6 +449,33 @@ fn model_selects_next_client_action_preferring_local_only_on_tie() {
         ModelScheduledClientAction::LocalOnlyCreate(ModelPlannedLocalOnlyAction {
             client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
             created_at_ms: 1_700_000_200_000,
+        })
+    );
+}
+
+#[test]
+fn model_selects_executable_inode_action_before_deferred_inode_action() {
+    let selected = select_next_client_action(
+        None,
+        Some(&ModelPlannedInodeAction {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            created_at_ms: 1_700_000_205_000,
+        }),
+        Some(&ModelPlannedInodeAction {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(7),
+            created_at_ms: 1_700_000_200_000,
+        }),
+    )
+    .expect("one action should be selected");
+
+    assert_eq!(
+        selected,
+        ModelScheduledClientAction::PlannedInodeAction(ModelPlannedInodeAction {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            created_at_ms: 1_700_000_205_000,
         })
     );
 }

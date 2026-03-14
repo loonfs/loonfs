@@ -17,10 +17,22 @@ fn execute_next_client_action_download_remote_edit_updates_bound_inode() {
     let scenario = load_fixture(
         "client/execute_next_client_action_download_remote_edit_updates_bound_inode.yaml",
     );
+    run_download_remote_edit_scenario(&scenario, "client-download-remote-edit");
+}
+
+#[test]
+fn execute_next_client_action_prefers_executable_inode_action_over_older_deferred_action() {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_prefers_executable_inode_action_over_older_deferred_action.yaml",
+    );
+    run_download_remote_edit_scenario(&scenario, "client-download-remote-edit-priority");
+}
+
+fn run_download_remote_edit_scenario(scenario: &Scenario, temp_dir_name: &str) {
     let initial: DownloadInitialState = scenario.decode_initial().expect("decode initial state");
     let actions: Vec<DownloadFixtureAction> = scenario.decode_actions().expect("decode actions");
     let expect: DownloadExpectedState = scenario.decode_expect().expect("decode expectations");
-    let temp_dir = TestDir::new("client-download-remote-edit");
+    let temp_dir = TestDir::new(temp_dir_name);
     let db_path = temp_dir.path().join("client.sqlite3");
     let store_root = temp_dir.path().join("objectstore");
     let local_root = temp_dir.path().join("local");
@@ -81,7 +93,7 @@ fn execute_next_client_action_download_remote_edit_updates_bound_inode() {
         &initial.remote_state,
         &initial.local_state,
         &initial.sync_anchor,
-        &initial.planned_action,
+        &initial.planned_actions,
     );
 
     let executed =
@@ -130,9 +142,26 @@ fn execute_next_client_action_download_remote_edit_updates_bound_inode() {
         if expect.planned_action_cleared {
             None
         } else {
-            Some(initial.planned_action.clone())
+            Some(
+                initial
+                    .planned_actions
+                    .iter()
+                    .find(|row| {
+                        row.namespace_id == planner_tick.namespace_id
+                            && row.inode_id == planner_tick.inode_id
+                    })
+                    .expect("fixture should include target planned action")
+                    .clone(),
+            )
         }
     );
+    for planned_action in &expect.remaining_planned_actions {
+        assert_eq!(
+            db.load_planned_action(&planned_action.namespace_id, planned_action.inode_id)
+                .expect("load remaining planned action"),
+            Some(planned_action.clone())
+        );
+    }
     assert_eq!(
         fs::read_to_string(&local_path).expect("read downloaded local file"),
         expect.local_file_content_utf8
@@ -167,14 +196,16 @@ fn seed_bound_download_state(
     remote_state: &RemoteFileStateRow,
     local_state: &LocalFileStateRow,
     sync_anchor: &SyncAnchorRow,
-    planned_action: &PlannedActionRow,
+    planned_actions: &[PlannedActionRow],
 ) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-bound-download-state", |tx| {
         tx.upsert_remote_file(remote_state)?;
         tx.upsert_local_file(local_state)?;
         tx.upsert_sync_anchor(sync_anchor)?;
-        tx.upsert_planned_action(planned_action)?;
+        for planned_action in planned_actions {
+            tx.upsert_planned_action(planned_action)?;
+        }
         Ok(())
     })
     .expect("seed bound download state");
@@ -213,7 +244,7 @@ struct DownloadInitialState {
     sync_anchor: SyncAnchorRow,
     local_file: FixtureFile,
     remote_file: FixtureRemoteFile,
-    planned_action: PlannedActionRow,
+    planned_actions: Vec<PlannedActionRow>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +256,8 @@ struct DownloadExpectedState {
     local_state: LocalFileStateRow,
     sync_anchor: SyncAnchorRow,
     planned_action_cleared: bool,
+    #[serde(default)]
+    remaining_planned_actions: Vec<PlannedActionRow>,
     local_file_content_utf8: String,
     #[serde(default)]
     local_parent_entries: Vec<String>,

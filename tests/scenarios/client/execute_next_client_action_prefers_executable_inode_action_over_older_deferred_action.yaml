@@ -1,4 +1,4 @@
-name: execute_next_client_action_download_remote_edit_updates_bound_inode
+name: execute_next_client_action_prefers_executable_inode_action_over_older_deferred_action
 initial:
   remote_state:
     namespace_id: ns-1
@@ -38,6 +38,11 @@ initial:
     content_utf8: |
       hello from loon
   planned_actions:
+    - namespace_id: ns-1
+      inode_id: 7
+      decision: create_conflict_copy
+      reason: local_and_remote_differ_from_anchor
+      created_at_ms: 1700000504000
     - namespace_id: ns-1
       inode_id: 42
       decision: download_remote_edit
@@ -94,7 +99,12 @@ expect:
     parent_inode_id: 2
     display_name: report.txt
   planned_action_cleared: true
-  remaining_planned_actions: []
+  remaining_planned_actions:
+    - namespace_id: ns-1
+      inode_id: 7
+      decision: create_conflict_copy
+      reason: local_and_remote_differ_from_anchor
+      created_at_ms: 1700000504000
   local_file_content_utf8: |
     hello from loon
   local_parent_entries:

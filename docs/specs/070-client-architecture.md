@@ -899,33 +899,51 @@ It is still intentionally partial. In this first implementation it may:
 
 Rules:
 
-- the tick must load at most one candidate row from each table:
-  - the deterministic next `planned_local_only_actions` row
-  - the deterministic next `planned_actions` row
-- cross-table arbitration must be deterministic:
-  - lower `created_at_ms` first
-  - if `created_at_ms` ties, `planned_local_only_actions` wins over `planned_actions`
+- the first mixed tick uses one explicit scheduler policy, `client_tick_scheduler_v1`
+- `client_tick_scheduler_v1` has three priority buckets:
+  - `local_only_create`:
+    the deterministic next row from `planned_local_only_actions`
+  - `executable_inode_action`:
+    the deterministic next row from `planned_actions` where
+    `decision in {upload_local_edit, download_remote_edit}`
+  - `deferred_inode_action`:
+    the deterministic next row from `planned_actions` where
+    `decision not in {upload_local_edit, download_remote_edit}`
+- the tick must load at most one candidate row from each scheduler bucket
+- bucket priority is strict:
+  - `local_only_create` always wins over `executable_inode_action`
+  - `executable_inode_action` always wins over `deferred_inode_action`
+  - `created_at_ms` is only a tie-break inside one bucket, not across different buckets
+- deterministic row order inside each bucket must be:
+  - for `planned_local_only_actions`: lower `created_at_ms`, then lexicographically smaller
+    `client_file_id`
+  - for `planned_actions`: lower `created_at_ms`, then lexicographically smaller `namespace_id`,
+    then lower `inode_id`
 - if the selected row comes from `planned_local_only_actions`, the tick must execute it through the
   existing local-only create loop
-- if the selected row comes from `planned_actions` and `decision = upload_local_edit`, the tick
-  must execute it through the bound-file edit executor
-- if the selected row comes from `planned_actions` and `decision = download_remote_edit`, the tick
-  must execute it through the bound-file download executor
-- if the selected row comes from `planned_actions` and the decision is anything else, the tick must
-  return that planned action as the next scheduled work item without trying to silently emulate
-  download/conflict behavior yet
+- if the selected row comes from `executable_inode_action` and `decision = upload_local_edit`,
+  the tick must execute it through the bound-file edit executor
+- if the selected row comes from `executable_inode_action` and
+  `decision = download_remote_edit`, the tick must execute it through the bound-file download
+  executor
+- if the selected row comes from `deferred_inode_action`, the tick must return that planned action
+  as the next scheduled work item without trying to silently emulate download/conflict behavior yet
 - if both tables are empty, the tick must return `no_work`
 
 Why this rule exists:
 
 - one scheduler surface is more valuable than separate “creates only” and “everything else later”
   entrypoints
+- executable inode actions should make progress even when an older deferred inode action is still
+  waiting for a later implementation slice
 - we should not fake support for inode-keyed conflict actions before their executors exist
-- a deterministic cross-table tie-break keeps restart behavior and tests reproducible
+- bucketed selection plus deterministic intra-bucket ordering keeps restart behavior and tests
+  reproducible
 
 Failure modes prevented:
 
 - local-only creates and inode-keyed planned actions being scheduled by unrelated policies
+- an older deferred inode action blocking a newer but executable bound-file edit or download
 - a partial implementation pretending it executed an inode-keyed action when it only selected it
 - a bound-file edit staying permanently stuck in `planned_actions` after the upload and replace
   path already exists

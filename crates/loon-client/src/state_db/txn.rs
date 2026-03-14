@@ -1,7 +1,8 @@
 use super::loads::{
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
     load_inode_upload, load_local_file, load_local_only_candidates_for_namespace,
-    load_local_only_file, load_local_only_upload, load_next_planned_action,
+    load_local_only_file, load_local_only_upload, load_next_deferred_planned_action,
+    load_next_executable_planned_action, load_next_planned_action,
     load_next_planned_local_only_action, load_pending_client_mutation,
     load_pending_client_mutation_for_client_file, load_pending_inode_mutation,
     load_pending_inode_mutation_for_inode, load_planned_action, load_planned_local_only_action,
@@ -107,6 +108,18 @@ impl SqliteStateDb {
 
     pub fn load_next_planned_action(&self) -> Result<Option<PlannedActionRow>, StateDbError> {
         load_next_planned_action(&self.conn)
+    }
+
+    pub fn load_next_executable_planned_action(
+        &self,
+    ) -> Result<Option<PlannedActionRow>, StateDbError> {
+        load_next_executable_planned_action(&self.conn)
+    }
+
+    pub fn load_next_deferred_planned_action(
+        &self,
+    ) -> Result<Option<PlannedActionRow>, StateDbError> {
+        load_next_deferred_planned_action(&self.conn)
     }
 
     pub fn allocate_local_file_id(
