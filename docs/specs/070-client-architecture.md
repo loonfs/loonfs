@@ -528,6 +528,56 @@ Failure modes named for the first implementation:
 
 - `create_remote_dir_decision_missing`
 
+## Unified local-only create executor
+
+The first higher-level local-only create entrypoint sits above the narrow file and directory
+executors. It handles exactly two planner outcomes:
+
+- `upload_local_create`
+- `create_remote_dir`
+
+The executor takes:
+
+- `client_file_id`
+- an optional caller-supplied local filesystem path
+- one upload timestamp
+- one dispatch timestamp
+
+Rules:
+
+- if `pending_client_mutations` already contains a row for `client_file_id`, the executor must
+  choose its branch from the durable stored `request_json`, not from current planner state
+- a stored pending `create_dir` request must retry without consulting `planned_local_only_actions`
+- a stored pending `create_file` request must retry without rereading the caller-supplied path
+- if no pending row exists, the executor must load `planned_local_only_actions(client_file_id)`
+  and branch only on:
+  - `decision = upload_local_create`
+  - `decision = create_remote_dir`
+- if the selected branch is `upload_local_create` and `local_only_uploads(client_file_id)` already
+  matches the current local-only digest, the executor may dispatch without a caller-supplied local
+  path
+- if the selected branch is `upload_local_create` and no matching upload row exists yet, the
+  caller-supplied local path is required so the executor can freeze durable content before dispatch
+- if the selected branch is `create_remote_dir`, the caller-supplied local path is ignored
+
+Why this rule exists:
+
+- callers should ask for “execute this local-only create” once instead of choosing between separate
+  file and directory paths
+- restarts should still allow a file create to proceed after content is already durable, even if
+  the original source path is no longer available
+- the durable pending request and upload rows remain the source of truth for retries
+
+Failure modes prevented:
+
+- retrying a frozen file create by rereading a local path that has changed or disappeared
+- forcing callers to know whether durable content is already available before picking an executor
+- rebuilding a retry from current planner state after a request has already been frozen
+
+Failure modes named for the first implementation:
+
+- `local_only_create_source_path_missing`
+
 ## Bind-after-publish loop
 
 After a successful `create_file` or `create_dir`, the authoritative side returns one committed
