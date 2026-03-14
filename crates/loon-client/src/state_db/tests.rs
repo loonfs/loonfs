@@ -1,4 +1,3 @@
-
 use super::{
     BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
     LocalOnlyPlannedActionRow, LocalOnlyUploadRow, ObservedLocalOnlyInode,
