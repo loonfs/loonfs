@@ -19,7 +19,6 @@ use loon_types::{
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn execute_next_client_action_upload_local_edit_updates_bound_inode() {
@@ -331,10 +330,7 @@ fn write_source_file(root: &Path, relative_path: &str, local_file: &FixtureLocal
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/scenarios")
-        .join(relative_path);
-    Scenario::load(&path).unwrap_or_else(|err| panic!("load fixture {}: {err}", path.display()))
+    loon_testkit::fixtures::load_fixture(relative_path)
 }
 
 fn seed_head_and_lease(store: &LocalFsStore, head: &HeadState, lease: &LeaseState) {
@@ -489,29 +485,4 @@ impl RawClientMutationRequest {
     }
 }
 
-#[derive(Debug)]
-struct TestDir {
-    path: PathBuf,
-}
-
-impl TestDir {
-    fn new(label: &str) -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("loon-{label}-{unique}"));
-        fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
+type TestDir = loon_testkit::tempdir::TestDir;

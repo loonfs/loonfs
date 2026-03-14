@@ -25,7 +25,6 @@ use loon_types::{
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 const TEST_WRITER_VERSION: &str = "loon-testkit-differential";
 
@@ -442,10 +441,7 @@ struct MaterializedCheckpointFixture {
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/scenarios")
-        .join(relative_path);
-    Scenario::load(&path).unwrap_or_else(|err| panic!("load fixture {}: {err}", path.display()))
+    loon_testkit::fixtures::load_fixture(relative_path)
 }
 
 fn assert_single_action(actions: &[ReplayActionEnvelope], expected: ReplayActionKind) {

@@ -20,9 +20,7 @@ use loon_types::{
 };
 use serde::Deserialize;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 #[test]
 fn create_remote_dir_binds_and_restarts_converged() {
@@ -371,40 +369,7 @@ fn seed_head_and_lease(store: &LocalFsStore, head: &HeadState, lease: &LeaseStat
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/scenarios")
-        .join(relative_path);
-    Scenario::load(&path).unwrap_or_else(|err| panic!("load fixture {}: {err}", path.display()))
+    loon_testkit::fixtures::load_fixture(relative_path)
 }
 
-#[derive(Debug)]
-struct TestDir {
-    path: PathBuf,
-}
-
-impl TestDir {
-    fn new(label: &str) -> Self {
-        static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(1);
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let id = NEXT_TEST_DIR_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "loondb-client-{label}-{}-{id}-{stamp}",
-            std::process::id(),
-        ));
-        fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
+type TestDir = loon_testkit::tempdir::TestDir;

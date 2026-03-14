@@ -4,7 +4,6 @@ use loon_client::state_db::LocalOnlyFileStateRow;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ClientMutationOp, ClientMutationRequest};
 use serde::Deserialize;
-use std::path::PathBuf;
 
 #[test]
 fn upload_local_create_fixture_translates_to_client_create_file_request() {
@@ -108,8 +107,5 @@ struct ExpectedLocalOnlyPlannerAction {
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/scenarios")
-        .join(relative_path);
-    Scenario::load(&path).unwrap_or_else(|err| panic!("load fixture {}: {err}", path.display()))
+    loon_testkit::fixtures::load_fixture(relative_path)
 }

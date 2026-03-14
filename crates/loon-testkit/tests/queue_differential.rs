@@ -20,7 +20,6 @@ use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ChangeSeq, HeadState, NamespaceId, ProgressState};
 use serde::Deserialize;
-use std::path::PathBuf;
 
 #[test]
 fn lost_enqueue_repair_fixture_matches_model_and_queue() {
@@ -685,10 +684,7 @@ struct ClaimStateSnapshot {
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/scenarios")
-        .join(relative_path);
-    Scenario::load(&path).unwrap_or_else(|err| panic!("load fixture {}: {err}", path.display()))
+    loon_testkit::fixtures::load_fixture(relative_path)
 }
 
 fn model_namespace_from_head(head: &HeadState) -> ModelNamespace {

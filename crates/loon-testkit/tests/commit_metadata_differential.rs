@@ -12,7 +12,6 @@ use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ChangeSeq, HeadState, InodeId, LeaseState, NamespaceId, RevisionNo};
 use serde::Deserialize;
-use std::path::PathBuf;
 
 const NOW_MS: u64 = 1_500;
 const TEST_WRITER_VERSION: &str = "loon-testkit-differential";
@@ -622,11 +621,5 @@ fn extend_invariants(out: &mut Vec<String>, incoming: &[String]) {
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
-    Scenario::load(fixture_path(relative_path)).expect("load scenario fixture")
-}
-
-fn fixture_path(relative_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/scenarios")
-        .join(relative_path)
+    loon_testkit::fixtures::load_fixture(relative_path)
 }

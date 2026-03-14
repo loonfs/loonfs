@@ -10,9 +10,6 @@ use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId, ProgressState};
 use serde::Deserialize;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const TEST_WRITER_VERSION: &str = "loon-testkit-differential";
 
@@ -190,10 +187,7 @@ enum ProgressOutcome {
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/scenarios")
-        .join(relative_path);
-    Scenario::load(&path).unwrap_or_else(|err| panic!("load fixture {}: {err}", path.display()))
+    loon_testkit::fixtures::load_fixture(relative_path)
 }
 
 fn scenario_target(
@@ -396,31 +390,4 @@ fn extend_invariants(checked_invariants: &mut Vec<String>, new_invariants: &[Str
     }
 }
 
-struct TestDir {
-    path: PathBuf,
-}
-
-impl TestDir {
-    fn new(prefix: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "loondb-testkit-{prefix}-{}-{nanos}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&path).expect("create temp dir");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
+type TestDir = loon_testkit::tempdir::TestDir;
