@@ -12,8 +12,11 @@ Add a test case that is readable outside the implementation.
 4. Name the invariant directly in `expect.invariants`.
 5. Render the fixture with `cargo run -p xtask -- render-case <path>`.
    You can pass either a real file path or a fixture key like `client/foo.yaml`.
-6. Save a snapshot output if the harness already supports it.
-7. Link the fixture in the PR description.
+6. For replay fixtures, rerun them with
+   `cargo run -p xtask -- replay-seed replay <path> [--seed <u64>]`.
+   You can also pass a fixture key like `native/wal_tail_replay_advances_head.yaml`.
+7. Save a snapshot output if the harness already supports it.
+8. Link the fixture in the PR description.
 
 ## Good fixture qualities
 

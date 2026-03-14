@@ -3,6 +3,7 @@
 pub mod client;
 pub mod fixtures;
 pub mod render;
+pub mod replay;
 pub mod scenario;
 pub mod seed;
 pub mod tempdir;
