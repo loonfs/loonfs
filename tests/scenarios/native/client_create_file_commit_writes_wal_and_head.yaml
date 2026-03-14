@@ -64,6 +64,7 @@ expect:
     retention_floor_seq: 40
   invariants:
     - create_file_requires_durable_content
+    - create_file_writes_inode_direntry_and_initial_revision
     - content_manifest_digest_matches_object
     - content_manifest_namespace_matches_request
     - content_manifest_blocks_match_descriptors

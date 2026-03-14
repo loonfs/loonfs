@@ -221,6 +221,74 @@ Failure modes prevented:
 - a request reporting different failures depending on incidental lookup order
 - spending inode allocation or WAL work on a request that already loses at metadata validation
 
+## First authoritative metadata transition rules
+
+After metadata preconditions succeed and the commit is accepted, the canonical metadata state must
+advance by appending rows at:
+
+- `commit_seq = plan.next_seq`
+
+No existing inode, direntry, or revision row is rewritten in place.
+
+### `create_dir(parent_inode, display_name)`
+
+The committed transition must append:
+
+- one inode row for the allocated inode id with:
+  `inode_kind = DIR` and `created_seq = commit_seq`
+- one direntry row under `(parent_inode, name_key)` with:
+  `display_name`, `child_inode_id = allocated inode id`, and `bind_seq = commit_seq`
+
+It must not append a revision row.
+
+### `create_file(parent_inode, display_name, content_manifest_digest)`
+
+The committed transition must append:
+
+- one inode row for the allocated inode id with:
+  `inode_kind = FILE` and `created_seq = commit_seq`
+- one direntry row under `(parent_inode, name_key)` with:
+  `display_name`, `child_inode_id = allocated inode id`, and `bind_seq = commit_seq`
+- one revision row for the allocated inode id with:
+  `revision_no = 1`, `committed_seq = commit_seq`, and the committed
+  `content_manifest_digest`
+
+### `replace_file(inode_id, base_revision_no, content_manifest_digest)`
+
+The committed transition must append:
+
+- one revision row for `inode_id` with:
+  `revision_no = base_revision_no + 1`,
+  `committed_seq = commit_seq`,
+  and the committed `content_manifest_digest`
+
+It must not append or rewrite an inode row.
+It must not append or rewrite a direntry row.
+
+### Allocation ordering rule
+
+If one request contains multiple create operations, allocated inode ids are consumed in request-op
+order from `head.next_inode_id`.
+
+Why these rules exist:
+
+- the logical metadata families only stay replayable if every successful mutation names the exact
+  rows it appends
+- create and replace must update revision history differently
+- replay should not depend on implicit server-side side effects
+
+Failure modes prevented:
+
+- a successful create that advances `head.json` without a corresponding visible direntry
+- a successful file create without an initial revision row
+- a file replace that mutates path bindings or overwrites older revision history
+
+Failure modes named for the first implementation:
+
+- `create_dir_writes_inode_and_direntry_rows`
+- `create_file_writes_inode_direntry_and_initial_revision`
+- `replace_file_appends_new_revision_head`
+
 ## Authoritative durable content validation
 
 Before the authoritative side may publish `create_file` or `replace_file`, it must validate the

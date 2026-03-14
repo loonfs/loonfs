@@ -6,7 +6,7 @@ use loon_core::commit::{
 use loon_core::content::{
     validate_durable_content_reference, DurableContentValidationError, ValidatedDurableContent,
 };
-use loon_core::metadata::MetadataState;
+use loon_core::metadata::{MetadataApplyError, MetadataState};
 use loon_core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
@@ -33,6 +33,7 @@ pub struct ExecutedClientMutation {
     pub commit_request: CommitRequest,
     pub plan: CommitPlan,
     pub wal: PreparedWalCommit,
+    pub resulting_metadata_state: MetadataState,
     pub wal_metadata: ObjectMetadata,
     pub head_publish: PreparedCommitHeadPublish,
     pub head_metadata: ObjectMetadata,
@@ -124,6 +125,8 @@ pub enum ClientMutationExecutionError {
     CommitValidation(CommitValidationError),
     #[error("WAL build failed: {0:?}")]
     WalBuild(WalBuildError),
+    #[error("metadata apply failed: {0:?}")]
+    MetadataApply(MetadataApplyError),
     #[error("head preparation failed: {0:?}")]
     HeadPrepare(CommitHeadPublishError),
     #[error("failed to write WAL object: {0}")]
@@ -158,6 +161,10 @@ pub fn execute_client_mutation<S: ObjectStore>(
     };
     let plan = build_commit_plan(&commit_request, &context)?;
     let wal = prepare_wal_commit(&commit_request, &plan, &params.writer_version)?;
+    let applied_metadata = params
+        .metadata_state
+        .apply_committed_wal_ops(plan.next_seq, &wal.envelope.payload.ops)
+        .map_err(ClientMutationExecutionError::MetadataApply)?;
     let head_publish =
         prepare_commit_head_publish(&loaded_head.envelope.state, &plan, &params.writer_version)?;
     let wal_metadata = store
@@ -177,12 +184,17 @@ pub fn execute_client_mutation<S: ObjectStore>(
     }
     extend_invariants(&mut checked_invariants, &plan.checked_invariants);
     extend_invariants(&mut checked_invariants, &wal.checked_invariants);
+    extend_invariants(
+        &mut checked_invariants,
+        &applied_metadata.checked_invariants,
+    );
     extend_invariants(&mut checked_invariants, &head_publish.checked_invariants);
 
     Ok(ExecutedClientMutation {
         commit_request,
         plan,
         wal,
+        resulting_metadata_state: applied_metadata.metadata_state,
         wal_metadata,
         head_publish,
         head_metadata,

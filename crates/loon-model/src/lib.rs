@@ -253,6 +253,40 @@ pub enum ModelMetadataPreconditionError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelMetadataMutation {
+    CreateDir {
+        inode_id: InodeId,
+        parent_inode_id: InodeId,
+        display_name: String,
+    },
+    CreateFile {
+        inode_id: InodeId,
+        parent_inode_id: InodeId,
+        display_name: String,
+        content_manifest_digest: String,
+    },
+    ReplaceFile {
+        inode_id: InodeId,
+        base_revision_no: RevisionNo,
+        content_manifest_digest: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedModelMetadataState {
+    pub metadata_state: ModelMetadataState,
+    pub checked_invariants: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelMetadataApplyError {
+    RevisionOverflow {
+        inode_id: InodeId,
+        base_revision_no: RevisionNo,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelScheduledClientAction {
     LocalOnlyCreate(ModelPlannedLocalOnlyAction),
     PlannedInodeAction(ModelPlannedInodeAction),
@@ -1431,6 +1465,99 @@ pub fn select_local_only_observation_bind_candidate(
 }
 
 impl ModelMetadataState {
+    pub fn apply_committed_mutations(
+        &self,
+        committed_seq: ChangeSeq,
+        mutations: &[ModelMetadataMutation],
+    ) -> Result<AppliedModelMetadataState, ModelMetadataApplyError> {
+        let mut metadata_state = self.clone();
+        let mut checked_invariants = Vec::new();
+
+        for mutation in mutations {
+            match mutation {
+                ModelMetadataMutation::CreateDir {
+                    inode_id,
+                    parent_inode_id,
+                    display_name,
+                } => {
+                    metadata_state.inodes.push(ModelInodeRecord {
+                        inode_id: *inode_id,
+                        inode_kind: InodeKind::Dir,
+                        created_seq: committed_seq,
+                    });
+                    metadata_state.direntries.push(ModelDirentryRecord {
+                        parent_inode_id: *parent_inode_id,
+                        name_key: display_name.clone(),
+                        display_name: display_name.clone(),
+                        child_inode_id: *inode_id,
+                        bind_seq: committed_seq,
+                    });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "create_dir_writes_inode_and_direntry_rows",
+                    );
+                }
+                ModelMetadataMutation::CreateFile {
+                    inode_id,
+                    parent_inode_id,
+                    display_name,
+                    content_manifest_digest,
+                } => {
+                    metadata_state.inodes.push(ModelInodeRecord {
+                        inode_id: *inode_id,
+                        inode_kind: InodeKind::File,
+                        created_seq: committed_seq,
+                    });
+                    metadata_state.direntries.push(ModelDirentryRecord {
+                        parent_inode_id: *parent_inode_id,
+                        name_key: display_name.clone(),
+                        display_name: display_name.clone(),
+                        child_inode_id: *inode_id,
+                        bind_seq: committed_seq,
+                    });
+                    metadata_state.revisions.push(ModelRevisionRecord {
+                        inode_id: *inode_id,
+                        revision_no: RevisionNo(1),
+                        committed_seq,
+                        content_manifest_digest: content_manifest_digest.clone(),
+                    });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "create_file_writes_inode_direntry_and_initial_revision",
+                    );
+                }
+                ModelMetadataMutation::ReplaceFile {
+                    inode_id,
+                    base_revision_no,
+                    content_manifest_digest,
+                } => {
+                    let next_revision_no =
+                        base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
+                            ModelMetadataApplyError::RevisionOverflow {
+                                inode_id: *inode_id,
+                                base_revision_no: *base_revision_no,
+                            },
+                        )?;
+                    metadata_state.revisions.push(ModelRevisionRecord {
+                        inode_id: *inode_id,
+                        revision_no: next_revision_no,
+                        committed_seq,
+                        content_manifest_digest: content_manifest_digest.clone(),
+                    });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "replace_file_appends_new_revision_head",
+                    );
+                }
+            }
+        }
+
+        Ok(AppliedModelMetadataState {
+            metadata_state,
+            checked_invariants,
+        })
+    }
+
     pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<ModelInodeRecord> {
         self.inodes
             .iter()
@@ -1634,6 +1761,12 @@ impl ModelMetadataState {
             })
             .max_by_key(|direntry| direntry.bind_seq)
             .cloned()
+    }
+}
+
+fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
+    if !invariants.iter().any(|existing| existing == name) {
+        invariants.push(name.to_owned());
     }
 }
 
@@ -2511,6 +2644,118 @@ mod tests {
                 content_manifest_digest: "sha256:note-v2".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn model_apply_create_dir_appends_inode_and_direntry_rows() {
+        let applied = ModelMetadataState::default()
+            .apply_committed_mutations(
+                ChangeSeq(42),
+                &[ModelMetadataMutation::CreateDir {
+                    inode_id: InodeId(501),
+                    parent_inode_id: InodeId(2),
+                    display_name: "drafts".to_owned(),
+                }],
+            )
+            .expect("apply create_dir metadata");
+
+        assert_eq!(
+            applied.metadata_state.inodes,
+            vec![ModelInodeRecord {
+                inode_id: InodeId(501),
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(42),
+            }]
+        );
+        assert_eq!(
+            applied.metadata_state.direntries,
+            vec![ModelDirentryRecord {
+                parent_inode_id: InodeId(2),
+                name_key: "drafts".to_owned(),
+                display_name: "drafts".to_owned(),
+                child_inode_id: InodeId(501),
+                bind_seq: ChangeSeq(42),
+            }]
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"create_dir_writes_inode_and_direntry_rows".to_owned()));
+    }
+
+    #[test]
+    fn model_apply_create_file_appends_initial_revision_row() {
+        let applied = ModelMetadataState::default()
+            .apply_committed_mutations(
+                ChangeSeq(42),
+                &[ModelMetadataMutation::CreateFile {
+                    inode_id: InodeId(501),
+                    parent_inode_id: InodeId(2),
+                    display_name: "note.txt".to_owned(),
+                    content_manifest_digest: "sha256:note-v1".to_owned(),
+                }],
+            )
+            .expect("apply create_file metadata");
+
+        assert_eq!(
+            applied.metadata_state.inodes,
+            vec![ModelInodeRecord {
+                inode_id: InodeId(501),
+                inode_kind: InodeKind::File,
+                created_seq: ChangeSeq(42),
+            }]
+        );
+        assert_eq!(
+            applied.metadata_state.direntries,
+            vec![ModelDirentryRecord {
+                parent_inode_id: InodeId(2),
+                name_key: "note.txt".to_owned(),
+                display_name: "note.txt".to_owned(),
+                child_inode_id: InodeId(501),
+                bind_seq: ChangeSeq(42),
+            }]
+        );
+        assert_eq!(
+            applied.metadata_state.revisions,
+            vec![ModelRevisionRecord {
+                inode_id: InodeId(501),
+                revision_no: RevisionNo(1),
+                committed_seq: ChangeSeq(42),
+                content_manifest_digest: "sha256:note-v1".to_owned(),
+            }]
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"create_file_writes_inode_direntry_and_initial_revision".to_owned()));
+    }
+
+    #[test]
+    fn model_apply_replace_file_appends_next_revision_row() {
+        let applied = seeded_metadata_state()
+            .apply_committed_mutations(
+                ChangeSeq(42),
+                &[ModelMetadataMutation::ReplaceFile {
+                    inode_id: InodeId(42),
+                    base_revision_no: RevisionNo(2),
+                    content_manifest_digest: "sha256:note-v3".to_owned(),
+                }],
+            )
+            .expect("apply replace_file metadata");
+
+        assert_eq!(
+            applied
+                .metadata_state
+                .latest_revision_head_at_seq(InodeId(42), ChangeSeq(42))
+                .expect("revision head after replace"),
+            ModelRevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(3),
+                committed_seq: ChangeSeq(42),
+                content_manifest_digest: "sha256:note-v3".to_owned(),
+            }
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"replace_file_appends_new_revision_head".to_owned()));
     }
 
     #[test]
