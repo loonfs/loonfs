@@ -8,6 +8,12 @@ This repository treats tests as a product surface.
 - `conformance/`: storage-provider contract tests
 - `snapshots/`: rendered outputs for fixture review
 
+Snapshot outputs are organized by command family, for example:
+
+- `snapshots/render-case/...`
+- `snapshots/replay-seed/...`
+- `snapshots/minimize-case/...`
+
 ## How to add a new scenario
 
 1. Copy an existing YAML fixture.

@@ -10,13 +10,14 @@ Add a test case that is readable outside the implementation.
 2. Keep the initial state small.
 3. Use stable names for inodes, revisions, and namespaces.
 4. Name the invariant directly in `expect.invariants`.
-5. Render the fixture with `cargo run -p xtask -- render-case <path>`.
+5. Render the fixture with `cargo run -p xtask -- render-case <path> [--snapshot]`.
    You can pass either a real file path or a fixture key like `client/foo.yaml`.
 6. For replay fixtures, rerun them with
-   `cargo run -p xtask -- replay-seed replay <path> [--seed <u64>]`.
+   `cargo run -p xtask -- replay-seed replay <path> [--seed <u64>] [--snapshot]`.
    You can also pass a fixture key like `native/wal_tail_replay_advances_head.yaml`.
 7. If a replay fixture fails, minimize it with
-   `cargo run -p xtask -- minimize-case replay <path> [--seed <u64>] [--write <path>]`.
+   `cargo run -p xtask -- minimize-case replay <path> [--seed <u64>] [--snapshot] [--write <path>]`.
+   Default snapshots land under `tests/snapshots/<command>/<family>/<fixture>.txt`.
 8. Save a snapshot output if the harness already supports it.
 9. Link the fixture in the PR description.
 

@@ -7,4 +7,5 @@ pub mod render;
 pub mod replay;
 pub mod scenario;
 pub mod seed;
+pub mod snapshots;
 pub mod tempdir;
