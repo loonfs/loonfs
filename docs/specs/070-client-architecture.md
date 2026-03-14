@@ -389,11 +389,12 @@ Failure modes named for the first implementation:
 - `uploaded_content_digest_mismatch`
 - `uploaded_content_local_digest_missing`
 
-## Schema v4: pending client mutations
+## Pending client mutation request ledger (schema v6)
 
-The next schema version adds one durable bridge for in-flight authoritative creates:
+The next schema version widens the durable bridge for in-flight authoritative creates:
 
 - `pending_client_mutations`
+- `client_metadata.next_client_request_id`
 
 One row is keyed by:
 
@@ -406,29 +407,43 @@ The row must durably map:
 - `client_request_id`
 - `namespace_id`
 - `client_file_id`
+- `request_json`
 - `created_at_ms`
 
 Rules:
 
+- `client_metadata.next_client_request_id` allocates monotonically formatted request ids like
+  `client-req-00000000000000000001`
 - the client must persist this row before it treats a create request as in flight
 - the mapping from `client_request_id` to `client_file_id` must stay stable across restart
-- recording the same request twice is only valid if it still points at the same namespace and temporary local identity
+- `request_json` must be the exact `ClientMutationRequest` bytes that were dispatched
+- if a pending row already exists for a `client_file_id`, retry must reuse the stored
+  `client_request_id` and stored `request_json` instead of allocating a new request id or
+  rebuilding from current local state
+- recording the same request twice is only valid if it still points at the same namespace,
+  temporary local identity, and exact request body
 
 Why this rule exists:
 
 - a successful authoritative create may be observed after a client restart
 - the bind step still needs to know which temporary local identity that success belongs to
+- a failed or lost dispatch retry must not accidentally send a different request body under the
+  same semantic create intent
 
 Failure modes prevented:
 
 - a post-restart success response that cannot be matched back to the correct `client_file_id`
 - the client binding one authoritative inode to the wrong temporary local file
+- retrying a failed dispatch with a newly generated request id
+- local state drifting after the first dispatch attempt and silently changing the retried request
 
 Failure modes named for the first implementation:
 
 - `pending_client_mutation_missing`
 - `pending_client_mutation_conflict`
+- `pending_client_mutation_client_file_conflict`
 - `pending_client_mutation_namespace_mismatch`
+- `pending_client_mutation_request_missing`
 
 ## Bind-after-publish loop
 

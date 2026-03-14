@@ -1,6 +1,9 @@
 use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision, PlannerError};
-use crate::state_db::{ClientFileId, LocalOnlyFileStateRow, SqliteStateDb, StateDbError};
-use loon_types::{ClientMutationOp, ClientMutationRequest, InodeKind};
+use crate::state_db::{
+    BoundLocalOnlyFile, ClientFileId, LocalOnlyFileStateRow, PendingClientMutationRow,
+    SqliteStateDb, StateDbError,
+};
+use loon_types::{ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeKind};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -41,6 +44,61 @@ pub enum ExecutorError {
         decision: PlannerDecision,
         inode_kind: InodeKind,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchedClientMutation {
+    pub pending: PendingClientMutationRow,
+    pub request: ClientMutationRequest,
+    pub response: ClientMutationResponse,
+    pub bound_identity: BoundLocalOnlyFile,
+}
+
+#[derive(Debug, Error)]
+pub enum DispatchClientMutationError {
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error("dispatch_failed: `{client_request_id}` {message}")]
+    DispatchFailed {
+        client_request_id: String,
+        message: String,
+    },
+}
+
+pub fn dispatch_client_mutation_from_state<F>(
+    db: &mut SqliteStateDb,
+    client_file_id: &ClientFileId,
+    created_at_ms: u64,
+    dispatch: F,
+) -> Result<DispatchedClientMutation, DispatchClientMutationError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
+    let pending = match db.load_pending_client_mutation_for_client_file(client_file_id)? {
+        Some(existing) => existing,
+        None => {
+            let client_request_id = db.allocate_client_request_id()?;
+            let request =
+                build_client_mutation_request_from_state(db, &client_request_id, client_file_id)?;
+            db.record_pending_client_mutation(client_file_id, &request, created_at_ms)?
+        }
+    };
+    let request = pending.request.clone();
+    let response =
+        dispatch(&request).map_err(|message| DispatchClientMutationError::DispatchFailed {
+            client_request_id: request.client_request_id.clone(),
+            message,
+        })?;
+    let bound_identity = db.apply_client_mutation_response(&response)?;
+
+    Ok(DispatchedClientMutation {
+        pending,
+        request,
+        response,
+        bound_identity,
+    })
 }
 
 pub fn build_client_mutation_request_from_state(

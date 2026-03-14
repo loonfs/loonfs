@@ -1075,6 +1075,20 @@ pub fn validate_local_only_upload_record(
     Ok(upload.content_manifest_digest.clone())
 }
 
+pub fn allocate_client_request_id(next_counter: u64) -> String {
+    format!("client-req-{next_counter:020}")
+}
+
+pub fn reuse_or_allocate_client_request_id(
+    existing_request_id: Option<&str>,
+    next_counter: u64,
+) -> (String, bool) {
+    match existing_request_id {
+        Some(existing) => (existing.to_owned(), false),
+        None => (allocate_client_request_id(next_counter), true),
+    }
+}
+
 pub fn validate_uploaded_content_reference(
     namespace_id: &NamespaceId,
     content_manifest_digest: &str,
@@ -1369,6 +1383,27 @@ mod tests {
             resolved,
             "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
         );
+    }
+
+    #[test]
+    fn model_allocates_client_request_ids_monotonically() {
+        assert_eq!(
+            allocate_client_request_id(1),
+            "client-req-00000000000000000001"
+        );
+        assert_eq!(
+            allocate_client_request_id(2),
+            "client-req-00000000000000000002"
+        );
+    }
+
+    #[test]
+    fn model_reuses_existing_client_request_id_for_retry() {
+        let (request_id, allocated_new) =
+            reuse_or_allocate_client_request_id(Some("client-req-00000000000000000007"), 8);
+
+        assert_eq!(request_id, "client-req-00000000000000000007");
+        assert!(!allocated_new);
     }
 
     #[test]

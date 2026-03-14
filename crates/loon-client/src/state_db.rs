@@ -5,10 +5,11 @@ use loon_types::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::path::Path;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
     namespace_id TEXT NOT NULL,
@@ -142,12 +143,22 @@ CREATE TABLE local_only_uploads (
 );
 "#;
 
+const SCHEMA_V6_SQL: &str = r#"
+INSERT INTO client_metadata (key, value_integer)
+VALUES ('next_client_request_id', 1);
+
+ALTER TABLE pending_client_mutations
+ADD COLUMN request_json TEXT;
+"#;
+
 #[derive(Debug, Error)]
 pub enum StateDbError {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("unsupported client state schema version {0}")]
     UnsupportedSchemaVersion(i32),
+    #[error("client mutation request JSON codec error: {0}")]
+    ClientMutationRequestCodec(#[from] serde_json::Error),
     #[error("SQLite integer out of range for {field}: {value}")]
     IntegerOutOfRange { field: &'static str, value: i64 },
     #[error("value out of range for SQLite {field}: {value}")]
@@ -215,6 +226,14 @@ pub enum StateDbError {
         new_client_file_id: String,
     },
     #[error(
+        "pending_client_mutation_client_file_conflict: `{client_file_id}` existing request `{existing_client_request_id}` != new request `{new_client_request_id}`"
+    )]
+    PendingClientMutationClientFileConflict {
+        client_file_id: String,
+        existing_client_request_id: String,
+        new_client_request_id: String,
+    },
+    #[error(
         "pending_client_mutation_namespace_mismatch: `{client_request_id}` pending namespace `{pending_namespace_id}` != response namespace `{response_namespace_id}`"
     )]
     PendingClientMutationNamespaceMismatch {
@@ -222,6 +241,8 @@ pub enum StateDbError {
         pending_namespace_id: String,
         response_namespace_id: String,
     },
+    #[error("pending_client_mutation_request_missing: `{client_request_id}`")]
+    PendingClientMutationRequestMissing { client_request_id: String },
     #[error(
         "bind_kind_mismatch: `{client_file_id}` local kind `{local_kind}` != remote kind `{remote_kind}`"
     )]
@@ -381,6 +402,7 @@ pub struct PendingClientMutationRow {
     pub client_request_id: String,
     pub namespace_id: NamespaceId,
     pub client_file_id: ClientFileId,
+    pub request: ClientMutationRequest,
     pub created_at_ms: u64,
 }
 
@@ -467,6 +489,12 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn allocate_client_request_id(&mut self) -> Result<String, StateDbError> {
+        self.planner_transaction("allocate_client_request_id", |tx| {
+            tx.allocate_client_request_id()
+        })
+    }
+
     pub fn load_local_only_file(
         &self,
         client_file_id: &ClientFileId,
@@ -493,6 +521,13 @@ impl SqliteStateDb {
         client_request_id: &str,
     ) -> Result<Option<PendingClientMutationRow>, StateDbError> {
         load_pending_client_mutation(&self.conn, client_request_id)
+    }
+
+    pub fn load_pending_client_mutation_for_client_file(
+        &self,
+        client_file_id: &ClientFileId,
+    ) -> Result<Option<PendingClientMutationRow>, StateDbError> {
+        load_pending_client_mutation_for_client_file(&self.conn, client_file_id)
     }
 
     pub fn observe_local_only_inode_under_parent(
@@ -607,6 +642,14 @@ impl SqliteStateDb {
         if current_version == 4 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V5_SQL)?;
+            tx.pragma_update(None, "user_version", 5)?;
+            tx.commit()?;
+            current_version = 5;
+        }
+
+        if current_version == 5 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V6_SQL)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -641,6 +684,27 @@ impl PlannerTxn<'_> {
             "tmp:{}:{next_counter:020}",
             namespace_id.as_str()
         )))
+    }
+
+    pub fn allocate_client_request_id(&mut self) -> Result<String, StateDbError> {
+        let next_counter = self.tx.query_row(
+            "SELECT value_integer FROM client_metadata WHERE key = 'next_client_request_id'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let next_counter = from_sql_u64(next_counter, "next_client_request_id")?;
+
+        self.tx.execute(
+            "UPDATE client_metadata
+            SET value_integer = ?1
+            WHERE key = 'next_client_request_id'",
+            params![to_sql_u64(
+                next_counter.saturating_add(1),
+                "next_client_request_id"
+            )?],
+        )?;
+
+        Ok(format!("client-req-{next_counter:020}"))
     }
 
     pub fn upsert_remote_file(&mut self, row: &RemoteFileStateRow) -> Result<(), StateDbError> {
@@ -886,6 +950,7 @@ impl PlannerTxn<'_> {
         {
             if existing.namespace_id == request.namespace_id
                 && existing.client_file_id == *client_file_id
+                && existing.request == *request
             {
                 return Ok(existing);
             }
@@ -897,10 +962,25 @@ impl PlannerTxn<'_> {
             });
         }
 
+        if let Some(existing) =
+            load_pending_client_mutation_for_client_file(&self.tx, client_file_id)?
+        {
+            if existing.request == *request {
+                return Ok(existing);
+            }
+
+            return Err(StateDbError::PendingClientMutationClientFileConflict {
+                client_file_id: client_file_id.as_str().to_owned(),
+                existing_client_request_id: existing.client_request_id,
+                new_client_request_id: request.client_request_id.clone(),
+            });
+        }
+
         let row = PendingClientMutationRow {
             client_request_id: request.client_request_id.clone(),
             namespace_id: request.namespace_id.clone(),
             client_file_id: client_file_id.clone(),
+            request: request.clone(),
             created_at_ms,
         };
         self.tx.execute(
@@ -908,12 +988,14 @@ impl PlannerTxn<'_> {
                 client_request_id,
                 namespace_id,
                 client_file_id,
+                request_json,
                 created_at_ms
-            ) VALUES (?1, ?2, ?3, ?4)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 &row.client_request_id,
                 row.namespace_id.as_str(),
                 row.client_file_id.as_str(),
+                serde_json::to_string(&row.request)?,
                 to_sql_u64(row.created_at_ms, "created_at_ms")?,
             ],
         )?;
@@ -1588,7 +1670,7 @@ fn load_pending_client_mutation(
 ) -> Result<Option<PendingClientMutationRow>, StateDbError> {
     let raw = conn
         .query_row(
-            "SELECT namespace_id, client_file_id, created_at_ms
+            "SELECT namespace_id, client_file_id, request_json, created_at_ms
             FROM pending_client_mutations
             WHERE client_request_id = ?1",
             params![client_request_id],
@@ -1596,21 +1678,49 @@ fn load_pending_client_mutation(
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         )
         .optional()?;
 
-    raw.map(|(namespace_id, client_file_id, created_at_ms)| {
-        Ok(PendingClientMutationRow {
-            client_request_id: client_request_id.to_owned(),
-            namespace_id: NamespaceId::from(namespace_id),
-            client_file_id: ClientFileId::new(client_file_id),
-            created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
-        })
-    })
+    raw.map(
+        |(namespace_id, client_file_id, request_json, created_at_ms)| {
+            let request_json =
+                request_json.ok_or_else(|| StateDbError::PendingClientMutationRequestMissing {
+                    client_request_id: client_request_id.to_owned(),
+                })?;
+            Ok(PendingClientMutationRow {
+                client_request_id: client_request_id.to_owned(),
+                namespace_id: NamespaceId::from(namespace_id),
+                client_file_id: ClientFileId::new(client_file_id),
+                request: serde_json::from_str(&request_json)?,
+                created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+            })
+        },
+    )
     .transpose()
+}
+
+fn load_pending_client_mutation_for_client_file(
+    conn: &Connection,
+    client_file_id: &ClientFileId,
+) -> Result<Option<PendingClientMutationRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT client_request_id
+            FROM pending_client_mutations
+            WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    match raw {
+        Some(client_request_id) => load_pending_client_mutation(conn, &client_request_id),
+        None => Ok(None),
+    }
 }
 
 fn inode_kind_as_str(kind: &InodeKind) -> &'static str {
@@ -1711,7 +1821,7 @@ mod tests {
     };
 
     #[test]
-    fn sqlite_state_db_applies_schema_v5() {
+    fn sqlite_state_db_applies_schema_v6() {
         let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
         assert_eq!(
@@ -1805,6 +1915,20 @@ mod tests {
 
         assert_eq!(first, ClientFileId::from("tmp:ns-1:00000000000000000001"));
         assert_eq!(second, ClientFileId::from("tmp:ns-1:00000000000000000002"));
+    }
+
+    #[test]
+    fn allocate_client_request_ids_monotonically() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let first = db
+            .allocate_client_request_id()
+            .expect("allocate first request id");
+        let second = db
+            .allocate_client_request_id()
+            .expect("allocate second request id");
+
+        assert_eq!(first, "client-req-00000000000000000001");
+        assert_eq!(second, "client-req-00000000000000000002");
     }
 
     #[test]
@@ -1911,6 +2035,7 @@ mod tests {
                 client_request_id: "client-req-0001".to_owned(),
                 namespace_id: NamespaceId::from("ns-1"),
                 client_file_id: client_file_id.clone(),
+                request: request.clone(),
                 created_at_ms: 1_700_000_106_000,
             }
         );
@@ -1918,6 +2043,11 @@ mod tests {
         assert_eq!(
             db.load_pending_client_mutation("client-req-0001")
                 .expect("load pending mutation"),
+            Some(recorded.clone())
+        );
+        assert_eq!(
+            db.load_pending_client_mutation_for_client_file(&client_file_id)
+                .expect("load pending mutation by client file"),
             Some(recorded)
         );
     }
@@ -1945,6 +2075,40 @@ mod tests {
         assert!(matches!(
             error,
             StateDbError::PendingClientMutationConflict { .. }
+        ));
+    }
+
+    #[test]
+    fn record_pending_client_mutation_rejects_conflicting_request_for_same_client_file() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+
+        db.record_pending_client_mutation(
+            &client_file_id,
+            &sample_client_create_file_request(),
+            1_700_000_106_000,
+        )
+        .expect("record first pending mutation");
+
+        let error = db
+            .record_pending_client_mutation(
+                &client_file_id,
+                &ClientMutationRequest {
+                    namespace_id: NamespaceId::from("ns-1"),
+                    client_request_id: "client-req-0002".to_owned(),
+                    op: ClientMutationOp::CreateFile {
+                        parent_inode_id: InodeId(2),
+                        display_name: "draft.txt".to_owned(),
+                        content_manifest_digest: "sha256:different-manifest".to_owned(),
+                    },
+                },
+                1_700_000_106_001,
+            )
+            .expect_err("conflicting request for same client file should fail");
+
+        assert!(matches!(
+            error,
+            StateDbError::PendingClientMutationClientFileConflict { .. }
         ));
     }
 
