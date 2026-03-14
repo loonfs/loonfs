@@ -492,6 +492,42 @@ Failure modes named for the first implementation:
 - `upload_local_create_decision_missing`
 - `uploaded_content_digest_mismatch`
 
+## First directory create executor
+
+The matching directory executor is also intentionally narrow. It only handles one local-only
+planner outcome:
+
+- `create_remote_dir`
+
+The executor takes:
+
+- `client_file_id`
+- one dispatch timestamp
+
+Rules:
+
+- if `pending_client_mutations` already contains a row for `client_file_id`, the executor must
+  reuse that durable `request_json` and must not rebuild the request from current local state
+- if no pending row exists, the executor must load `planned_local_only_actions(client_file_id)` and
+  require `decision = create_remote_dir`
+- after that check, the executor must dispatch through the same pending-request flow and bind the
+  authoritative success response in the same way as any other create
+
+Why this rule exists:
+
+- directory create should use the same durable request/bind discipline as file create
+- the client action surface should not force callers to know whether retries are rebuilding from
+  state or reusing a prior pending request
+
+Failure modes prevented:
+
+- running a directory-create executor against a file upload planner action
+- retrying a failed directory create with a newly rebuilt request id
+
+Failure modes named for the first implementation:
+
+- `create_remote_dir_decision_missing`
+
 ## Bind-after-publish loop
 
 After a successful `create_file` or `create_dir`, the authoritative side returns one committed

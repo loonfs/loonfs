@@ -77,6 +77,12 @@ pub struct ExecutedUploadLocalCreate {
     pub dispatched: DispatchedClientMutation,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedCreateRemoteDir {
+    pub reused_pending_request: bool,
+    pub dispatched: DispatchedClientMutation,
+}
+
 #[derive(Debug, Error)]
 pub enum ExecuteUploadLocalCreateError {
     #[error(transparent)]
@@ -94,6 +100,49 @@ pub enum ExecuteUploadLocalCreateError {
         client_file_id: String,
         decision: PlannerDecision,
     },
+}
+
+#[derive(Debug, Error)]
+pub enum ExecuteCreateRemoteDirError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Planner(#[from] PlannerError),
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    Dispatch(#[from] DispatchClientMutationError),
+    #[error("create_remote_dir_decision_missing: `{client_file_id}` decision `{decision:?}`")]
+    CreateRemoteDirDecisionMissing {
+        client_file_id: String,
+        decision: PlannerDecision,
+    },
+}
+
+pub fn execute_create_remote_dir<F>(
+    db: &mut SqliteStateDb,
+    client_file_id: &ClientFileId,
+    created_at_ms: u64,
+    dispatch: F,
+) -> Result<ExecutedCreateRemoteDir, ExecuteCreateRemoteDirError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
+    let reused_pending_request = db
+        .load_pending_client_mutation_for_client_file(client_file_id)?
+        .is_some();
+
+    if !reused_pending_request {
+        ensure_create_remote_dir_ready(db, client_file_id)?;
+    }
+
+    let dispatched =
+        dispatch_client_mutation_from_state(db, client_file_id, created_at_ms, dispatch)?;
+
+    Ok(ExecutedCreateRemoteDir {
+        reused_pending_request,
+        dispatched,
+    })
 }
 
 pub fn execute_upload_local_create_from_path<S: ObjectStore, F>(
@@ -210,6 +259,42 @@ fn ensure_upload_local_create_ready_from_path<S: ObjectStore>(
         .record_local_only_upload(client_file_id, &uploaded, uploaded_at_ms)
         .map_err(ExecuteUploadLocalCreateError::from)?;
     Ok((recorded, false))
+}
+
+fn ensure_create_remote_dir_ready(
+    db: &mut SqliteStateDb,
+    client_file_id: &ClientFileId,
+) -> Result<(), ExecuteCreateRemoteDirError> {
+    let local_only = db.load_local_only_file(client_file_id)?.ok_or_else(|| {
+        StateDbError::LocalOnlyFileMissing {
+            client_file_id: client_file_id.as_str().to_owned(),
+        }
+    })?;
+    let planned_row = db
+        .load_planned_local_only_action(client_file_id)?
+        .ok_or_else(|| ExecutorError::PlannedLocalOnlyActionMissing {
+            client_file_id: client_file_id.as_str().to_owned(),
+        })?;
+    let planned = PlannedLocalOnlyActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::CreateRemoteDir {
+        return Err(
+            ExecuteCreateRemoteDirError::CreateRemoteDirDecisionMissing {
+                client_file_id: client_file_id.as_str().to_owned(),
+                decision: planned.decision,
+            },
+        );
+    }
+
+    if local_only.inode_kind != InodeKind::Dir {
+        return Err(ExecutorError::DecisionKindMismatch {
+            client_file_id: client_file_id.as_str().to_owned(),
+            decision: planned.decision,
+            inode_kind: local_only.inode_kind,
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 pub fn build_client_mutation_request_from_state(
