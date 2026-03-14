@@ -613,6 +613,44 @@ Failure modes prevented:
 - a scheduler accidentally reimplementing file-vs-directory branching differently from the
   underlying executor
 
+## First mixed client tick
+
+The first broader client tick arbitrates between:
+
+- `planned_local_only_actions`
+- `planned_actions`
+
+It is still intentionally partial. In this first implementation it may:
+
+- execute one selected local-only create immediately
+- or surface one selected inode-keyed planned action as the next scheduled work item
+
+Rules:
+
+- the tick must load at most one candidate row from each table:
+  - the deterministic next `planned_local_only_actions` row
+  - the deterministic next `planned_actions` row
+- cross-table arbitration must be deterministic:
+  - lower `created_at_ms` first
+  - if `created_at_ms` ties, `planned_local_only_actions` wins over `planned_actions`
+- if the selected row comes from `planned_local_only_actions`, the tick must execute it through the
+  existing local-only create loop
+- if the selected row comes from `planned_actions`, the tick must return that planned action as the
+  next scheduled work item without trying to silently emulate upload/download/conflict behavior yet
+- if both tables are empty, the tick must return `no_work`
+
+Why this rule exists:
+
+- one scheduler surface is more valuable than separate “creates only” and “everything else later”
+  entrypoints
+- we should not fake support for inode-keyed upload/download actions before their executors exist
+- a deterministic cross-table tie-break keeps restart behavior and tests reproducible
+
+Failure modes prevented:
+
+- local-only creates and inode-keyed planned actions being scheduled by unrelated policies
+- a partial implementation pretending it executed an inode-keyed action when it only selected it
+
 ## Bind-after-publish loop
 
 After a successful `create_file` or `create_dir`, the authoritative side returns one committed
