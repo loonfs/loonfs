@@ -157,9 +157,9 @@ struct ReplaySeedArgs {
 }
 
 fn parse_replay_seed_args(mut args: impl Iterator<Item = String>) -> Result<ReplaySeedArgs> {
-    let first = args
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("usage: replay-seed [replay] <scenario> [--seed <u64>] [--snapshot]"))?;
+    let first = args.next().ok_or_else(|| {
+        anyhow::anyhow!("usage: replay-seed [replay] <scenario> [--seed <u64>] [--snapshot]")
+    })?;
 
     let scenario_path = if first == "replay" {
         args.next().ok_or_else(|| {

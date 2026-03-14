@@ -618,6 +618,14 @@ Rules:
   writing the local path
 - the executor must require the downloaded whole-file digest to match
   `remote_state.content_digest`
+- before replacing the target path, the executor must write the downloaded bytes to one staging
+  file in the same directory as the target path
+- the executor must sync the staging file before it renames that staging file over the target path
+- the target replacement must use one atomic rename in the same directory
+- where the platform permits parent-directory sync, the executor must sync the parent directory
+  after the rename before it claims convergence
+- if a stale staging file from an earlier interrupted attempt already exists, the executor may
+  overwrite it; the staging file is scratch state, not durable truth
 - after the local write succeeds, one SQLite transaction must:
   - update `local_state` to the remote digest
   - clear `dirty`
@@ -635,7 +643,9 @@ Failure modes prevented:
 - overwriting a locally diverged file with remote bytes
 - downloading remote bytes without a durable manifest reference
 - applying a remote observation whose manifest bytes do not match the observed file digest
-- claiming convergence after a partial or unverified local file write
+- claiming convergence after a partial, truncated, or unverified local file write
+- crash windows where the target path is rewritten in place before the replacement bytes are fully
+  staged and synced
 
 Failure modes named for the first implementation:
 
@@ -647,6 +657,7 @@ Failure modes named for the first implementation:
 - `download_remote_edit_remote_digest_missing`
 - `download_remote_edit_remote_digest_mismatch`
 - `download_remote_edit_source_path_missing`
+- `download_remote_edit_local_apply_failed`
 
 ## Pending client mutation request ledger (schema v6)
 

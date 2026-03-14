@@ -96,6 +96,8 @@ expect:
   planned_action_cleared: true
   local_file_content_utf8: |
     hello from loon
+  local_parent_entries:
+    - report.txt
   planner_result:
     namespace_id: ns-1
     inode_id: 42

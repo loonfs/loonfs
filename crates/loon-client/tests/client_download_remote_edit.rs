@@ -137,6 +137,10 @@ fn execute_next_client_action_download_remote_edit_updates_bound_inode() {
         fs::read_to_string(&local_path).expect("read downloaded local file"),
         expect.local_file_content_utf8
     );
+    assert_eq!(
+        read_directory_entries(local_path.parent().expect("local file parent")),
+        expect.local_parent_entries,
+    );
 }
 
 fn run_execute_next_client_action(
@@ -183,6 +187,21 @@ fn write_local_file(root: &Path, relative_path: &Path, content_utf8: &str) -> Pa
     path
 }
 
+fn read_directory_entries(path: &Path) -> Vec<String> {
+    let mut entries = fs::read_dir(path)
+        .expect("read directory")
+        .map(|entry| {
+            entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
 fn load_fixture(relative_path: &str) -> Scenario {
     loon_testkit::fixtures::load_fixture(relative_path)
 }
@@ -207,6 +226,8 @@ struct DownloadExpectedState {
     sync_anchor: SyncAnchorRow,
     planned_action_cleared: bool,
     local_file_content_utf8: String,
+    #[serde(default)]
+    local_parent_entries: Vec<String>,
     planner_result: PlannedActionRecord,
 }
 

@@ -1,4 +1,5 @@
 use crate::download::DownloadError;
+use crate::local_apply::LocalApplyError;
 use crate::planner::{PlannerDecision, PlannerError};
 use crate::state_db::{
     AppliedInodeMutation, BoundLocalOnlyFile, ClientFileId, InodeUploadRow,
@@ -271,12 +272,25 @@ pub enum ExecuteDownloadRemoteEditError {
         remote_content_digest: String,
         downloaded_file_digest: String,
     },
-    #[error("download_remote_edit_local_write_failed: path `{path}` {source}")]
-    LocalWriteFailed {
+    #[error(
+        "download_remote_edit_local_apply_failed: operation `{operation}` path `{path}` {source}"
+    )]
+    LocalApplyFailed {
+        operation: &'static str,
         path: String,
         #[source]
         source: std::io::Error,
     },
+}
+
+impl From<LocalApplyError> for ExecuteDownloadRemoteEditError {
+    fn from(error: LocalApplyError) -> Self {
+        Self::LocalApplyFailed {
+            operation: error.operation,
+            path: error.path,
+            source: error.source,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

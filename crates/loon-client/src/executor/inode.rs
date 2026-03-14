@@ -1,12 +1,12 @@
 use super::dispatch::dispatch_inode_mutation_from_state;
 use super::*;
 use crate::download::download_file_to_bytes;
+use crate::local_apply::apply_bytes_atomically;
 use crate::planner::{PlannedActionRecord, PlannerDecision};
 use crate::state_db::{InodeUploadRow, RemoteFileStateRow, SqliteStateDb};
 use crate::upload::upload_small_file_from_path;
 use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, NamespaceId};
-use std::fs;
 use std::path::Path;
 
 pub fn execute_upload_local_edit_from_path<S: ObjectStore, F>(
@@ -125,20 +125,7 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
         });
     }
 
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).map_err(|source| {
-            ExecuteDownloadRemoteEditError::LocalWriteFailed {
-                path: target_path.display().to_string(),
-                source,
-            }
-        })?;
-    }
-    fs::write(target_path, &downloaded.bytes).map_err(|source| {
-        ExecuteDownloadRemoteEditError::LocalWriteFailed {
-            path: target_path.display().to_string(),
-            source,
-        }
-    })?;
+    apply_bytes_atomically(target_path, &downloaded.bytes)?;
 
     let applied = db.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)?;
     Ok(ExecutedDownloadRemoteEdit {

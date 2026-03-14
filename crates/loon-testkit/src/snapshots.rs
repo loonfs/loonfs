@@ -22,9 +22,12 @@ impl SnapshotKind {
 pub fn fixture_key_from_path(path: &Path) -> Result<String> {
     let scenario_root = fs::canonicalize(scenario_root())?;
     let scenario_path = fs::canonicalize(path)?;
-    let relative = scenario_path
-        .strip_prefix(&scenario_root)
-        .map_err(|_| anyhow!("snapshot output requires a scenario under {}", scenario_root.display()))?;
+    let relative = scenario_path.strip_prefix(&scenario_root).map_err(|_| {
+        anyhow!(
+            "snapshot output requires a scenario under {}",
+            scenario_root.display()
+        )
+    })?;
 
     Ok(relative.to_string_lossy().replace('\\', "/"))
 }
@@ -90,7 +93,9 @@ mod tests {
             Some(4242),
         );
         assert!(
-            path.ends_with("tests/snapshots/replay-seed/native/wal_tail_replay_advances_head.seed-4242.txt"),
+            path.ends_with(
+                "tests/snapshots/replay-seed/native/wal_tail_replay_advances_head.seed-4242.txt"
+            ),
             "unexpected snapshot path: {}",
             path.display()
         );
