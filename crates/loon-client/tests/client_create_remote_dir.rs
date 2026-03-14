@@ -1,3 +1,6 @@
+#[path = "common/support.rs"]
+mod support;
+
 use loon_client::executor::{
     execute_create_remote_dir, ExecuteCreateRemoteDirError, ExecutedCreateRemoteDir,
 };
@@ -208,6 +211,7 @@ fn run_execute(
                 writer_id: action.writer_id.clone(),
                 writer_version: action.writer_version.clone(),
                 now_ms: action.now_ms,
+                metadata_state: support::server_metadata_for_request(request),
             },
         )
         .map(|executed| executed.response)

@@ -365,18 +365,22 @@ mod tests {
     use crate::commit::{
         build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, Precondition,
     };
+    use crate::metadata::{InodeRecord, MetadataState, RevisionRecord};
     use loon_objectstore::keys::wal_commit;
     use loon_types::{
         decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, ChangeSeq, FenceToken,
-        HeadState, InodeId, LeaseState, NamespaceId, RevisionNo, WalCommitEnvelope,
+        HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo, WalCommitEnvelope,
         WalCommitPayload, WalEnvelopeKind, WalOp, WalPrecondition,
     };
 
     #[test]
     fn prepare_wal_commit_builds_immutable_object_key_and_payload() {
         let request = sample_request();
-        let plan =
-            build_commit_plan(&request, &validation_context(999)).expect("validated commit plan");
+        let plan = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, replace_metadata_state()),
+        )
+        .expect("validated commit plan");
 
         let prepared =
             prepare_wal_commit(&request, &plan, "loon-core-test").expect("prepare wal commit");
@@ -397,8 +401,11 @@ mod tests {
     #[test]
     fn prepare_wal_commit_round_trips_through_shared_codec() {
         let request = sample_request();
-        let plan =
-            build_commit_plan(&request, &validation_context(999)).expect("validated commit plan");
+        let plan = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, replace_metadata_state()),
+        )
+        .expect("validated commit plan");
 
         let prepared =
             prepare_wal_commit(&request, &plan, "loon-core-test").expect("prepare wal commit");
@@ -447,8 +454,11 @@ mod tests {
                 },
             ],
         };
-        let plan =
-            build_commit_plan(&request, &validation_context(999)).expect("validated commit plan");
+        let plan = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, create_parent_metadata_state(InodeId(902))),
+        )
+        .expect("validated commit plan");
 
         let prepared =
             prepare_wal_commit(&request, &plan, "loon-core-test").expect("prepare wal commit");
@@ -469,8 +479,11 @@ mod tests {
     #[test]
     fn prepare_wal_commit_rejects_namespace_mismatch() {
         let mut request = sample_request();
-        let plan =
-            build_commit_plan(&request, &validation_context(999)).expect("validated commit plan");
+        let plan = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, replace_metadata_state()),
+        )
+        .expect("validated commit plan");
         request.namespace_id = NamespaceId::from("ns-2");
 
         let error =
@@ -488,7 +501,7 @@ mod tests {
     #[test]
     fn replay_wal_commit_updates_head_for_contiguous_entry() {
         let request = sample_request();
-        let context = validation_context(999);
+        let context = validation_context_with_metadata(999, replace_metadata_state());
         let prepared = prepare_wal_commit(
             &request,
             &build_commit_plan(&request, &context).expect("validated commit plan"),
@@ -742,7 +755,10 @@ mod tests {
         }
     }
 
-    fn validation_context(now_ms: u64) -> CommitValidationContext {
+    fn validation_context_with_metadata(
+        now_ms: u64,
+        metadata_state: MetadataState,
+    ) -> CommitValidationContext {
         CommitValidationContext {
             head: HeadState {
                 namespace_id: NamespaceId::from("ns-1"),
@@ -759,6 +775,35 @@ mod tests {
                 lease_expires_at_ms: 1_000,
             },
             now_ms,
+            metadata_state,
+        }
+    }
+
+    fn create_parent_metadata_state(parent_inode: InodeId) -> MetadataState {
+        MetadataState {
+            inodes: vec![InodeRecord {
+                inode_id: parent_inode,
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(1),
+            }],
+            ..MetadataState::default()
+        }
+    }
+
+    fn replace_metadata_state() -> MetadataState {
+        MetadataState {
+            inodes: vec![InodeRecord {
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                created_seq: ChangeSeq(1),
+            }],
+            revisions: vec![RevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(7),
+                committed_seq: ChangeSeq(7),
+                content_manifest_digest: "sha256:manifest".to_owned(),
+            }],
+            ..MetadataState::default()
         }
     }
 }

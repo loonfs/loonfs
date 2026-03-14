@@ -12,6 +12,16 @@ initial:
     holder_id: writer-a
     fence_token: 8
     lease_expires_at_ms: 2000
+  metadata_state:
+    inodes:
+      - inode_id: 42
+        inode_kind: file
+        created_seq: 1
+    revisions:
+      - inode_id: 42
+        revision_no: 17
+        committed_seq: 17
+        content_manifest_digest: sha256:previous-manifest
   content_objects:
     manifest:
       digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6

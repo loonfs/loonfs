@@ -2,6 +2,7 @@ use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
     Precondition,
 };
+use loon_core::metadata::MetadataState;
 use loon_core::namespace::head_and_lease_fence_tokens_agree;
 use loon_model::{
     ModelAction, ModelCommitValidationError, ModelCommitValidationRequest, ModelMetadataState,
@@ -141,6 +142,7 @@ fn stale_writer_fixture_matches_model_and_core() {
                         head: core_head.clone(),
                         lease: lease.clone(),
                         now_ms,
+                        metadata_state: MetadataState::default(),
                     },
                 )
                 .map(|plan| CommitAttemptOutcome::Accepted {

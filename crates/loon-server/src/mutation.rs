@@ -6,6 +6,7 @@ use loon_core::commit::{
 use loon_core::content::{
     validate_durable_content_reference, DurableContentValidationError, ValidatedDurableContent,
 };
+use loon_core::metadata::MetadataState;
 use loon_core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
@@ -23,6 +24,8 @@ pub struct ClientMutationExecutionParams {
     pub writer_id: String,
     pub writer_version: String,
     pub now_ms: u64,
+    #[serde(default)]
+    pub metadata_state: MetadataState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +154,7 @@ pub fn execute_client_mutation<S: ObjectStore>(
         head: loaded_head.envelope.state.clone(),
         lease: loaded_lease.envelope.state.clone(),
         now_ms: params.now_ms,
+        metadata_state: params.metadata_state.clone(),
     };
     let plan = build_commit_plan(&commit_request, &context)?;
     let wal = prepare_wal_commit(&commit_request, &plan, &params.writer_version)?;
@@ -591,6 +595,7 @@ mod tests {
         execute_client_mutation, translate_client_mutation_request, ClientMutationExecutionError,
         ClientMutationExecutionParams, DurableContentValidationError,
     };
+    use loon_core::metadata::MetadataState;
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
     use loon_objectstore::ObjectStore;
@@ -619,6 +624,7 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "loon-server-test".to_owned(),
             now_ms: 1_500,
+            metadata_state: MetadataState::default(),
         };
         let head = HeadState {
             namespace_id: loon_types::NamespaceId::from("ns-1"),
@@ -671,6 +677,7 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "loon-server-test".to_owned(),
             now_ms: 1_500,
+            metadata_state: MetadataState::default(),
         };
         let head = HeadState {
             namespace_id: loon_types::NamespaceId::from("ns-1"),
@@ -742,6 +749,7 @@ mod tests {
                 writer_id: initial.lease.holder_id.clone(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                metadata_state: initial.metadata_state.clone(),
             },
         )
         .expect("execute client create-file mutation");
@@ -846,6 +854,7 @@ mod tests {
                 writer_id: initial.lease.holder_id.clone(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                metadata_state: initial.metadata_state.clone(),
             },
         )
         .expect("execute client replace-file mutation");
@@ -920,6 +929,7 @@ mod tests {
                 writer_id: initial.lease.holder_id,
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                metadata_state: initial.metadata_state,
             },
         )
         .expect_err("missing content block should reject create-file mutation");
@@ -939,6 +949,8 @@ mod tests {
     struct MutationInitial {
         head: HeadState,
         lease: LeaseState,
+        #[serde(default)]
+        metadata_state: MetadataState,
         content_objects: Option<SeededContentObjects>,
         client_request: RawClientMutationRequest,
     }

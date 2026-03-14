@@ -1,3 +1,6 @@
+#[path = "common/support.rs"]
+mod support;
+
 use loon_client::executor::{execute_next_client_action, NextClientAction};
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
@@ -231,6 +234,7 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
                         writer_id: execute.writer_id.clone(),
                         writer_version: execute.writer_version.clone(),
                         now_ms: execute.now_ms,
+                        metadata_state: support::server_metadata_for_request(request),
                     },
                 )
                 .map(|executed| executed.response)
@@ -286,6 +290,7 @@ fn run_execute_next_client_action(
                     writer_id: action.writer_id.clone(),
                     writer_version: action.writer_version.clone(),
                     now_ms: action.now_ms,
+                    metadata_state: support::server_metadata_for_request(request),
                 },
             )
             .map(|executed| executed.response)

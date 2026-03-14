@@ -1,3 +1,6 @@
+#[path = "common/support.rs"]
+mod support;
+
 use loon_client::executor::{dispatch_client_mutation_from_state, DispatchClientMutationError};
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
@@ -102,6 +105,7 @@ fn dispatch_retry_reuses_pending_request_id_after_failure() {
                         writer_id: "writer-a".to_owned(),
                         writer_version: "loon-server-test".to_owned(),
                         now_ms: 1_700_000_107_000,
+                        metadata_state: support::server_metadata_for_request(request),
                     },
                 )
                 .map(|executed| executed.response)
@@ -184,6 +188,7 @@ fn run_fixture(relative_path: &str) {
                         writer_id: dispatch.writer_id.clone(),
                         writer_version: dispatch.writer_version.clone(),
                         now_ms: dispatch.now_ms,
+                        metadata_state: support::server_metadata_for_request(request),
                     },
                 )
                 .map(|executed| executed.response)

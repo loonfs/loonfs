@@ -1,3 +1,6 @@
+#[path = "common/support.rs"]
+mod support;
+
 use loon_client::executor::build_client_mutation_request_from_state;
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
@@ -105,6 +108,7 @@ fn run_fixture(relative_path: &str) {
                 writer_id: execute.writer_id,
                 writer_version: execute.writer_version,
                 now_ms: execute.now_ms,
+                metadata_state: support::server_metadata_for_request(&request),
             },
         )
         .expect("execute authoritative client mutation");

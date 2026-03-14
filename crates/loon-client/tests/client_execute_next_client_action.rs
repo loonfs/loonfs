@@ -1,3 +1,6 @@
+#[path = "common/support.rs"]
+mod support;
+
 use loon_client::executor::{
     execute_next_client_action, ExecutedNextLocalOnlyCreate, NextClientAction,
 };
@@ -312,6 +315,7 @@ fn run_execute_next_client_action(
                     writer_id: action.writer_id.clone(),
                     writer_version: action.writer_version.clone(),
                     now_ms: action.now_ms,
+                    metadata_state: support::server_metadata_for_request(request),
                 },
             )
             .map(|executed| executed.response)

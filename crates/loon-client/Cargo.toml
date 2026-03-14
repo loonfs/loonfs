@@ -17,3 +17,4 @@ serde_json.workspace = true
 loon-model = { path = "../loon-model" }
 loon-testkit = { path = "../loon-testkit" }
 loon-server = { path = "../loon-server" }
+loon-core = { path = "../loon-core" }
