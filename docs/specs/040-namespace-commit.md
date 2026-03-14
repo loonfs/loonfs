@@ -83,6 +83,10 @@ Failure modes named for the first implementation:
 
 - `create_mutation_consumes_next_inode_id`
 - `create_file_requires_durable_content`
+- `create_parent_missing`
+- `create_parent_not_directory`
+- `create_child_name_collision`
+- `create_under_subtree_tombstone`
 
 ## Replace-file mutation
 
@@ -119,8 +123,103 @@ Failure modes prevented:
 Failure modes named for the first implementation:
 
 - `replace_file_requires_durable_content`
+- `replace_file_inode_missing`
+- `replace_file_inode_not_file`
 - `replace_file_base_revision_mismatch`
+- `replace_file_under_subtree_tombstone`
 - `replace_file_path_change_not_supported`
+
+## Authoritative metadata precondition lookups
+
+The semantic meaning of a commit precondition comes from the authoritative metadata state at:
+
+- `base_seq = request.planned_head_seq`
+
+Frame validation may happen first, but commit planning is not complete until metadata preconditions
+are evaluated against the logical metadata families described in Spec 030.
+
+### `HeadSeqIs(expected_seq)`
+
+Lookup rule:
+
+- compare `expected_seq` to the current durable `head.json.seq`
+
+Why it exists:
+
+- every deeper metadata lookup must be anchored to one explicit namespace history point
+
+### `ChildNameAbsent(parent_inode_id, name_key)`
+
+Lookup rule:
+
+1. resolve `visible_inode(namespace_id, parent_inode_id, base_seq)`
+2. require the parent inode to exist
+3. require the parent inode kind to be `DIR`
+4. resolve `visible_child(namespace_id, parent_inode_id, name_key, base_seq)`
+5. require that lookup to return no visible child binding
+
+The current create contract may still use `display_name` as `name_key`, but the lookup rule itself
+is in terms of canonical `name_key`.
+
+Failure modes named for the first implementation:
+
+- `create_parent_missing`
+- `create_parent_not_directory`
+- `create_child_name_collision`
+
+### `InodeRevisionIs(inode_id, revision_no)`
+
+Lookup rule:
+
+1. resolve `visible_inode(namespace_id, inode_id, base_seq)`
+2. require the inode to exist
+3. require the inode kind to be `FILE` for the current `replace_file` mutation family
+4. resolve `current_revision_head(namespace_id, inode_id, base_seq)`
+5. require the visible head revision to equal `revision_no`
+
+Failure modes named for the first implementation:
+
+- `replace_file_inode_missing`
+- `replace_file_inode_not_file`
+- `replace_file_base_revision_mismatch`
+
+### `AncestorsNotSubtreeDeleted(inode_id)`
+
+Lookup rule:
+
+1. start from `inode_id`
+2. walk the visible parent chain toward the namespace root at `base_seq`
+3. at each visited inode, require that no `active_subtree_tombstone(namespace_id, visited_inode, base_seq)` exists
+
+For create operations this check is anchored at the target parent inode, because the child inode does
+not exist yet.
+
+Failure modes named for the first implementation:
+
+- `create_under_subtree_tombstone`
+- `replace_file_under_subtree_tombstone`
+
+## Metadata evaluation order
+
+The first semantic-core commit planner should evaluate metadata preconditions in this order after
+frame validation succeeds:
+
+1. `HeadSeqIs`
+2. inode existence / kind lookups needed by the request ops
+3. `ChildNameAbsent` and `InodeRevisionIs`
+4. `AncestorsNotSubtreeDeleted`
+
+Why this order exists:
+
+- it keeps the lookup anchor explicit before any deeper table scan
+- it makes failure reporting deterministic when more than one metadata rule is wrong
+- it avoids allocating inode ids or writing WAL objects for requests that are already invalid at the
+  metadata layer
+
+Failure modes prevented:
+
+- a request reporting different failures depending on incidental lookup order
+- spending inode allocation or WAL work on a request that already loses at metadata validation
 
 ## Authoritative durable content validation
 
@@ -250,9 +349,9 @@ Failure modes prevented:
 - silent disagreement between head state and lease state
 - validation logic depending on ambient wall-clock reads
 
-## Validation skeleton
+## Frame validation before metadata evaluation
 
-Before writing a WAL object, the commit planner must at minimum validate:
+Before metadata lookups or WAL creation begin, the commit planner must at minimum validate:
 
 1. the request namespace matches the current head and lease namespace
 2. the planned head seq still matches the current head seq
@@ -260,7 +359,8 @@ Before writing a WAL object, the commit planner must at minimum validate:
 4. the lease holder still matches the requesting writer
 5. the lease has not expired at the explicitly supplied validation time
 
-The planner may leave deeper inode and name checks to later metadata lookups, but the checks above are mandatory before publish is attempted.
+These checks are necessary but not sufficient. A commit is not valid for publish until the metadata
+preconditions above are also evaluated at the same `planned_head_seq`.
 
 ## WAL commit object
 
