@@ -1,12 +1,18 @@
-use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision};
-use crate::state_db::LocalOnlyFileStateRow;
+use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision, PlannerError};
+use crate::state_db::{ClientFileId, LocalOnlyFileStateRow, SqliteStateDb, StateDbError};
 use loon_types::{ClientMutationOp, ClientMutationRequest, InodeKind};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ExecutorError {
+    #[error("state DB error: {0}")]
+    StateDb(#[from] StateDbError),
+    #[error("planner error: {0}")]
+    Planner(#[from] PlannerError),
     #[error("empty client request id")]
     EmptyClientRequestId,
+    #[error("planned_local_only_action_missing: `{client_file_id}`")]
+    PlannedLocalOnlyActionMissing { client_file_id: String },
     #[error(
         "client_file_id mismatch: local `{local_client_file_id}` != planned `{planned_client_file_id}`"
     )]
@@ -35,6 +41,37 @@ pub enum ExecutorError {
         decision: PlannerDecision,
         inode_kind: InodeKind,
     },
+}
+
+pub fn build_client_mutation_request_from_state(
+    db: &SqliteStateDb,
+    client_request_id: &str,
+    client_file_id: &ClientFileId,
+) -> Result<ClientMutationRequest, ExecutorError> {
+    let local_only = db.load_local_only_file(client_file_id)?.ok_or_else(|| {
+        StateDbError::LocalOnlyFileMissing {
+            client_file_id: client_file_id.as_str().to_owned(),
+        }
+    })?;
+    let planned_row = db
+        .load_planned_local_only_action(client_file_id)?
+        .ok_or_else(|| ExecutorError::PlannedLocalOnlyActionMissing {
+            client_file_id: client_file_id.as_str().to_owned(),
+        })?;
+    let planned = PlannedLocalOnlyActionRecord::try_from(planned_row)?;
+    let content_manifest_digest = match planned.decision {
+        PlannerDecision::UploadLocalCreate => {
+            Some(db.resolve_local_only_upload_content_manifest_digest(&local_only)?)
+        }
+        _ => None,
+    };
+
+    build_client_mutation_request(
+        client_request_id,
+        &local_only,
+        &planned,
+        content_manifest_digest.as_deref(),
+    )
 }
 
 pub fn build_client_mutation_request(

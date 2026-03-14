@@ -1,3 +1,4 @@
+use crate::upload::UploadedContent;
 use loon_types::{
     ChangeSeq, ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind, NamespaceId,
     RevisionNo,
@@ -7,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
     namespace_id TEXT NOT NULL,
@@ -129,6 +130,18 @@ CREATE TABLE pending_client_mutations (
 );
 "#;
 
+const SCHEMA_V5_SQL: &str = r#"
+CREATE TABLE local_only_uploads (
+    client_file_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    file_digest_sha256 TEXT NOT NULL,
+    content_manifest_digest TEXT NOT NULL,
+    manifest_object_key TEXT NOT NULL,
+    file_size_bytes INTEGER NOT NULL,
+    uploaded_at_ms INTEGER NOT NULL
+);
+"#;
+
 #[derive(Debug, Error)]
 pub enum StateDbError {
     #[error("SQLite error: {0}")]
@@ -166,6 +179,31 @@ pub enum StateDbError {
     },
     #[error("local_only_file_missing: `{client_file_id}`")]
     LocalOnlyFileMissing { client_file_id: String },
+    #[error("uploaded_content_missing: `{client_file_id}`")]
+    UploadedContentMissing { client_file_id: String },
+    #[error("uploaded_content_requires_file: `{client_file_id}` kind `{inode_kind}`")]
+    UploadedContentRequiresFile {
+        client_file_id: String,
+        inode_kind: String,
+    },
+    #[error("uploaded_content_local_digest_missing: `{client_file_id}`")]
+    UploadedContentLocalDigestMissing { client_file_id: String },
+    #[error(
+        "uploaded_content_namespace_mismatch: `{client_file_id}` local namespace `{local_namespace_id}` != uploaded namespace `{uploaded_namespace_id}`"
+    )]
+    UploadedContentNamespaceMismatch {
+        client_file_id: String,
+        local_namespace_id: String,
+        uploaded_namespace_id: String,
+    },
+    #[error(
+        "uploaded_content_digest_mismatch: `{client_file_id}` local digest `{local_content_digest}` != uploaded digest `{uploaded_file_digest}`"
+    )]
+    UploadedContentDigestMismatch {
+        client_file_id: String,
+        local_content_digest: String,
+        uploaded_file_digest: String,
+    },
     #[error("pending_client_mutation_missing: `{client_request_id}`")]
     PendingClientMutationMissing { client_request_id: String },
     #[error(
@@ -328,6 +366,17 @@ pub struct LocalOnlyPlannedActionRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalOnlyUploadRow {
+    pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
+    pub file_digest_sha256: String,
+    pub content_manifest_digest: String,
+    pub manifest_object_key: String,
+    pub file_size_bytes: u64,
+    pub uploaded_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingClientMutationRow {
     pub client_request_id: String,
     pub namespace_id: NamespaceId,
@@ -432,6 +481,13 @@ impl SqliteStateDb {
         load_planned_local_only_action(&self.conn, client_file_id)
     }
 
+    pub fn load_local_only_upload(
+        &self,
+        client_file_id: &ClientFileId,
+    ) -> Result<Option<LocalOnlyUploadRow>, StateDbError> {
+        load_local_only_upload(&self.conn, client_file_id)
+    }
+
     pub fn load_pending_client_mutation(
         &self,
         client_request_id: &str,
@@ -464,6 +520,30 @@ impl SqliteStateDb {
         self.planner_transaction("bind_local_only_inode_to_remote", |tx| {
             tx.bind_local_only_inode_to_remote(client_file_id, remote)
         })
+    }
+
+    pub fn record_local_only_upload(
+        &mut self,
+        client_file_id: &ClientFileId,
+        uploaded: &UploadedContent,
+        uploaded_at_ms: u64,
+    ) -> Result<LocalOnlyUploadRow, StateDbError> {
+        self.planner_transaction("record_local_only_upload", |tx| {
+            tx.record_local_only_upload(client_file_id, uploaded, uploaded_at_ms)
+        })
+    }
+
+    pub fn resolve_local_only_upload_content_manifest_digest(
+        &self,
+        local_only: &LocalOnlyFileStateRow,
+    ) -> Result<String, StateDbError> {
+        let upload = self
+            .load_local_only_upload(&local_only.client_file_id)?
+            .ok_or_else(|| StateDbError::UploadedContentMissing {
+                client_file_id: local_only.client_file_id.as_str().to_owned(),
+            })?;
+        validate_local_only_upload(local_only, &upload.namespace_id, &upload.file_digest_sha256)?;
+        Ok(upload.content_manifest_digest)
     }
 
     pub fn record_pending_client_mutation(
@@ -519,6 +599,14 @@ impl SqliteStateDb {
         if current_version == 3 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V4_SQL)?;
+            tx.pragma_update(None, "user_version", 4)?;
+            tx.commit()?;
+            current_version = 4;
+        }
+
+        if current_version == 4 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V5_SQL)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }
@@ -730,6 +818,64 @@ impl PlannerTxn<'_> {
         Ok(row)
     }
 
+    pub fn record_local_only_upload(
+        &mut self,
+        client_file_id: &ClientFileId,
+        uploaded: &UploadedContent,
+        uploaded_at_ms: u64,
+    ) -> Result<LocalOnlyUploadRow, StateDbError> {
+        let local_only = self.load_local_only_file(client_file_id)?.ok_or_else(|| {
+            StateDbError::LocalOnlyFileMissing {
+                client_file_id: client_file_id.as_str().to_owned(),
+            }
+        })?;
+        validate_local_only_upload(
+            &local_only,
+            &uploaded.namespace_id,
+            &uploaded.file_digest_sha256,
+        )?;
+
+        let row = LocalOnlyUploadRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: uploaded.namespace_id.clone(),
+            file_digest_sha256: uploaded.file_digest_sha256.clone(),
+            content_manifest_digest: uploaded.content_manifest_digest.clone(),
+            manifest_object_key: uploaded.manifest_object_key.clone(),
+            file_size_bytes: uploaded.file_size_bytes,
+            uploaded_at_ms,
+        };
+
+        self.tx.execute(
+            "INSERT INTO local_only_uploads (
+                client_file_id,
+                namespace_id,
+                file_digest_sha256,
+                content_manifest_digest,
+                manifest_object_key,
+                file_size_bytes,
+                uploaded_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(client_file_id) DO UPDATE SET
+                namespace_id = excluded.namespace_id,
+                file_digest_sha256 = excluded.file_digest_sha256,
+                content_manifest_digest = excluded.content_manifest_digest,
+                manifest_object_key = excluded.manifest_object_key,
+                file_size_bytes = excluded.file_size_bytes,
+                uploaded_at_ms = excluded.uploaded_at_ms",
+            params![
+                row.client_file_id.as_str(),
+                row.namespace_id.as_str(),
+                &row.file_digest_sha256,
+                &row.content_manifest_digest,
+                &row.manifest_object_key,
+                to_sql_u64(row.file_size_bytes, "file_size_bytes")?,
+                to_sql_u64(row.uploaded_at_ms, "uploaded_at_ms")?,
+            ],
+        )?;
+
+        Ok(row)
+    }
+
     pub fn record_pending_client_mutation(
         &mut self,
         client_file_id: &ClientFileId,
@@ -895,6 +1041,7 @@ impl PlannerTxn<'_> {
         self.upsert_sync_anchor(&anchor_row)?;
         self.delete_planned_action(&remote.namespace_id, remote.inode_id)?;
         self.delete_planned_local_only_action(client_file_id)?;
+        self.delete_local_only_upload(client_file_id)?;
         self.delete_local_only_file(client_file_id)?;
 
         Ok(BoundLocalOnlyFile {
@@ -1006,6 +1153,17 @@ impl PlannerTxn<'_> {
     ) -> Result<(), StateDbError> {
         self.tx.execute(
             "DELETE FROM local_only_state WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_local_only_upload(
+        &mut self,
+        client_file_id: &ClientFileId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM local_only_uploads WHERE client_file_id = ?1",
             params![client_file_id.as_str()],
         )?;
         Ok(())
@@ -1372,6 +1530,58 @@ fn load_planned_local_only_action(
     .transpose()
 }
 
+fn load_local_only_upload(
+    conn: &Connection,
+    client_file_id: &ClientFileId,
+) -> Result<Option<LocalOnlyUploadRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT
+                namespace_id,
+                file_digest_sha256,
+                content_manifest_digest,
+                manifest_object_key,
+                file_size_bytes,
+                uploaded_at_ms
+            FROM local_only_uploads
+            WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(
+            namespace_id,
+            file_digest_sha256,
+            content_manifest_digest,
+            manifest_object_key,
+            file_size_bytes,
+            uploaded_at_ms,
+        )| {
+            Ok(LocalOnlyUploadRow {
+                client_file_id: client_file_id.clone(),
+                namespace_id: NamespaceId::from(namespace_id),
+                file_digest_sha256,
+                content_manifest_digest,
+                manifest_object_key,
+                file_size_bytes: from_sql_u64(file_size_bytes, "file_size_bytes")?,
+                uploaded_at_ms: from_sql_u64(uploaded_at_ms, "uploaded_at_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn load_pending_client_mutation(
     conn: &Connection,
     client_request_id: &str,
@@ -1440,6 +1650,43 @@ fn ensure_bind_match(
     })
 }
 
+fn validate_local_only_upload(
+    local_only: &LocalOnlyFileStateRow,
+    upload_namespace_id: &NamespaceId,
+    uploaded_file_digest: &str,
+) -> Result<(), StateDbError> {
+    if local_only.inode_kind != InodeKind::File {
+        return Err(StateDbError::UploadedContentRequiresFile {
+            client_file_id: local_only.client_file_id.as_str().to_owned(),
+            inode_kind: inode_kind_as_str(&local_only.inode_kind).to_owned(),
+        });
+    }
+
+    if local_only.namespace_id != *upload_namespace_id {
+        return Err(StateDbError::UploadedContentNamespaceMismatch {
+            client_file_id: local_only.client_file_id.as_str().to_owned(),
+            local_namespace_id: local_only.namespace_id.as_str().to_owned(),
+            uploaded_namespace_id: upload_namespace_id.as_str().to_owned(),
+        });
+    }
+
+    let local_content_digest = local_only.content_digest.as_deref().ok_or_else(|| {
+        StateDbError::UploadedContentLocalDigestMissing {
+            client_file_id: local_only.client_file_id.as_str().to_owned(),
+        }
+    })?;
+
+    if local_content_digest != uploaded_file_digest {
+        return Err(StateDbError::UploadedContentDigestMismatch {
+            client_file_id: local_only.client_file_id.as_str().to_owned(),
+            local_content_digest: local_content_digest.to_owned(),
+            uploaded_file_digest: uploaded_file_digest.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 fn to_sql_u64(value: u64, field: &'static str) -> Result<i64, StateDbError> {
     i64::try_from(value).map_err(|_| StateDbError::UnsignedOutOfRange { field, value })
 }
@@ -1452,16 +1699,19 @@ fn from_sql_u64(value: i64, field: &'static str) -> Result<u64, StateDbError> {
 mod tests {
     use super::{
         BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
-        LocalOnlyPlannedActionRow, ObservedLocalOnlyInode, PendingClientMutationRow,
-        RemoteFileStateRow, SqliteStateDb, StateDbError, SyncAnchorRow, SCHEMA_VERSION,
+        LocalOnlyPlannedActionRow, LocalOnlyUploadRow, ObservedLocalOnlyInode,
+        PendingClientMutationRow, RemoteFileStateRow, SqliteStateDb, StateDbError, SyncAnchorRow,
+        SCHEMA_VERSION,
     };
+    use crate::upload::UploadedContent;
     use loon_types::{
         ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
-        CreatedRemoteInode, InodeId, InodeKind, NamespaceId, RevisionNo,
+        ContentManifestEnvelope, ContentManifestPayload, CreatedRemoteInode, InodeId, InodeKind,
+        NamespaceId, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
     };
 
     #[test]
-    fn sqlite_state_db_applies_schema_v4() {
+    fn sqlite_state_db_applies_schema_v5() {
         let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
         assert_eq!(
@@ -1477,6 +1727,7 @@ mod tests {
             "client_metadata",
             "local_only_state",
             "planned_local_only_actions",
+            "local_only_uploads",
             "pending_client_mutations",
             "transfer_ledger",
             "conflicts_and_errors",
@@ -1572,6 +1823,73 @@ mod tests {
                 .expect("load local-only state"),
             Some(local_only)
         );
+    }
+
+    #[test]
+    fn record_local_only_upload_persists_and_resolves_manifest_digest() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let local_only = sample_local_only();
+        let uploaded = sample_uploaded_content();
+
+        db.planner_transaction("seed-local-only", |tx| {
+            tx.upsert_local_only_file(&local_only)?;
+            Ok(())
+        })
+        .expect("seed local-only state");
+
+        let recorded = db
+            .record_local_only_upload(&local_only.client_file_id, &uploaded, 1_700_000_104_000)
+            .expect("record local-only upload");
+
+        assert_eq!(
+            recorded,
+            LocalOnlyUploadRow {
+                client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+                namespace_id: NamespaceId::from("ns-1"),
+                file_digest_sha256: "sha256:new-local-file".to_owned(),
+                content_manifest_digest: "sha256:manifest-new-local-file".to_owned(),
+                manifest_object_key:
+                    "namespaces/ns-1/manifests/sha256:manifest-new-local-file.json".to_owned(),
+                file_size_bytes: 15,
+                uploaded_at_ms: 1_700_000_104_000,
+            }
+        );
+        assert_eq!(
+            db.load_local_only_upload(&local_only.client_file_id)
+                .expect("load persisted upload"),
+            Some(recorded)
+        );
+        assert_eq!(
+            db.resolve_local_only_upload_content_manifest_digest(&local_only)
+                .expect("resolve content manifest digest"),
+            "sha256:manifest-new-local-file"
+        );
+    }
+
+    #[test]
+    fn record_local_only_upload_rejects_mismatched_digest() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let mut local_only = sample_local_only();
+        local_only.content_digest = Some("sha256:edited-after-upload".to_owned());
+
+        db.planner_transaction("seed-local-only", |tx| {
+            tx.upsert_local_only_file(&local_only)?;
+            Ok(())
+        })
+        .expect("seed local-only state");
+
+        let error = db
+            .record_local_only_upload(
+                &local_only.client_file_id,
+                &sample_uploaded_content(),
+                1_700_000_104_000,
+            )
+            .expect_err("stale upload should be rejected");
+
+        assert!(matches!(
+            error,
+            StateDbError::UploadedContentDigestMismatch { .. }
+        ));
     }
 
     #[test]
@@ -1748,6 +2066,11 @@ mod tests {
                 reason: "local_only_file_without_remote_identity".to_owned(),
                 created_at_ms: 1_700_000_105_000,
             })?;
+            tx.record_local_only_upload(
+                &client_file_id,
+                &sample_uploaded_content(),
+                1_700_000_104_000,
+            )?;
             Ok(())
         })
         .expect("seed bindable local-only state");
@@ -1802,6 +2125,11 @@ mod tests {
         assert_eq!(
             db.load_planned_local_only_action(&client_file_id)
                 .expect("load temp planned action"),
+            None
+        );
+        assert_eq!(
+            db.load_local_only_upload(&client_file_id)
+                .expect("load temp upload row"),
             None
         );
     }
@@ -1864,6 +2192,11 @@ mod tests {
                 reason: "local_only_file_without_remote_identity".to_owned(),
                 created_at_ms: 1_700_000_105_000,
             })?;
+            tx.record_local_only_upload(
+                &client_file_id,
+                &sample_uploaded_content(),
+                1_700_000_104_000,
+            )?;
             tx.record_pending_client_mutation(&client_file_id, &request, 1_700_000_106_000)?;
             Ok(())
         })
@@ -1929,6 +2262,11 @@ mod tests {
         assert_eq!(
             db.load_local_only_file(&client_file_id)
                 .expect("load temp local-only state after bind"),
+            None
+        );
+        assert_eq!(
+            db.load_local_only_upload(&client_file_id)
+                .expect("load temp upload row after bind"),
             None
         );
     }
@@ -2027,6 +2365,26 @@ mod tests {
                 display_name: "draft.txt".to_owned(),
                 content_digest: Some("sha256:new-local-file".to_owned()),
             },
+        }
+    }
+
+    fn sample_uploaded_content() -> UploadedContent {
+        UploadedContent {
+            namespace_id: NamespaceId::from("ns-1"),
+            file_size_bytes: 15,
+            file_digest_sha256: "sha256:new-local-file".to_owned(),
+            content_manifest_digest: "sha256:manifest-new-local-file".to_owned(),
+            manifest_object_key: "namespaces/ns-1/manifests/sha256:manifest-new-local-file.json"
+                .to_owned(),
+            manifest_envelope: ContentManifestEnvelope::from_payload(ContentManifestPayload {
+                namespace_id: NamespaceId::from("ns-1"),
+                file_size_bytes: 15,
+                file_digest_sha256: "sha256:new-local-file".to_owned(),
+                block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
+                blocks: Vec::new(),
+            })
+            .expect("build sample manifest envelope"),
+            block_objects: Vec::new(),
         }
     }
 

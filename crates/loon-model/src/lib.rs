@@ -76,6 +76,28 @@ pub struct ModelUploadedContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelLocalOnlyUploadRecord {
+    pub namespace_id: NamespaceId,
+    pub file_digest_sha256: String,
+    pub content_manifest_digest: String,
+    pub manifest_object_key: String,
+    pub file_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelLocalOnlyUploadValidationError {
+    MissingLocalContentDigest,
+    NamespaceMismatch {
+        expected: NamespaceId,
+        actual: NamespaceId,
+    },
+    FileDigestMismatch {
+        expected: String,
+        actual: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelValidatedContent {
     pub file_size_bytes: u64,
     pub file_digest_sha256: String,
@@ -1028,6 +1050,31 @@ pub fn build_uploaded_content(
     })
 }
 
+pub fn validate_local_only_upload_record(
+    namespace_id: &NamespaceId,
+    local_content_digest: Option<&str>,
+    upload: &ModelLocalOnlyUploadRecord,
+) -> Result<String, ModelLocalOnlyUploadValidationError> {
+    let local_content_digest = local_content_digest
+        .ok_or(ModelLocalOnlyUploadValidationError::MissingLocalContentDigest)?;
+
+    if &upload.namespace_id != namespace_id {
+        return Err(ModelLocalOnlyUploadValidationError::NamespaceMismatch {
+            expected: namespace_id.clone(),
+            actual: upload.namespace_id.clone(),
+        });
+    }
+
+    if upload.file_digest_sha256 != local_content_digest {
+        return Err(ModelLocalOnlyUploadValidationError::FileDigestMismatch {
+            expected: local_content_digest.to_owned(),
+            actual: upload.file_digest_sha256.clone(),
+        });
+    }
+
+    Ok(upload.content_manifest_digest.clone())
+}
+
 pub fn validate_uploaded_content_reference(
     namespace_id: &NamespaceId,
     content_manifest_digest: &str,
@@ -1293,6 +1340,68 @@ mod tests {
             "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
         );
         assert_eq!(validated.block_count, 1);
+    }
+
+    #[test]
+    fn model_validates_local_only_upload_record() {
+        let upload = ModelLocalOnlyUploadRecord {
+            namespace_id: NamespaceId::from("ns-1"),
+            file_digest_sha256:
+                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            content_manifest_digest:
+                "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                    .to_owned(),
+            manifest_object_key:
+                "namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json"
+                    .to_owned(),
+            file_size_bytes: 16,
+        };
+
+        let resolved = validate_local_only_upload_record(
+            &NamespaceId::from("ns-1"),
+            Some("sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"),
+            &upload,
+        )
+        .expect("validate local-only upload");
+
+        assert_eq!(
+            resolved,
+            "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+        );
+    }
+
+    #[test]
+    fn model_rejects_local_only_upload_record_when_digest_mismatches() {
+        let upload = ModelLocalOnlyUploadRecord {
+            namespace_id: NamespaceId::from("ns-1"),
+            file_digest_sha256:
+                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            content_manifest_digest:
+                "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                    .to_owned(),
+            manifest_object_key:
+                "namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json"
+                    .to_owned(),
+            file_size_bytes: 16,
+        };
+
+        let error = validate_local_only_upload_record(
+            &NamespaceId::from("ns-1"),
+            Some("sha256:different"),
+            &upload,
+        )
+        .expect_err("mismatched digest should be rejected");
+
+        assert_eq!(
+            error,
+            ModelLocalOnlyUploadValidationError::FileDigestMismatch {
+                expected: "sha256:different".to_owned(),
+                actual: "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            }
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
-use loon_client::executor::build_client_mutation_request;
-use loon_client::planner::{plan_file, PlannedActionRecord, PlannedLocalOnlyActionRecord};
+use loon_client::executor::build_client_mutation_request_from_state;
+use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
     BoundLocalOnlyFile, LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
     RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
@@ -59,8 +59,6 @@ fn run_fixture(relative_path: &str) {
     assert!(actions[5].is_restart(), "restart should be sixth");
     let planner_tick = actions[6].planner().expect("planner tick seventh");
 
-    let planned = PlannedLocalOnlyActionRecord::try_from(initial.planned_local_only_action.clone())
-        .expect("decode planned local-only action");
     let uploaded_content = initial.local_file.as_ref().map(|local_file| {
         let source_path = source_root.join(&local_file.relative_path);
         fs::create_dir_all(source_path.parent().expect("source file parent"))
@@ -69,16 +67,26 @@ fn run_fixture(relative_path: &str) {
         upload_small_file_from_path(&store, &initial.local_only_state.namespace_id, &source_path)
             .expect("upload local file before request build")
     });
-    let request = build_client_mutation_request(
-        &build.client_request_id,
-        &initial.local_only_state,
-        &planned,
-        uploaded_content
-            .as_ref()
-            .map(|uploaded| uploaded.content_manifest_digest.as_str())
-            .or(initial.local_only_state.content_digest.as_deref()),
-    )
-    .expect("build client mutation request");
+
+    if let Some(uploaded) = uploaded_content.as_ref() {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB for upload ledger");
+        db.record_local_only_upload(
+            &initial.local_only_state.client_file_id,
+            uploaded,
+            initial.planned_local_only_action.created_at_ms,
+        )
+        .expect("record uploaded content in client state");
+    }
+
+    let request = {
+        let db = SqliteStateDb::open(&db_path).expect("open client state DB for request build");
+        build_client_mutation_request_from_state(
+            &db,
+            &build.client_request_id,
+            &initial.local_only_state.client_file_id,
+        )
+        .expect("build client mutation request")
+    };
 
     let response = {
         let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
@@ -164,6 +172,11 @@ fn run_fixture(relative_path: &str) {
         } else {
             panic!("fixture currently expects pending mutation to clear");
         }
+    );
+    assert_eq!(
+        db.load_local_only_upload(&initial.local_only_state.client_file_id)
+            .expect("load local-only upload after bind"),
+        None
     );
 }
 

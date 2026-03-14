@@ -290,6 +290,51 @@ Failure modes prevented:
 - different uploaders writing different manifest bytes under the same manifest digest
 - treating provider-side existence as proof that the immutable object body matches the local file
 
+## Local-only upload ledger (schema v5)
+
+The first restart-safe `create_file` path adds one narrow durable table:
+
+- `local_only_uploads`
+
+One row is keyed by:
+
+```text
+client_file_id
+```
+
+The row must durably map:
+
+- `client_file_id`
+- `namespace_id`
+- `file_digest_sha256`
+- `content_manifest_digest`
+- `manifest_object_key`
+- `file_size_bytes`
+- `uploaded_at_ms`
+
+Rules:
+
+- the client may persist this row only for a local-only `file`
+- persisting the row must validate that the uploaded namespace matches the local-only row
+- persisting the row must validate that the uploaded `file_digest_sha256` still matches the
+  current `local_only_state.content_digest`
+- when building `create_file`, the executor must load `content_manifest_digest` from this durable
+  row, not from an in-memory upload result
+- if the local-only file later binds to a real inode, the temp upload row must be cleared in the
+  same transaction that clears the temp identity
+
+Why this rule exists:
+
+- upload and publish are separate durable steps
+- restart must not force the executor to rediscover upload state from a local filesystem path
+- if the local file changed after upload, the executor must refuse to publish stale content
+
+Failure modes prevented:
+
+- losing the uploaded manifest digest across restart and rebuilding a request from ambient memory
+- publishing `create_file` after the local-only file changed to a different digest
+- leaving temp upload state behind after the temp identity is already bound to a real inode
+
 ## Client mutation contract
 
 The first executor does not invent a separate long-lived sync protocol. It emits
@@ -320,8 +365,9 @@ Rules:
 - one planned local-only action maps to one client mutation request
 - the request carries canonical `parent_inode_id`, never a parent path string
 - `client_request_id` is stable for retries and becomes the authoritative `request_id`
-- for `create_file`, the executor must use the `content_manifest_digest` returned by the durable
-  upload step, not the local observed file digest
+- for `create_file`, the executor must load `content_manifest_digest` from the durable
+  `local_only_uploads(client_file_id)` row, not from caller memory and not from the local observed
+  file digest
 
 Why this rule exists:
 
@@ -333,6 +379,15 @@ Failure modes prevented:
 - the executor guessing parent identity from mutable paths
 - planner output being coupled to a transport shape that cannot become a namespace commit request
 - retrying the same local-only action with a different authoritative request id
+
+Failure modes named for the first implementation:
+
+- `planned_local_only_action_missing`
+- `uploaded_content_missing`
+- `uploaded_content_requires_file`
+- `uploaded_content_namespace_mismatch`
+- `uploaded_content_digest_mismatch`
+- `uploaded_content_local_digest_missing`
 
 ## Schema v4: pending client mutations
 
