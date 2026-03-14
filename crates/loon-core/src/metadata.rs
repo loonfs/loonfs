@@ -52,9 +52,6 @@ pub struct AppliedMetadataState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetadataApplyError {
-    UnsupportedWalOp {
-        op_name: String,
-    },
     RevisionOverflow {
         inode_id: InodeId,
         base_revision: RevisionNo,
@@ -149,10 +146,22 @@ impl MetadataState {
                         "replace_file_appends_new_revision_head",
                     );
                 }
-                WalOp::Rename { .. } => {
-                    return Err(MetadataApplyError::UnsupportedWalOp {
-                        op_name: "rename".to_owned(),
+                WalOp::Rename {
+                    inode_id,
+                    new_parent_inode,
+                    new_display_name,
+                } => {
+                    metadata_state.direntries.push(DirentryRecord {
+                        parent_inode_id: *new_parent_inode,
+                        name_key: new_display_name.clone(),
+                        display_name: new_display_name.clone(),
+                        child_inode_id: *inode_id,
+                        bind_seq: committed_seq,
                     });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "rename_appends_new_direntry_binding",
+                    );
                 }
                 WalOp::DeleteSubtree { .. } => {
                     let WalOp::DeleteSubtree { root_inode } = op else {
@@ -259,6 +268,14 @@ impl MetadataState {
             .cloned()
     }
 
+    pub fn current_parent_binding_for_child(
+        &self,
+        child_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryRecord> {
+        self.latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)
+    }
+
     pub fn active_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
@@ -330,8 +347,27 @@ impl MetadataState {
             return None;
         }
 
-        let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
+        let direntry = self.active_child_binding_at_seq(parent_inode_id, name_key, base_seq)?;
         self.visible_inode(direntry.child_inode_id, base_seq)?;
+        Some(direntry)
+    }
+
+    fn active_child_binding_at_seq(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryRecord> {
+        let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
+        let latest_binding =
+            self.latest_parent_binding_for_child_at_seq(direntry.child_inode_id, base_seq)?;
+        if latest_binding.parent_inode_id != direntry.parent_inode_id
+            || latest_binding.name_key != direntry.name_key
+            || latest_binding.bind_seq != direntry.bind_seq
+        {
+            return None;
+        }
+
         Some(direntry)
     }
 
@@ -348,6 +384,30 @@ impl MetadataState {
             .max_by_key(|direntry| direntry.bind_seq)
             .cloned()
     }
+
+    pub fn would_create_directory_cycle(
+        &self,
+        inode_id: InodeId,
+        new_parent_inode: InodeId,
+        base_seq: ChangeSeq,
+    ) -> bool {
+        let mut current = Some(new_parent_inode);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+            if candidate_inode_id == inode_id {
+                return true;
+            }
+            current = self
+                .latest_parent_binding_for_child_at_seq(candidate_inode_id, base_seq)
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        false
+    }
 }
 
 fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
@@ -359,8 +419,7 @@ fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        DirentryRecord, InodeRecord, MetadataApplyError, MetadataState, RevisionRecord,
-        SubtreeTombstoneRecord,
+        DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     };
     use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
 
@@ -623,23 +682,75 @@ mod tests {
     }
 
     #[test]
-    fn apply_committed_wal_ops_rejects_unsupported_op() {
-        let error = MetadataState::default()
-            .apply_committed_wal_ops(
-                ChangeSeq(42),
-                &[WalOp::Rename {
+    fn apply_committed_wal_ops_appends_rename_binding_and_hides_old_visible_name() {
+        let applied = MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(7),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(5),
+                },
+                InodeRecord {
                     inode_id: InodeId(42),
-                    new_parent_inode: InodeId(2),
-                    new_display_name: "renamed.txt".to_owned(),
-                }],
-            )
-            .expect_err("rename should be unsupported");
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(17),
+                },
+            ],
+            direntries: vec![
+                DirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(7),
+                    bind_seq: ChangeSeq(5),
+                },
+                DirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "report.txt".to_owned(),
+                    display_name: "report.txt".to_owned(),
+                    child_inode_id: InodeId(42),
+                    bind_seq: ChangeSeq(17),
+                },
+            ],
+            revisions: vec![RevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(5),
+                committed_seq: ChangeSeq(52),
+                content_manifest_digest: "sha256:report-v5".to_owned(),
+            }],
+            subtree_tombstones: Vec::new(),
+        }
+        .apply_committed_wal_ops(
+            ChangeSeq(53),
+            &[WalOp::Rename {
+                inode_id: InodeId(42),
+                new_parent_inode: InodeId(7),
+                new_display_name: "report-renamed.txt".to_owned(),
+            }],
+        )
+        .expect("apply rename");
 
         assert_eq!(
-            error,
-            MetadataApplyError::UnsupportedWalOp {
-                op_name: "rename".to_owned(),
-            }
+            applied
+                .metadata_state
+                .visible_child(InodeId(2), "report.txt", ChangeSeq(53)),
+            None
         );
+        assert_eq!(
+            applied
+                .metadata_state
+                .visible_child(InodeId(7), "report-renamed.txt", ChangeSeq(53))
+                .expect("renamed visible child")
+                .child_inode_id,
+            InodeId(42)
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"rename_appends_new_direntry_binding".to_owned()));
     }
 }

@@ -10,6 +10,7 @@ pub const INVARIANTS: &[&str] = &[
     "create_dir_writes_inode_and_direntry_rows",
     "create_file_writes_inode_direntry_and_initial_revision",
     "replace_file_appends_new_revision_head",
+    "rename_appends_new_direntry_binding",
     "delete_subtree_writes_tombstone_row",
     "content_manifest_checksum_matches_payload",
     "content_manifest_digest_matches_object",

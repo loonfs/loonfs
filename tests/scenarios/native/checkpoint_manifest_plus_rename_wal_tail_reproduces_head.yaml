@@ -1,0 +1,215 @@
+name: checkpoint_manifest_plus_rename_wal_tail_reproduces_head
+initial:
+  checkpoint_manifest:
+    key: namespaces/ns-1/snapshots/00000000000000000052/manifest.json
+    payload:
+      namespace_id: ns-1
+      checkpoint_seq: 52
+      active_fence_token: 8
+      next_inode_id: 501
+      retention_floor_seq: 50
+      verified: true
+      tables:
+        - family: inodes
+          segments:
+            - object_key: namespaces/ns-1/snapshots/00000000000000000052/tables/inodes-00000.sst.zst
+              segment_index: 0
+              row_count: 3
+              min_key: inode-00000000000000000002
+              max_key: inode-00000000000000000042
+              payload_checksum_sha256: fixture-inodes
+              page_checksums_sha256:
+                - fixture-inodes-page-0
+        - family: direntries
+          segments:
+            - object_key: namespaces/ns-1/snapshots/00000000000000000052/tables/direntries-00000.sst.zst
+              segment_index: 0
+              row_count: 2
+              min_key: direntry-00000000000000000002-docs
+              max_key: direntry-00000000000000000002-report.txt
+              payload_checksum_sha256: fixture-direntries
+              page_checksums_sha256:
+                - fixture-direntries-page-0
+        - family: revisions
+          segments:
+            - object_key: namespaces/ns-1/snapshots/00000000000000000052/tables/revisions-00000.sst.zst
+              segment_index: 0
+              row_count: 1
+              min_key: revision-00000000000000000042-00000000000000000005
+              max_key: revision-00000000000000000042-00000000000000000005
+              payload_checksum_sha256: fixture-revisions
+              page_checksums_sha256:
+                - fixture-revisions-page-0
+        - family: tombstones
+          segments:
+            - object_key: namespaces/ns-1/snapshots/00000000000000000052/tables/tombstones-00000.sst.zst
+              segment_index: 0
+              row_count: 0
+              min_key: ""
+              max_key: ""
+              payload_checksum_sha256: fixture-tombstones
+              page_checksums_sha256:
+                - fixture-tombstones-page-0
+  checkpoint_segments:
+    - key: namespaces/ns-1/snapshots/00000000000000000052/tables/inodes-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 52
+        family: inodes
+        segment_index: 0
+        row_count: 3
+        min_key: inode-00000000000000000002
+        max_key: inode-00000000000000000042
+        pages:
+          - page_index: 0
+            min_key: inode-00000000000000000002
+            max_key: inode-00000000000000000042
+            row_keys:
+              - inode-00000000000000000002
+              - inode-00000000000000000007
+              - inode-00000000000000000042
+            rows:
+              - row_kind: inode
+                inode_id: 2
+                inode_kind: dir
+                created_seq: 1
+              - row_kind: inode
+                inode_id: 7
+                inode_kind: dir
+                created_seq: 5
+              - row_kind: inode
+                inode_id: 42
+                inode_kind: file
+                created_seq: 17
+    - key: namespaces/ns-1/snapshots/00000000000000000052/tables/direntries-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 52
+        family: direntries
+        segment_index: 0
+        row_count: 2
+        min_key: direntry-00000000000000000002-docs
+        max_key: direntry-00000000000000000002-report.txt
+        pages:
+          - page_index: 0
+            min_key: direntry-00000000000000000002-docs
+            max_key: direntry-00000000000000000002-report.txt
+            row_keys:
+              - direntry-00000000000000000002-docs
+              - direntry-00000000000000000002-report.txt
+            rows:
+              - row_kind: direntry
+                parent_inode_id: 2
+                name_key: docs
+                display_name: docs
+                child_inode_id: 7
+                bind_seq: 5
+              - row_kind: direntry
+                parent_inode_id: 2
+                name_key: report.txt
+                display_name: report.txt
+                child_inode_id: 42
+                bind_seq: 17
+    - key: namespaces/ns-1/snapshots/00000000000000000052/tables/revisions-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 52
+        family: revisions
+        segment_index: 0
+        row_count: 1
+        min_key: revision-00000000000000000042-00000000000000000005
+        max_key: revision-00000000000000000042-00000000000000000005
+        pages:
+          - page_index: 0
+            min_key: revision-00000000000000000042-00000000000000000005
+            max_key: revision-00000000000000000042-00000000000000000005
+            row_keys:
+              - revision-00000000000000000042-00000000000000000005
+            rows:
+              - row_kind: revision
+                inode_id: 42
+                revision_no: 5
+                committed_seq: 52
+                content_manifest_digest: sha256:report-v5
+    - key: namespaces/ns-1/snapshots/00000000000000000052/tables/tombstones-00000.sst.zst
+      payload:
+        namespace_id: ns-1
+        checkpoint_seq: 52
+        family: tombstones
+        segment_index: 0
+        row_count: 0
+        min_key: ""
+        max_key: ""
+        pages:
+          - page_index: 0
+            min_key: ""
+            max_key: ""
+            row_keys: []
+            rows: []
+  wal_objects:
+    - key: namespaces/ns-1/wal/00000000000000000053-req-20260314-rename-0001.cbor.zst
+      payload:
+        namespace_id: ns-1
+        seq: 53
+        base_head_seq: 52
+        commit_id: req-20260314-rename-0001
+        writer_fence_token: 9
+        ops:
+          - op_kind: rename
+            inode_id: 42
+            new_parent_inode: 7
+            new_display_name: report-renamed.txt
+actions:
+  - replay_from_checkpoint_and_wal_tail: true
+expect:
+  final_head:
+    namespace_id: ns-1
+    seq: 53
+    active_fence_token: 9
+    next_inode_id: 501
+    snapshot_hint_seq: 52
+    retention_floor_seq: 50
+  final_metadata_state:
+    inodes:
+      - inode_id: 2
+        inode_kind: dir
+        created_seq: 1
+      - inode_id: 7
+        inode_kind: dir
+        created_seq: 5
+      - inode_id: 42
+        inode_kind: file
+        created_seq: 17
+    direntries:
+      - parent_inode_id: 2
+        name_key: docs
+        display_name: docs
+        child_inode_id: 7
+        bind_seq: 5
+      - parent_inode_id: 2
+        name_key: report.txt
+        display_name: report.txt
+        child_inode_id: 42
+        bind_seq: 17
+      - parent_inode_id: 7
+        name_key: report-renamed.txt
+        display_name: report-renamed.txt
+        child_inode_id: 42
+        bind_seq: 53
+    revisions:
+      - inode_id: 42
+        revision_no: 5
+        committed_seq: 52
+        content_manifest_digest: sha256:report-v5
+    subtree_tombstones: []
+  invariants:
+    - checkpoint_manifest_checksum_matches_payload
+    - checkpoint_manifest_key_matches_seq
+    - checkpoint_manifest_must_be_verified
+    - checkpoint_replay_requires_all_manifest_segments
+    - checkpoint_segment_descriptor_matches_payload
+    - checkpoint_segment_rows_restore_basis_metadata
+    - wal_replay_applies_metadata_rows
+    - rename_appends_new_direntry_binding
+    - checkpoint_plus_wal_tail_reproduces_head
+    - checkpoint_plus_wal_tail_reproduces_metadata

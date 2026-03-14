@@ -129,6 +129,54 @@ Failure modes named for the first implementation:
 - `replace_file_under_subtree_tombstone`
 - `replace_file_path_change_not_supported`
 
+## Rename mutation
+
+The first inode-keyed name-binding mutation is:
+
+- `rename(inode_id, new_parent_inode, new_display_name)`
+
+Rules:
+
+- `rename` may move an existing inode to a new visible parent, change its visible name, or both
+- `rename` appends one new direntry row for the existing `inode_id`
+- `rename` does not rewrite or erase the older source direntry row
+- after commit, the renamed inode's visible path is derived from its latest parent binding
+- `rename` does not change inode kind or file revision history
+- the first implementation rejects directory moves that would make an inode an ancestor of itself
+
+The first rename preconditions are:
+
+- `HeadSeqIs(current_head.seq)`
+- `ChildNameAbsent(new_parent_inode, new_name_key)`
+- `AncestorsNotSubtreeDeleted(inode_id)`
+- `AncestorsNotSubtreeDeleted(new_parent_inode)`
+
+For the current rename contract, `new_name_key` may equal `new_display_name` until the shared
+versioned name-policy layer is wired into request construction.
+
+Why these rules exist:
+
+- rename should stay inode-keyed and append-only instead of becoming delete+add
+- path visibility must come from canonical direntry history, not mutable path caches
+- move/rename should reject obvious tree-shape corruption and deleted-ancestor races
+
+Failure modes prevented:
+
+- one inode staying visible at both its old and new path after rename
+- moving a directory under its own descendant and creating a cycle
+- renaming into an occupied sibling slot without a deterministic conflict
+
+Failure modes named for the first implementation:
+
+- `rename_inode_missing`
+- `rename_source_binding_missing`
+- `rename_target_parent_missing`
+- `rename_target_parent_not_directory`
+- `rename_target_name_collision`
+- `rename_would_cycle_directory`
+- `rename_inode_under_subtree_tombstone`
+- `rename_target_parent_under_subtree_tombstone`
+
 ## Delete-subtree mutation
 
 The first recursive delete mutation is:
@@ -246,6 +294,9 @@ Failure modes named for the first implementation:
 - `create_parent_missing`
 - `create_parent_not_directory`
 - `create_child_name_collision`
+- `rename_target_parent_missing`
+- `rename_target_parent_not_directory`
+- `rename_target_name_collision`
 
 ### `InodeRevisionIs(inode_id, revision_no)`
 
@@ -283,6 +334,8 @@ Failure modes named for the first implementation:
 
 - `create_under_subtree_tombstone`
 - `replace_file_under_subtree_tombstone`
+- `rename_inode_under_subtree_tombstone`
+- `rename_target_parent_under_subtree_tombstone`
 - `delete_subtree_root_covered_by_tombstone`
 - `restore_revision_under_subtree_tombstone`
 
@@ -294,7 +347,8 @@ frame validation succeeds:
 1. `HeadSeqIs`
 2. inode existence / kind lookups needed by the request ops
 3. `ChildNameAbsent` and `InodeRevisionIs`
-4. delete-root and restore-source lookups needed by `delete_subtree` and `restore_revision`
+4. rename-source, delete-root, and restore-source lookups needed by
+   `rename`, `delete_subtree`, and `restore_revision`
 5. `AncestorsNotSubtreeDeleted`
 
 Why this order exists:
@@ -315,6 +369,9 @@ though the explicit precondition list only names `AncestorsNotSubtreeDeleted(roo
 For the first restore-revision contract, source revision existence and “historical source” checks
 are op validation rules even though the explicit precondition list already carries
 `InodeRevisionIs(inode_id, base_revision_no)`.
+
+For the first rename contract, source-binding existence and directory-cycle checks are op validation
+rules even though the explicit precondition list only names target-slot absence and subtree checks.
 
 ## First authoritative metadata transition rules
 
@@ -359,6 +416,24 @@ The committed transition must append:
 
 It must not append or rewrite an inode row.
 It must not append or rewrite a direntry row.
+
+### `rename(inode_id, new_parent_inode, new_display_name)`
+
+The committed transition must append:
+
+- one direntry row under `(new_parent_inode, new_name_key)` with:
+  `display_name = new_display_name`,
+  `child_inode_id = inode_id`,
+  and `bind_seq = commit_seq`
+
+It must not append or rewrite an inode row.
+It must not append or rewrite a revision row.
+It must not erase the older source direntry row.
+
+At any later `base_seq >= commit_seq`, visibility queries must treat:
+
+- the inode's current visible parent binding as this newest direntry row
+- the older source name as no longer visible once a newer binding for the same child exists
 
 ### `delete_subtree(root_inode)`
 
@@ -411,6 +486,7 @@ Failure modes named for the first implementation:
 - `create_dir_writes_inode_and_direntry_rows`
 - `create_file_writes_inode_direntry_and_initial_revision`
 - `replace_file_appends_new_revision_head`
+- `rename_appends_new_direntry_binding`
 - `delete_subtree_writes_tombstone_row`
 - `restore_creates_new_revision_head`
 

@@ -115,6 +115,8 @@ Minimum semantics carried by this family:
 - `display_name` is preserved exactly for presentation
 - `name_key` is compared by the shared versioned `NamePolicy`
 - later rows under the same `(parent_inode_id, name_key)` may supersede older bindings
+- later rows that rebind the same `child_inode_id` under a different parent/name pair supersede the
+  child's older visible binding without erasing that older row from history
 - replay can determine which binding is visible at any committed seq
 
 Why it exists:
@@ -194,12 +196,21 @@ Returns the active direntry binding only if:
 - the parent inode kind is `DIR`
 - at least one direntry row for `(parent_inode_id, name_key)` is bound at or before `base_seq`
 - no later binding for the same `(parent_inode_id, name_key)` supersedes it by `base_seq`
+- the bound child inode's latest parent binding at `base_seq` is still this direntry row
 - the bound child inode is still visible at `base_seq`
 
 ### `bound_child_at_seq(namespace_id, parent_inode_id, name_key, base_seq)`
 
 Returns the latest direntry binding for `(parent_inode_id, name_key)` at or before `base_seq`,
 without hiding the result because the parent or child is later covered by a subtree tombstone.
+
+### `current_parent_binding_for_child(namespace_id, child_inode_id, base_seq)`
+
+Returns the latest direntry row that binds `child_inode_id` under any parent/name pair at or before
+`base_seq`.
+
+This is the raw "where does this inode currently live in the tree?" lookup. It does not hide the
+result because the inode or one of its ancestors is later covered by a subtree tombstone.
 
 ### `active_subtree_tombstone(namespace_id, root_inode_id, base_seq)`
 
@@ -225,6 +236,7 @@ lookups before tombstone coverage is applied:
 - `inode_at_seq(...)`
 - `latest_revision_head_at_seq(...)`
 - `bound_child_at_seq(...)`
+- `current_parent_binding_for_child(...)`
 
 These lookups are the semantic center for:
 

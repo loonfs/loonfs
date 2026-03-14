@@ -33,6 +33,7 @@ const TEST_WRITER_VERSION: &str = "loon-testkit-differential";
 fn wal_tail_replay_fixture_matches_model_and_core() {
     run_wal_replay_fixture("native/wal_tail_replay_advances_head.yaml");
     run_wal_replay_fixture("native/wal_tail_replay_applies_delete_subtree_tombstone.yaml");
+    run_wal_replay_fixture("native/wal_tail_replay_applies_rename_direntry_rebind.yaml");
     run_wal_replay_fixture("native/wal_tail_replay_applies_restore_revision_head.yaml");
 }
 
@@ -41,6 +42,9 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
     run_checkpoint_replay_fixture("native/checkpoint_manifest_plus_wal_tail_reproduces_head.yaml");
     run_checkpoint_replay_fixture(
         "native/checkpoint_manifest_plus_delete_subtree_wal_tail_hides_descendants.yaml",
+    );
+    run_checkpoint_replay_fixture(
+        "native/checkpoint_manifest_plus_rename_wal_tail_reproduces_head.yaml",
     );
     run_checkpoint_replay_fixture(
         "native/checkpoint_manifest_plus_restore_revision_wal_tail_reproduces_head.yaml",
@@ -910,6 +914,15 @@ fn model_metadata_mutation_from_fixture(op: &FixtureWalOp) -> ModelMetadataMutat
         FixtureWalOp::DeleteSubtree { root_inode } => ModelMetadataMutation::DeleteSubtree {
             root_inode_id: *root_inode,
         },
+        FixtureWalOp::Rename {
+            inode_id,
+            new_parent_inode,
+            new_display_name,
+        } => ModelMetadataMutation::Rename {
+            inode_id: *inode_id,
+            new_parent_inode_id: *new_parent_inode,
+            new_display_name: new_display_name.clone(),
+        },
         FixtureWalOp::RestoreRevision {
             inode_id,
             base_revision,
@@ -919,11 +932,6 @@ fn model_metadata_mutation_from_fixture(op: &FixtureWalOp) -> ModelMetadataMutat
             base_revision_no: *base_revision,
             restore_from_revision_no: *restore_from_revision,
         },
-        FixtureWalOp::Rename { .. } => {
-            panic!(
-                "replay differential fixtures only support create/replace/delete/restore WAL ops"
-            )
-        }
     }
 }
 

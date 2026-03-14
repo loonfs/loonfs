@@ -42,6 +42,11 @@ fn restore_revision_fixture_matches_model_and_core_metadata() {
     run_fixture("native/restore_revision_commit_appends_new_head_from_historical_content.yaml");
 }
 
+#[test]
+fn rename_fixture_matches_model_and_core_metadata() {
+    run_fixture("native/rename_commit_rebinds_visible_child_under_new_parent.yaml");
+}
+
 fn run_fixture(relative_path: &str) {
     let scenario = load_fixture(relative_path);
     let initial: MetadataFixtureInitial = scenario.decode_initial().expect("decode initial state");
@@ -213,6 +218,9 @@ enum RawCommitOp {
     ReplaceFile {
         replace_file: RawReplaceFile,
     },
+    Rename {
+        rename: RawRename,
+    },
     DeleteSubtree {
         delete_subtree: RawDeleteSubtree,
     },
@@ -239,6 +247,13 @@ struct RawReplaceFile {
     inode_id: InodeId,
     base_revision_no: RevisionNo,
     content_manifest_digest: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawRename {
+    inode_id: InodeId,
+    new_parent_inode_id: InodeId,
+    new_display_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -327,6 +342,11 @@ impl From<RawCommitOp> for CommitOp {
                 inode_id: replace_file.inode_id,
                 base_revision: replace_file.base_revision_no,
                 content_manifest_digest: replace_file.content_manifest_digest,
+            },
+            RawCommitOp::Rename { rename } => CommitOp::Rename {
+                inode_id: rename.inode_id,
+                new_parent_inode: rename.new_parent_inode_id,
+                new_display_name: rename.new_display_name,
             },
             RawCommitOp::DeleteSubtree { delete_subtree } => CommitOp::DeleteSubtree {
                 root_inode: delete_subtree.root_inode_id,
@@ -527,6 +547,11 @@ fn materialize_model_mutations(
                 base_revision_no: replace_file.base_revision_no,
                 content_manifest_digest: replace_file.content_manifest_digest.clone(),
             },
+            RawCommitOp::Rename { rename } => ModelMetadataMutation::Rename {
+                inode_id: rename.inode_id,
+                new_parent_inode_id: rename.new_parent_inode_id,
+                new_display_name: rename.new_display_name.clone(),
+            },
             RawCommitOp::DeleteSubtree { delete_subtree } => ModelMetadataMutation::DeleteSubtree {
                 root_inode_id: delete_subtree.root_inode_id,
             },
@@ -550,6 +575,19 @@ fn validate_model_request_ops(
 ) -> Result<(), ModelMetadataPreconditionError> {
     for op in ops {
         match op {
+            RawCommitOp::Rename { rename } => {
+                metadata_state.ensure_rename_source_binding_exists(rename.inode_id, base_seq)?;
+                metadata_state.ensure_child_name_absent(
+                    rename.new_parent_inode_id,
+                    &rename.new_display_name,
+                    base_seq,
+                )?;
+                metadata_state.ensure_rename_does_not_cycle(
+                    rename.inode_id,
+                    rename.new_parent_inode_id,
+                    base_seq,
+                )?;
+            }
             RawCommitOp::DeleteSubtree { delete_subtree } => {
                 metadata_state.ensure_inode_is_directory(delete_subtree.root_inode_id, base_seq)?;
             }

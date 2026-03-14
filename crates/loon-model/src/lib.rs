@@ -300,6 +300,13 @@ pub enum ModelMetadataPreconditionError {
         base_revision_no: RevisionNo,
         restore_from_revision: RevisionNo,
     },
+    SourceBindingMissing {
+        inode_id: InodeId,
+    },
+    RenameWouldCycle {
+        inode_id: InodeId,
+        new_parent_inode_id: InodeId,
+    },
     AncestorCoveredBySubtreeTombstone {
         inode_id: InodeId,
         root_inode_id: InodeId,
@@ -324,6 +331,11 @@ pub enum ModelMetadataMutation {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
         content_manifest_digest: String,
+    },
+    Rename {
+        inode_id: InodeId,
+        new_parent_inode_id: InodeId,
+        new_display_name: String,
     },
     RestoreRevision {
         inode_id: InodeId,
@@ -1038,6 +1050,7 @@ impl ModelNamespace {
                         InodeId(current.0.max(inode_id.0.saturating_add(1)))
                     }
                     ModelMetadataMutation::ReplaceFile { .. }
+                    | ModelMetadataMutation::Rename { .. }
                     | ModelMetadataMutation::RestoreRevision { .. }
                     | ModelMetadataMutation::DeleteSubtree { .. } => current,
                 });
@@ -1675,6 +1688,23 @@ impl ModelMetadataState {
                         "replace_file_appends_new_revision_head",
                     );
                 }
+                ModelMetadataMutation::Rename {
+                    inode_id,
+                    new_parent_inode_id,
+                    new_display_name,
+                } => {
+                    metadata_state.direntries.push(ModelDirentryRecord {
+                        parent_inode_id: *new_parent_inode_id,
+                        name_key: new_display_name.clone(),
+                        display_name: new_display_name.clone(),
+                        child_inode_id: *inode_id,
+                        bind_seq: committed_seq,
+                    });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "rename_appends_new_direntry_binding",
+                    );
+                }
                 ModelMetadataMutation::RestoreRevision {
                     inode_id,
                     base_revision_no,
@@ -1778,6 +1808,14 @@ impl ModelMetadataState {
             .cloned()
     }
 
+    pub fn current_parent_binding_for_child(
+        &self,
+        child_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelDirentryRecord> {
+        self.latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)
+    }
+
     pub fn active_subtree_tombstone(
         &self,
         root_inode_id: InodeId,
@@ -1853,7 +1891,7 @@ impl ModelMetadataState {
             return None;
         }
 
-        let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
+        let direntry = self.active_child_binding_at_seq(parent_inode_id, name_key, base_seq)?;
         self.visible_inode(direntry.child_inode_id, base_seq)?;
         Some(direntry)
     }
@@ -1874,7 +1912,7 @@ impl ModelMetadataState {
             });
         }
 
-        if let Some(existing) = self.bound_child_at_seq(parent_inode_id, name_key, base_seq) {
+        if let Some(existing) = self.visible_child(parent_inode_id, name_key, base_seq) {
             return Err(ModelMetadataPreconditionError::ChildNameCollision {
                 parent_inode_id,
                 name_key: name_key.to_owned(),
@@ -1962,6 +2000,45 @@ impl ModelMetadataState {
         Ok(())
     }
 
+    pub fn ensure_rename_source_binding_exists(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<(), ModelMetadataPreconditionError> {
+        self.inode_at_seq(inode_id, base_seq)
+            .ok_or(ModelMetadataPreconditionError::InodeMissing { inode_id })?;
+        if self
+            .current_parent_binding_for_child(inode_id, base_seq)
+            .is_none()
+        {
+            return Err(ModelMetadataPreconditionError::SourceBindingMissing { inode_id });
+        }
+
+        Ok(())
+    }
+
+    pub fn ensure_rename_does_not_cycle(
+        &self,
+        inode_id: InodeId,
+        new_parent_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Result<(), ModelMetadataPreconditionError> {
+        let inode = self
+            .inode_at_seq(inode_id, base_seq)
+            .ok_or(ModelMetadataPreconditionError::InodeMissing { inode_id })?;
+        if inode.inode_kind != InodeKind::Dir {
+            return Ok(());
+        }
+        if self.is_ancestor_of(inode_id, new_parent_inode_id, base_seq) {
+            return Err(ModelMetadataPreconditionError::RenameWouldCycle {
+                inode_id,
+                new_parent_inode_id,
+            });
+        }
+
+        Ok(())
+    }
+
     pub fn ensure_ancestors_not_subtree_deleted(
         &self,
         inode_id: InodeId,
@@ -1980,6 +2057,25 @@ impl ModelMetadataState {
         Ok(())
     }
 
+    fn active_child_binding_at_seq(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<ModelDirentryRecord> {
+        let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
+        let latest_binding =
+            self.latest_parent_binding_for_child_at_seq(direntry.child_inode_id, base_seq)?;
+        if latest_binding.parent_inode_id != direntry.parent_inode_id
+            || latest_binding.name_key != direntry.name_key
+            || latest_binding.bind_seq != direntry.bind_seq
+        {
+            return None;
+        }
+
+        Some(direntry)
+    }
+
     fn latest_parent_binding_for_child_at_seq(
         &self,
         child_inode_id: InodeId,
@@ -1992,6 +2088,30 @@ impl ModelMetadataState {
             })
             .max_by_key(|direntry| direntry.bind_seq)
             .cloned()
+    }
+
+    fn is_ancestor_of(
+        &self,
+        ancestor_inode_id: InodeId,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> bool {
+        let mut current = Some(inode_id);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+            if candidate_inode_id == ancestor_inode_id {
+                return true;
+            }
+            current = self
+                .latest_parent_binding_for_child_at_seq(candidate_inode_id, base_seq)
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        false
     }
 }
 
@@ -3203,6 +3323,38 @@ mod tests {
     }
 
     #[test]
+    fn model_apply_rename_appends_new_binding_and_hides_old_visible_name() {
+        let applied = seeded_metadata_state()
+            .apply_committed_mutations(
+                ChangeSeq(42),
+                &[ModelMetadataMutation::Rename {
+                    inode_id: InodeId(42),
+                    new_parent_inode_id: InodeId(2),
+                    new_display_name: "renamed.txt".to_owned(),
+                }],
+            )
+            .expect("apply rename metadata");
+
+        assert_eq!(
+            applied
+                .metadata_state
+                .visible_child(InodeId(2), "note.txt", ChangeSeq(42)),
+            None
+        );
+        assert_eq!(
+            applied
+                .metadata_state
+                .visible_child(InodeId(2), "renamed.txt", ChangeSeq(42))
+                .expect("renamed visible child")
+                .child_inode_id,
+            InodeId(42)
+        );
+        assert!(applied
+            .checked_invariants
+            .contains(&"rename_appends_new_direntry_binding".to_owned()));
+    }
+
+    #[test]
     fn model_apply_delete_subtree_appends_tombstone_row_and_hides_descendants() {
         let applied = ModelMetadataState {
             inodes: vec![
@@ -3295,6 +3447,59 @@ mod tests {
                 inode_id: InodeId(42),
                 base_revision_no: RevisionNo(2),
                 restore_from_revision: RevisionNo(2),
+            }
+        );
+    }
+
+    #[test]
+    fn model_rejects_directory_rename_cycle() {
+        let metadata_state = ModelMetadataState {
+            inodes: vec![
+                ModelInodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(7),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(5),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(9),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(8),
+                },
+            ],
+            direntries: vec![
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(7),
+                    bind_seq: ChangeSeq(5),
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(7),
+                    name_key: "archive".to_owned(),
+                    display_name: "archive".to_owned(),
+                    child_inode_id: InodeId(9),
+                    bind_seq: ChangeSeq(8),
+                },
+            ],
+            revisions: Vec::new(),
+            subtree_tombstones: Vec::new(),
+        };
+
+        let error = metadata_state
+            .ensure_rename_does_not_cycle(InodeId(7), InodeId(9), ChangeSeq(52))
+            .expect_err("directory cycle should be rejected");
+
+        assert_eq!(
+            error,
+            ModelMetadataPreconditionError::RenameWouldCycle {
+                inode_id: InodeId(7),
+                new_parent_inode_id: InodeId(9),
             }
         );
     }
