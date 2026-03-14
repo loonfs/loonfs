@@ -27,6 +27,8 @@ pub struct ModelWalCommit {
     pub base_head_seq: ChangeSeq,
     pub commit_id: String,
     pub writer_fence_token: FenceToken,
+    #[serde(default)]
+    pub ops: Vec<ModelMetadataMutation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,12 +56,52 @@ pub struct ModelCheckpointSegment {
     pub object_key: String,
     pub segment_index: u32,
     pub row_count: u64,
+    #[serde(default)]
+    pub pages: Vec<ModelCheckpointPage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCheckpointTable {
     pub family: ModelCheckpointFamily,
     pub segments: Vec<ModelCheckpointSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCheckpointPage {
+    pub page_index: u32,
+    pub min_key: String,
+    pub max_key: String,
+    #[serde(default)]
+    pub row_keys: Vec<String>,
+    #[serde(default)]
+    pub rows: Vec<ModelCheckpointRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "row_kind", rename_all = "snake_case")]
+pub enum ModelCheckpointRow {
+    Inode {
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+        created_seq: ChangeSeq,
+    },
+    Direntry {
+        parent_inode_id: InodeId,
+        name_key: String,
+        display_name: String,
+        child_inode_id: InodeId,
+        bind_seq: ChangeSeq,
+    },
+    Revision {
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        committed_seq: ChangeSeq,
+        content_manifest_digest: String,
+    },
+    Tombstone {
+        root_inode_id: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -583,6 +625,10 @@ pub enum ModelError {
         expected: String,
         actual: String,
     },
+    MetadataRevisionOverflow {
+        inode_id: InodeId,
+        base_revision_no: RevisionNo,
+    },
 }
 
 impl ModelQueueShard {
@@ -845,6 +891,7 @@ impl ModelNamespace {
             base_head_seq: self.head_seq,
             commit_id: commit_id.into(),
             writer_fence_token,
+            ops: Vec::new(),
         })
     }
 
@@ -930,8 +977,33 @@ impl ModelNamespace {
             });
         }
 
+        let applied_metadata = self
+            .metadata_state
+            .apply_committed_mutations(wal.seq, &wal.ops)
+            .map_err(|err| match err {
+                ModelMetadataApplyError::RevisionOverflow {
+                    inode_id,
+                    base_revision_no,
+                } => ModelError::MetadataRevisionOverflow {
+                    inode_id,
+                    base_revision_no,
+                },
+            })?;
+
         self.head_seq = wal.seq;
         self.active_fence_token = wal.writer_fence_token;
+        self.metadata_state = applied_metadata.metadata_state;
+        let replay_next_inode_id =
+            wal.ops
+                .iter()
+                .fold(self.next_inode_id, |current, op| match op {
+                    ModelMetadataMutation::CreateDir { inode_id, .. }
+                    | ModelMetadataMutation::CreateFile { inode_id, .. } => {
+                        InodeId(current.0.max(inode_id.0.saturating_add(1)))
+                    }
+                    ModelMetadataMutation::ReplaceFile { .. } => current,
+                });
+        self.next_inode_id = replay_next_inode_id;
         Ok(())
     }
 
@@ -954,7 +1026,11 @@ impl ModelNamespace {
                             0,
                         ),
                         segment_index: 0,
-                        row_count: 0,
+                        row_count: self.metadata_state.inodes.len() as u64,
+                        pages: vec![build_model_checkpoint_page(
+                            ModelCheckpointFamily::Inodes,
+                            &self.metadata_state,
+                        )],
                     }],
                 },
                 ModelCheckpointTable {
@@ -967,7 +1043,11 @@ impl ModelNamespace {
                             0,
                         ),
                         segment_index: 0,
-                        row_count: 0,
+                        row_count: self.metadata_state.direntries.len() as u64,
+                        pages: vec![build_model_checkpoint_page(
+                            ModelCheckpointFamily::Direntries,
+                            &self.metadata_state,
+                        )],
                     }],
                 },
                 ModelCheckpointTable {
@@ -980,7 +1060,11 @@ impl ModelNamespace {
                             0,
                         ),
                         segment_index: 0,
-                        row_count: 0,
+                        row_count: self.metadata_state.revisions.len() as u64,
+                        pages: vec![build_model_checkpoint_page(
+                            ModelCheckpointFamily::Revisions,
+                            &self.metadata_state,
+                        )],
                     }],
                 },
                 ModelCheckpointTable {
@@ -993,7 +1077,11 @@ impl ModelNamespace {
                             0,
                         ),
                         segment_index: 0,
-                        row_count: 0,
+                        row_count: self.metadata_state.subtree_tombstones.len() as u64,
+                        pages: vec![build_model_checkpoint_page(
+                            ModelCheckpointFamily::Tombstones,
+                            &self.metadata_state,
+                        )],
                     }],
                 },
             ],
@@ -1220,7 +1308,7 @@ impl ModelNamespace {
             next_inode_id: checkpoint.next_inode_id,
             snapshot_hint_seq: Some(checkpoint.checkpoint_seq),
             retention_floor_seq: checkpoint.retention_floor_seq,
-            metadata_state: ModelMetadataState::default(),
+            metadata_state: metadata_state_from_checkpoint(checkpoint)?,
         })
     }
 }
@@ -1886,6 +1974,150 @@ fn ensure_checkpoint_is_restorable(
     Ok(())
 }
 
+fn metadata_state_from_checkpoint(
+    checkpoint: &ModelCheckpoint,
+) -> Result<ModelMetadataState, ModelError> {
+    let mut metadata_state = ModelMetadataState::default();
+
+    for table in &checkpoint.tables {
+        for segment in &table.segments {
+            for page in &segment.pages {
+                for row in &page.rows {
+                    match row {
+                        ModelCheckpointRow::Inode {
+                            inode_id,
+                            inode_kind,
+                            created_seq,
+                        } => metadata_state.inodes.push(ModelInodeRecord {
+                            inode_id: *inode_id,
+                            inode_kind: inode_kind.clone(),
+                            created_seq: *created_seq,
+                        }),
+                        ModelCheckpointRow::Direntry {
+                            parent_inode_id,
+                            name_key,
+                            display_name,
+                            child_inode_id,
+                            bind_seq,
+                        } => metadata_state.direntries.push(ModelDirentryRecord {
+                            parent_inode_id: *parent_inode_id,
+                            name_key: name_key.clone(),
+                            display_name: display_name.clone(),
+                            child_inode_id: *child_inode_id,
+                            bind_seq: *bind_seq,
+                        }),
+                        ModelCheckpointRow::Revision {
+                            inode_id,
+                            revision_no,
+                            committed_seq,
+                            content_manifest_digest,
+                        } => metadata_state.revisions.push(ModelRevisionRecord {
+                            inode_id: *inode_id,
+                            revision_no: *revision_no,
+                            committed_seq: *committed_seq,
+                            content_manifest_digest: content_manifest_digest.clone(),
+                        }),
+                        ModelCheckpointRow::Tombstone {
+                            root_inode_id,
+                            tombstone_seq,
+                        } => metadata_state
+                            .subtree_tombstones
+                            .push(ModelSubtreeTombstoneRecord {
+                                root_inode_id: *root_inode_id,
+                                tombstone_seq: *tombstone_seq,
+                            }),
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(metadata_state)
+}
+
+fn build_model_checkpoint_page(
+    family: ModelCheckpointFamily,
+    metadata_state: &ModelMetadataState,
+) -> ModelCheckpointPage {
+    let rows = checkpoint_rows_for_family(family, metadata_state);
+    let row_keys = rows
+        .iter()
+        .map(ModelCheckpointRow::row_key)
+        .collect::<Vec<_>>();
+    let min_key = row_keys.first().cloned().unwrap_or_default();
+    let max_key = row_keys.last().cloned().unwrap_or_default();
+
+    ModelCheckpointPage {
+        page_index: 0,
+        min_key,
+        max_key,
+        row_keys,
+        rows,
+    }
+}
+
+fn checkpoint_rows_for_family(
+    family: ModelCheckpointFamily,
+    metadata_state: &ModelMetadataState,
+) -> Vec<ModelCheckpointRow> {
+    match family {
+        ModelCheckpointFamily::Inodes => {
+            let mut rows = metadata_state
+                .inodes
+                .iter()
+                .map(|inode| ModelCheckpointRow::Inode {
+                    inode_id: inode.inode_id,
+                    inode_kind: inode.inode_kind.clone(),
+                    created_seq: inode.created_seq,
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by_key(ModelCheckpointRow::row_key);
+            rows
+        }
+        ModelCheckpointFamily::Direntries => {
+            let mut rows = metadata_state
+                .direntries
+                .iter()
+                .map(|direntry| ModelCheckpointRow::Direntry {
+                    parent_inode_id: direntry.parent_inode_id,
+                    name_key: direntry.name_key.clone(),
+                    display_name: direntry.display_name.clone(),
+                    child_inode_id: direntry.child_inode_id,
+                    bind_seq: direntry.bind_seq,
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by_key(ModelCheckpointRow::row_key);
+            rows
+        }
+        ModelCheckpointFamily::Revisions => {
+            let mut rows = metadata_state
+                .revisions
+                .iter()
+                .map(|revision| ModelCheckpointRow::Revision {
+                    inode_id: revision.inode_id,
+                    revision_no: revision.revision_no,
+                    committed_seq: revision.committed_seq,
+                    content_manifest_digest: revision.content_manifest_digest.clone(),
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by_key(ModelCheckpointRow::row_key);
+            rows
+        }
+        ModelCheckpointFamily::Tombstones => {
+            let mut rows = metadata_state
+                .subtree_tombstones
+                .iter()
+                .map(|tombstone| ModelCheckpointRow::Tombstone {
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by_key(ModelCheckpointRow::row_key);
+            rows
+        }
+    }
+}
+
 fn checkpoint_segment_object_key(
     namespace_id: &NamespaceId,
     checkpoint_seq: ChangeSeq,
@@ -1898,6 +2130,28 @@ fn checkpoint_segment_object_key(
         checkpoint_seq.0,
         family.as_str()
     )
+}
+
+impl ModelCheckpointRow {
+    fn row_key(&self) -> String {
+        match self {
+            Self::Inode { inode_id, .. } => format!("inode-{:020}", inode_id.0),
+            Self::Direntry {
+                parent_inode_id,
+                name_key,
+                ..
+            } => format!("direntry-{:020}-{name_key}", parent_inode_id.0),
+            Self::Revision {
+                inode_id,
+                revision_no,
+                ..
+            } => format!("revision-{:020}-{:020}", inode_id.0, revision_no.0),
+            Self::Tombstone {
+                root_inode_id,
+                tombstone_seq,
+            } => format!("tombstone-{:020}-{:020}", root_inode_id.0, tombstone_seq.0),
+        }
+    }
 }
 
 fn ensure_active_broker_lease(
@@ -2943,6 +3197,7 @@ mod tests {
             base_head_seq: ChangeSeq(0),
             commit_id: "req-20260311-0001".to_owned(),
             writer_fence_token: FenceToken(0),
+            ops: Vec::new(),
         };
 
         let error = ns

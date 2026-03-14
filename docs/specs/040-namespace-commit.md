@@ -561,23 +561,29 @@ For each WAL object, replay must verify:
 4. `payload.base_head_seq` matches the current replay cursor
 5. `payload.seq` is exactly one greater than the current replay cursor
 
-If those checks pass, replay may advance the head summary to:
+If those checks pass, replay must:
 
-- `seq = payload.seq`
-- `active_fence_token = payload.writer_fence_token`
+- apply the WAL ops into the authoritative metadata families at `payload.seq`
+- advance the head summary to:
+  - `seq = payload.seq`
+  - `active_fence_token = payload.writer_fence_token`
+  - `next_inode_id = max(current_head.next_inode_id, allocated create inode ids + 1)`
 
-The current skeleton preserves `next_inode_id`, `snapshot_hint_seq`, and `retention_floor_seq` from the replay basis. Rich metadata application still comes later.
+The current replay path still preserves `snapshot_hint_seq` and `retention_floor_seq` from the
+replay basis, but it no longer treats WAL as head-summary-only history.
 
 Why this section exists:
 
 - readers need one deterministic rule for whether a WAL tail is safe to apply
-- checkpoint integration later depends on the same continuity checks
+- checkpoint integration depends on the same continuity checks plus the same metadata application
+  rules as live publish
 
 Failure modes prevented:
 
 - skipping WAL entries during replay
 - applying WAL from the wrong namespace
 - accepting corrupted or mismatched immutable history objects
+- replaying head seq without replaying the metadata rows that seq made visible
 
 ## Checkpoint manifest skeleton
 
@@ -616,7 +622,8 @@ Each segment entry must name:
 - `payload_checksum_sha256`
 - `page_checksums_sha256`
 
-For the current skeleton, replay uses the manifest only as a verified basis summary. Rich table decoding comes later.
+Replay may trust the manifest only after every referenced segment object is loaded and its typed
+rows reconstruct one basis metadata state.
 
 Why these fields exist:
 
@@ -650,6 +657,14 @@ The first checkpoint-aware replay path is:
    - `snapshot_hint_seq = Some(checkpoint_seq)`
    - `retention_floor_seq = manifest.retention_floor_seq`
 5. replay the WAL tail after `checkpoint_seq` using the WAL replay checks above
+
+The reconstructed checkpoint basis metadata must include the same canonical logical families as
+live publish:
+
+- inode rows
+- direntry rows
+- revision rows
+- subtree tombstone rows
 
 If the manifest namespace does not match, the manifest key does not match `checkpoint_seq`, `verified` is false, a referenced segment object is missing, or any descriptor does not match its decoded segment body, replay must fail before any WAL is applied.
 
@@ -692,16 +707,28 @@ Each page entry must name:
 - `min_key`
 - `max_key`
 - `row_keys`
+- `rows`
 
-The manifest stores the segment payload checksum plus one checksum per page. The current skeleton uses ordered string keys inside each page so the durable object shape is fixed before typed table-row encodings land.
+Each row is typed and must match the segment family:
 
-For the current writer skeleton, each table family emits one deterministic segment object at `segment_index = 0`. The first implementation may emit empty pages and zero-row segments while preserving the namespace head summary needed for replay.
+- `inodes` segments carry `inode(inode_id, inode_kind, created_seq)`
+- `direntries` segments carry `direntry(parent_inode_id, name_key, display_name, child_inode_id, bind_seq)`
+- `revisions` segments carry `revision(inode_id, revision_no, committed_seq, content_manifest_digest)`
+- `tombstones` segments carry `tombstone(root_inode_id, tombstone_seq)`
+
+The manifest stores the segment payload checksum plus one checksum per page. `row_keys`,
+`min_key`, `max_key`, and `row_count` are redundant summary fields and must match the typed row
+body exactly; replay must validate them before trusting the segment.
+
+For the current writer skeleton, each table family emits one deterministic segment object at
+`segment_index = 0`.
 
 Why these fields exist:
 
 - `family` and `segment_index` bind the object body to its durable object key
 - segment `row_count`, `min_key`, and `max_key` make manifest-to-segment verification explicit
-- page-level ordered keys give the first checksum and pagination contract without locking a final row encoding too early
+- page-level ordered keys and typed rows make checkpoint restore deterministic instead of trusting
+  manifest summaries alone
 - immutable CBOR+zstd keeps snapshot bulk data portable and append-only
 
 Failure modes prevented:
@@ -715,10 +742,11 @@ Failure modes prevented:
 The first checkpoint writer path is:
 
 1. take the current `HeadState` as the checkpoint basis
-2. derive `checkpoint_seq = head.seq`
-3. build immutable segment objects for each table family under that `checkpoint_seq`
-4. copy each segment payload checksum and page checksum list into the manifest descriptors
-5. write `manifest.json` with `verified = true` only after the segment objects are fully assembled
+2. take the current canonical metadata families as the checkpoint basis rows
+3. derive `checkpoint_seq = head.seq`
+4. build immutable segment objects for each table family under that `checkpoint_seq`
+5. copy each segment payload checksum and page checksum list into the manifest descriptors
+6. write `manifest.json` with `verified = true` only after the segment objects are fully assembled
 
 The current skeleton preserves:
 
@@ -726,13 +754,11 @@ The current skeleton preserves:
 - `next_inode_id`
 - `retention_floor_seq`
 
-It does not yet materialize full inode, direntry, revision, or tombstone rows. That richer table scan/build path comes later.
-
 Failure modes prevented:
 
 - publishing a verified manifest before its segment objects exist
 - losing allocator or retention state while building a checkpoint
-- drifting between durable segment keys and manifest metadata
+- drifting between durable segment keys, typed segment rows, and manifest metadata
 
 ## Checkpoint publication via head CAS
 

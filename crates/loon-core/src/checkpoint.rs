@@ -1,5 +1,8 @@
+use crate::metadata::{
+    DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+};
 use crate::progress::LoadedRetentionAuthorizers;
-use crate::wal::{replay_wal_tail, StoredWalObject, WalReplayError};
+use crate::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::{
     namespace_head, snapshot_manifest, snapshot_table, SnapshotTableFamily,
@@ -8,9 +11,10 @@ use loon_objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
     encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd, ChangeSeq,
-    CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointSegmentDescriptor,
-    CheckpointSegmentEnvelope, CheckpointSegmentPayload, CheckpointTableFamily,
-    CheckpointTableManifest, ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceId,
+    CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage, CheckpointRow,
+    CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointSegmentPayload,
+    CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind, HeadState,
+    HeadStateEnvelope, NamespaceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -76,7 +80,15 @@ pub struct LoadedCheckpoint {
     pub object_key: String,
     pub manifest: CheckpointManifestEnvelope,
     pub basis_head: HeadState,
+    pub basis_metadata_state: MetadataState,
     pub segments: Vec<LoadedCheckpointSegment>,
+    pub checked_invariants: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayedCheckpointState {
+    pub resulting_head: HeadState,
+    pub resulting_metadata_state: MetadataState,
     pub checked_invariants: Vec<String>,
 }
 
@@ -130,6 +142,32 @@ pub enum CheckpointReplayError {
         expected: CheckpointSegmentDescriptor,
         actual: CheckpointSegmentDescriptor,
     },
+    SegmentRowFamilyMismatch {
+        object_key: String,
+        family: CheckpointTableFamily,
+        row_key: String,
+    },
+    PageRowKeysMismatch {
+        object_key: String,
+        page_index: u32,
+    },
+    PageKeyRangeMismatch {
+        object_key: String,
+        page_index: u32,
+        expected_min_key: String,
+        actual_min_key: String,
+        expected_max_key: String,
+        actual_max_key: String,
+    },
+    SegmentSummaryMismatch {
+        object_key: String,
+        expected_row_count: u64,
+        actual_row_count: u64,
+        expected_min_key: String,
+        actual_min_key: String,
+        expected_max_key: String,
+        actual_max_key: String,
+    },
     WalReplay(WalReplayError),
 }
 
@@ -177,6 +215,7 @@ pub enum CheckpointPublishError {
 
 pub fn prepare_checkpoint(
     head: &HeadState,
+    metadata_state: &MetadataState,
     writer_version: &str,
 ) -> Result<PreparedCheckpoint, CheckpointBuildError> {
     if writer_version.trim().is_empty() {
@@ -186,7 +225,7 @@ pub fn prepare_checkpoint(
     let segments = CHECKPOINT_TABLE_FAMILIES
         .iter()
         .copied()
-        .map(|family| prepare_checkpoint_segment(head, family, writer_version))
+        .map(|family| prepare_checkpoint_segment(head, metadata_state, family, writer_version))
         .collect::<Result<Vec<_>, _>>()?;
 
     let manifest_payload = CheckpointManifestPayload {
@@ -222,6 +261,7 @@ pub fn prepare_checkpoint(
             "checkpoint_segment_key_matches_family_and_index".to_owned(),
             "verified_checkpoint_manifest_requires_durable_segments".to_owned(),
             "checkpoint_manifest_preserves_head_summary".to_owned(),
+            "checkpoint_manifest_preserves_basis_metadata".to_owned(),
         ],
     })
 }
@@ -357,11 +397,17 @@ pub fn load_checkpoint(
         &mut checked_invariants,
         "checkpoint_segment_descriptor_matches_payload",
     );
+    let basis_metadata_state = metadata_state_from_checkpoint_segments(&loaded_segments)?;
+    push_invariant(
+        &mut checked_invariants,
+        "checkpoint_segment_rows_restore_basis_metadata",
+    );
 
     Ok(LoadedCheckpoint {
         object_key: loaded_manifest.object_key,
         manifest: loaded_manifest.manifest,
         basis_head: loaded_manifest.basis_head,
+        basis_metadata_state,
         segments: loaded_segments,
         checked_invariants,
     })
@@ -373,8 +419,37 @@ pub fn replay_from_checkpoint_and_wal_tail(
     checkpoint_segments: &[StoredCheckpointSegment],
     wal_tail: &[StoredWalObject],
 ) -> Result<HeadState, CheckpointReplayError> {
+    replay_from_checkpoint_and_wal_tail_with_metadata(
+        expected_namespace,
+        checkpoint_manifest,
+        checkpoint_segments,
+        wal_tail,
+    )
+    .map(|replayed| replayed.resulting_head)
+}
+
+pub fn replay_from_checkpoint_and_wal_tail_with_metadata(
+    expected_namespace: &NamespaceId,
+    checkpoint_manifest: &StoredCheckpointManifest,
+    checkpoint_segments: &[StoredCheckpointSegment],
+    wal_tail: &[StoredWalObject],
+) -> Result<ReplayedCheckpointState, CheckpointReplayError> {
     let loaded = load_checkpoint(expected_namespace, checkpoint_manifest, checkpoint_segments)?;
-    replay_wal_tail(&loaded.basis_head, wal_tail).map_err(CheckpointReplayError::WalReplay)
+    let replayed =
+        replay_wal_tail_with_metadata(&loaded.basis_head, &loaded.basis_metadata_state, wal_tail)
+            .map_err(CheckpointReplayError::WalReplay)?;
+    let mut checked_invariants = loaded.checked_invariants.clone();
+    extend_invariants(&mut checked_invariants, &replayed.checked_invariants);
+    push_invariant(
+        &mut checked_invariants,
+        "checkpoint_plus_wal_tail_reproduces_metadata",
+    );
+
+    Ok(ReplayedCheckpointState {
+        resulting_head: replayed.resulting_head,
+        resulting_metadata_state: replayed.resulting_metadata_state,
+        checked_invariants,
+    })
 }
 
 pub fn prepare_checkpoint_head_publish(
@@ -562,18 +637,20 @@ pub fn publish_checkpoint_head<S: ObjectStore>(
 
 fn prepare_checkpoint_segment(
     head: &HeadState,
+    metadata_state: &MetadataState,
     family: CheckpointTableFamily,
     writer_version: &str,
 ) -> Result<PreparedCheckpointSegment, CheckpointBuildError> {
+    let page = build_checkpoint_page(family, metadata_state);
     let payload = CheckpointSegmentPayload {
         namespace_id: head.namespace_id.clone(),
         checkpoint_seq: head.seq,
         family,
         segment_index: 0,
-        row_count: 0,
-        min_key: String::new(),
-        max_key: String::new(),
-        pages: vec![],
+        row_count: page.rows.len() as u64,
+        min_key: page.min_key.clone(),
+        max_key: page.max_key.clone(),
+        pages: vec![page],
     };
     let envelope = CheckpointSegmentEnvelope::from_payload(writer_version, payload)
         .map_err(|err| CheckpointBuildError::Codec(err.to_string()))?;
@@ -603,6 +680,222 @@ fn prepare_checkpoint_segment(
         envelope,
         encoded_bytes,
     })
+}
+
+fn build_checkpoint_page(
+    family: CheckpointTableFamily,
+    metadata_state: &MetadataState,
+) -> CheckpointPage {
+    let rows = checkpoint_rows_for_family(family, metadata_state);
+    let row_keys = rows.iter().map(CheckpointRow::row_key).collect::<Vec<_>>();
+    let min_key = row_keys.first().cloned().unwrap_or_default();
+    let max_key = row_keys.last().cloned().unwrap_or_default();
+
+    CheckpointPage {
+        page_index: 0,
+        min_key,
+        max_key,
+        row_keys,
+        rows,
+    }
+}
+
+fn checkpoint_rows_for_family(
+    family: CheckpointTableFamily,
+    metadata_state: &MetadataState,
+) -> Vec<CheckpointRow> {
+    match family {
+        CheckpointTableFamily::Inodes => {
+            let mut rows = metadata_state
+                .inodes
+                .iter()
+                .map(|inode| CheckpointRow::Inode {
+                    inode_id: inode.inode_id,
+                    inode_kind: inode.inode_kind.clone(),
+                    created_seq: inode.created_seq,
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by_key(CheckpointRow::row_key);
+            rows
+        }
+        CheckpointTableFamily::Direntries => {
+            let mut rows = metadata_state
+                .direntries
+                .iter()
+                .map(|direntry| CheckpointRow::Direntry {
+                    parent_inode_id: direntry.parent_inode_id,
+                    name_key: direntry.name_key.clone(),
+                    display_name: direntry.display_name.clone(),
+                    child_inode_id: direntry.child_inode_id,
+                    bind_seq: direntry.bind_seq,
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by_key(CheckpointRow::row_key);
+            rows
+        }
+        CheckpointTableFamily::Revisions => {
+            let mut rows = metadata_state
+                .revisions
+                .iter()
+                .map(|revision| CheckpointRow::Revision {
+                    inode_id: revision.inode_id,
+                    revision_no: revision.revision_no,
+                    committed_seq: revision.committed_seq,
+                    content_manifest_digest: revision.content_manifest_digest.clone(),
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by_key(CheckpointRow::row_key);
+            rows
+        }
+        CheckpointTableFamily::Tombstones => {
+            let mut rows = metadata_state
+                .subtree_tombstones
+                .iter()
+                .map(|tombstone| CheckpointRow::Tombstone {
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by_key(CheckpointRow::row_key);
+            rows
+        }
+    }
+}
+
+fn metadata_state_from_checkpoint_segments(
+    segments: &[LoadedCheckpointSegment],
+) -> Result<MetadataState, CheckpointReplayError> {
+    let mut metadata_state = MetadataState::default();
+
+    for segment in segments {
+        validate_checkpoint_segment_payload_rows(&segment.object_key, &segment.envelope.payload)?;
+
+        for page in &segment.envelope.payload.pages {
+            for row in &page.rows {
+                match row {
+                    CheckpointRow::Inode {
+                        inode_id,
+                        inode_kind,
+                        created_seq,
+                    } => metadata_state.inodes.push(InodeRecord {
+                        inode_id: *inode_id,
+                        inode_kind: inode_kind.clone(),
+                        created_seq: *created_seq,
+                    }),
+                    CheckpointRow::Direntry {
+                        parent_inode_id,
+                        name_key,
+                        display_name,
+                        child_inode_id,
+                        bind_seq,
+                    } => metadata_state.direntries.push(DirentryRecord {
+                        parent_inode_id: *parent_inode_id,
+                        name_key: name_key.clone(),
+                        display_name: display_name.clone(),
+                        child_inode_id: *child_inode_id,
+                        bind_seq: *bind_seq,
+                    }),
+                    CheckpointRow::Revision {
+                        inode_id,
+                        revision_no,
+                        committed_seq,
+                        content_manifest_digest,
+                    } => metadata_state.revisions.push(RevisionRecord {
+                        inode_id: *inode_id,
+                        revision_no: *revision_no,
+                        committed_seq: *committed_seq,
+                        content_manifest_digest: content_manifest_digest.clone(),
+                    }),
+                    CheckpointRow::Tombstone {
+                        root_inode_id,
+                        tombstone_seq,
+                    } => metadata_state
+                        .subtree_tombstones
+                        .push(SubtreeTombstoneRecord {
+                            root_inode_id: *root_inode_id,
+                            tombstone_seq: *tombstone_seq,
+                        }),
+                }
+            }
+        }
+    }
+
+    Ok(metadata_state)
+}
+
+fn validate_checkpoint_segment_payload_rows(
+    object_key: &str,
+    payload: &CheckpointSegmentPayload,
+) -> Result<(), CheckpointReplayError> {
+    let mut all_row_keys = Vec::new();
+
+    for page in &payload.pages {
+        let derived_row_keys = page
+            .rows
+            .iter()
+            .map(CheckpointRow::row_key)
+            .collect::<Vec<_>>();
+        if page.row_keys != derived_row_keys {
+            return Err(CheckpointReplayError::PageRowKeysMismatch {
+                object_key: object_key.to_owned(),
+                page_index: page.page_index,
+            });
+        }
+
+        let actual_min_key = derived_row_keys.first().cloned().unwrap_or_default();
+        let actual_max_key = derived_row_keys.last().cloned().unwrap_or_default();
+        if page.min_key != actual_min_key || page.max_key != actual_max_key {
+            return Err(CheckpointReplayError::PageKeyRangeMismatch {
+                object_key: object_key.to_owned(),
+                page_index: page.page_index,
+                expected_min_key: page.min_key.clone(),
+                actual_min_key,
+                expected_max_key: page.max_key.clone(),
+                actual_max_key,
+            });
+        }
+
+        for row in &page.rows {
+            if checkpoint_row_family(row) != payload.family {
+                return Err(CheckpointReplayError::SegmentRowFamilyMismatch {
+                    object_key: object_key.to_owned(),
+                    family: payload.family,
+                    row_key: row.row_key(),
+                });
+            }
+        }
+
+        all_row_keys.extend(derived_row_keys);
+    }
+
+    let actual_row_count = all_row_keys.len() as u64;
+    let actual_min_key = all_row_keys.first().cloned().unwrap_or_default();
+    let actual_max_key = all_row_keys.last().cloned().unwrap_or_default();
+    if payload.row_count != actual_row_count
+        || payload.min_key != actual_min_key
+        || payload.max_key != actual_max_key
+    {
+        return Err(CheckpointReplayError::SegmentSummaryMismatch {
+            object_key: object_key.to_owned(),
+            expected_row_count: payload.row_count,
+            actual_row_count,
+            expected_min_key: payload.min_key.clone(),
+            actual_min_key,
+            expected_max_key: payload.max_key.clone(),
+            actual_max_key,
+        });
+    }
+
+    Ok(())
+}
+
+fn checkpoint_row_family(row: &CheckpointRow) -> CheckpointTableFamily {
+    match row {
+        CheckpointRow::Inode { .. } => CheckpointTableFamily::Inodes,
+        CheckpointRow::Direntry { .. } => CheckpointTableFamily::Direntries,
+        CheckpointRow::Revision { .. } => CheckpointTableFamily::Revisions,
+        CheckpointRow::Tombstone { .. } => CheckpointTableFamily::Tombstones,
+    }
 }
 
 fn checkpoint_segment_descriptor(
@@ -673,9 +966,12 @@ mod tests {
     use super::{
         load_checkpoint, load_checkpoint_manifest, prepare_checkpoint,
         prepare_checkpoint_head_publish, publish_checkpoint_head,
-        replay_from_checkpoint_and_wal_tail, CheckpointBuildError, CheckpointHeadPublishRequest,
-        CheckpointPublishError, CheckpointReplayError, LoadedCheckpoint, StoredCheckpointManifest,
-        StoredCheckpointSegment,
+        replay_from_checkpoint_and_wal_tail, replay_from_checkpoint_and_wal_tail_with_metadata,
+        CheckpointBuildError, CheckpointHeadPublishRequest, CheckpointPublishError,
+        CheckpointReplayError, LoadedCheckpoint, StoredCheckpointManifest, StoredCheckpointSegment,
+    };
+    use crate::metadata::{
+        DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     };
     use crate::progress::{
         load_retention_authorizers, LoadedProgressObject, LoadedRetentionAuthorizers,
@@ -692,17 +988,18 @@ mod tests {
         encode_checkpoint_manifest_json, encode_wal_commit_envelope_zstd, ChangeSeq,
         CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointSegmentDescriptor,
         CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind, FenceToken, HeadState,
-        HeadStateEnvelope, InodeId, NamespaceId, ProgressState, ProgressStateEnvelope,
-        WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+        HeadStateEnvelope, InodeId, InodeKind, NamespaceId, ProgressState, ProgressStateEnvelope,
+        RevisionNo, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn prepare_checkpoint_builds_verified_manifest_and_empty_segments() {
+    fn prepare_checkpoint_builds_verified_manifest_and_metadata_segments() {
         let prepared =
-            prepare_checkpoint(&sample_head(), "loon-core-test").expect("prepare checkpoint");
+            prepare_checkpoint(&sample_head(), &sample_metadata_state(), "loon-core-test")
+                .expect("prepare checkpoint");
 
         assert_eq!(
             prepared.manifest.object_key,
@@ -726,17 +1023,17 @@ mod tests {
             manifest.payload.tables[0].segments[0].object_key,
             snapshot_table("ns-1", 42, SnapshotTableFamily::Inodes, 0)
         );
-        assert!(manifest
-            .payload
-            .tables
-            .iter()
-            .all(|table| table.segments[0].row_count == 0));
+        assert_eq!(manifest.payload.tables[0].segments[0].row_count, 2);
+        assert_eq!(manifest.payload.tables[1].segments[0].row_count, 1);
+        assert_eq!(manifest.payload.tables[2].segments[0].row_count, 1);
+        assert_eq!(manifest.payload.tables[3].segments[0].row_count, 1);
     }
 
     #[test]
     fn prepare_checkpoint_segment_round_trips_through_shared_codec() {
         let prepared =
-            prepare_checkpoint(&sample_head(), "loon-core-test").expect("prepare checkpoint");
+            prepare_checkpoint(&sample_head(), &sample_metadata_state(), "loon-core-test")
+                .expect("prepare checkpoint");
         let decoded = decode_checkpoint_segment_envelope_zstd(&prepared.segments[0].encoded_bytes)
             .expect("decode checkpoint segment");
 
@@ -747,13 +1044,16 @@ mod tests {
         assert!(decoded
             .has_valid_payload_checksum()
             .expect("recompute checkpoint segment checksum"));
-        assert_eq!(decoded.payload.pages.len(), 0);
+        assert_eq!(decoded.payload.pages.len(), 1);
+        assert_eq!(decoded.payload.pages[0].rows.len(), 2);
+        assert_eq!(decoded.payload.row_count, 2);
     }
 
     #[test]
     fn load_checkpoint_verifies_segments_before_deriving_basis_head() {
         let prepared =
-            prepare_checkpoint(&sample_head(), "loon-core-test").expect("prepare checkpoint");
+            prepare_checkpoint(&sample_head(), &sample_metadata_state(), "loon-core-test")
+                .expect("prepare checkpoint");
         let loaded = load_checkpoint(
             &NamespaceId::from("ns-1"),
             &StoredCheckpointManifest::from(&prepared.manifest),
@@ -766,9 +1066,13 @@ mod tests {
         assert_eq!(loaded.basis_head.next_inode_id, InodeId(777));
         assert_eq!(loaded.basis_head.snapshot_hint_seq, Some(ChangeSeq(42)));
         assert_eq!(loaded.segments.len(), 4);
+        assert_eq!(loaded.basis_metadata_state, sample_metadata_state());
         assert!(loaded
             .checked_invariants
             .contains(&"checkpoint_segment_descriptor_matches_payload".to_owned()));
+        assert!(loaded
+            .checked_invariants
+            .contains(&"checkpoint_segment_rows_restore_basis_metadata".to_owned()));
     }
 
     #[test]
@@ -927,7 +1231,7 @@ mod tests {
 
     #[test]
     fn prepare_checkpoint_rejects_empty_writer_version() {
-        let error = prepare_checkpoint(&sample_head(), "   ")
+        let error = prepare_checkpoint(&sample_head(), &sample_metadata_state(), "   ")
             .expect_err("empty writer version should fail");
 
         assert_eq!(error, CheckpointBuildError::EmptyWriterVersion);
@@ -967,6 +1271,39 @@ mod tests {
         assert_eq!(final_head.active_fence_token, FenceToken(9));
         assert_eq!(final_head.next_inode_id, InodeId(501));
         assert_eq!(final_head.snapshot_hint_seq, Some(ChangeSeq(40)));
+    }
+
+    #[test]
+    fn replay_from_checkpoint_and_wal_tail_reproduces_metadata() {
+        let prepared = prepared_checkpoint_for_replay();
+        let wal_tail = vec![stored_wal_object(sample_wal_payload(
+            ChangeSeq(41),
+            ChangeSeq(40),
+            "req-20260311-0001",
+            FenceToken(9),
+        ))];
+
+        let replayed = replay_from_checkpoint_and_wal_tail_with_metadata(
+            &NamespaceId::from("ns-1"),
+            &StoredCheckpointManifest::from(&prepared.manifest),
+            &stored_checkpoint_segments(&prepared),
+            &wal_tail,
+        )
+        .expect("checkpoint plus wal tail should replay metadata");
+
+        assert_eq!(replayed.resulting_head.seq, ChangeSeq(41));
+        assert_eq!(
+            replayed.resulting_metadata_state.revisions.last(),
+            Some(&RevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(8),
+                committed_seq: ChangeSeq(41),
+                content_manifest_digest: "sha256:report-v8".to_owned(),
+            })
+        );
+        assert!(replayed
+            .checked_invariants
+            .contains(&"checkpoint_plus_wal_tail_reproduces_metadata".to_owned()));
     }
 
     #[test]
@@ -1045,7 +1382,7 @@ mod tests {
             } => {
                 assert!(object_key.contains("/tables/"));
                 assert_eq!(expected.row_count, 1);
-                assert_eq!(actual.row_count, 0);
+                assert_eq!(actual.row_count, 2);
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -1155,8 +1492,10 @@ mod tests {
             request_id: commit_id.to_owned(),
             writer_id: "writer-a".to_owned(),
             writer_fence_token,
-            ops: vec![WalOp::DeleteSubtree {
-                root_inode: InodeId(2),
+            ops: vec![WalOp::ReplaceFile {
+                inode_id: InodeId(42),
+                base_revision: RevisionNo(7),
+                content_manifest_digest: "sha256:report-v8".to_owned(),
             }],
             preconditions: vec![WalPrecondition::HeadSeqIs(base_head_seq)],
         }
@@ -1190,13 +1529,18 @@ mod tests {
     }
 
     fn prepared_checkpoint_for_replay() -> super::PreparedCheckpoint {
-        prepare_checkpoint(&sample_checkpoint_head(), "loon-core-test")
-            .expect("prepare checkpoint for replay tests")
+        prepare_checkpoint(
+            &sample_checkpoint_head(),
+            &sample_metadata_state(),
+            "loon-core-test",
+        )
+        .expect("prepare checkpoint for replay tests")
     }
 
     fn loaded_checkpoint_for_publish() -> LoadedCheckpoint {
-        let prepared = prepare_checkpoint(&sample_head(), "loon-core-test")
-            .expect("prepare checkpoint for publish tests");
+        let prepared =
+            prepare_checkpoint(&sample_head(), &sample_metadata_state(), "loon-core-test")
+                .expect("prepare checkpoint for publish tests");
         load_checkpoint(
             &NamespaceId::from("ns-1"),
             &StoredCheckpointManifest::from(&prepared.manifest),
@@ -1224,6 +1568,40 @@ mod tests {
             next_inode_id: InodeId(501),
             snapshot_hint_seq: Some(ChangeSeq(40)),
             retention_floor_seq: ChangeSeq(40),
+        }
+    }
+
+    fn sample_metadata_state() -> MetadataState {
+        MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(42),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(17),
+                },
+            ],
+            direntries: vec![DirentryRecord {
+                parent_inode_id: InodeId(2),
+                name_key: "report.txt".to_owned(),
+                display_name: "report.txt".to_owned(),
+                child_inode_id: InodeId(42),
+                bind_seq: ChangeSeq(17),
+            }],
+            revisions: vec![RevisionRecord {
+                inode_id: InodeId(42),
+                revision_no: RevisionNo(7),
+                committed_seq: ChangeSeq(40),
+                content_manifest_digest: "sha256:report-v7".to_owned(),
+            }],
+            subtree_tombstones: vec![SubtreeTombstoneRecord {
+                root_inode_id: InodeId(99),
+                tombstone_seq: ChangeSeq(39),
+            }],
         }
     }
 

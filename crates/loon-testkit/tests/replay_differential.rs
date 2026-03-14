@@ -1,11 +1,17 @@
 use loon_core::checkpoint::{
-    load_checkpoint, replay_from_checkpoint_and_wal_tail, StoredCheckpointManifest,
+    load_checkpoint, replay_from_checkpoint_and_wal_tail_with_metadata, StoredCheckpointManifest,
     StoredCheckpointSegment,
 };
-use loon_core::wal::{replay_wal_commit, replay_wal_tail, StoredWalObject};
+use loon_core::metadata::{
+    DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+};
+use loon_core::wal::{
+    replay_wal_commit_with_metadata, replay_wal_tail_with_metadata, StoredWalObject,
+};
 use loon_model::{
-    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointSegment, ModelCheckpointTable,
-    ModelMetadataState, ModelNamespace, ModelWalCommit,
+    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointRow,
+    ModelCheckpointSegment, ModelCheckpointTable, ModelMetadataMutation, ModelMetadataState,
+    ModelNamespace, ModelWalCommit,
 };
 use loon_objectstore::keys::{snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily};
 use loon_testkit::render::render_trace;
@@ -13,9 +19,9 @@ use loon_testkit::scenario::Scenario;
 use loon_types::{
     encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
     encode_wal_commit_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,
-    CheckpointManifestPayload, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-    CheckpointSegmentPayload, CheckpointTableFamily, FenceToken, HeadState, InodeId, NamespaceId,
-    WalCommitEnvelope, WalCommitPayload,
+    CheckpointManifestPayload, CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor,
+    CheckpointSegmentEnvelope, CheckpointSegmentPayload, CheckpointTableFamily, FenceToken,
+    HeadState, InodeId, NamespaceId, RevisionNo, WalCommitEnvelope, WalCommitPayload, WalOp,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -32,15 +38,17 @@ fn wal_tail_replay_fixture_matches_model_and_core() {
 
     assert_single_action(&actions, ReplayActionKind::ReplayWalTail);
 
-    let mut model_namespace = model_namespace_from_head(&initial.replay_basis_head);
+    let mut model_namespace =
+        model_namespace_from_head(&initial.replay_basis_head, &initial.replay_basis_metadata);
     let mut core_head = initial.replay_basis_head.clone();
+    let mut core_metadata = initial.replay_basis_metadata.clone();
     let stored_wal_objects = stored_wal_objects_from_fixture(&initial.wal_objects);
 
     let mut observed_invariants = Vec::new();
     let mut trace = vec![format!(
         "initial model={:?} core={:?}",
         snapshot_from_model_namespace(&model_namespace),
-        snapshot_from_head(&core_head)
+        snapshot_from_core_state(&core_head, &core_metadata)
     )];
 
     assert_states_match(
@@ -48,7 +56,7 @@ fn wal_tail_replay_fixture_matches_model_and_core() {
         &trace,
         0,
         &snapshot_from_model_namespace(&model_namespace),
-        &snapshot_from_head(&core_head),
+        &snapshot_from_core_state(&core_head, &core_metadata),
     );
 
     for (index, (fixture_wal, stored_wal)) in initial
@@ -59,7 +67,12 @@ fn wal_tail_replay_fixture_matches_model_and_core() {
     {
         let model_outcome =
             apply_model_wal(&mut model_namespace, &model_wal_from_fixture(fixture_wal));
-        let core_outcome = apply_core_wal(&mut core_head, stored_wal, &mut observed_invariants);
+        let core_outcome = apply_core_wal(
+            &mut core_head,
+            &mut core_metadata,
+            stored_wal,
+            &mut observed_invariants,
+        );
 
         trace.push(format!(
             "step={} wal_key={} model_outcome={:?} core_outcome={:?} model_state={:?} core_state={:?}",
@@ -68,7 +81,7 @@ fn wal_tail_replay_fixture_matches_model_and_core() {
             model_outcome,
             core_outcome,
             snapshot_from_model_namespace(&model_namespace),
-            snapshot_from_head(&core_head),
+            snapshot_from_core_state(&core_head, &core_metadata),
         ));
 
         if model_outcome != core_outcome {
@@ -84,18 +97,24 @@ fn wal_tail_replay_fixture_matches_model_and_core() {
             &trace,
             index + 1,
             &snapshot_from_model_namespace(&model_namespace),
-            &snapshot_from_head(&core_head),
+            &snapshot_from_core_state(&core_head, &core_metadata),
         );
     }
 
-    let tail_outcome = replay_wal_tail(&initial.replay_basis_head, &stored_wal_objects)
-        .map(|head| snapshot_from_head(&head))
-        .map_err(|err| format!("{err:?}"));
+    let tail_outcome = replay_wal_tail_with_metadata(
+        &initial.replay_basis_head,
+        &initial.replay_basis_metadata,
+        &stored_wal_objects,
+    )
+    .map(|replayed| {
+        snapshot_from_core_state(&replayed.resulting_head, &replayed.resulting_metadata_state)
+    })
+    .map_err(|err| format!("{err:?}"));
     trace.push(format!("high_level_core_wal_tail={tail_outcome:?}"));
 
-    let expected_head = snapshot_from_head(&expect.final_head);
+    let expected_state = snapshot_from_expect(&expect);
     let actual_model = snapshot_from_model_namespace(&model_namespace);
-    let actual_core = snapshot_from_head(&core_head);
+    let actual_core = snapshot_from_core_state(&core_head, &core_metadata);
 
     if tail_outcome != Ok(actual_core.clone()) {
         panic!(
@@ -104,7 +123,7 @@ fn wal_tail_replay_fixture_matches_model_and_core() {
         );
     }
 
-    if actual_model != expected_head || actual_core != expected_head {
+    if actual_model != expected_state || actual_core != expected_state {
         panic!(
             "WAL replay final expectation mismatch:\n{}",
             render_trace(&scenario, &trace)
@@ -152,7 +171,7 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
     let basis_model = model_namespace.as_ref().map(snapshot_from_model_namespace);
     let basis_core = loaded_checkpoint
         .as_ref()
-        .map(|loaded| snapshot_from_head(&loaded.basis_head));
+        .map(|loaded| snapshot_from_core_state(&loaded.basis_head, &loaded.basis_metadata_state));
 
     trace.push(format!(
         "checkpoint_basis model={basis_model:?} core={basis_core:?}"
@@ -169,6 +188,10 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
         .as_ref()
         .map(|loaded| loaded.basis_head.clone())
         .expect("checkpoint fixture should load successfully");
+    let mut core_metadata = loaded_checkpoint
+        .as_ref()
+        .map(|loaded| loaded.basis_metadata_state.clone())
+        .expect("checkpoint fixture should load successfully");
 
     let stored_wal_objects = stored_wal_objects_from_fixture(&initial.wal_objects);
 
@@ -184,7 +207,12 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
                 .expect("model checkpoint restore should succeed"),
             &model_wal_from_fixture(fixture_wal),
         );
-        let core_outcome = apply_core_wal(&mut core_head, stored_wal, &mut observed_invariants);
+        let core_outcome = apply_core_wal(
+            &mut core_head,
+            &mut core_metadata,
+            stored_wal,
+            &mut observed_invariants,
+        );
 
         trace.push(format!(
             "step={} wal_key={} model_outcome={:?} core_outcome={:?} model_state={:?} core_state={:?}",
@@ -193,7 +221,7 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
             model_outcome,
             core_outcome,
             model_namespace.as_ref().map(snapshot_from_model_namespace),
-            snapshot_from_head(&core_head),
+            snapshot_from_core_state(&core_head, &core_metadata),
         ));
 
         if model_outcome != core_outcome {
@@ -212,28 +240,34 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
                 .as_ref()
                 .map(snapshot_from_model_namespace)
                 .expect("model checkpoint restore should succeed"),
-            &snapshot_from_head(&core_head),
+            &snapshot_from_core_state(&core_head, &core_metadata),
         );
     }
 
-    let high_level_core = replay_from_checkpoint_and_wal_tail(
+    let high_level_core_result = replay_from_checkpoint_and_wal_tail_with_metadata(
         &materialized.model_checkpoint.namespace_id,
         &materialized.stored_manifest,
         &materialized.stored_segments,
         &stored_wal_objects,
-    )
-    .map(|head| snapshot_from_head(&head))
-    .map_err(|err| format!("{err:?}"));
+    );
+    if let Ok(replayed) = &high_level_core_result {
+        extend_invariants(&mut observed_invariants, &replayed.checked_invariants);
+    }
+    let high_level_core = high_level_core_result
+        .map(|replayed| {
+            snapshot_from_core_state(&replayed.resulting_head, &replayed.resulting_metadata_state)
+        })
+        .map_err(|err| format!("{err:?}"));
     trace.push(format!(
         "high_level_core_checkpoint_tail={high_level_core:?}"
     ));
 
-    let expected_head = snapshot_from_head(&expect.final_head);
+    let expected_state = snapshot_from_expect(&expect);
     let actual_model = model_namespace
         .as_ref()
         .map(snapshot_from_model_namespace)
         .expect("model checkpoint restore should succeed");
-    let actual_core = snapshot_from_head(&core_head);
+    let actual_core = snapshot_from_core_state(&core_head, &core_metadata);
 
     if high_level_core != Ok(actual_core.clone()) {
         panic!(
@@ -242,7 +276,7 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
         );
     }
 
-    if actual_model != expected_head || actual_core != expected_head {
+    if actual_model != expected_state || actual_core != expected_state {
         panic!(
             "checkpoint replay final expectation mismatch:\n{}",
             render_trace(&scenario, &trace)
@@ -259,6 +293,8 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
 #[derive(Debug, Deserialize)]
 struct WalReplayInitial {
     replay_basis_head: HeadState,
+    #[serde(default)]
+    replay_basis_metadata: MetadataState,
     wal_objects: Vec<FixtureWalObject>,
 }
 
@@ -272,6 +308,8 @@ struct CheckpointReplayInitial {
 #[derive(Debug, Deserialize)]
 struct ReplayExpect {
     final_head: HeadState,
+    #[serde(default)]
+    final_metadata_state: MetadataState,
     #[serde(default)]
     invariants: Vec<String>,
 }
@@ -289,6 +327,41 @@ struct FixtureWalPayload {
     base_head_seq: ChangeSeq,
     commit_id: String,
     writer_fence_token: FenceToken,
+    #[serde(default)]
+    ops: Vec<FixtureWalOp>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op_kind", rename_all = "snake_case")]
+enum FixtureWalOp {
+    CreateDir {
+        inode_id: InodeId,
+        parent_inode: InodeId,
+        display_name: String,
+    },
+    CreateFile {
+        inode_id: InodeId,
+        parent_inode: InodeId,
+        display_name: String,
+        content_manifest_digest: String,
+    },
+    ReplaceFile {
+        inode_id: InodeId,
+        base_revision: RevisionNo,
+        content_manifest_digest: String,
+    },
+    Rename {
+        inode_id: InodeId,
+        new_parent_inode: InodeId,
+        new_display_name: String,
+    },
+    DeleteSubtree {
+        root_inode: InodeId,
+    },
+    RestoreRevision {
+        inode_id: InodeId,
+        restore_from_revision: RevisionNo,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -325,6 +398,15 @@ struct NamespaceSnapshot {
     next_inode_id: InodeId,
     snapshot_hint_seq: Option<ChangeSeq>,
     retention_floor_seq: ChangeSeq,
+    metadata_state: MetadataSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataSnapshot {
+    inodes: Vec<InodeRecord>,
+    direntries: Vec<DirentryRecord>,
+    revisions: Vec<RevisionRecord>,
+    subtree_tombstones: Vec<SubtreeTombstoneRecord>,
 }
 
 #[derive(Debug)]
@@ -373,7 +455,7 @@ impl ReplayActionEnvelope {
     }
 }
 
-fn model_namespace_from_head(head: &HeadState) -> ModelNamespace {
+fn model_namespace_from_head(head: &HeadState, metadata_state: &MetadataState) -> ModelNamespace {
     ModelNamespace {
         namespace_id: head.namespace_id.clone(),
         head_seq: head.seq,
@@ -381,7 +463,7 @@ fn model_namespace_from_head(head: &HeadState) -> ModelNamespace {
         next_inode_id: head.next_inode_id,
         snapshot_hint_seq: head.snapshot_hint_seq,
         retention_floor_seq: head.retention_floor_seq,
-        metadata_state: ModelMetadataState::default(),
+        metadata_state: model_metadata_state_from_core(metadata_state),
     }
 }
 
@@ -393,10 +475,11 @@ fn snapshot_from_model_namespace(namespace: &ModelNamespace) -> NamespaceSnapsho
         next_inode_id: namespace.next_inode_id,
         snapshot_hint_seq: namespace.snapshot_hint_seq,
         retention_floor_seq: namespace.retention_floor_seq,
+        metadata_state: metadata_snapshot_from_model(&namespace.metadata_state),
     }
 }
 
-fn snapshot_from_head(head: &HeadState) -> NamespaceSnapshot {
+fn snapshot_from_core_state(head: &HeadState, metadata_state: &MetadataState) -> NamespaceSnapshot {
     NamespaceSnapshot {
         namespace_id: head.namespace_id.clone(),
         seq: head.seq,
@@ -404,7 +487,12 @@ fn snapshot_from_head(head: &HeadState) -> NamespaceSnapshot {
         next_inode_id: head.next_inode_id,
         snapshot_hint_seq: head.snapshot_hint_seq,
         retention_floor_seq: head.retention_floor_seq,
+        metadata_state: metadata_snapshot_from_core(metadata_state),
     }
+}
+
+fn snapshot_from_expect(expect: &ReplayExpect) -> NamespaceSnapshot {
+    snapshot_from_core_state(&expect.final_head, &expect.final_metadata_state)
 }
 
 fn stored_wal_objects_from_fixture(objects: &[FixtureWalObject]) -> Vec<StoredWalObject> {
@@ -434,7 +522,12 @@ fn stored_wal_object_from_fixture(index: usize, object: &FixtureWalObject) -> St
         request_id: format!("fixture-request-{index}"),
         writer_id: "loon-testkit".to_owned(),
         writer_fence_token: object.payload.writer_fence_token,
-        ops: Vec::new(),
+        ops: object
+            .payload
+            .ops
+            .iter()
+            .map(shared_wal_op_from_fixture)
+            .collect(),
         preconditions: Vec::new(),
     };
     let envelope =
@@ -454,6 +547,12 @@ fn model_wal_from_fixture(object: &FixtureWalObject) -> ModelWalCommit {
         base_head_seq: object.payload.base_head_seq,
         commit_id: object.payload.commit_id.clone(),
         writer_fence_token: object.payload.writer_fence_token,
+        ops: object
+            .payload
+            .ops
+            .iter()
+            .map(model_metadata_mutation_from_fixture)
+            .collect(),
     }
 }
 
@@ -469,14 +568,16 @@ fn apply_model_wal(
 
 fn apply_core_wal(
     head: &mut HeadState,
+    metadata_state: &mut MetadataState,
     wal: &StoredWalObject,
     observed_invariants: &mut Vec<String>,
 ) -> Result<NamespaceSnapshot, String> {
-    replay_wal_commit(head, wal)
+    replay_wal_commit_with_metadata(head, metadata_state, wal)
         .map(|replayed| {
             extend_invariants(observed_invariants, &replayed.checked_invariants);
             *head = replayed.resulting_head;
-            snapshot_from_head(head)
+            *metadata_state = replayed.resulting_metadata_state;
+            snapshot_from_core_state(head, metadata_state)
         })
         .map_err(|err| format!("{err:?}"))
 }
@@ -591,11 +692,29 @@ fn materialize_checkpoint_fixture(
         },
         stored_segments,
         available_segment_keys: segments.iter().map(|segment| segment.key.clone()).collect(),
-        model_checkpoint: model_checkpoint_from_payload(&normalized_payload),
+        model_checkpoint: model_checkpoint_from_fixture(&normalized_payload, segments),
     }
 }
 
-fn model_checkpoint_from_payload(payload: &CheckpointManifestPayload) -> ModelCheckpoint {
+fn model_checkpoint_from_fixture(
+    payload: &CheckpointManifestPayload,
+    segments: &[FixtureCheckpointSegment],
+) -> ModelCheckpoint {
+    let pages_by_object_key = segments
+        .iter()
+        .map(|segment| {
+            (
+                segment.key.clone(),
+                segment
+                    .payload
+                    .pages
+                    .iter()
+                    .map(model_checkpoint_page_from_shared)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
     ModelCheckpoint {
         namespace_id: payload.namespace_id.clone(),
         checkpoint_seq: payload.checkpoint_seq,
@@ -615,10 +734,260 @@ fn model_checkpoint_from_payload(payload: &CheckpointManifestPayload) -> ModelCh
                         object_key: segment.object_key.clone(),
                         segment_index: segment.segment_index,
                         row_count: segment.row_count,
+                        pages: pages_by_object_key
+                            .get(&segment.object_key)
+                            .cloned()
+                            .unwrap_or_default(),
                     })
                     .collect(),
             })
             .collect(),
+    }
+}
+
+fn model_checkpoint_page_from_shared(page: &CheckpointPage) -> ModelCheckpointPage {
+    ModelCheckpointPage {
+        page_index: page.page_index,
+        min_key: page.min_key.clone(),
+        max_key: page.max_key.clone(),
+        row_keys: page.row_keys.clone(),
+        rows: page
+            .rows
+            .iter()
+            .map(model_checkpoint_row_from_shared)
+            .collect(),
+    }
+}
+
+fn model_checkpoint_row_from_shared(row: &CheckpointRow) -> ModelCheckpointRow {
+    match row {
+        CheckpointRow::Inode {
+            inode_id,
+            inode_kind,
+            created_seq,
+        } => ModelCheckpointRow::Inode {
+            inode_id: *inode_id,
+            inode_kind: inode_kind.clone(),
+            created_seq: *created_seq,
+        },
+        CheckpointRow::Direntry {
+            parent_inode_id,
+            name_key,
+            display_name,
+            child_inode_id,
+            bind_seq,
+        } => ModelCheckpointRow::Direntry {
+            parent_inode_id: *parent_inode_id,
+            name_key: name_key.clone(),
+            display_name: display_name.clone(),
+            child_inode_id: *child_inode_id,
+            bind_seq: *bind_seq,
+        },
+        CheckpointRow::Revision {
+            inode_id,
+            revision_no,
+            committed_seq,
+            content_manifest_digest,
+        } => ModelCheckpointRow::Revision {
+            inode_id: *inode_id,
+            revision_no: *revision_no,
+            committed_seq: *committed_seq,
+            content_manifest_digest: content_manifest_digest.clone(),
+        },
+        CheckpointRow::Tombstone {
+            root_inode_id,
+            tombstone_seq,
+        } => ModelCheckpointRow::Tombstone {
+            root_inode_id: *root_inode_id,
+            tombstone_seq: *tombstone_seq,
+        },
+    }
+}
+
+fn shared_wal_op_from_fixture(op: &FixtureWalOp) -> WalOp {
+    match op {
+        FixtureWalOp::CreateDir {
+            inode_id,
+            parent_inode,
+            display_name,
+        } => WalOp::CreateDir {
+            inode_id: *inode_id,
+            parent_inode: *parent_inode,
+            display_name: display_name.clone(),
+        },
+        FixtureWalOp::CreateFile {
+            inode_id,
+            parent_inode,
+            display_name,
+            content_manifest_digest,
+        } => WalOp::CreateFile {
+            inode_id: *inode_id,
+            parent_inode: *parent_inode,
+            display_name: display_name.clone(),
+            content_manifest_digest: content_manifest_digest.clone(),
+        },
+        FixtureWalOp::ReplaceFile {
+            inode_id,
+            base_revision,
+            content_manifest_digest,
+        } => WalOp::ReplaceFile {
+            inode_id: *inode_id,
+            base_revision: *base_revision,
+            content_manifest_digest: content_manifest_digest.clone(),
+        },
+        FixtureWalOp::Rename {
+            inode_id,
+            new_parent_inode,
+            new_display_name,
+        } => WalOp::Rename {
+            inode_id: *inode_id,
+            new_parent_inode: *new_parent_inode,
+            new_display_name: new_display_name.clone(),
+        },
+        FixtureWalOp::DeleteSubtree { root_inode } => WalOp::DeleteSubtree {
+            root_inode: *root_inode,
+        },
+        FixtureWalOp::RestoreRevision {
+            inode_id,
+            restore_from_revision,
+        } => WalOp::RestoreRevision {
+            inode_id: *inode_id,
+            restore_from_revision: *restore_from_revision,
+        },
+    }
+}
+
+fn model_metadata_mutation_from_fixture(op: &FixtureWalOp) -> ModelMetadataMutation {
+    match op {
+        FixtureWalOp::CreateDir {
+            inode_id,
+            parent_inode,
+            display_name,
+        } => ModelMetadataMutation::CreateDir {
+            inode_id: *inode_id,
+            parent_inode_id: *parent_inode,
+            display_name: display_name.clone(),
+        },
+        FixtureWalOp::CreateFile {
+            inode_id,
+            parent_inode,
+            display_name,
+            content_manifest_digest,
+        } => ModelMetadataMutation::CreateFile {
+            inode_id: *inode_id,
+            parent_inode_id: *parent_inode,
+            display_name: display_name.clone(),
+            content_manifest_digest: content_manifest_digest.clone(),
+        },
+        FixtureWalOp::ReplaceFile {
+            inode_id,
+            base_revision,
+            content_manifest_digest,
+        } => ModelMetadataMutation::ReplaceFile {
+            inode_id: *inode_id,
+            base_revision_no: *base_revision,
+            content_manifest_digest: content_manifest_digest.clone(),
+        },
+        FixtureWalOp::Rename { .. }
+        | FixtureWalOp::DeleteSubtree { .. }
+        | FixtureWalOp::RestoreRevision { .. } => {
+            panic!("replay differential fixtures only support create/replace WAL ops")
+        }
+    }
+}
+
+fn model_metadata_state_from_core(metadata_state: &MetadataState) -> ModelMetadataState {
+    ModelMetadataState {
+        inodes: metadata_state
+            .inodes
+            .iter()
+            .map(|inode| loon_model::ModelInodeRecord {
+                inode_id: inode.inode_id,
+                inode_kind: inode.inode_kind.clone(),
+                created_seq: inode.created_seq,
+            })
+            .collect(),
+        direntries: metadata_state
+            .direntries
+            .iter()
+            .map(|direntry| loon_model::ModelDirentryRecord {
+                parent_inode_id: direntry.parent_inode_id,
+                name_key: direntry.name_key.clone(),
+                display_name: direntry.display_name.clone(),
+                child_inode_id: direntry.child_inode_id,
+                bind_seq: direntry.bind_seq,
+            })
+            .collect(),
+        revisions: metadata_state
+            .revisions
+            .iter()
+            .map(|revision| loon_model::ModelRevisionRecord {
+                inode_id: revision.inode_id,
+                revision_no: revision.revision_no,
+                committed_seq: revision.committed_seq,
+                content_manifest_digest: revision.content_manifest_digest.clone(),
+            })
+            .collect(),
+        subtree_tombstones: metadata_state
+            .subtree_tombstones
+            .iter()
+            .map(|tombstone| loon_model::ModelSubtreeTombstoneRecord {
+                root_inode_id: tombstone.root_inode_id,
+                tombstone_seq: tombstone.tombstone_seq,
+            })
+            .collect(),
+    }
+}
+
+fn metadata_snapshot_from_model(metadata_state: &ModelMetadataState) -> MetadataSnapshot {
+    MetadataSnapshot {
+        inodes: metadata_state
+            .inodes
+            .iter()
+            .map(|inode| InodeRecord {
+                inode_id: inode.inode_id,
+                inode_kind: inode.inode_kind.clone(),
+                created_seq: inode.created_seq,
+            })
+            .collect(),
+        direntries: metadata_state
+            .direntries
+            .iter()
+            .map(|direntry| DirentryRecord {
+                parent_inode_id: direntry.parent_inode_id,
+                name_key: direntry.name_key.clone(),
+                display_name: direntry.display_name.clone(),
+                child_inode_id: direntry.child_inode_id,
+                bind_seq: direntry.bind_seq,
+            })
+            .collect(),
+        revisions: metadata_state
+            .revisions
+            .iter()
+            .map(|revision| RevisionRecord {
+                inode_id: revision.inode_id,
+                revision_no: revision.revision_no,
+                committed_seq: revision.committed_seq,
+                content_manifest_digest: revision.content_manifest_digest.clone(),
+            })
+            .collect(),
+        subtree_tombstones: metadata_state
+            .subtree_tombstones
+            .iter()
+            .map(|tombstone| SubtreeTombstoneRecord {
+                root_inode_id: tombstone.root_inode_id,
+                tombstone_seq: tombstone.tombstone_seq,
+            })
+            .collect(),
+    }
+}
+
+fn metadata_snapshot_from_core(metadata_state: &MetadataState) -> MetadataSnapshot {
+    MetadataSnapshot {
+        inodes: metadata_state.inodes.clone(),
+        direntries: metadata_state.direntries.clone(),
+        revisions: metadata_state.revisions.clone(),
+        subtree_tombstones: metadata_state.subtree_tombstones.clone(),
     }
 }
 

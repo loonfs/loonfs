@@ -343,7 +343,59 @@ pub struct CheckpointPage {
     pub page_index: u32,
     pub min_key: String,
     pub max_key: String,
+    #[serde(default)]
     pub row_keys: Vec<String>,
+    #[serde(default)]
+    pub rows: Vec<CheckpointRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "row_kind", rename_all = "snake_case")]
+pub enum CheckpointRow {
+    Inode {
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+        created_seq: ChangeSeq,
+    },
+    Direntry {
+        parent_inode_id: InodeId,
+        name_key: String,
+        display_name: String,
+        child_inode_id: InodeId,
+        bind_seq: ChangeSeq,
+    },
+    Revision {
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        committed_seq: ChangeSeq,
+        content_manifest_digest: String,
+    },
+    Tombstone {
+        root_inode_id: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
+}
+
+impl CheckpointRow {
+    pub fn row_key(&self) -> String {
+        match self {
+            Self::Inode { inode_id, .. } => format!("inode-{:020}", inode_id.0),
+            Self::Direntry {
+                parent_inode_id,
+                name_key,
+                ..
+            } => format!("direntry-{:020}-{name_key}", parent_inode_id.0),
+            Self::Revision {
+                inode_id,
+                revision_no,
+                ..
+            } => format!("revision-{:020}-{:020}", inode_id.0, revision_no.0),
+            Self::Tombstone {
+                root_inode_id,
+                tombstone_seq,
+            } => format!("tombstone-{:020}-{:020}", root_inode_id.0, tombstone_seq.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -790,12 +842,12 @@ mod tests {
         encode_wal_commit_envelope_zstd, payload_checksum_sha256, sha256_digest,
         wal_payload_checksum_sha256, ChangeSeq, CheckpointManifestCodecError,
         CheckpointManifestEnvelope, CheckpointManifestKind, CheckpointManifestPayload,
-        CheckpointPage, CheckpointSegmentCodecError, CheckpointSegmentDescriptor,
+        CheckpointPage, CheckpointRow, CheckpointSegmentCodecError, CheckpointSegmentDescriptor,
         CheckpointSegmentEnvelope, CheckpointSegmentKind, CheckpointSegmentPayload,
         CheckpointTableFamily, CheckpointTableManifest, ContentBlockDescriptor,
         ContentManifestCodecError, ContentManifestEnvelope, ContentManifestKind,
         ContentManifestPayload, ControlObjectEnvelope, ControlObjectKind, FenceToken, HeadState,
-        InodeId, LeaseState, NamespaceId, ProgressState, RevisionNo, WalCodecError,
+        InodeId, InodeKind, LeaseState, NamespaceId, ProgressState, RevisionNo, WalCodecError,
         WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
         CHECKPOINT_MANIFEST_FORMAT_VERSION, CHECKPOINT_SEGMENT_FORMAT_VERSION,
         CONTENT_BLOCK_SIZE_BYTES, CONTENT_MANIFEST_FORMAT_VERSION, CONTROL_OBJECT_FORMAT_VERSION,
@@ -1177,6 +1229,18 @@ mod tests {
                 min_key: "inode-1".to_owned(),
                 max_key: "inode-2".to_owned(),
                 row_keys: vec!["inode-1".to_owned(), "inode-2".to_owned()],
+                rows: vec![
+                    CheckpointRow::Inode {
+                        inode_id: InodeId(1),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(1),
+                    },
+                    CheckpointRow::Inode {
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::File,
+                        created_seq: ChangeSeq(2),
+                    },
+                ],
             }],
         }
     }
