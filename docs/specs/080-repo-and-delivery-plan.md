@@ -30,6 +30,26 @@ Current delivery order:
 - prefer deleting or quarantining placeholder surfaces over expanding them
 - use `docs/roadmap/020-semantic-core-reset.md` as the current execution-order document
 
+Current real delivery surfaces:
+
+- `loon-core`
+- `loon-model`
+- `loon-objectstore`
+- `loon-server::mutation`
+- `loon-client`
+- `loon-testkit`
+- `xtask`
+
+Current quarantined delivery surfaces:
+
+- `loon-cli`
+- the `loond` binary shell
+- `loon-server` HTTP/app placeholders
+- `loon-macos`
+
+These quarantined surfaces stay in the repository to preserve delivery intent and crate names, but
+they should not advertise themselves as active product entrypoints until they wrap real behavior.
+
 ## What should happen early
 
 The repo should accumulate:

@@ -11,7 +11,7 @@ For now, this repository is a **development bootstrap**, not a finished product.
 - object-storage portability earned through conformance tests
 - a test suite that is understandable by both engineers and product-minded reviewers
 
-## Current product shape
+## Intended product shape
 
 - Rust server
 - macOS client
@@ -20,6 +20,15 @@ For now, this repository is a **development bootstrap**, not a finished product.
 - inode-keyed metadata
 - multiple namespaces per account
 - deterministic background work built on rebuildable state
+
+## Current implemented surfaces
+
+- `loon-core`, `loon-model`, and `loon-objectstore` hold the active protocol and storage logic
+- `loon-server::mutation` is the current authoritative server-side execution surface
+- `loon-client` contains the active SQLite/planner/executor work
+- `loon-testkit` and `xtask` are the active review and debugging tools
+- `loon-cli`, the `loond` binary shell, and `loon-macos` are reserved delivery surfaces and are
+  intentionally quarantined during the semantic-core reset
 
 ## Start here
 
@@ -51,10 +60,10 @@ crates/
   loon-queue/       durable background-work coordination
   loon-testkit/     scenario fixtures, rendering, helpers
   loon-sim/         deterministic simulator scaffolding
-  loon-server/      server shell
-  loon-cli/         CLI shell
-  loon-client/      sync daemon shell
-  loon-macos/       macOS bridge shell (connects LoonDB to Mac File Provider)
+  loon-server/      authoritative mutation surface; binary/http shell quarantined for now
+  loon-cli/         reserved CLI placeholder during semantic-core reset
+  loon-client/      active client state, planner, and executor implementation
+  loon-macos/       reserved macOS integration placeholder for later File Provider work
 
 tests/
   scenarios/        readable test cases
@@ -72,8 +81,8 @@ xtask/              repository automation entrypoints
 3. `loon-model`: pure namespace model + state-machine tests
 4. `loon-queue`: one sharded queue class, probably `BuildSnapshot`
 5. `loon-sim`: deterministic clock, scheduler, mock object store
-6. `loon-server`: minimal read path + commit endpoint shell
-7. `loon-client`: full-mirror daemon scaffolding
+6. `loon-server`: authoritative mutation surface before widening binary or HTTP shells
+7. `loon-client`: durable local truth, planner, and executor paths
 8. `loon-macos`: File Provider bridge after mirror semantics are stable
 
 ## Commands to wire up first
