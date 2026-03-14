@@ -1,7 +1,7 @@
 use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision, PlannerError};
 use crate::state_db::{
     BoundLocalOnlyFile, ClientFileId, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    LocalOnlyUploadRow, PendingClientMutationRow, SqliteStateDb, StateDbError,
+    LocalOnlyUploadRow, PendingClientMutationRow, PlannedActionRow, SqliteStateDb, StateDbError,
 };
 use crate::upload::{upload_small_file_from_path, UploadError};
 use loon_objectstore::ObjectStore;
@@ -155,6 +155,74 @@ pub enum ExecuteNextLocalOnlyCreateError {
     LocalOnlyCreate(#[from] ExecuteLocalOnlyCreateError),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextClientAction {
+    ExecutedLocalOnlyCreate(ExecutedNextLocalOnlyCreate),
+    SelectedPlannedAction(PlannedActionRow),
+}
+
+#[derive(Debug, Error)]
+pub enum ExecuteNextClientActionError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    LocalOnlyCreate(#[from] ExecuteLocalOnlyCreateError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NextClientActionCandidate {
+    LocalOnlyCreate(LocalOnlyPlannedActionRow),
+    PlannedAction(PlannedActionRow),
+}
+
+pub fn execute_next_client_action<S, P, F>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    resolve_source_path: P,
+    uploaded_at_ms: u64,
+    created_at_ms: u64,
+    dispatch: F,
+) -> Result<Option<NextClientAction>, ExecuteNextClientActionError>
+where
+    S: ObjectStore,
+    P: FnOnce(&ClientFileId) -> Option<PathBuf>,
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
+    let next_action = match select_next_client_action_candidate(
+        db.load_next_planned_local_only_action()?,
+        db.load_next_planned_action()?,
+    ) {
+        Some(action) => action,
+        None => return Ok(None),
+    };
+
+    match next_action {
+        NextClientActionCandidate::LocalOnlyCreate(planned_action) => {
+            let client_file_id = planned_action.client_file_id.clone();
+            let source_path = resolve_source_path(&client_file_id);
+            let executed = execute_local_only_create(
+                db,
+                store,
+                &client_file_id,
+                source_path.as_deref(),
+                uploaded_at_ms,
+                created_at_ms,
+                dispatch,
+            )?;
+
+            Ok(Some(NextClientAction::ExecutedLocalOnlyCreate(
+                ExecutedNextLocalOnlyCreate {
+                    planned_action,
+                    executed,
+                },
+            )))
+        }
+        NextClientActionCandidate::PlannedAction(planned_action) => Ok(Some(
+            NextClientAction::SelectedPlannedAction(planned_action),
+        )),
+    }
+}
+
 pub fn execute_next_local_only_create<S, P, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -189,6 +257,26 @@ where
         planned_action,
         executed,
     }))
+}
+
+fn select_next_client_action_candidate(
+    next_local_only: Option<LocalOnlyPlannedActionRow>,
+    next_planned_action: Option<PlannedActionRow>,
+) -> Option<NextClientActionCandidate> {
+    match (next_local_only, next_planned_action) {
+        (Some(local_only), Some(planned_action)) => {
+            if local_only.created_at_ms <= planned_action.created_at_ms {
+                Some(NextClientActionCandidate::LocalOnlyCreate(local_only))
+            } else {
+                Some(NextClientActionCandidate::PlannedAction(planned_action))
+            }
+        }
+        (Some(local_only), None) => Some(NextClientActionCandidate::LocalOnlyCreate(local_only)),
+        (None, Some(planned_action)) => {
+            Some(NextClientActionCandidate::PlannedAction(planned_action))
+        }
+        (None, None) => None,
+    }
 }
 
 pub fn execute_local_only_create<S: ObjectStore, F>(

@@ -1,0 +1,19 @@
+name: execute_next_client_action_selects_inode_planned_action
+initial:
+  planned_action:
+    namespace_id: ns-1
+    inode_id: 42
+    decision: upload_local_edit
+    reason: local_differs_from_anchor
+    created_at_ms: 1700000305000
+actions:
+  - execute_next_client_action:
+      uploaded_at_ms: 1700000304000
+      created_at_ms: 1700000306000
+expect:
+  selected_planned_action:
+    namespace_id: ns-1
+    inode_id: 42
+    decision: upload_local_edit
+    reason: local_differs_from_anchor
+    created_at_ms: 1700000305000

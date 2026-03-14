@@ -343,7 +343,7 @@ pub struct FileSyncViews {
     pub sync_anchor: Option<SyncAnchorRow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedActionRow {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
@@ -478,6 +478,10 @@ impl SqliteStateDb {
         inode_id: InodeId,
     ) -> Result<Option<PlannedActionRow>, StateDbError> {
         load_planned_action(&self.conn, namespace_id, inode_id)
+    }
+
+    pub fn load_next_planned_action(&self) -> Result<Option<PlannedActionRow>, StateDbError> {
+        load_next_planned_action(&self.conn)
     }
 
     pub fn allocate_local_file_id(
@@ -1523,6 +1527,40 @@ fn load_planned_action(
     .transpose()
 }
 
+fn load_next_planned_action(conn: &Connection) -> Result<Option<PlannedActionRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT namespace_id, inode_id, decision, reason, created_at_ms
+            FROM planned_actions
+            ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
+            LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(namespace_id, inode_id, decision, reason, created_at_ms)| {
+            Ok(PlannedActionRow {
+                namespace_id: NamespaceId::from(namespace_id),
+                inode_id: InodeId(from_sql_u64(inode_id, "inode_id")?),
+                decision,
+                reason,
+                created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
 fn load_local_only_file(
     conn: &Connection,
     client_file_id: &ClientFileId,
@@ -1852,8 +1890,8 @@ mod tests {
     use super::{
         BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
         LocalOnlyPlannedActionRow, LocalOnlyUploadRow, ObservedLocalOnlyInode,
-        PendingClientMutationRow, RemoteFileStateRow, SqliteStateDb, StateDbError, SyncAnchorRow,
-        SCHEMA_VERSION,
+        PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb,
+        StateDbError, SyncAnchorRow, SCHEMA_VERSION,
     };
     use crate::upload::UploadedContent;
     use loon_types::{
@@ -2029,6 +2067,49 @@ mod tests {
                 namespace_id: NamespaceId::from("ns-1"),
                 decision: "upload_local_create".to_owned(),
                 reason: "local_only_file_without_remote_identity".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            })
+        );
+    }
+
+    #[test]
+    fn load_next_planned_action_orders_deterministically() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+
+        db.planner_transaction("seed-planned-actions", |tx| {
+            tx.upsert_planned_action(&PlannedActionRow {
+                namespace_id: NamespaceId::from("ns-2"),
+                inode_id: InodeId(9),
+                decision: "download_remote_edit".to_owned(),
+                reason: "remote_differs_from_anchor".to_owned(),
+                created_at_ms: 1_700_000_300_000,
+            })?;
+            tx.upsert_planned_action(&PlannedActionRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(8),
+                decision: "upload_local_edit".to_owned(),
+                reason: "local_differs_from_anchor".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            })?;
+            tx.upsert_planned_action(&PlannedActionRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(7),
+                decision: "download_remote_edit".to_owned(),
+                reason: "remote_differs_from_anchor".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            })?;
+            Ok(())
+        })
+        .expect("seed planned actions");
+
+        assert_eq!(
+            db.load_next_planned_action()
+                .expect("load next planned action"),
+            Some(PlannedActionRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(7),
+                decision: "download_remote_edit".to_owned(),
+                reason: "remote_differs_from_anchor".to_owned(),
                 created_at_ms: 1_700_000_200_000,
             })
         );

@@ -110,6 +110,19 @@ pub struct ModelPlannedLocalOnlyAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelPlannedInodeAction {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelScheduledClientAction {
+    LocalOnlyCreate(ModelPlannedLocalOnlyAction),
+    PlannedInodeAction(ModelPlannedInodeAction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelValidatedContent {
     pub file_size_bytes: u64,
     pub file_digest_sha256: String,
@@ -1136,6 +1149,32 @@ pub fn select_next_local_only_action(
         .cloned()
 }
 
+pub fn select_next_client_action(
+    next_local_only: Option<&ModelPlannedLocalOnlyAction>,
+    next_inode_action: Option<&ModelPlannedInodeAction>,
+) -> Option<ModelScheduledClientAction> {
+    match (next_local_only, next_inode_action) {
+        (Some(local_only), Some(inode_action)) => {
+            if local_only.created_at_ms <= inode_action.created_at_ms {
+                Some(ModelScheduledClientAction::LocalOnlyCreate(
+                    local_only.clone(),
+                ))
+            } else {
+                Some(ModelScheduledClientAction::PlannedInodeAction(
+                    inode_action.clone(),
+                ))
+            }
+        }
+        (Some(local_only), None) => Some(ModelScheduledClientAction::LocalOnlyCreate(
+            local_only.clone(),
+        )),
+        (None, Some(inode_action)) => Some(ModelScheduledClientAction::PlannedInodeAction(
+            inode_action.clone(),
+        )),
+        (None, None) => None,
+    }
+}
+
 pub fn validate_uploaded_content_reference(
     namespace_id: &NamespaceId,
     content_manifest_digest: &str,
@@ -1536,6 +1575,30 @@ mod tests {
                 client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
                 created_at_ms: 1_700_000_200_000,
             }
+        );
+    }
+
+    #[test]
+    fn model_selects_next_client_action_preferring_local_only_on_tie() {
+        let selected = select_next_client_action(
+            Some(&ModelPlannedLocalOnlyAction {
+                client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            }),
+            Some(&ModelPlannedInodeAction {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                created_at_ms: 1_700_000_200_000,
+            }),
+        )
+        .expect("one action should be selected");
+
+        assert_eq!(
+            selected,
+            ModelScheduledClientAction::LocalOnlyCreate(ModelPlannedLocalOnlyAction {
+                client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
+                created_at_ms: 1_700_000_200_000,
+            })
         );
     }
 
