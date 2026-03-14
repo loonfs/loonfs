@@ -44,6 +44,9 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
         "native/checkpoint_manifest_plus_delete_subtree_wal_tail_hides_descendants.yaml",
     );
     run_checkpoint_replay_fixture(
+        "native/checkpoint_manifest_reused_direntry_slot_restores_bind_history.yaml",
+    );
+    run_checkpoint_replay_fixture(
         "native/checkpoint_manifest_plus_rename_wal_tail_reproduces_head.yaml",
     );
     run_checkpoint_replay_fixture(

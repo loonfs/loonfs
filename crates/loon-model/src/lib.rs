@@ -2402,8 +2402,12 @@ impl ModelCheckpointRow {
             Self::Direntry {
                 parent_inode_id,
                 name_key,
+                bind_seq,
                 ..
-            } => format!("direntry-{:020}-{name_key}", parent_inode_id.0),
+            } => format!(
+                "direntry-{:020}-{name_key}-{:020}",
+                parent_inode_id.0, bind_seq.0
+            ),
             Self::Revision {
                 inode_id,
                 revision_no,
@@ -3502,6 +3506,80 @@ mod tests {
                 new_parent_inode_id: InodeId(9),
             }
         );
+    }
+
+    #[test]
+    fn model_visible_child_prefers_latest_slot_binding_when_name_is_reused() {
+        let metadata_state = ModelMetadataState {
+            inodes: vec![
+                ModelInodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(42),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(10),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(77),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(30),
+                },
+            ],
+            direntries: vec![
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "note.txt".to_owned(),
+                    display_name: "note.txt".to_owned(),
+                    child_inode_id: InodeId(42),
+                    bind_seq: ChangeSeq(10),
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "archive.txt".to_owned(),
+                    display_name: "archive.txt".to_owned(),
+                    child_inode_id: InodeId(42),
+                    bind_seq: ChangeSeq(20),
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "note.txt".to_owned(),
+                    display_name: "note.txt".to_owned(),
+                    child_inode_id: InodeId(77),
+                    bind_seq: ChangeSeq(30),
+                },
+            ],
+            revisions: vec![
+                ModelRevisionRecord {
+                    inode_id: InodeId(42),
+                    revision_no: RevisionNo(1),
+                    committed_seq: ChangeSeq(10),
+                    content_manifest_digest: "sha256:note-v1".to_owned(),
+                },
+                ModelRevisionRecord {
+                    inode_id: InodeId(77),
+                    revision_no: RevisionNo(1),
+                    committed_seq: ChangeSeq(30),
+                    content_manifest_digest: "sha256:note-v2".to_owned(),
+                },
+            ],
+            subtree_tombstones: Vec::new(),
+        };
+
+        assert_eq!(
+            metadata_state
+                .visible_child(InodeId(2), "note.txt", ChangeSeq(30))
+                .expect("latest visible note.txt binding")
+                .child_inode_id,
+            InodeId(77)
+        );
+        let old_child_binding = metadata_state
+            .current_parent_binding_for_child(InodeId(42), ChangeSeq(30))
+            .expect("latest binding for renamed-away inode");
+        assert_eq!(old_child_binding.parent_inode_id, InodeId(2));
+        assert_eq!(old_child_binding.name_key, "archive.txt");
     }
 
     #[test]

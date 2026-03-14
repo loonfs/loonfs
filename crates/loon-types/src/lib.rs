@@ -383,8 +383,12 @@ impl CheckpointRow {
             Self::Direntry {
                 parent_inode_id,
                 name_key,
+                bind_seq,
                 ..
-            } => format!("direntry-{:020}-{name_key}", parent_inode_id.0),
+            } => format!(
+                "direntry-{:020}-{name_key}-{:020}",
+                parent_inode_id.0, bind_seq.0
+            ),
             Self::Revision {
                 inode_id,
                 revision_no,

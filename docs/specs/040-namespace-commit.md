@@ -917,6 +917,9 @@ Each row is typed and must match the segment family:
 - `revisions` segments carry `revision(inode_id, revision_no, committed_seq, content_manifest_digest)`
 - `tombstones` segments carry `tombstone(root_inode_id, tombstone_seq)`
 
+For `direntries`, the checkpoint row key must include `bind_seq` as well as `(parent_inode_id,
+name_key)`, so repeated reuse of one visible slot is still representable as distinct historical rows.
+
 The manifest stores the segment payload checksum plus one checksum per page. `row_keys`,
 `min_key`, `max_key`, and `row_count` are redundant summary fields and must match the typed row
 body exactly; replay must validate them before trusting the segment.

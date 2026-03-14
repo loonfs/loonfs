@@ -25,8 +25,8 @@ initial:
             - object_key: namespaces/ns-1/snapshots/00000000000000000052/tables/direntries-00000.sst.zst
               segment_index: 0
               row_count: 1
-              min_key: direntry-00000000000000000002-report.txt
-              max_key: direntry-00000000000000000002-report.txt
+              min_key: direntry-00000000000000000002-report.txt-00000000000000000009
+              max_key: direntry-00000000000000000002-report.txt-00000000000000000009
               payload_checksum_sha256: fixture-direntries
               page_checksums_sha256:
                 - fixture-direntries-page-0
@@ -83,14 +83,14 @@ initial:
         family: direntries
         segment_index: 0
         row_count: 1
-        min_key: direntry-00000000000000000002-report.txt
-        max_key: direntry-00000000000000000002-report.txt
+        min_key: direntry-00000000000000000002-report.txt-00000000000000000009
+        max_key: direntry-00000000000000000002-report.txt-00000000000000000009
         pages:
           - page_index: 0
-            min_key: direntry-00000000000000000002-report.txt
-            max_key: direntry-00000000000000000002-report.txt
+            min_key: direntry-00000000000000000002-report.txt-00000000000000000009
+            max_key: direntry-00000000000000000002-report.txt-00000000000000000009
             row_keys:
-              - direntry-00000000000000000002-report.txt
+              - direntry-00000000000000000002-report.txt-00000000000000000009
             rows:
               - row_kind: direntry
                 parent_inode_id: 2
