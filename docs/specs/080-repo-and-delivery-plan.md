@@ -23,6 +23,13 @@ A team should be able to pick one workstream at a time:
 - server shell
 - client shell
 
+Current delivery order:
+
+- implement the semantic core before widening shells and adapters
+- treat review boundaries inside crates as equally important as crate boundaries
+- prefer deleting or quarantining placeholder surfaces over expanding them
+- use `docs/roadmap/020-semantic-core-reset.md` as the current execution-order document
+
 ## What should happen early
 
 The repo should accumulate:

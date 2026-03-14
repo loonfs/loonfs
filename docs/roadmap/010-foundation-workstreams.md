@@ -2,6 +2,11 @@
 
 This roadmap turns `docs/specs/090-major-implementation-decisions.md` into concrete work packages that different engineers or agents can pick up safely.
 
+Current note:
+this document describes the original workstream breakdown. The current execution order is now
+captured in `docs/roadmap/020-semantic-core-reset.md`, which prioritizes the canonical metadata
+engine and structural cleanup before further surface-area growth.
+
 ## Workstream A: object-store contract and control objects
 
 Primary crates:
