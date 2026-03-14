@@ -391,7 +391,8 @@ create summary:
 - `created_inode.content_digest`
 
 For the current create-only contract, `created_inode.revision_no` is `1` and
-`created_inode.content_digest` is `null` for directories.
+`created_inode.content_digest` is `null` for directories. For files, it is the authoritative
+whole-file digest from the validated manifest payload.
 
 On receipt of that response, one SQLite transaction must:
 

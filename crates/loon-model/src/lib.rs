@@ -6,7 +6,7 @@ use loon_types::{
     InodeId, LeaseState, NamespaceId, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelNamespace {
@@ -73,6 +73,45 @@ pub struct ModelUploadedContent {
     pub file_digest_sha256: String,
     pub content_manifest_digest: String,
     pub manifest_envelope: ContentManifestEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelValidatedContent {
+    pub file_size_bytes: u64,
+    pub file_digest_sha256: String,
+    pub block_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelContentValidationError {
+    ManifestDigestMismatch {
+        expected: String,
+        actual: String,
+    },
+    ManifestNamespaceMismatch {
+        expected: NamespaceId,
+        actual: NamespaceId,
+    },
+    MissingBlock {
+        digest: String,
+    },
+    BlockLengthMismatch {
+        digest: String,
+        expected: u64,
+        actual: u64,
+    },
+    BlockDigestMismatch {
+        expected: String,
+        actual: String,
+    },
+    FileSizeMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    FileDigestMismatch {
+        expected: String,
+        actual: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -989,6 +1028,78 @@ pub fn build_uploaded_content(
     })
 }
 
+pub fn validate_uploaded_content_reference(
+    namespace_id: &NamespaceId,
+    content_manifest_digest: &str,
+    manifest_envelope: &ContentManifestEnvelope,
+    available_blocks: &BTreeMap<String, Vec<u8>>,
+) -> Result<ModelValidatedContent, ModelContentValidationError> {
+    let actual_manifest_digest = content_manifest_digest_sha256(manifest_envelope)
+        .expect("content manifest envelope should always re-encode");
+    if actual_manifest_digest != content_manifest_digest {
+        return Err(ModelContentValidationError::ManifestDigestMismatch {
+            expected: content_manifest_digest.to_owned(),
+            actual: actual_manifest_digest,
+        });
+    }
+
+    if &manifest_envelope.payload.namespace_id != namespace_id {
+        return Err(ModelContentValidationError::ManifestNamespaceMismatch {
+            expected: namespace_id.clone(),
+            actual: manifest_envelope.payload.namespace_id.clone(),
+        });
+    }
+
+    let mut reconstructed = Vec::new();
+    for block in &manifest_envelope.payload.blocks {
+        let bytes = available_blocks
+            .get(&block.content_digest_sha256)
+            .ok_or_else(|| ModelContentValidationError::MissingBlock {
+                digest: block.content_digest_sha256.clone(),
+            })?;
+        let actual_size = bytes.len() as u64;
+        if actual_size != block.plaintext_size_bytes {
+            return Err(ModelContentValidationError::BlockLengthMismatch {
+                digest: block.content_digest_sha256.clone(),
+                expected: block.plaintext_size_bytes,
+                actual: actual_size,
+            });
+        }
+
+        let actual_digest = sha256_digest(bytes);
+        if actual_digest != block.content_digest_sha256 {
+            return Err(ModelContentValidationError::BlockDigestMismatch {
+                expected: block.content_digest_sha256.clone(),
+                actual: actual_digest,
+            });
+        }
+
+        reconstructed.extend_from_slice(bytes);
+    }
+
+    let actual_file_size = reconstructed.len() as u64;
+    if actual_file_size != manifest_envelope.payload.file_size_bytes {
+        return Err(ModelContentValidationError::FileSizeMismatch {
+            expected: manifest_envelope.payload.file_size_bytes,
+            actual: actual_file_size,
+        });
+    }
+
+    let actual_file_digest = sha256_digest(&reconstructed);
+    if actual_file_digest != manifest_envelope.payload.file_digest_sha256 {
+        return Err(ModelContentValidationError::FileDigestMismatch {
+            expected: manifest_envelope.payload.file_digest_sha256.clone(),
+            actual: actual_file_digest,
+        });
+    }
+
+    Ok(ModelValidatedContent {
+        file_size_bytes: actual_file_size,
+        file_digest_sha256: actual_file_digest,
+        block_count: manifest_envelope.payload.blocks.len(),
+    })
+}
+
 fn ensure_checkpoint_is_restorable(
     checkpoint: &ModelCheckpoint,
     available_segment_keys: &[String],
@@ -1155,6 +1266,53 @@ mod tests {
         assert_eq!(
             uploaded.manifest_envelope.payload.blocks[1].plaintext_size_bytes,
             1
+        );
+    }
+
+    #[test]
+    fn model_validates_uploaded_content_reference() {
+        let uploaded = build_uploaded_content(NamespaceId::from("ns-1"), b"hello from loon\n")
+            .expect("build uploaded content");
+        let mut blocks = BTreeMap::new();
+        blocks.insert(
+            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9".to_owned(),
+            b"hello from loon\n".to_vec(),
+        );
+
+        let validated = validate_uploaded_content_reference(
+            &NamespaceId::from("ns-1"),
+            &uploaded.content_manifest_digest,
+            &uploaded.manifest_envelope,
+            &blocks,
+        )
+        .expect("validate uploaded content reference");
+
+        assert_eq!(validated.file_size_bytes, 16);
+        assert_eq!(
+            validated.file_digest_sha256,
+            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+        );
+        assert_eq!(validated.block_count, 1);
+    }
+
+    #[test]
+    fn model_rejects_uploaded_content_reference_when_block_is_missing() {
+        let uploaded = build_uploaded_content(NamespaceId::from("ns-1"), b"hello from loon\n")
+            .expect("build uploaded content");
+        let error = validate_uploaded_content_reference(
+            &NamespaceId::from("ns-1"),
+            &uploaded.content_manifest_digest,
+            &uploaded.manifest_envelope,
+            &BTreeMap::new(),
+        )
+        .expect_err("missing block should be rejected");
+
+        assert_eq!(
+            error,
+            ModelContentValidationError::MissingBlock {
+                digest: "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                    .to_owned(),
+            }
         );
     }
 

@@ -84,6 +84,46 @@ Failure modes named for the first implementation:
 - `create_mutation_consumes_next_inode_id`
 - `create_file_requires_durable_content`
 
+## Authoritative durable content validation
+
+Before the authoritative side may publish `create_file`, it must validate the referenced
+immutable content objects against object storage.
+
+Validation steps:
+
+1. load `namespaces/{namespace_id}/manifests/{content_manifest_digest}.json`
+2. decode `ContentManifestEnvelope` and verify `payload_checksum_sha256`
+3. recompute the manifest object's digest from the stored JSON bytes and require it to equal
+   `content_manifest_digest`
+4. require `payload.namespace_id` to match the request namespace
+5. for every listed block, load `namespaces/{namespace_id}/blobs/{block_digest_sha256}`
+6. require every loaded block's raw bytes to match its listed digest and size
+7. require the ordered concatenation of those blocks to reproduce
+   `payload.file_size_bytes` and `payload.file_digest_sha256`
+
+Why these rules exist:
+
+- `create_file_requires_durable_content` should be enforced against real durable objects,
+  not just against a non-empty digest string
+- metadata should not publish if the referenced manifest or any referenced block is missing,
+  corrupted, or namespace-crossed
+
+Failure modes prevented:
+
+- a create request pointing at a manifest object with tampered JSON
+- a create request pointing at a manifest whose listed blocks do not exist
+- a create request pointing at blocks whose bytes no longer match the manifest descriptors
+- a create request pointing at a manifest whose whole-file digest does not match its block list
+
+Failure modes named for the first implementation:
+
+- `create_file_manifest_missing`
+- `create_file_manifest_digest_mismatch`
+- `create_file_manifest_namespace_mismatch`
+- `create_file_block_missing`
+- `create_file_block_descriptor_mismatch`
+- `create_file_file_digest_mismatch`
+
 ## Fencing
 
 Lease ownership changes must change the active fencing token.
@@ -274,6 +314,8 @@ Rules:
 - `committed_seq` must equal the newly published head seq
 - the returned `created_inode.inode_id` must equal the inode id allocated in the WAL op
 - the first create revision is `1`
+- for files, `created_inode.content_digest` is the whole-file content digest from the validated
+  manifest payload, not the manifest object digest
 
 Why this rule exists:
 

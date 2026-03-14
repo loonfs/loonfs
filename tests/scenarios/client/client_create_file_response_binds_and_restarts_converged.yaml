@@ -6,10 +6,14 @@ initial:
     inode_kind: file
     parent_inode_id: 2
     display_name: draft.txt
-    content_digest: sha256:new-local-file
+    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
     exists_on_disk: true
     dirty: true
     last_local_change_ms: 1700000100000
+  local_file:
+    relative_path: drafts/draft.txt
+    content_utf8: |
+      hello from loon
   planned_local_only_action:
     client_file_id: tmp:ns-1:00000000000000000001
     namespace_id: ns-1
@@ -55,7 +59,7 @@ expect:
       revision_no: 1
       parent_inode_id: 2
       display_name: draft.txt
-      content_digest: sha256:new-local-file
+      content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
   bound_identity:
     client_file_id: tmp:ns-1:00000000000000000001
     namespace_id: ns-1
@@ -66,7 +70,7 @@ expect:
     inode_kind: file
     observed_seq: 42
     revision_no: 1
-    content_digest: sha256:new-local-file
+    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
     parent_inode_id: 2
     display_name: draft.txt
     is_deleted: false
@@ -74,7 +78,7 @@ expect:
     namespace_id: ns-1
     inode_id: 501
     inode_kind: file
-    content_digest: sha256:new-local-file
+    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
     parent_inode_id: 2
     display_name: draft.txt
     exists_on_disk: true
@@ -86,7 +90,7 @@ expect:
     inode_kind: file
     synced_seq: 42
     revision_no: 1
-    content_digest: sha256:new-local-file
+    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
     parent_inode_id: 2
     display_name: draft.txt
   local_only_state_cleared: true

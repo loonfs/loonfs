@@ -3,6 +3,9 @@ use loon_core::commit::{
     CommitOp, CommitPlan, CommitRequest, CommitValidationContext, CommitValidationError,
     Precondition, PreparedCommitHeadPublish,
 };
+use loon_core::content::{
+    validate_durable_content_reference, DurableContentValidationError, ValidatedDurableContent,
+};
 use loon_core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
@@ -101,6 +104,8 @@ pub enum ClientMutationExecutionError {
     LoadHead(#[from] ControlObjectLoadError),
     #[error("failed to load lease object: {0}")]
     LoadLease(ControlObjectLoadError),
+    #[error("durable content validation failed: {0}")]
+    DurableContent(DurableContentValidationError),
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
     #[error(transparent)]
@@ -127,6 +132,7 @@ pub fn execute_client_mutation<S: ObjectStore>(
     let loaded_head = read_head_object(store, &request.namespace_id)?;
     let loaded_lease = read_lease_object(store, &request.namespace_id)
         .map_err(ClientMutationExecutionError::LoadLease)?;
+    let validated_content = validate_referenced_durable_content(store, request)?;
     let head_etag = loaded_head.metadata.etag.clone().ok_or_else(|| {
         ClientMutationExecutionError::MissingHeadEtag {
             object_key: loaded_head.object_key.clone(),
@@ -148,9 +154,16 @@ pub fn execute_client_mutation<S: ObjectStore>(
         .map_err(map_store_write_error)?;
     let head_metadata = publish_commit_head(store, &head_etag, &head_publish)
         .map_err(|err| ClientMutationExecutionError::HeadWrite(format!("{err:?}")))?;
-    let response = build_client_mutation_response(request, &plan, &head_publish)?;
+    let response =
+        build_client_mutation_response(request, validated_content.as_ref(), &plan, &head_publish)?;
 
     let mut checked_invariants = Vec::new();
+    if let Some(validated_content) = &validated_content {
+        extend_invariants(
+            &mut checked_invariants,
+            &validated_content.checked_invariants,
+        );
+    }
     extend_invariants(&mut checked_invariants, &plan.checked_invariants);
     extend_invariants(&mut checked_invariants, &wal.checked_invariants);
     extend_invariants(&mut checked_invariants, &head_publish.checked_invariants);
@@ -167,8 +180,28 @@ pub fn execute_client_mutation<S: ObjectStore>(
     })
 }
 
+fn validate_referenced_durable_content<S: ObjectStore>(
+    store: &S,
+    request: &ClientMutationRequest,
+) -> Result<Option<ValidatedDurableContent>, ClientMutationExecutionError> {
+    match &request.op {
+        ClientMutationOp::CreateFile {
+            content_manifest_digest,
+            ..
+        } => validate_durable_content_reference(
+            store,
+            &request.namespace_id,
+            content_manifest_digest,
+        )
+        .map(Some)
+        .map_err(ClientMutationExecutionError::DurableContent),
+        ClientMutationOp::CreateDir { .. } => Ok(None),
+    }
+}
+
 fn build_client_mutation_response(
     request: &ClientMutationRequest,
+    validated_content: Option<&ValidatedDurableContent>,
     plan: &CommitPlan,
     head_publish: &PreparedCommitHeadPublish,
 ) -> Result<ClientMutationResponse, ClientMutationExecutionError> {
@@ -196,14 +229,19 @@ fn build_client_mutation_response(
         ClientMutationOp::CreateFile {
             parent_inode_id,
             display_name,
-            content_manifest_digest,
+            ..
         } => CreatedRemoteInode {
             inode_id,
             inode_kind: loon_types::InodeKind::File,
             revision_no: RevisionNo(1),
             parent_inode_id: *parent_inode_id,
             display_name: display_name.clone(),
-            content_digest: Some(content_manifest_digest.clone()),
+            content_digest: Some(
+                validated_content
+                    .expect("create_file response requires validated durable content")
+                    .file_digest_sha256
+                    .clone(),
+            ),
         },
     };
 
@@ -459,15 +497,17 @@ impl From<CommitHeadPublishError> for ClientMutationExecutionError {
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_client_mutation, translate_client_mutation_request, ClientMutationExecutionParams,
+        execute_client_mutation, translate_client_mutation_request, ClientMutationExecutionError,
+        ClientMutationExecutionParams, DurableContentValidationError,
     };
     use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{namespace_head, namespace_lease};
+    use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
     use loon_objectstore::ObjectStore;
     use loon_testkit::scenario::Scenario;
     use loon_types::{
-        decode_wal_commit_envelope_zstd, ClientMutationRequest, ControlObjectKind, HeadState,
-        HeadStateEnvelope, LeaseState, LeaseStateEnvelope, WalOp,
+        decode_wal_commit_envelope_zstd, encode_content_manifest_json, sha256_digest,
+        ClientMutationRequest, ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind,
+        HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId, WalOp,
     };
     use serde::Deserialize;
     use std::fs;
@@ -534,6 +574,20 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
 
         seed_head_and_lease(&store, &initial.head, &initial.lease);
+        seed_content_objects(
+            &store,
+            &initial.head.namespace_id,
+            initial
+                .content_objects
+                .as_ref()
+                .expect("create-file fixture should seed content objects"),
+        );
+
+        let content_manifest_digest = initial
+            .client_request
+            .content_manifest_digest()
+            .expect("create-file fixture should carry content manifest digest")
+            .to_owned();
 
         let executed = execute_client_mutation(
             &store,
@@ -568,7 +622,7 @@ mod tests {
                 inode_id: expect.wal_object.payload.create_file_inode_id,
                 parent_inode: loon_types::InodeId(902),
                 display_name: "note.txt".to_owned(),
-                content_manifest_digest: "sha256:child-note".to_owned(),
+                content_manifest_digest: content_manifest_digest.clone(),
             }]
         );
         assert_eq!(
@@ -585,7 +639,10 @@ mod tests {
                 revision_no: loon_types::RevisionNo(1),
                 parent_inode_id: loon_types::InodeId(902),
                 display_name: "note.txt".to_owned(),
-                content_digest: Some("sha256:child-note".to_owned()),
+                content_digest: Some(
+                    "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                        .to_owned(),
+                ),
             }
         );
         assert_eq!(executed.head_publish.resulting_head, expect.head);
@@ -611,10 +668,51 @@ mod tests {
         assert_eq!(stored_head.state, expect.head);
     }
 
+    #[test]
+    fn client_create_file_fixture_rejects_missing_content_block() {
+        let scenario = load_fixture("native/client_create_file_rejects_missing_content_block.yaml");
+        let initial: MutationInitial = scenario.decode_initial().expect("decode initial state");
+        let expect: MutationErrorExpect = scenario.decode_expect().expect("decode expectations");
+        let temp_dir = TestDir::new("client-create-file-missing-block");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+
+        seed_head_and_lease(&store, &initial.head, &initial.lease);
+        seed_content_objects(
+            &store,
+            &initial.head.namespace_id,
+            initial
+                .content_objects
+                .as_ref()
+                .expect("missing-block fixture should seed content objects"),
+        );
+
+        let error = execute_client_mutation(
+            &store,
+            &ClientMutationRequest::from(initial.client_request),
+            &ClientMutationExecutionParams {
+                writer_id: initial.lease.holder_id,
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+            },
+        )
+        .expect_err("missing content block should reject create-file mutation");
+
+        match expect.error.as_str() {
+            "create_file_block_missing" => assert!(matches!(
+                error,
+                ClientMutationExecutionError::DurableContent(
+                    DurableContentValidationError::MissingBlockObject { .. }
+                )
+            )),
+            other => panic!("unexpected fixture error tag `{other}`"),
+        }
+    }
+
     #[derive(Debug, Deserialize)]
     struct MutationInitial {
         head: HeadState,
         lease: LeaseState,
+        content_objects: Option<SeededContentObjects>,
         client_request: RawClientMutationRequest,
     }
 
@@ -626,9 +724,32 @@ mod tests {
     }
 
     #[derive(Debug, Deserialize)]
+    struct MutationErrorExpect {
+        error: String,
+    }
+
+    #[derive(Debug, Deserialize)]
     struct ExpectedWalObject {
         key: String,
         payload: ExpectedWalPayload,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SeededContentObjects {
+        manifest: SeededManifestObject,
+        blocks: Vec<SeededBlockObject>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SeededManifestObject {
+        digest: String,
+        payload: ContentManifestPayload,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SeededBlockObject {
+        digest: String,
+        body_utf8: String,
     }
 
     #[derive(Debug, Deserialize)]
@@ -693,6 +814,17 @@ mod tests {
         }
     }
 
+    impl RawClientMutationRequest {
+        fn content_manifest_digest(&self) -> Option<&str> {
+            match &self.op {
+                RawClientMutationOp::CreateFile { create_file } => {
+                    Some(create_file.content_manifest_digest.as_str())
+                }
+                RawClientMutationOp::CreateDir { .. } => None,
+            }
+        }
+    }
+
     fn load_fixture(relative_path: &str) -> Scenario {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/scenarios")
@@ -722,6 +854,41 @@ mod tests {
         store
             .put_if_absent(&namespace_lease(lease.namespace_id.as_str()), &lease_bytes)
             .expect("seed lease object");
+    }
+
+    fn seed_content_objects(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        content_objects: &SeededContentObjects,
+    ) {
+        let manifest_envelope =
+            ContentManifestEnvelope::from_payload(content_objects.manifest.payload.clone())
+                .expect("build content manifest envelope");
+        let manifest_bytes =
+            encode_content_manifest_json(&manifest_envelope).expect("encode content manifest");
+        assert_eq!(
+            sha256_digest(&manifest_bytes),
+            content_objects.manifest.digest,
+            "fixture manifest digest should match encoded content manifest"
+        );
+        store
+            .put_if_absent(
+                &content_manifest(namespace_id.as_str(), &content_objects.manifest.digest),
+                &manifest_bytes,
+            )
+            .expect("seed content manifest object");
+
+        for block in &content_objects.blocks {
+            let block_bytes = block.body_utf8.as_bytes();
+            assert_eq!(
+                sha256_digest(block_bytes),
+                block.digest,
+                "fixture block digest should match block body"
+            );
+            store
+                .put_if_absent(&blob(namespace_id.as_str(), &block.digest), block_bytes)
+                .expect("seed content block object");
+        }
     }
 
     #[derive(Debug)]

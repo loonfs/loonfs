@@ -4,6 +4,7 @@ use loon_client::state_db::{
     BoundLocalOnlyFile, LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
     RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
 };
+use loon_client::upload::upload_small_file_from_path;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
@@ -37,7 +38,9 @@ fn run_fixture(relative_path: &str) {
     let temp_dir = TestDir::new("client-mutation-round-trip");
     let db_path = temp_dir.path().join("client.sqlite3");
     let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
     fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
     let store = LocalFsStore::new(&store_root).expect("create local object store");
 
     seed_head_and_lease(&store, &initial.head, &initial.lease);
@@ -58,11 +61,22 @@ fn run_fixture(relative_path: &str) {
 
     let planned = PlannedLocalOnlyActionRecord::try_from(initial.planned_local_only_action.clone())
         .expect("decode planned local-only action");
+    let uploaded_content = initial.local_file.as_ref().map(|local_file| {
+        let source_path = source_root.join(&local_file.relative_path);
+        fs::create_dir_all(source_path.parent().expect("source file parent"))
+            .expect("create source file parent");
+        fs::write(&source_path, local_file.content_utf8.as_bytes()).expect("write source file");
+        upload_small_file_from_path(&store, &initial.local_only_state.namespace_id, &source_path)
+            .expect("upload local file before request build")
+    });
     let request = build_client_mutation_request(
         &build.client_request_id,
         &initial.local_only_state,
         &planned,
-        initial.local_only_state.content_digest.as_deref(),
+        uploaded_content
+            .as_ref()
+            .map(|uploaded| uploaded.content_manifest_digest.as_str())
+            .or(initial.local_only_state.content_digest.as_deref()),
     )
     .expect("build client mutation request");
 
@@ -156,6 +170,7 @@ fn run_fixture(relative_path: &str) {
 #[derive(Debug, Deserialize)]
 struct RoundTripInitial {
     local_only_state: LocalOnlyFileStateRow,
+    local_file: Option<FixtureLocalFile>,
     planned_local_only_action: LocalOnlyPlannedActionRow,
     head: HeadState,
     lease: LeaseState,
@@ -172,6 +187,12 @@ struct RoundTripExpect {
     planned_local_only_action_cleared: bool,
     pending_mutation_cleared: bool,
     planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct FixtureLocalFile {
+    relative_path: PathBuf,
+    content_utf8: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -992,6 +992,8 @@ dependencies = [
  "loon-types",
  "serde",
  "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]
