@@ -15,8 +15,10 @@ Add a test case that is readable outside the implementation.
 6. For replay fixtures, rerun them with
    `cargo run -p xtask -- replay-seed replay <path> [--seed <u64>]`.
    You can also pass a fixture key like `native/wal_tail_replay_advances_head.yaml`.
-7. Save a snapshot output if the harness already supports it.
-8. Link the fixture in the PR description.
+7. If a replay fixture fails, minimize it with
+   `cargo run -p xtask -- minimize-case replay <path> [--seed <u64>] [--write <path>]`.
+8. Save a snapshot output if the harness already supports it.
+9. Link the fixture in the PR description.
 
 ## Good fixture qualities
 

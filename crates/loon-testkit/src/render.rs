@@ -38,6 +38,13 @@ pub fn render_case(scenario: &Scenario) -> String {
     rendered
 }
 
+pub fn render_yaml<T>(value: &T) -> Result<String, serde_yaml::Error>
+where
+    T: Serialize,
+{
+    serde_yaml::to_string(value)
+}
+
 fn render_mapping_section<T>(rendered: &mut String, label: &str, value: &T)
 where
     T: Serialize,

@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod fixtures;
+pub mod minimize;
 pub mod render;
 pub mod replay;
 pub mod scenario;
