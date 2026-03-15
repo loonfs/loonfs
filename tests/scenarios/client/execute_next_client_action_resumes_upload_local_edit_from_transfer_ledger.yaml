@@ -1,4 +1,4 @@
-name: execute_next_client_action_upload_local_edit_updates_bound_inode
+name: execute_next_client_action_resumes_upload_local_edit_from_transfer_ledger
 initial:
   remote_state:
     namespace_id: ns-1
@@ -14,7 +14,7 @@ initial:
     namespace_id: ns-1
     inode_id: 42
     inode_kind: file
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    content_digest:
     parent_inode_id: 2
     display_name: report.txt
     exists_on_disk: true
@@ -31,14 +31,21 @@ initial:
     display_name: report.txt
   local_file:
     relative_path: reports/report.txt
-    content_utf8: |
-      hello from loon
+    generated_two_block:
+      first_block_fill_byte: a
+      second_block_utf8: "b"
   planned_action:
     namespace_id: ns-1
     inode_id: 42
     decision: upload_local_edit
     reason: local_differs_from_anchor
     created_at_ms: 1700000405000
+  transfer_ledger:
+    direction: upload
+    block_index: 1
+    block_count: 2
+    state: uploading
+    updated_at_ms: 1700000404500
   head:
     namespace_id: ns-1
     seq: 41
@@ -73,7 +80,7 @@ expect:
       replace_file:
         inode_id: 42
         base_revision_no: 17
-        content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+        content_manifest_digest:
   mutation_response:
     namespace_id: ns-1
     client_request_id: client-req-00000000000000000001
@@ -82,17 +89,17 @@ expect:
       inode_id: 42
       inode_kind: file
       revision_no: 18
-      content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+      content_digest:
   applied_inode_mutation:
     namespace_id: ns-1
     inode_id: 42
   inode_upload:
     namespace_id: ns-1
     inode_id: 42
-    file_digest_sha256: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
-    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
-    manifest_object_key: namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json
-    file_size_bytes: 16
+    file_digest_sha256:
+    content_manifest_digest:
+    manifest_object_key:
+    file_size_bytes: 16777217
     uploaded_at_ms: 1700000404000
   remote_state:
     namespace_id: ns-1
@@ -100,8 +107,8 @@ expect:
     inode_kind: file
     observed_seq: 42
     revision_no: 18
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
-    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+    content_digest:
+    content_manifest_digest:
     parent_inode_id: 2
     display_name: report.txt
     is_deleted: false
@@ -109,7 +116,7 @@ expect:
     namespace_id: ns-1
     inode_id: 42
     inode_kind: file
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    content_digest:
     parent_inode_id: 2
     display_name: report.txt
     exists_on_disk: true
@@ -121,8 +128,8 @@ expect:
     inode_kind: file
     synced_seq: 42
     revision_no: 18
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
-    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+    content_digest:
+    content_manifest_digest:
     parent_inode_id: 2
     display_name: report.txt
   planned_action_cleared: true

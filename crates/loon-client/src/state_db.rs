@@ -432,6 +432,7 @@ pub enum TransferDirection {
 #[serde(rename_all = "snake_case")]
 pub enum TransferState {
     Staging,
+    Uploading,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,12 +577,14 @@ fn transfer_direction_from_str(value: &str) -> Result<TransferDirection, StateDb
 fn transfer_state_as_str(state: TransferState) -> &'static str {
     match state {
         TransferState::Staging => "staging",
+        TransferState::Uploading => "uploading",
     }
 }
 
 fn transfer_state_from_str(value: &str) -> Result<TransferState, StateDbError> {
     match value {
         "staging" => Ok(TransferState::Staging),
+        "uploading" => Ok(TransferState::Uploading),
         other => Err(StateDbError::UnknownTransferState(other.to_owned())),
     }
 }

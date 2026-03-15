@@ -167,12 +167,12 @@ fn transfer_ledger_round_trips_by_inode_and_direction() {
     let row = TransferLedgerRow {
         namespace_id: NamespaceId::from("ns-1"),
         inode_id: InodeId(601),
-        transfer_id: "download:ns-1:601:sha256:manifest-1".to_owned(),
-        direction: TransferDirection::Download,
+        transfer_id: "upload:ns-1:601:sha256:manifest-1".to_owned(),
+        direction: TransferDirection::Upload,
         object_key: "namespaces/ns-1/manifests/sha256:manifest-1.json".to_owned(),
         block_index: 1,
         block_count: 2,
-        state: TransferState::Staging,
+        state: TransferState::Uploading,
         updated_at_ms: 1_700_000_611_000,
     };
 
@@ -183,7 +183,7 @@ fn transfer_ledger_round_trips_by_inode_and_direction() {
         db.load_transfer_ledger_for_inode(
             &NamespaceId::from("ns-1"),
             InodeId(601),
-            TransferDirection::Download,
+            TransferDirection::Upload,
         )
         .expect("load transfer ledger row"),
         Some(row.clone())
@@ -192,7 +192,7 @@ fn transfer_ledger_round_trips_by_inode_and_direction() {
     db.delete_transfer_ledger_for_inode(
         &NamespaceId::from("ns-1"),
         InodeId(601),
-        TransferDirection::Download,
+        TransferDirection::Upload,
     )
     .expect("delete transfer ledger row");
 
@@ -200,7 +200,7 @@ fn transfer_ledger_round_trips_by_inode_and_direction() {
         db.load_transfer_ledger_for_inode(
             &NamespaceId::from("ns-1"),
             InodeId(601),
-            TransferDirection::Download,
+            TransferDirection::Upload,
         )
         .expect("load deleted transfer ledger row"),
         None

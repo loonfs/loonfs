@@ -415,6 +415,18 @@ fn model_builds_deterministic_download_transfer_id() {
 }
 
 #[test]
+fn model_builds_deterministic_upload_transfer_id() {
+    assert_eq!(
+        upload_transfer_id(
+            &NamespaceId::from("ns-1"),
+            InodeId(42),
+            "sha256:manifest-abc"
+        ),
+        "upload:ns-1:42:sha256:manifest-abc"
+    );
+}
+
+#[test]
 fn model_sums_expected_download_prefix_size() {
     assert_eq!(expected_download_staged_size(&[6, 10, 4], 0), 0);
     assert_eq!(expected_download_staged_size(&[6, 10, 4], 1), 6);
@@ -438,6 +450,25 @@ fn model_resumes_download_only_when_stage_matches_expected_prefix() {
         reconcile_download_resume_block_index(99, &[6, 10], 16),
         2,
         "resume block index should clamp to the manifest block count"
+    );
+}
+
+#[test]
+fn model_resumes_upload_only_when_transfer_row_matches_current_plan() {
+    assert_eq!(
+        reconcile_upload_resume_block_index(1, 2, true),
+        1,
+        "matching upload plan should resume at the recorded next block index"
+    );
+    assert_eq!(
+        reconcile_upload_resume_block_index(1, 2, false),
+        0,
+        "mismatched upload plan should restart from block zero"
+    );
+    assert_eq!(
+        reconcile_upload_resume_block_index(99, 2, true),
+        2,
+        "resume block index should clamp to the planned block count"
     );
 }
 

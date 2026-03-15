@@ -1336,6 +1336,64 @@ Failure modes prevented:
 - atomically publishing a local file before the fully staged bytes are verified against the remote
   manifest
 
+## First durable upload transfer-ledger path
+
+The first upload-side transfer-ledger slice is for inode-keyed `upload_local_edit`.
+
+It reuses the same SQLite table:
+
+- `transfer_ledger`
+
+The first active upload row shape is:
+
+- `namespace_id`
+- `inode_id`
+- `transfer_id`
+- `direction = upload`
+- `object_key = manifest_object_key`
+- `block_index = next block index to upload`
+- `block_count = total manifest block count`
+- `state = uploading`
+- `updated_at_ms`
+
+Rules:
+
+- the first implementation keeps at most one active upload row per `(namespace_id, inode_id)`
+- this slice applies only to inode-keyed `upload_local_edit`
+- local-only creates may continue using the smaller one-shot upload helper until the client has a
+  temp-identity keyed transfer ledger
+- before uploading blocks, the executor must scan the local source path and derive one deterministic
+  content manifest plan for the current local bytes
+- `transfer_id` must be deterministic for one planned upload:
+  `upload:{namespace_id}:{inode_id}:{content_manifest_digest}`
+- when an existing upload row matches the newly derived `transfer_id`, `object_key`, and
+  `block_count`, the executor may resume from the recorded `block_index`
+- when the existing row does not match the newly derived upload plan, the executor must restart
+  from `block_index = 0`
+- after one content block is durably written to object storage, the executor must advance
+  `transfer_ledger.block_index` durably
+- if the process crashes after a block object write but before the ledger advance, the retry path
+  may safely re-upload that block because immutable block keys are content-addressed
+- after all content blocks are durable, the executor may write the immutable manifest object
+- only after the manifest object exists may the client record `inode_uploads(namespace_id, inode_id)`
+  and clear the active upload `transfer_ledger` row
+- dispatching `ClientMutationOp::ReplaceFile` remains a later step and may still fail independently
+  after upload completion
+
+Why this rule exists:
+
+- restart-safe download progress is only half of the transfer story if bound local edits still
+  restart from block `0`
+- block-by-block upload progress is the smallest durable protocol that can grow into broader
+  resumable transfers later
+
+Failure modes prevented:
+
+- restarting a large local edit upload from byte `0` with no durable proof of prior block progress
+- depending on one in-memory upload call for inode-keyed file edits
+- losing a fully uploaded content manifest because upload completion and manifest publication were
+  not named as separate durable steps
+
 ## Local data model inspiration
 
 The client should keep separate, individually consistent views of:

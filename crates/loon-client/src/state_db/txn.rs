@@ -811,6 +811,7 @@ impl PlannerTxn<'_> {
                 to_sql_u64(row.uploaded_at_ms, "uploaded_at_ms")?,
             ],
         )?;
+        self.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
 
         Ok(row)
     }

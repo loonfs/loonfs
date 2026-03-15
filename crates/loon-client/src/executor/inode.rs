@@ -13,7 +13,9 @@ use crate::state_db::{
     InodeUploadRow, RemoteFileStateRow, SqliteStateDb, TransferDirection, TransferLedgerRow,
     TransferState,
 };
-use crate::upload::upload_small_file_from_path;
+use crate::upload::{
+    finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
+};
 use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind, NamespaceId};
 use serde_json::json;
@@ -437,6 +439,7 @@ fn ensure_upload_local_edit_ready<S: ObjectStore>(
         if existing_upload.namespace_id == *namespace_id
             && local.content_digest.as_deref() == Some(existing_upload.file_digest_sha256.as_str())
         {
+            db.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
             return Ok((existing_upload, true));
         }
     }
@@ -446,11 +449,95 @@ fn ensure_upload_local_edit_ready<S: ObjectStore>(
             namespace_id: namespace_id.as_str().to_owned(),
             inode_id: inode_id.0,
         })?;
-    let uploaded = upload_small_file_from_path(store, namespace_id, source_path)?;
+    let plan = plan_upload_from_path(namespace_id, source_path)?;
+    let block_count = u64::try_from(plan.blocks.len()).expect("block count should fit in u64");
+    let transfer_id = upload_transfer_id(namespace_id, inode_id, &plan.content_manifest_digest);
+    let requested_block_index = match db.load_transfer_ledger_for_inode(
+        namespace_id,
+        inode_id,
+        TransferDirection::Upload,
+    )? {
+        Some(existing)
+            if existing.transfer_id == transfer_id
+                && existing.object_key == plan.manifest_object_key
+                && existing.block_count == block_count
+                && existing.state == TransferState::Uploading =>
+        {
+            existing.block_index
+        }
+        _ => 0,
+    };
+    let resume_block_index = requested_block_index.min(block_count);
+    db.upsert_transfer_ledger(&upload_transfer_row(
+        namespace_id,
+        inode_id,
+        &transfer_id,
+        &plan.manifest_object_key,
+        resume_block_index,
+        block_count,
+        uploaded_at_ms,
+    ))?;
+    for block_index in usize::try_from(resume_block_index).expect("resume block index should fit")
+        ..plan.blocks.len()
+    {
+        upload_planned_block_from_path(
+            store,
+            source_path,
+            &plan,
+            u64::try_from(block_index).expect("block index should fit in u64"),
+        )?;
+        let next_block_index =
+            u64::try_from(block_index + 1).expect("block index should fit in u64");
+        db.upsert_transfer_ledger(&upload_transfer_row(
+            namespace_id,
+            inode_id,
+            &transfer_id,
+            &plan.manifest_object_key,
+            next_block_index,
+            block_count,
+            uploaded_at_ms,
+        ))?;
+    }
+    let uploaded = finalize_planned_upload(store, &plan)?;
     let recorded = db
         .record_inode_upload(namespace_id, inode_id, &uploaded, uploaded_at_ms)
         .map_err(ExecuteUploadLocalEditError::from)?;
     Ok((recorded, false))
+}
+
+fn upload_transfer_id(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    content_manifest_digest: &str,
+) -> String {
+    format!(
+        "upload:{}:{}:{}",
+        namespace_id.as_str(),
+        inode_id.0,
+        content_manifest_digest
+    )
+}
+
+fn upload_transfer_row(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    transfer_id: &str,
+    object_key: &str,
+    block_index: u64,
+    block_count: u64,
+    updated_at_ms: u64,
+) -> TransferLedgerRow {
+    TransferLedgerRow {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        transfer_id: transfer_id.to_owned(),
+        direction: TransferDirection::Upload,
+        object_key: object_key.to_owned(),
+        block_index,
+        block_count,
+        state: TransferState::Uploading,
+        updated_at_ms,
+    }
 }
 
 fn record_download_remote_edit_issue(

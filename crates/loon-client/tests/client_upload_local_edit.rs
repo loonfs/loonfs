@@ -5,16 +5,19 @@ use loon_client::executor::{execute_next_client_action, NextClientAction};
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
     AppliedInodeMutation, FileSyncViews, InodeUploadRow, LocalFileStateRow, PlannedActionRow,
-    RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
+    RemoteFileStateRow, SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow,
+    TransferState,
 };
+use loon_client::upload::{upload_small_file_from_path, UploadedContent};
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
 use loon_testkit::scenario::Scenario;
 use loon_types::{
-    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind, HeadState,
-    HeadStateEnvelope, InodeId, LeaseState, LeaseStateEnvelope, NamespaceId,
+    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind,
+    HeadState, HeadStateEnvelope, InodeId, LeaseState, LeaseStateEnvelope, NamespaceId,
+    ReplacedRemoteFile, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::Deserialize;
 use std::fs;
@@ -22,123 +25,17 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn execute_next_client_action_upload_local_edit_updates_bound_inode() {
-    let scenario = load_fixture(
+    run_upload_local_edit_fixture(
         "client/execute_next_client_action_upload_local_edit_updates_bound_inode.yaml",
+        "client-upload-local-edit",
     );
-    let initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
-    let actions: Vec<EditFixtureAction> = scenario.decode_actions().expect("decode actions");
-    let expect: EditExpectedState = scenario.decode_expect().expect("decode expectations");
-    let temp_dir = TestDir::new("client-upload-local-edit");
-    let db_path = temp_dir.path().join("client.sqlite3");
-    let store_root = temp_dir.path().join("objectstore");
-    let source_root = temp_dir.path().join("source");
-    fs::create_dir_all(&store_root).expect("create local object store root");
-    fs::create_dir_all(&source_root).expect("create local source root");
-    let store = LocalFsStore::new(&store_root).expect("create local object store");
+}
 
-    seed_head_and_lease(&store, &initial.head, &initial.lease);
-    seed_bound_edit_state(
-        &db_path,
-        &initial.remote_state,
-        &initial.local_state,
-        &initial.sync_anchor,
-        &initial.planned_action,
-    );
-
-    assert_eq!(
-        actions.len(),
-        3,
-        "fixture should contain execute, restart, planner"
-    );
-    let execute = actions[0].execute().expect("execute action first");
-    assert!(actions[1].is_restart(), "restart should be second");
-    let planner_tick = actions[2].planner().expect("planner action third");
-
-    let source_path = write_source_file(
-        &source_root,
-        execute
-            .source_path_relative
-            .as_ref()
-            .expect("edit fixture should include source path"),
-        &initial.local_file,
-    );
-
-    let executed = run_execute_next_client_action(
-        &db_path,
-        &store,
-        None,
-        Some(source_path.as_path()),
-        &execute,
-    )
-    .expect("one action should be scheduled");
-
-    let edit = match executed {
-        Some(NextClientAction::ExecutedUploadLocalEdit(result)) => result,
-        other => panic!("expected executed upload_local_edit, got {other:?}"),
-    };
-
-    assert_eq!(edit.ensured_upload, Some(expect.inode_upload.clone()));
-    assert!(
-        !edit.upload_reused,
-        "first edit should upload fresh content"
-    );
-    assert_eq!(
-        edit.dispatched.pending.client_request_id,
-        expect.pending_request_id
-    );
-    assert_eq!(
-        edit.dispatched.request,
-        expect.request.clone().into_request()
-    );
-    assert_eq!(edit.dispatched.response, expect.mutation_response.clone());
-    assert_eq!(
-        edit.dispatched.applied,
-        expect.applied_inode_mutation.clone()
-    );
-
-    let mut db = SqliteStateDb::open(&db_path).expect("reopen client state DB after execute");
-    let planner_result = plan_file(
-        &mut db,
-        &planner_tick.namespace_id,
-        planner_tick.inode_id,
-        planner_tick.now_ms,
-    )
-    .expect("plan edited inode after restart");
-
-    assert_eq!(planner_result, expect.planner_result);
-    assert_eq!(
-        db.load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
-            .expect("load converged views"),
-        FileSyncViews {
-            namespace_id: planner_tick.namespace_id.clone(),
-            inode_id: planner_tick.inode_id,
-            remote: Some(expect.remote_state.clone()),
-            local: Some(expect.local_state.clone()),
-            sync_anchor: Some(expect.sync_anchor.clone()),
-        }
-    );
-    assert_eq!(
-        db.load_inode_upload(&planner_tick.namespace_id, planner_tick.inode_id)
-            .expect("load inode upload row"),
-        Some(expect.inode_upload.clone())
-    );
-    assert_eq!(
-        db.load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
-            .expect("load planned action after success"),
-        if expect.planned_action_cleared {
-            None
-        } else {
-            Some(initial.planned_action.clone())
-        }
-    );
-    assert_eq!(
-        db.load_pending_inode_mutation(&expect.pending_request_id)
-            .expect("load pending inode mutation"),
-        if expect.pending_mutation_cleared {
-            None
-        } else {
-            panic!("fixture currently expects pending inode mutation to clear");
-        }
+#[test]
+fn execute_next_client_action_resumes_upload_local_edit_from_transfer_ledger() {
+    run_upload_local_edit_fixture(
+        "client/execute_next_client_action_resumes_upload_local_edit_from_transfer_ledger.yaml",
+        "client-upload-local-edit-resume",
     );
 }
 
@@ -147,27 +44,23 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
     let scenario = load_fixture(
         "client/execute_next_client_action_upload_local_edit_updates_bound_inode.yaml",
     );
-    let initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
+    let mut initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
     let actions: Vec<EditFixtureAction> = scenario.decode_actions().expect("decode actions");
-    let expect: EditExpectedState = scenario.decode_expect().expect("decode expectations");
+    let mut expect: EditExpectedState = scenario.decode_expect().expect("decode expectations");
     let execute = actions[0].execute().expect("execute action first");
     let temp_dir = TestDir::new("client-upload-local-edit-retry");
     let db_path = temp_dir.path().join("client.sqlite3");
     let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
     let source_root = temp_dir.path().join("source");
     fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
     fs::create_dir_all(&source_root).expect("create local source root");
     let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
 
     seed_head_and_lease(&store, &initial.head, &initial.lease);
-    seed_bound_edit_state(
-        &db_path,
-        &initial.remote_state,
-        &initial.local_state,
-        &initial.sync_anchor,
-        &initial.planned_action,
-    );
-
     let source_path = write_source_file(
         &source_root,
         execute
@@ -175,6 +68,22 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
             .as_ref()
             .expect("retry fixture should include source path"),
         &initial.local_file,
+    );
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.remote_state.namespace_id,
+        &source_path,
+    )
+    .expect("plan expected uploaded content");
+    fill_upload_expectations(&mut initial, &mut expect, &expected_upload);
+
+    seed_bound_edit_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.sync_anchor,
+        &initial.planned_action,
+        None,
     );
 
     let failing_action = ExecuteNextClientActionAction {
@@ -202,7 +111,12 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
 
     let db = SqliteStateDb::open(&db_path).expect("reopen DB after failed first dispatch");
     let pending = db
-        .load_pending_inode_mutation(&expect.pending_request_id)
+        .load_pending_inode_mutation(
+            expect
+                .pending_request_id
+                .as_ref()
+                .expect("expected pending request id"),
+        )
         .expect("load persisted pending inode mutation")
         .expect("pending inode mutation should persist after failed dispatch");
     assert_eq!(pending.request, expect.request.clone().into_request());
@@ -212,7 +126,16 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
             initial.remote_state.inode_id
         )
         .expect("load persisted inode upload"),
-        Some(expect.inode_upload.clone())
+        Some(expect.inode_upload.clone().into_row())
+    );
+    assert_eq!(
+        db.load_transfer_ledger_for_inode(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+            TransferDirection::Upload,
+        )
+        .expect("load upload transfer ledger after completed upload"),
+        None
     );
     drop(db);
 
@@ -251,16 +174,192 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
 
     assert_eq!(
         edit.dispatched.pending.client_request_id,
-        expect.pending_request_id
+        expect
+            .pending_request_id
+            .as_deref()
+            .expect("expected pending request id")
     );
     assert_eq!(
         edit.dispatched.request,
         expect.request.clone().into_request()
     );
-    assert_eq!(edit.dispatched.response, expect.mutation_response.clone());
-    assert_eq!(edit.dispatched.applied, expect.applied_inode_mutation);
+    assert_eq!(
+        edit.dispatched.response,
+        expect.mutation_response.clone().into_response()
+    );
+    assert_eq!(
+        edit.dispatched.applied,
+        expect
+            .applied_inode_mutation
+            .clone()
+            .expect("expected applied inode mutation")
+    );
     assert!(edit.upload_reused, "retry should reuse uploaded content");
-    assert_eq!(edit.ensured_upload, Some(expect.inode_upload));
+    assert_eq!(edit.ensured_upload, Some(expect.inode_upload.into_row()));
+}
+
+fn run_upload_local_edit_fixture(relative_path: &str, temp_label: &str) {
+    let scenario = load_fixture(relative_path);
+    let mut initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<EditFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let mut expect: EditExpectedState = scenario.decode_expect().expect("decode expectations");
+    let temp_dir = TestDir::new(temp_label);
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+
+    assert_eq!(
+        actions.len(),
+        3,
+        "fixture should contain execute, restart, planner"
+    );
+    let execute = actions[0].execute().expect("execute action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let planner_tick = actions[2].planner().expect("planner action third");
+
+    let source_path = write_source_file(
+        &source_root,
+        execute
+            .source_path_relative
+            .as_ref()
+            .expect("edit fixture should include source path"),
+        &initial.local_file,
+    );
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.remote_state.namespace_id,
+        &source_path,
+    )
+    .expect("plan expected uploaded content");
+    fill_upload_expectations(&mut initial, &mut expect, &expected_upload);
+
+    let transfer_row = initial
+        .transfer_ledger
+        .as_ref()
+        .map(|seed| seed_transfer_ledger_row(&initial, seed, &expected_upload));
+    seed_bound_edit_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.sync_anchor,
+        &initial.planned_action,
+        transfer_row.as_ref(),
+    );
+    if let Some(seed) = &initial.transfer_ledger {
+        seed_uploaded_prefix_for_transfer(&store, &source_path, &expected_upload, seed.block_index);
+    }
+
+    let executed = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(source_path.as_path()),
+        execute,
+    )
+    .expect("one action should be scheduled");
+
+    let edit = match executed {
+        Some(NextClientAction::ExecutedUploadLocalEdit(result)) => result,
+        other => panic!("expected executed upload_local_edit, got {other:?}"),
+    };
+
+    assert_eq!(
+        edit.ensured_upload,
+        Some(expect.inode_upload.clone().into_row())
+    );
+    assert_eq!(edit.upload_reused, expect.upload_reused);
+    assert_eq!(
+        edit.dispatched.pending.client_request_id,
+        expect
+            .pending_request_id
+            .as_deref()
+            .expect("expected pending request id")
+    );
+    assert_eq!(
+        edit.dispatched.request,
+        expect.request.clone().into_request()
+    );
+    assert_eq!(
+        edit.dispatched.response,
+        expect.mutation_response.clone().into_response()
+    );
+    assert_eq!(
+        edit.dispatched.applied,
+        expect
+            .applied_inode_mutation
+            .clone()
+            .expect("expected applied inode mutation")
+    );
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen client state DB after execute");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan edited inode after restart");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_eq!(
+        db.load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load converged views"),
+        FileSyncViews {
+            namespace_id: planner_tick.namespace_id.clone(),
+            inode_id: planner_tick.inode_id,
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: Some(expect.sync_anchor.clone()),
+        }
+    );
+    assert_eq!(
+        db.load_inode_upload(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load inode upload row"),
+        Some(expect.inode_upload.clone().into_row())
+    );
+    assert_eq!(
+        db.load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load planned action after success"),
+        if expect.planned_action_cleared {
+            None
+        } else {
+            Some(initial.planned_action.clone())
+        }
+    );
+    assert_eq!(
+        db.load_pending_inode_mutation(
+            expect
+                .pending_request_id
+                .as_deref()
+                .expect("expected pending request id"),
+        )
+        .expect("load pending inode mutation"),
+        if expect.pending_mutation_cleared {
+            None
+        } else {
+            panic!("fixture currently expects pending inode mutation to clear");
+        }
+    );
+    if expect.transfer_ledger_cleared {
+        assert_eq!(
+            db.load_transfer_ledger_for_inode(
+                &planner_tick.namespace_id,
+                planner_tick.inode_id,
+                TransferDirection::Upload,
+            )
+            .expect("load upload transfer ledger after success"),
+            None
+        );
+    }
 }
 
 fn run_execute_next_client_action(
@@ -304,6 +403,7 @@ fn seed_bound_edit_state(
     local: &LocalFileStateRow,
     sync_anchor: &SyncAnchorRow,
     planned_action: &PlannedActionRow,
+    transfer_ledger: Option<&TransferLedgerRow>,
 ) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-bound-edit-state", |tx| {
@@ -311,6 +411,9 @@ fn seed_bound_edit_state(
         tx.upsert_local_file(local)?;
         tx.upsert_sync_anchor(sync_anchor)?;
         tx.upsert_planned_action(planned_action)?;
+        if let Some(transfer_ledger) = transfer_ledger {
+            tx.upsert_transfer_ledger(transfer_ledger)?;
+        }
         Ok(())
     })
     .expect("seed bound file edit state");
@@ -325,8 +428,128 @@ fn write_source_file(root: &Path, relative_path: &str, local_file: &FixtureLocal
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create source file parent directories");
     }
-    fs::write(&path, local_file.content_utf8.as_bytes()).expect("write source file");
+    fs::write(&path, local_file.file_bytes()).expect("write source file");
     path
+}
+
+fn fill_upload_expectations(
+    initial: &mut EditInitialState,
+    expect: &mut EditExpectedState,
+    uploaded: &UploadedContent,
+) {
+    match &initial.local_state.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => initial.local_state.content_digest = Some(uploaded.file_digest_sha256.clone()),
+    }
+    match &mut expect.request.op {
+        RawClientMutationOp::ReplaceFile { replace_file } => {
+            match &replace_file.content_manifest_digest {
+                Some(digest) => assert_eq!(digest, &uploaded.content_manifest_digest),
+                None => {
+                    replace_file.content_manifest_digest =
+                        Some(uploaded.content_manifest_digest.clone())
+                }
+            }
+        }
+    }
+    match &expect.mutation_response.replaced_file.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => {
+            expect.mutation_response.replaced_file.content_digest =
+                Some(uploaded.file_digest_sha256.clone())
+        }
+    }
+    expect.inode_upload.fill_from_uploaded(
+        &initial.remote_state.namespace_id,
+        initial.remote_state.inode_id,
+        uploaded,
+    );
+    fill_remote_state_digests(&mut expect.remote_state, uploaded);
+    fill_local_state_digest(&mut expect.local_state, uploaded);
+    fill_sync_anchor_digests(&mut expect.sync_anchor, uploaded);
+}
+
+fn fill_remote_state_digests(state: &mut RemoteFileStateRow, uploaded: &UploadedContent) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => state.content_digest = Some(uploaded.file_digest_sha256.clone()),
+    }
+    match &state.content_manifest_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.content_manifest_digest),
+        None => state.content_manifest_digest = Some(uploaded.content_manifest_digest.clone()),
+    }
+}
+
+fn fill_local_state_digest(state: &mut LocalFileStateRow, uploaded: &UploadedContent) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => state.content_digest = Some(uploaded.file_digest_sha256.clone()),
+    }
+}
+
+fn fill_sync_anchor_digests(state: &mut SyncAnchorRow, uploaded: &UploadedContent) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => state.content_digest = Some(uploaded.file_digest_sha256.clone()),
+    }
+    match &state.content_manifest_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.content_manifest_digest),
+        None => state.content_manifest_digest = Some(uploaded.content_manifest_digest.clone()),
+    }
+}
+
+fn seed_transfer_ledger_row(
+    initial: &EditInitialState,
+    seed: &FixtureTransferLedgerSeed,
+    uploaded: &UploadedContent,
+) -> TransferLedgerRow {
+    TransferLedgerRow {
+        namespace_id: initial.remote_state.namespace_id.clone(),
+        inode_id: initial.remote_state.inode_id,
+        transfer_id: upload_transfer_id(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+            &uploaded.content_manifest_digest,
+        ),
+        direction: seed.direction,
+        object_key: uploaded.manifest_object_key.clone(),
+        block_index: seed.block_index,
+        block_count: seed.block_count,
+        state: seed.state,
+        updated_at_ms: seed.updated_at_ms,
+    }
+}
+
+fn seed_uploaded_prefix_for_transfer(
+    store: &LocalFsStore,
+    source_path: &Path,
+    uploaded: &UploadedContent,
+    block_index: u64,
+) {
+    let bytes = fs::read(source_path).expect("read source bytes for transfer seeding");
+    for (block_object, block_bytes) in uploaded
+        .block_objects
+        .iter()
+        .zip(bytes.chunks(CONTENT_BLOCK_SIZE_BYTES as usize))
+        .take(usize::try_from(block_index).expect("block index should fit"))
+    {
+        store
+            .put_if_absent(&block_object.object_key, block_bytes)
+            .expect("seed already-uploaded block object");
+    }
+}
+
+fn upload_transfer_id(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    content_manifest_digest: &str,
+) -> String {
+    format!(
+        "upload:{}:{}:{}",
+        namespace_id.as_str(),
+        inode_id.0,
+        content_manifest_digest
+    )
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
@@ -364,6 +587,8 @@ struct EditInitialState {
     sync_anchor: SyncAnchorRow,
     local_file: FixtureLocalFile,
     planned_action: PlannedActionRow,
+    #[serde(default)]
+    transfer_ledger: Option<FixtureTransferLedgerSeed>,
     head: HeadState,
     lease: LeaseState,
 }
@@ -371,7 +596,52 @@ struct EditInitialState {
 #[derive(Debug, Deserialize)]
 struct FixtureLocalFile {
     relative_path: String,
-    content_utf8: String,
+    #[serde(default)]
+    content_utf8: Option<String>,
+    #[serde(default)]
+    generated_two_block: Option<GeneratedTwoBlockFile>,
+}
+
+impl FixtureLocalFile {
+    fn file_bytes(&self) -> Vec<u8> {
+        if let Some(content_utf8) = &self.content_utf8 {
+            return content_utf8.as_bytes().to_vec();
+        }
+        let generated = self
+            .generated_two_block
+            .as_ref()
+            .expect("fixture local file should provide content");
+        generated.file_bytes()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedTwoBlockFile {
+    first_block_fill_byte: String,
+    second_block_utf8: String,
+}
+
+impl GeneratedTwoBlockFile {
+    fn file_bytes(&self) -> Vec<u8> {
+        let first_byte = self
+            .first_block_fill_byte
+            .as_bytes()
+            .first()
+            .copied()
+            .expect("first_block_fill_byte should not be empty");
+        let mut bytes = vec![first_byte; CONTENT_BLOCK_SIZE_BYTES as usize];
+        bytes.extend_from_slice(self.second_block_utf8.as_bytes());
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FixtureTransferLedgerSeed {
+    direction: TransferDirection,
+    block_index: u64,
+    block_count: u64,
+    state: TransferState,
+    updated_at_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,16 +704,22 @@ struct PlannerTickAction {
 
 #[derive(Debug, Deserialize)]
 struct EditExpectedState {
-    pending_request_id: String,
+    #[serde(default)]
+    pending_request_id: Option<String>,
     request: RawClientMutationRequest,
-    mutation_response: ClientMutationResponse,
-    applied_inode_mutation: AppliedInodeMutation,
-    inode_upload: InodeUploadRow,
+    mutation_response: RawClientMutationResponse,
+    #[serde(default)]
+    applied_inode_mutation: Option<AppliedInodeMutation>,
+    inode_upload: RawInodeUploadRow,
     remote_state: RemoteFileStateRow,
     local_state: LocalFileStateRow,
     sync_anchor: SyncAnchorRow,
     planned_action_cleared: bool,
     pending_mutation_cleared: bool,
+    #[serde(default)]
+    transfer_ledger_cleared: bool,
+    #[serde(default)]
+    upload_reused: bool,
     planner_result: PlannedActionRecord,
 }
 
@@ -457,14 +733,16 @@ struct RawClientMutationRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum RawClientMutationOp {
-    ReplaceFile { replace_file: ExpectedReplaceFileOp },
+    ReplaceFile {
+        replace_file: RawExpectedReplaceFileOp,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ExpectedReplaceFileOp {
+struct RawExpectedReplaceFileOp {
     inode_id: InodeId,
-    base_revision_no: loon_types::RevisionNo,
-    content_manifest_digest: String,
+    base_revision_no: RevisionNo,
+    content_manifest_digest: Option<String>,
 }
 
 impl RawClientMutationRequest {
@@ -477,10 +755,107 @@ impl RawClientMutationRequest {
                     ClientMutationOp::ReplaceFile {
                         inode_id: replace_file.inode_id,
                         base_revision_no: replace_file.base_revision_no,
-                        content_manifest_digest: replace_file.content_manifest_digest,
+                        content_manifest_digest: replace_file
+                            .content_manifest_digest
+                            .expect("expected replace_file manifest digest"),
                     }
                 }
             },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawClientMutationResponse {
+    namespace_id: NamespaceId,
+    client_request_id: String,
+    committed_seq: ChangeSeq,
+    replaced_file: RawReplacedRemoteFile,
+}
+
+impl RawClientMutationResponse {
+    fn into_response(self) -> ClientMutationResponse {
+        ClientMutationResponse {
+            namespace_id: self.namespace_id,
+            client_request_id: self.client_request_id,
+            committed_seq: self.committed_seq,
+            created_inode: None,
+            replaced_file: Some(self.replaced_file.into_row()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawReplacedRemoteFile {
+    inode_id: InodeId,
+    inode_kind: loon_types::InodeKind,
+    revision_no: RevisionNo,
+    content_digest: Option<String>,
+}
+
+impl RawReplacedRemoteFile {
+    fn into_row(self) -> ReplacedRemoteFile {
+        ReplacedRemoteFile {
+            inode_id: self.inode_id,
+            inode_kind: self.inode_kind,
+            revision_no: self.revision_no,
+            content_digest: self
+                .content_digest
+                .expect("expected replaced file content digest"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawInodeUploadRow {
+    namespace_id: NamespaceId,
+    inode_id: InodeId,
+    file_digest_sha256: Option<String>,
+    content_manifest_digest: Option<String>,
+    manifest_object_key: Option<String>,
+    file_size_bytes: u64,
+    uploaded_at_ms: u64,
+}
+
+impl RawInodeUploadRow {
+    fn fill_from_uploaded(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        uploaded: &UploadedContent,
+    ) {
+        assert_eq!(&self.namespace_id, namespace_id);
+        assert_eq!(self.inode_id, inode_id);
+        match &self.file_digest_sha256 {
+            Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+            None => self.file_digest_sha256 = Some(uploaded.file_digest_sha256.clone()),
+        }
+        match &self.content_manifest_digest {
+            Some(digest) => assert_eq!(digest, &uploaded.content_manifest_digest),
+            None => self.content_manifest_digest = Some(uploaded.content_manifest_digest.clone()),
+        }
+        match &self.manifest_object_key {
+            Some(object_key) => assert_eq!(object_key, &uploaded.manifest_object_key),
+            None => self.manifest_object_key = Some(uploaded.manifest_object_key.clone()),
+        }
+        assert_eq!(self.file_size_bytes, uploaded.file_size_bytes);
+    }
+
+    fn into_row(self) -> InodeUploadRow {
+        InodeUploadRow {
+            namespace_id: self.namespace_id,
+            inode_id: self.inode_id,
+            file_digest_sha256: self
+                .file_digest_sha256
+                .expect("expected inode upload file digest"),
+            content_manifest_digest: self
+                .content_manifest_digest
+                .expect("expected inode upload manifest digest"),
+            manifest_object_key: self
+                .manifest_object_key
+                .expect("expected inode upload manifest object key"),
+            file_size_bytes: self.file_size_bytes,
+            uploaded_at_ms: self.uploaded_at_ms,
         }
     }
 }
