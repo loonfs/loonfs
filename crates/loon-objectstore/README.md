@@ -5,6 +5,11 @@ behavior depends on.
 
 This crate is the only layer that should know provider quirks.
 
+Its provider profiles should distinguish between:
+
+- active contract fields that other crates may rely on now
+- future capability flags that stay informational until the trait and conformance suite grow
+
 Higher layers may depend on:
 
 - the `ObjectStore` trait

@@ -25,16 +25,28 @@ fn provider_profiles_exist() {
     assert_eq!(AWS_S3.name, "aws-s3");
     assert_eq!(CLOUDFLARE_R2.name, "cloudflare-r2");
     assert_eq!(
-        LOCAL_FS.provider_etag_is_canonical_identity,
+        LOCAL_FS.active_contract.opaque_compare_token_for_cas,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        AWS_S3.active_contract.opaque_compare_token_for_cas,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        CLOUDFLARE_R2.active_contract.opaque_compare_token_for_cas,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        LOCAL_FS.future_capabilities.multipart_upload,
         Expectation::ExpectedNo
     );
     assert_eq!(
-        AWS_S3.provider_etag_is_canonical_identity,
-        Expectation::ExpectedNo
+        AWS_S3.future_capabilities.multipart_upload,
+        Expectation::ExpectedYes
     );
     assert_eq!(
-        CLOUDFLARE_R2.provider_etag_is_canonical_identity,
-        Expectation::ExpectedNo
+        CLOUDFLARE_R2.future_capabilities.multipart_upload,
+        Expectation::ExpectedYes
     );
 }
 

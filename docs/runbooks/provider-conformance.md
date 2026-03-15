@@ -84,9 +84,9 @@ The current suite proves the active v1 contract only:
 - range reads
 - key scoping/traversal rejection
 
-`multipart_upload` still exists in provider profiles as a future-facing capability flag, but it is
-not part of the active v1 `ObjectStore` trait surface and is not yet a correctness dependency for
-other crates.
+`future_capabilities.multipart_upload` still exists in provider profiles as a future-facing flag,
+but it is not part of the active v1 `ObjectStore` trait surface and is not yet a correctness
+dependency for other crates.
 
 ## Local usage
 

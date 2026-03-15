@@ -92,6 +92,23 @@ Failure modes prevented:
 - passing tests accidentally using a developer's ambient cloud credentials
 - provider adapters gaining hidden runtime configuration paths that are hard to audit
 
+## Provider-profile rule
+
+Provider profiles must separate:
+
+- the active `ObjectStore` contract that higher layers may rely on today
+- future provider capabilities that are informative but not yet correctness dependencies
+
+Example:
+
+- create-if-absent and compare-and-swap belong in the active contract profile
+- multipart-upload support belongs in a future-capability profile until the trait and conformance
+  suite make it part of the active surface
+
+Failure mode prevented:
+provider-profile metadata drifting into a misleading mix of “safe to depend on now” and “maybe
+useful later” fields.
+
 ## Boundary isolation rule
 
 Provider quirks must stop at the `ObjectStore` trait boundary.
