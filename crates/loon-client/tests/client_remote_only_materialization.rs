@@ -2,24 +2,44 @@ use loon_client::executor::{execute_next_client_action, NextClientAction};
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
     AppliedInodeMutation, FileSyncViews, LocalFileStateRow, PlannedActionRow, RemoteFileStateRow,
-    SqliteStateDb, SyncAnchorRow,
+    SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow, TransferState,
 };
-use loon_client::upload::upload_small_file_from_path;
+use loon_client::upload::{upload_small_file_from_path, UploadedContent};
 use loon_objectstore::fs::LocalFsStore;
+use loon_objectstore::keys::{blob, content_manifest};
+use loon_objectstore::ObjectStore;
 use loon_testkit::scenario::Scenario;
-use loon_types::{InodeId, NamespaceId};
+use loon_types::{
+    content_manifest_digest_sha256, encode_content_manifest_json, sha256_digest,
+    ContentBlockDescriptor, ContentManifestEnvelope, ContentManifestPayload, InodeId, NamespaceId,
+    CONTENT_BLOCK_SIZE_BYTES,
+};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 #[test]
 fn execute_next_client_action_materializes_remote_only_file() {
-    let scenario =
-        load_fixture("client/execute_next_client_action_materializes_remote_only_file.yaml");
-    let initial: MaterializeInitialState = scenario.decode_initial().expect("decode initial");
+    run_remote_only_materialization_fixture(
+        "client/execute_next_client_action_materializes_remote_only_file.yaml",
+        "client-remote-only-materialization",
+    );
+}
+
+#[test]
+fn execute_next_client_action_resumes_remote_only_file_from_transfer_ledger() {
+    run_remote_only_materialization_fixture(
+        "client/execute_next_client_action_resumes_remote_only_file_from_transfer_ledger.yaml",
+        "client-remote-only-materialization-resume",
+    );
+}
+
+fn run_remote_only_materialization_fixture(relative_path: &str, temp_label: &str) {
+    let scenario = load_fixture(relative_path);
+    let mut initial: MaterializeInitialState = scenario.decode_initial().expect("decode initial");
     let actions: Vec<MaterializeFixtureAction> = scenario.decode_actions().expect("decode actions");
-    let expect: MaterializeExpectedState = scenario.decode_expect().expect("decode expect");
-    let temp_dir = TestDir::new("client-remote-only-materialization");
+    let mut expect: MaterializeExpectedState = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new(temp_label);
     let db_path = temp_dir.path().join("client.sqlite3");
     let store_root = temp_dir.path().join("objectstore");
     let local_root = temp_dir.path().join("local");
@@ -40,32 +60,23 @@ fn execute_next_client_action_materializes_remote_only_file() {
     let target_path = local_root.join(target_relative);
     fs::create_dir_all(target_path.parent().expect("target parent")).expect("create target parent");
 
-    let remote_seed_path = write_remote_seed_file(
-        &remote_seed_root,
-        Path::new("remote/welcome.txt"),
-        &initial.remote_file.content_utf8,
-    );
-    let uploaded = upload_small_file_from_path(
+    let seeded_remote = seed_remote_content(
         &store,
         &initial.remote_state.namespace_id,
-        &remote_seed_path,
-    )
-    .expect("upload remote content into object store");
-
-    assert_eq!(
-        initial.remote_state.content_digest.as_deref(),
-        Some(uploaded.file_digest_sha256.as_str())
+        &initial.remote_file,
+        &remote_seed_root,
     );
-    assert_eq!(
-        initial.remote_state.content_manifest_digest.as_deref(),
-        Some(uploaded.content_manifest_digest.as_str())
-    );
+    fill_materialization_expectations(&mut initial, &mut expect, &seeded_remote);
 
     seed_remote_only_state(
         &db_path,
         &initial.remote_state,
         &initial.local_state,
         &initial.planned_actions,
+        initial.transfer_ledger.as_ref(),
+        &seeded_remote,
+        &initial.remote_file,
+        &target_path,
     );
 
     let executed =
@@ -79,13 +90,28 @@ fn execute_next_client_action_materializes_remote_only_file() {
 
     assert_eq!(
         download.downloaded_content_manifest_digest,
-        expect.downloaded_content_manifest_digest
+        expect
+            .downloaded_content_manifest_digest
+            .as_deref()
+            .expect("expected downloaded manifest digest")
     );
     assert_eq!(
         download.downloaded_file_digest_sha256,
-        expect.downloaded_file_digest_sha256
+        expect
+            .downloaded_file_digest_sha256
+            .as_deref()
+            .expect("expected downloaded file digest")
     );
-    assert_eq!(download.applied, expect.applied_inode_mutation);
+    assert_eq!(
+        download.applied,
+        expect
+            .applied_inode_mutation
+            .clone()
+            .unwrap_or(AppliedInodeMutation {
+                namespace_id: planner_tick.namespace_id.clone(),
+                inode_id: planner_tick.inode_id,
+            })
+    );
 
     let mut db = SqliteStateDb::open(&db_path).expect("reopen client state DB after execute");
     let planner_result = plan_file(
@@ -135,6 +161,23 @@ fn execute_next_client_action_materializes_remote_only_file() {
         read_directory_entries(target_path.parent().expect("target parent")),
         expect.local_parent_entries,
     );
+    if expect.transfer_ledger_cleared {
+        assert_eq!(
+            db.load_transfer_ledger_for_inode(
+                &planner_tick.namespace_id,
+                planner_tick.inode_id,
+                TransferDirection::Download,
+            )
+            .expect("load transfer ledger after materialization"),
+            None
+        );
+    }
+    if expect.stage_file_cleared {
+        assert!(
+            !stage_path_for_target(&target_path).exists(),
+            "stage file should be cleared after successful materialization"
+        );
+    }
 }
 
 fn run_execute_next_client_action(
@@ -161,6 +204,10 @@ fn seed_remote_only_state(
     remote_state: &RemoteFileStateRow,
     local_state: &LocalFileStateRow,
     planned_actions: &[PlannedActionRow],
+    transfer_ledger: Option<&FixtureTransferLedgerSeed>,
+    seeded_remote: &SeededRemoteFile,
+    remote_file: &FixtureRemoteFile,
+    target_path: &Path,
 ) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-remote-only-state", |tx| {
@@ -169,9 +216,155 @@ fn seed_remote_only_state(
         for planned_action in planned_actions {
             tx.upsert_planned_action(planned_action)?;
         }
+        if let Some(transfer_ledger) = transfer_ledger {
+            tx.upsert_transfer_ledger(&TransferLedgerRow {
+                namespace_id: remote_state.namespace_id.clone(),
+                inode_id: remote_state.inode_id,
+                transfer_id: download_transfer_id(
+                    &remote_state.namespace_id,
+                    remote_state.inode_id,
+                    &seeded_remote.content_manifest_digest,
+                ),
+                direction: transfer_ledger.direction,
+                object_key: seeded_remote.manifest_object_key.clone(),
+                block_index: transfer_ledger.block_index,
+                block_count: transfer_ledger.block_count,
+                state: transfer_ledger.state,
+                updated_at_ms: transfer_ledger.updated_at_ms,
+            })?;
+        }
         Ok(())
     })
     .expect("seed remote-only state");
+
+    if let Some(transfer_ledger) = transfer_ledger {
+        let mut stage_bytes = Vec::new();
+        for block in remote_file
+            .block_bytes()
+            .iter()
+            .take(usize::try_from(transfer_ledger.block_index).expect("block index should fit"))
+        {
+            stage_bytes.extend_from_slice(block);
+        }
+        let stage_path = stage_path_for_target(target_path);
+        fs::create_dir_all(stage_path.parent().expect("stage parent"))
+            .expect("create stage parent");
+        fs::write(&stage_path, &stage_bytes).expect("seed stage file");
+    }
+}
+
+fn seed_remote_content(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    remote_file: &FixtureRemoteFile,
+    remote_seed_root: &Path,
+) -> SeededRemoteFile {
+    if let Some(content_utf8) = &remote_file.content_utf8 {
+        let remote_seed_path = write_remote_seed_file(
+            remote_seed_root,
+            Path::new("remote/welcome.txt"),
+            content_utf8,
+        );
+        let uploaded = upload_small_file_from_path(store, namespace_id, &remote_seed_path)
+            .expect("upload remote content into object store");
+        return SeededRemoteFile::from_uploaded(&uploaded);
+    }
+
+    let mut file_bytes = Vec::new();
+    let mut manifest_blocks = Vec::new();
+    for block_bytes in remote_file.block_bytes() {
+        assert!(
+            u64::try_from(block_bytes.len()).expect("block length should fit in u64")
+                <= CONTENT_BLOCK_SIZE_BYTES,
+            "fixture blocks should stay within the content block size"
+        );
+        let content_digest_sha256 = sha256_digest(&block_bytes);
+        let object_key = blob(namespace_id.as_str(), &content_digest_sha256);
+        store
+            .put_overwrite(&object_key, &block_bytes)
+            .expect("seed remote block object");
+        manifest_blocks.push(ContentBlockDescriptor {
+            content_digest_sha256,
+            plaintext_size_bytes: u64::try_from(block_bytes.len())
+                .expect("block length should fit in u64"),
+        });
+        file_bytes.extend_from_slice(&block_bytes);
+    }
+
+    let manifest_envelope = ContentManifestEnvelope::from_payload(ContentManifestPayload {
+        namespace_id: namespace_id.clone(),
+        file_size_bytes: u64::try_from(file_bytes.len()).expect("file length should fit in u64"),
+        file_digest_sha256: sha256_digest(&file_bytes),
+        block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
+        blocks: manifest_blocks,
+    })
+    .expect("build content manifest");
+    let manifest_bytes =
+        encode_content_manifest_json(&manifest_envelope).expect("encode content manifest");
+    let content_manifest_digest =
+        content_manifest_digest_sha256(&manifest_envelope).expect("digest content manifest");
+    let manifest_object_key = content_manifest(namespace_id.as_str(), &content_manifest_digest);
+    store
+        .put_overwrite(&manifest_object_key, &manifest_bytes)
+        .expect("seed content manifest object");
+
+    SeededRemoteFile {
+        file_digest_sha256: manifest_envelope.payload.file_digest_sha256.clone(),
+        content_manifest_digest,
+        manifest_object_key,
+    }
+}
+
+fn fill_materialization_expectations(
+    initial: &mut MaterializeInitialState,
+    expect: &mut MaterializeExpectedState,
+    seeded_remote: &SeededRemoteFile,
+) {
+    fill_remote_state_digests(&mut initial.remote_state, seeded_remote);
+    fill_remote_state_digests(&mut expect.remote_state, seeded_remote);
+    fill_local_state_digest(&mut expect.local_state, seeded_remote);
+    fill_sync_anchor_digests(&mut expect.sync_anchor, seeded_remote);
+
+    if let Some(expected) = &expect.downloaded_content_manifest_digest {
+        assert_eq!(expected, &seeded_remote.content_manifest_digest);
+    } else {
+        expect.downloaded_content_manifest_digest =
+            Some(seeded_remote.content_manifest_digest.clone());
+    }
+    if let Some(expected) = &expect.downloaded_file_digest_sha256 {
+        assert_eq!(expected, &seeded_remote.file_digest_sha256);
+    } else {
+        expect.downloaded_file_digest_sha256 = Some(seeded_remote.file_digest_sha256.clone());
+    }
+}
+
+fn fill_remote_state_digests(state: &mut RemoteFileStateRow, seeded_remote: &SeededRemoteFile) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &seeded_remote.file_digest_sha256),
+        None => state.content_digest = Some(seeded_remote.file_digest_sha256.clone()),
+    }
+    match &state.content_manifest_digest {
+        Some(digest) => assert_eq!(digest, &seeded_remote.content_manifest_digest),
+        None => state.content_manifest_digest = Some(seeded_remote.content_manifest_digest.clone()),
+    }
+}
+
+fn fill_local_state_digest(state: &mut LocalFileStateRow, seeded_remote: &SeededRemoteFile) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &seeded_remote.file_digest_sha256),
+        None => state.content_digest = Some(seeded_remote.file_digest_sha256.clone()),
+    }
+}
+
+fn fill_sync_anchor_digests(state: &mut SyncAnchorRow, seeded_remote: &SeededRemoteFile) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &seeded_remote.file_digest_sha256),
+        None => state.content_digest = Some(seeded_remote.file_digest_sha256.clone()),
+    }
+    match &state.content_manifest_digest {
+        Some(digest) => assert_eq!(digest, &seeded_remote.content_manifest_digest),
+        None => state.content_manifest_digest = Some(seeded_remote.content_manifest_digest.clone()),
+    }
 }
 
 fn write_remote_seed_file(root: &Path, relative_path: &Path, content_utf8: &str) -> PathBuf {
@@ -196,8 +389,50 @@ fn read_directory_entries(path: &Path) -> Vec<String> {
     entries
 }
 
+fn stage_path_for_target(target_path: &Path) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .expect("target path should include a file name")
+        .to_string_lossy()
+        .into_owned();
+    target_path
+        .parent()
+        .expect("target path should include a parent directory")
+        .join(format!(".{file_name}.loon-stage"))
+}
+
+fn download_transfer_id(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    content_manifest_digest: &str,
+) -> String {
+    format!(
+        "download:{}:{}:{}",
+        namespace_id.as_str(),
+        inode_id.0,
+        content_manifest_digest
+    )
+}
+
 fn load_fixture(relative_path: &str) -> Scenario {
     loon_testkit::fixtures::load_fixture(relative_path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeededRemoteFile {
+    file_digest_sha256: String,
+    content_manifest_digest: String,
+    manifest_object_key: String,
+}
+
+impl SeededRemoteFile {
+    fn from_uploaded(uploaded: &UploadedContent) -> Self {
+        Self {
+            file_digest_sha256: uploaded.file_digest_sha256.clone(),
+            content_manifest_digest: uploaded.content_manifest_digest.clone(),
+            manifest_object_key: uploaded.manifest_object_key.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,13 +441,18 @@ struct MaterializeInitialState {
     local_state: LocalFileStateRow,
     remote_file: FixtureRemoteFile,
     planned_actions: Vec<PlannedActionRow>,
+    #[serde(default)]
+    transfer_ledger: Option<FixtureTransferLedgerSeed>,
 }
 
 #[derive(Debug, Deserialize)]
 struct MaterializeExpectedState {
-    downloaded_content_manifest_digest: String,
-    downloaded_file_digest_sha256: String,
-    applied_inode_mutation: AppliedInodeMutation,
+    #[serde(default)]
+    downloaded_content_manifest_digest: Option<String>,
+    #[serde(default)]
+    downloaded_file_digest_sha256: Option<String>,
+    #[serde(default)]
+    applied_inode_mutation: Option<AppliedInodeMutation>,
     remote_state: RemoteFileStateRow,
     local_state: LocalFileStateRow,
     sync_anchor: SyncAnchorRow,
@@ -220,12 +460,45 @@ struct MaterializeExpectedState {
     local_file_content_utf8: String,
     #[serde(default)]
     local_parent_entries: Vec<String>,
+    #[serde(default)]
+    transfer_ledger_cleared: bool,
+    #[serde(default)]
+    stage_file_cleared: bool,
     planner_result: PlannedActionRecord,
 }
 
 #[derive(Debug, Deserialize)]
 struct FixtureRemoteFile {
-    content_utf8: String,
+    #[serde(default)]
+    content_utf8: Option<String>,
+    #[serde(default)]
+    blocks_utf8: Vec<String>,
+}
+
+impl FixtureRemoteFile {
+    fn block_bytes(&self) -> Vec<Vec<u8>> {
+        if !self.blocks_utf8.is_empty() {
+            return self
+                .blocks_utf8
+                .iter()
+                .map(|block| block.as_bytes().to_vec())
+                .collect();
+        }
+
+        match &self.content_utf8 {
+            Some(content_utf8) => vec![content_utf8.as_bytes().to_vec()],
+            None => Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FixtureTransferLedgerSeed {
+    direction: TransferDirection,
+    block_index: u64,
+    block_count: u64,
+    state: TransferState,
+    updated_at_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]

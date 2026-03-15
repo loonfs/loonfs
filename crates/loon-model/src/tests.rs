@@ -403,6 +403,45 @@ fn model_reuses_existing_client_request_id_for_retry() {
 }
 
 #[test]
+fn model_builds_deterministic_download_transfer_id() {
+    assert_eq!(
+        download_transfer_id(
+            &NamespaceId::from("ns-1"),
+            InodeId(601),
+            "sha256:manifest-abc"
+        ),
+        "download:ns-1:601:sha256:manifest-abc"
+    );
+}
+
+#[test]
+fn model_sums_expected_download_prefix_size() {
+    assert_eq!(expected_download_staged_size(&[6, 10, 4], 0), 0);
+    assert_eq!(expected_download_staged_size(&[6, 10, 4], 1), 6);
+    assert_eq!(expected_download_staged_size(&[6, 10, 4], 2), 16);
+    assert_eq!(expected_download_staged_size(&[6, 10, 4], 99), 20);
+}
+
+#[test]
+fn model_resumes_download_only_when_stage_matches_expected_prefix() {
+    assert_eq!(
+        reconcile_download_resume_block_index(1, &[6, 10], 6),
+        1,
+        "matching stage length should resume at the recorded next block index"
+    );
+    assert_eq!(
+        reconcile_download_resume_block_index(1, &[6, 10], 5),
+        0,
+        "mismatched stage length should reset to block zero"
+    );
+    assert_eq!(
+        reconcile_download_resume_block_index(99, &[6, 10], 16),
+        2,
+        "resume block index should clamp to the manifest block count"
+    );
+}
+
+#[test]
 fn model_selects_next_local_only_action_deterministically() {
     let selected = select_next_local_only_action(&[
         ModelPlannedLocalOnlyAction {

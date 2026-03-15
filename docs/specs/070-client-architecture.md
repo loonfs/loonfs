@@ -1283,6 +1283,59 @@ Failure modes prevented:
 - a discovered remote-only inode failing local materialization repeatedly without any persisted
   explanation
 
+## First durable download transfer-ledger path
+
+The first transfer-ledger slice is for `download_remote_edit`.
+
+It uses the existing SQLite table:
+
+- `transfer_ledger`
+
+The first active download row shape is:
+
+- `namespace_id`
+- `inode_id`
+- `transfer_id`
+- `direction = download`
+- `object_key = manifest_object_key`
+- `block_index = next block index to download`
+- `block_count = total manifest block count`
+- `state = staging`
+- `updated_at_ms`
+
+Rules:
+
+- the first implementation keeps at most one active download row per `(namespace_id, inode_id)`
+- `transfer_id` must be deterministic for one remote file revision:
+  `download:{namespace_id}:{inode_id}:{content_manifest_digest}`
+- before downloading blocks, the executor must load and verify the immutable manifest object
+- the executor must stage bytes in the same directory as the target file, using the durable stage
+  path derived from the target path
+- after one block is written and `sync_all()` succeeds on the stage file, the client must advance
+  `transfer_ledger.block_index` durably
+- after the final block is staged, the client must verify staged file size and file digest against
+  the manifest before rename
+- only after full verification may the client atomically rename the staged file into the target
+  path, clear the active `transfer_ledger` row, and apply `local_state` / `sync_anchor`
+- if the active ledger row and staged file length disagree on restart, the client must reset the
+  staged file and restart from `block_index = 0` rather than guessing partial recovery
+- if the authoritative manifest digest changed, the client may discard the older active download
+  row and restart from block `0` for the newer manifest
+
+Why this rule exists:
+
+- remote-only discovery is only half-useful if larger downloads still depend on one in-memory
+  blob fetch
+- block-by-block durable progress is the smallest restart-safe transfer protocol that can grow into
+  full upload/download resume later
+
+Failure modes prevented:
+
+- restarting a large remote download from byte `0` with no durable proof of prior staged progress
+- trusting a staged file whose bytes no longer match the durable ledger cursor
+- atomically publishing a local file before the fully staged bytes are verified against the remote
+  manifest
+
 ## Local data model inspiration
 
 The client should keep separate, individually consistent views of:

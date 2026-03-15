@@ -12,6 +12,7 @@ loon-objectstore = { path = "../loon-objectstore" }
 rusqlite.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 loon-model = { path = "../loon-model" }

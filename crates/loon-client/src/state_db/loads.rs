@@ -255,6 +255,54 @@ pub(super) fn load_conflicts_and_errors(
     Ok(issues)
 }
 
+pub(super) fn load_transfer_ledger_for_inode(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    direction: TransferDirection,
+) -> Result<Option<TransferLedgerRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT transfer_id, direction, object_key, block_index, block_count, state, updated_at_ms
+            FROM transfer_ledger
+            WHERE namespace_id = ?1 AND inode_id = ?2 AND direction = ?3",
+            params![
+                namespace_id.as_str(),
+                to_sql_u64(inode_id.0, "inode_id")?,
+                transfer_direction_as_str(direction),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(transfer_id, direction, object_key, block_index, block_count, state, updated_at_ms)| {
+            Ok(TransferLedgerRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                transfer_id,
+                direction: transfer_direction_from_str(&direction)?,
+                object_key,
+                block_index: from_sql_u64(block_index, "block_index")?,
+                block_count: from_sql_u64(block_count, "block_count")?,
+                state: transfer_state_from_str(&state)?,
+                updated_at_ms: from_sql_u64(updated_at_ms, "updated_at_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
 pub(super) fn load_next_planned_action(
     conn: &Connection,
 ) -> Result<Option<PlannedActionRow>, StateDbError> {

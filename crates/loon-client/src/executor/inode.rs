@@ -1,9 +1,18 @@
 use super::dispatch::dispatch_inode_mutation_from_state;
 use super::*;
-use crate::download::download_file_to_bytes;
-use crate::local_apply::{apply_bytes_atomically, create_directory_durably};
+use crate::download::{
+    expected_staged_file_size, load_content_manifest, load_validated_content_block,
+    verify_downloaded_file_path,
+};
+use crate::local_apply::{
+    append_stage_bytes, create_directory_durably, finalize_stage_file, reset_stage_file,
+    stage_file_size, staging_path_for_target,
+};
 use crate::planner::{PlannedActionRecord, PlannerDecision};
-use crate::state_db::{InodeUploadRow, RemoteFileStateRow, SqliteStateDb};
+use crate::state_db::{
+    InodeUploadRow, RemoteFileStateRow, SqliteStateDb, TransferDirection, TransferLedgerRow,
+    TransferState,
+};
 use crate::upload::upload_small_file_from_path;
 use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind, NamespaceId};
@@ -125,21 +134,87 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
             .content_manifest_digest
             .as_deref()
             .expect("download_remote_edit should require manifest digest");
-        let downloaded = download_file_to_bytes(store, namespace_id, manifest_digest)?;
+        let loaded_manifest = load_content_manifest(store, namespace_id, manifest_digest)?;
         let remote_content_digest = remote
             .content_digest
             .as_deref()
             .expect("download_remote_edit should require remote content digest");
+        let block_count = u64::try_from(loaded_manifest.manifest_envelope.payload.blocks.len())
+            .expect("block count should fit in u64");
+        let transfer_id = download_transfer_id(namespace_id, inode_id, manifest_digest);
+        let requested_block_index = match db.load_transfer_ledger_for_inode(
+            namespace_id,
+            inode_id,
+            TransferDirection::Download,
+        )? {
+            Some(existing)
+                if existing.transfer_id == transfer_id
+                    && existing.object_key == loaded_manifest.object_key
+                    && existing.block_count == block_count
+                    && existing.state == TransferState::Staging =>
+            {
+                existing.block_index
+            }
+            _ => 0,
+        };
+        let staged_size_bytes = stage_file_size(target_path)?.unwrap_or(0);
+        let resume_block_index = if staged_size_bytes
+            == expected_staged_file_size(&loaded_manifest.manifest_envelope, requested_block_index)
+        {
+            requested_block_index
+        } else {
+            0
+        };
+
+        if resume_block_index == 0 {
+            reset_stage_file(target_path)?;
+        }
+
+        db.upsert_transfer_ledger(&download_transfer_row(
+            namespace_id,
+            inode_id,
+            &transfer_id,
+            &loaded_manifest.object_key,
+            resume_block_index,
+            block_count,
+            applied_at_ms,
+        ))?;
+
+        for (block_offset, block) in loaded_manifest
+            .manifest_envelope
+            .payload
+            .blocks
+            .iter()
+            .enumerate()
+            .skip(usize::try_from(resume_block_index).expect("resume block index should fit"))
+        {
+            let block_bytes = load_validated_content_block(store, namespace_id, block)?;
+            append_stage_bytes(target_path, &block_bytes)?;
+            let next_block_index =
+                u64::try_from(block_offset + 1).expect("block offset should fit in u64");
+            db.upsert_transfer_ledger(&download_transfer_row(
+                namespace_id,
+                inode_id,
+                &transfer_id,
+                &loaded_manifest.object_key,
+                next_block_index,
+                block_count,
+                applied_at_ms,
+            ))?;
+        }
+
+        let stage_path = staging_path_for_target(target_path)?;
+        let downloaded = verify_downloaded_file_path(&loaded_manifest, &stage_path)?;
         if downloaded.file_digest_sha256 != remote_content_digest {
             return Err(ExecuteDownloadRemoteEditError::RemoteDigestMismatch {
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
                 remote_content_digest: remote_content_digest.to_owned(),
-                downloaded_file_digest: downloaded.file_digest_sha256.clone(),
+                downloaded_file_digest: downloaded.file_digest_sha256,
             });
         }
 
-        apply_bytes_atomically(target_path, &downloaded.bytes)?;
+        finalize_stage_file(target_path)?;
 
         let applied = db.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)?;
         Ok(ExecutedDownloadRemoteEdit {
@@ -154,6 +229,41 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
     }
 
     result
+}
+
+fn download_transfer_id(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    content_manifest_digest: &str,
+) -> String {
+    format!(
+        "download:{}:{}:{}",
+        namespace_id.as_str(),
+        inode_id.0,
+        content_manifest_digest
+    )
+}
+
+fn download_transfer_row(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    transfer_id: &str,
+    object_key: &str,
+    block_index: u64,
+    block_count: u64,
+    updated_at_ms: u64,
+) -> TransferLedgerRow {
+    TransferLedgerRow {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        transfer_id: transfer_id.to_owned(),
+        direction: TransferDirection::Download,
+        object_key: object_key.to_owned(),
+        block_index,
+        block_count,
+        state: TransferState::Staging,
+        updated_at_ms,
+    }
 }
 
 pub(super) fn execute_materialize_remote_dir(

@@ -6,7 +6,7 @@ use super::loads::{
     load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
     load_pending_client_mutation_for_client_file, load_pending_inode_mutation,
     load_pending_inode_mutation_for_inode, load_planned_action, load_planned_local_only_action,
-    load_remote_file, load_sync_anchor,
+    load_remote_file, load_sync_anchor, load_transfer_ledger_for_inode,
 };
 use super::schema::initialize_connection;
 use super::*;
@@ -210,6 +210,15 @@ impl SqliteStateDb {
         load_conflicts_and_errors(&self.conn, namespace_id, inode_id)
     }
 
+    pub fn load_transfer_ledger_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        direction: TransferDirection,
+    ) -> Result<Option<TransferLedgerRow>, StateDbError> {
+        load_transfer_ledger_for_inode(&self.conn, namespace_id, inode_id, direction)
+    }
+
     pub fn observe_local_only_inode_under_parent(
         &mut self,
         observed: &ObservedLocalOnlyInode,
@@ -378,6 +387,26 @@ impl SqliteStateDb {
                 detail_json,
                 created_at_ms,
             )
+        })
+    }
+
+    pub fn upsert_transfer_ledger(
+        &mut self,
+        row: &TransferLedgerRow,
+    ) -> Result<TransferLedgerRow, StateDbError> {
+        self.planner_transaction("upsert_transfer_ledger", |tx| {
+            tx.upsert_transfer_ledger(row)
+        })
+    }
+
+    pub fn delete_transfer_ledger_for_inode(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        direction: TransferDirection,
+    ) -> Result<(), StateDbError> {
+        self.planner_transaction("delete_transfer_ledger_for_inode", |tx| {
+            tx.delete_transfer_ledger_for_inode(namespace_id, inode_id, direction)
         })
     }
 }
@@ -786,6 +815,75 @@ impl PlannerTxn<'_> {
         Ok(row)
     }
 
+    pub fn upsert_transfer_ledger(
+        &mut self,
+        row: &TransferLedgerRow,
+    ) -> Result<TransferLedgerRow, StateDbError> {
+        self.tx.execute(
+            "DELETE FROM transfer_ledger
+            WHERE namespace_id = ?1 AND inode_id = ?2 AND direction = ?3 AND transfer_id != ?4",
+            params![
+                row.namespace_id.as_str(),
+                to_sql_u64(row.inode_id.0, "inode_id")?,
+                transfer_direction_as_str(row.direction),
+                &row.transfer_id,
+            ],
+        )?;
+        self.tx.execute(
+            "INSERT INTO transfer_ledger (
+                namespace_id,
+                inode_id,
+                transfer_id,
+                direction,
+                object_key,
+                block_index,
+                block_count,
+                state,
+                updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(transfer_id) DO UPDATE SET
+                namespace_id = excluded.namespace_id,
+                inode_id = excluded.inode_id,
+                direction = excluded.direction,
+                object_key = excluded.object_key,
+                block_index = excluded.block_index,
+                block_count = excluded.block_count,
+                state = excluded.state,
+                updated_at_ms = excluded.updated_at_ms",
+            params![
+                row.namespace_id.as_str(),
+                to_sql_u64(row.inode_id.0, "inode_id")?,
+                &row.transfer_id,
+                transfer_direction_as_str(row.direction),
+                &row.object_key,
+                to_sql_u64(row.block_index, "block_index")?,
+                to_sql_u64(row.block_count, "block_count")?,
+                transfer_state_as_str(row.state),
+                to_sql_u64(row.updated_at_ms, "updated_at_ms")?,
+            ],
+        )?;
+
+        Ok(row.clone())
+    }
+
+    pub fn delete_transfer_ledger_for_inode(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        direction: TransferDirection,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM transfer_ledger
+            WHERE namespace_id = ?1 AND inode_id = ?2 AND direction = ?3",
+            params![
+                namespace_id.as_str(),
+                to_sql_u64(inode_id.0, "inode_id")?,
+                transfer_direction_as_str(direction),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn record_pending_client_mutation(
         &mut self,
         client_file_id: &ClientFileId,
@@ -1122,6 +1220,7 @@ impl PlannerTxn<'_> {
         self.upsert_local_file(&next_local)?;
         self.upsert_sync_anchor(&next_anchor)?;
         self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Download)?;
         self.delete_conflict_or_error_kind(
             namespace_id,
             inode_id,

@@ -2,7 +2,7 @@ use super::{
     BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
     LocalOnlyPlannedActionRow, LocalOnlyUploadRow, ObservedLocalOnlyInode,
     PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError,
-    SyncAnchorRow, SCHEMA_VERSION,
+    SyncAnchorRow, TransferDirection, TransferLedgerRow, TransferState, SCHEMA_VERSION,
 };
 use crate::upload::UploadedContent;
 use loon_types::{
@@ -159,6 +159,52 @@ fn allocate_client_request_ids_monotonically() {
 
     assert_eq!(first, "client-req-00000000000000000001");
     assert_eq!(second, "client-req-00000000000000000002");
+}
+
+#[test]
+fn transfer_ledger_round_trips_by_inode_and_direction() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let row = TransferLedgerRow {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(601),
+        transfer_id: "download:ns-1:601:sha256:manifest-1".to_owned(),
+        direction: TransferDirection::Download,
+        object_key: "namespaces/ns-1/manifests/sha256:manifest-1.json".to_owned(),
+        block_index: 1,
+        block_count: 2,
+        state: TransferState::Staging,
+        updated_at_ms: 1_700_000_611_000,
+    };
+
+    db.upsert_transfer_ledger(&row)
+        .expect("record transfer ledger row");
+
+    assert_eq!(
+        db.load_transfer_ledger_for_inode(
+            &NamespaceId::from("ns-1"),
+            InodeId(601),
+            TransferDirection::Download,
+        )
+        .expect("load transfer ledger row"),
+        Some(row.clone())
+    );
+
+    db.delete_transfer_ledger_for_inode(
+        &NamespaceId::from("ns-1"),
+        InodeId(601),
+        TransferDirection::Download,
+    )
+    .expect("delete transfer ledger row");
+
+    assert_eq!(
+        db.load_transfer_ledger_for_inode(
+            &NamespaceId::from("ns-1"),
+            InodeId(601),
+            TransferDirection::Download,
+        )
+        .expect("load deleted transfer ledger row"),
+        None
+    );
 }
 
 #[test]

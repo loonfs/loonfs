@@ -33,6 +33,10 @@ pub enum StateDbError {
     UnsignedOutOfRange { field: &'static str, value: u64 },
     #[error("unknown inode kind `{0}` in SQLite row")]
     UnknownInodeKind(String),
+    #[error("unknown transfer direction `{0}` in SQLite row")]
+    UnknownTransferDirection(String),
+    #[error("unknown transfer state `{0}` in SQLite row")]
+    UnknownTransferState(String),
     #[error("unsupported local-only inode kind `{0:?}`")]
     UnsupportedLocalOnlyInodeKind(InodeKind),
     #[error(
@@ -417,6 +421,32 @@ pub struct InodeUploadRow {
     pub uploaded_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferDirection {
+    Download,
+    Upload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferState {
+    Staging,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferLedgerRow {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub transfer_id: String,
+    pub direction: TransferDirection,
+    pub object_key: String,
+    pub block_index: u64,
+    pub block_count: u64,
+    pub state: TransferState,
+    pub updated_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingClientMutationRow {
     pub client_request_id: String,
@@ -525,6 +555,34 @@ fn inode_kind_from_str(value: &str) -> Result<InodeKind, StateDbError> {
         "symlink" => Ok(InodeKind::Symlink),
         "mount" => Ok(InodeKind::Mount),
         other => Err(StateDbError::UnknownInodeKind(other.to_owned())),
+    }
+}
+
+fn transfer_direction_as_str(direction: TransferDirection) -> &'static str {
+    match direction {
+        TransferDirection::Download => "download",
+        TransferDirection::Upload => "upload",
+    }
+}
+
+fn transfer_direction_from_str(value: &str) -> Result<TransferDirection, StateDbError> {
+    match value {
+        "download" => Ok(TransferDirection::Download),
+        "upload" => Ok(TransferDirection::Upload),
+        other => Err(StateDbError::UnknownTransferDirection(other.to_owned())),
+    }
+}
+
+fn transfer_state_as_str(state: TransferState) -> &'static str {
+    match state {
+        TransferState::Staging => "staging",
+    }
+}
+
+fn transfer_state_from_str(value: &str) -> Result<TransferState, StateDbError> {
+    match value {
+        "staging" => Ok(TransferState::Staging),
+        other => Err(StateDbError::UnknownTransferState(other.to_owned())),
     }
 }
 

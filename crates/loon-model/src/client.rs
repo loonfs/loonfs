@@ -3,7 +3,7 @@ use crate::{
     ModelPlannedInodeAction, ModelPlannedLocalOnlyAction, ModelRemoteObservationSelectionError,
     ModelScheduledClientAction,
 };
-use loon_types::{ChangeSeq, InodeId, InodeKind};
+use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId};
 use serde_json::json;
 
 pub fn allocate_client_request_id(next_counter: u64) -> String {
@@ -17,6 +17,39 @@ pub fn reuse_or_allocate_client_request_id(
     match existing_request_id {
         Some(existing) => (existing.to_owned(), false),
         None => (allocate_client_request_id(next_counter), true),
+    }
+}
+
+pub fn download_transfer_id(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    content_manifest_digest: &str,
+) -> String {
+    format!(
+        "download:{}:{}:{}",
+        namespace_id.as_str(),
+        inode_id.0,
+        content_manifest_digest
+    )
+}
+
+pub fn expected_download_staged_size(block_sizes: &[u64], next_block_index: u64) -> u64 {
+    let clamped = usize::try_from(next_block_index)
+        .unwrap_or(usize::MAX)
+        .min(block_sizes.len());
+    block_sizes.iter().take(clamped).sum()
+}
+
+pub fn reconcile_download_resume_block_index(
+    requested_block_index: u64,
+    block_sizes: &[u64],
+    staged_size_bytes: u64,
+) -> u64 {
+    let clamped = requested_block_index.min(block_sizes.len() as u64);
+    if staged_size_bytes == expected_download_staged_size(block_sizes, clamped) {
+        clamped
+    } else {
+        0
     }
 }
 
