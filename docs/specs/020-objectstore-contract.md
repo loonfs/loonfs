@@ -7,6 +7,18 @@ That makes the object-store contract a first-class part of the product.
 
 ## Required primitives
 
+The active v1 provider-facing surface is intentionally small. Higher layers may depend only on:
+
+- `head`
+- `get`
+- `put`
+- `delete`
+- `list_prefix`
+- `ObjectMetadata.etag` as an opaque compare token
+- `ObjectStoreError` variants
+
+Anything else is provider-specific detail and must terminate inside `loon-objectstore`.
+
 ### Create-if-absent
 
 Plainly:
@@ -80,11 +92,48 @@ Failure modes prevented:
 - passing tests accidentally using a developer's ambient cloud credentials
 - provider adapters gaining hidden runtime configuration paths that are hard to audit
 
+## Boundary isolation rule
+
+Provider quirks must stop at the `ObjectStore` trait boundary.
+
+Rules:
+
+- higher layers may branch on `ObjectStoreError::PreconditionFailed` as the generic stale-write
+  signal
+- higher layers must not branch on provider-specific HTTP status codes, header names, SDK error
+  strings, or transport text
+- `ObjectMetadata.etag` is an opaque compare token for one object version; it is not canonical
+  content identity, not a durable protocol field, and not valid for cross-object or cross-provider
+  reasoning
+- key prefixing, path-style quirks, conditional-header construction, and provider-specific retry
+  details must stay inside `loon-objectstore`
+- any new provider capability must first appear as an `ObjectStore`-level contract plus a
+  conformance case before other crates may depend on it
+
+Why these rules exist:
+
+- the repo should have one place where cloud-provider behavior is interpreted
+- higher layers should talk in terms of LoonDB concurrency and durability semantics, not S3 header
+  mechanics
+- opaque compare tokens are useful for CAS without becoming accidental durable identity
+
+Failure modes prevented:
+
+- `loon-core`, `loon-queue`, or `loon-client` growing hidden dependencies on one provider's HTTP
+  behavior
+- ETags being mistaken for canonical content digests or stable protocol fields
+- future provider swaps requiring changes in semantic crates instead of only in `loon-objectstore`
+
 ## Control-plane rule
 
 Head, lease, and queue objects must stay small enough for simple conditional writes.
 Large immutable file content may use multipart upload.
 Small mutable control objects should not.
+
+Multipart upload is therefore not part of the active v1 `ObjectStore` trait surface. If large
+immutable blob upload later requires explicit multipart semantics in this repository, that change
+must update this spec, the trait surface, and the conformance suite together before higher layers
+depend on it.
 
 ## Immutable content objects
 

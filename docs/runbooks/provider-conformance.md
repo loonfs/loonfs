@@ -4,18 +4,24 @@ LoonDB is allowed to depend only on the provider behavior that this suite verifi
 
 ## Required behaviors
 
+- active trait surface only:
+  `head`, `get`, `put`, `delete`, `list_prefix`, opaque compare tokens, and trait-level errors
 - create-if-absent for immutable objects
 - compare-and-swap update on small mutable control objects
 - strong visibility after write and delete
 - range reads
 - overwrite behavior
-- multipart behavior for large immutable blobs
+- key scoping and traversal rejection
 
 ## Why this runbook exists
 
 “S3-compatible” is not a correctness proof.
 
 The provider contract must be tested directly for local FS, AWS S3, and Cloudflare R2.
+
+Just as important, higher layers must not learn provider behavior any other way. If a semantic crate
+needs a new provider capability, the change should land first in `loon-objectstore`, then in this
+runbook, then in conformance tests.
 
 ## Credential layout
 
@@ -59,6 +65,29 @@ Why the names use `LOON_TEST_`:
 - they avoid accidentally picking up ambient `AWS_*` shell state
 - CI can scope them to one conformance job without affecting production config paths
 
+## Boundary rules
+
+- `ObjectMetadata.etag` is an opaque compare token only
+- callers may map `ObjectStoreError::PreconditionFailed` into domain-specific concurrency errors
+- callers must not parse ETags, inspect provider SDK errors, or branch on provider-specific
+  transport strings
+- conditional-header construction (`If-Match`, `If-None-Match`), key-prefix behavior, and endpoint
+  quirks stay inside `loon-objectstore`
+
+## Current conformance scope
+
+The current suite proves the active v1 contract only:
+
+- create-if-absent
+- compare-and-swap on small mutable objects
+- immediate visibility after write and delete
+- range reads
+- key scoping/traversal rejection
+
+`multipart_upload` still exists in provider profiles as a future-facing capability flag, but it is
+not part of the active v1 `ObjectStore` trait surface and is not yet a correctness dependency for
+other crates.
+
 ## Local usage
 
 One straightforward local flow is:
@@ -75,7 +104,8 @@ cargo test -p loon-objectstore --test conformance aws_s3_real_provider_conforman
 cargo test -p loon-objectstore --test conformance cloudflare_r2_real_provider_conformance -- --ignored --exact
 ```
 
-Today those ignored tests lock the secret-loading contract and invocation path. Once the real adapters exist, they should execute the full conformance suite instead of only loading config.
+Today those ignored tests execute the same conformance assertions the local FS adapter runs, using
+real AWS S3 and Cloudflare R2 resources.
 
 ## CI guidance
 

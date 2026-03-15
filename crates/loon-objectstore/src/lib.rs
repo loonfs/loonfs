@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMetadata {
+    /// Opaque compare token for one object version.
+    ///
+    /// This is suitable for immediate compare-and-swap on the same object key. It is not
+    /// canonical content identity and callers must not derive provider-specific meaning from it.
     pub etag: Option<String>,
     pub size_bytes: u64,
 }
@@ -32,6 +36,10 @@ pub struct ByteRange {
 }
 
 pub trait ObjectStore {
+    /// Provider-specific headers, status codes, and SDK errors must terminate inside this trait.
+    ///
+    /// Higher layers may depend only on the returned bytes, listing results, opaque compare
+    /// tokens, and the stable `ObjectStoreError` variants.
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
     fn get(&self, key: &str, range: Option<ByteRange>)
         -> Result<Option<Vec<u8>>, ObjectStoreError>;

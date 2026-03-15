@@ -6,7 +6,7 @@ use loon_objectstore::keys::{
     derived_progress, namespace_head, namespace_lease, queue_shard, snapshot_manifest,
     snapshot_table, wal_commit, SnapshotTableFamily,
 };
-use loon_objectstore::provider::{AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
+use loon_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
 use loon_objectstore::r2::{R2Store, R2StoreConfig};
 use loon_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
 use loon_objectstore::{ByteRange, ObjectStore};
@@ -24,6 +24,18 @@ fn provider_profiles_exist() {
     assert_eq!(LOCAL_FS.name, "local-fs");
     assert_eq!(AWS_S3.name, "aws-s3");
     assert_eq!(CLOUDFLARE_R2.name, "cloudflare-r2");
+    assert_eq!(
+        LOCAL_FS.provider_etag_is_canonical_identity,
+        Expectation::ExpectedNo
+    );
+    assert_eq!(
+        AWS_S3.provider_etag_is_canonical_identity,
+        Expectation::ExpectedNo
+    );
+    assert_eq!(
+        CLOUDFLARE_R2.provider_etag_is_canonical_identity,
+        Expectation::ExpectedNo
+    );
 }
 
 #[test]
