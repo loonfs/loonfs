@@ -9,12 +9,27 @@ use serde::Deserialize;
 
 #[test]
 fn remote_observation_discovers_remote_only_file_and_restarts_plannable() {
-    let scenario = load_fixture("client/client_remote_observation_discovers_remote_only_file.yaml");
+    run_remote_only_discovery_scenario(
+        "client/client_remote_observation_discovers_remote_only_file.yaml",
+        "client-remote-only-discovery-file",
+    );
+}
+
+#[test]
+fn remote_observation_discovers_remote_only_directory_and_restarts_plannable() {
+    run_remote_only_discovery_scenario(
+        "client/client_remote_observation_discovers_remote_only_directory.yaml",
+        "client-remote-only-discovery-dir",
+    );
+}
+
+fn run_remote_only_discovery_scenario(relative_path: &str, temp_dir_name: &str) {
+    let scenario = load_fixture(relative_path);
     let _initial: RemoteOnlyDiscoveryInitial = scenario.decode_initial().expect("decode initial");
     let actions: Vec<RemoteObservationFixtureAction> =
         scenario.decode_actions().expect("decode actions");
     let expect: RemoteOnlyDiscoveryExpect = scenario.decode_expect().expect("decode expect");
-    let temp_dir = TestDir::new("client-remote-only-discovery");
+    let temp_dir = TestDir::new(temp_dir_name);
     let db_path = temp_dir.path().join("client.sqlite3");
 
     let observe = actions[0].apply().expect("apply action first");

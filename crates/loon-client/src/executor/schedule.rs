@@ -1,4 +1,6 @@
-use super::inode::{execute_download_remote_edit, execute_upload_local_edit};
+use super::inode::{
+    execute_download_remote_edit, execute_materialize_remote_dir, execute_upload_local_edit,
+};
 use super::local_only::execute_local_only_create;
 use super::*;
 use crate::state_db::{ClientFileId, SqliteStateDb};
@@ -88,6 +90,19 @@ where
                         created_at_ms,
                     )?;
                     Ok(Some(NextClientAction::ExecutedDownloadRemoteEdit(executed)))
+                }
+                value if value == PlannerDecision::MaterializeRemoteDir.as_str() => {
+                    let target_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let executed = execute_materialize_remote_dir(
+                        db,
+                        &namespace_id,
+                        inode_id,
+                        target_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedMaterializeRemoteDir(
+                        executed,
+                    )))
                 }
                 _ => Ok(Some(NextClientAction::SelectedPlannedAction(
                     planned_action,

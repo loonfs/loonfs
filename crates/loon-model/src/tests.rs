@@ -626,7 +626,7 @@ fn model_detects_bound_local_match_for_remote_observation() {
 }
 
 #[test]
-fn model_supports_remote_only_file_discovery_from_authoritative_observation() {
+fn model_supports_remote_only_discovery_from_authoritative_observation() {
     let observed = ModelObservedRemoteInode {
         namespace_id: NamespaceId::from("ns-1"),
         inode_id: InodeId(601),
@@ -644,7 +644,22 @@ fn model_supports_remote_only_file_discovery_from_authoritative_observation() {
         is_deleted: false,
     };
 
-    assert!(remote_only_file_discovery_supported(&observed));
+    assert!(remote_only_discovery_supported(&observed));
+
+    let observed_dir = ModelObservedRemoteInode {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(701),
+        inode_kind: InodeKind::Dir,
+        observed_seq: ChangeSeq(52),
+        revision_no: RevisionNo(1),
+        content_digest: None,
+        content_manifest_digest: None,
+        parent_inode_id: Some(InodeId(2)),
+        display_name: "incoming".to_owned(),
+        is_deleted: false,
+    };
+
+    assert!(remote_only_discovery_supported(&observed_dir));
 }
 
 #[test]

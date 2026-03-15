@@ -13,6 +13,7 @@ pub enum PlannerDecision {
     UploadLocalCreate,
     UploadLocalEdit,
     DownloadRemoteEdit,
+    MaterializeRemoteDir,
     CreateConflictCopy,
     NoOp,
 }
@@ -141,15 +142,23 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
             PlannerDecision::UploadLocalEdit,
             PlannerReason::LocalDiffersFromAnchor,
         ),
-        (Some(_), None, None) => (
-            PlannerDecision::DownloadRemoteEdit,
+        (Some(remote), None, None) => (
+            match remote.inode_kind {
+                InodeKind::File => PlannerDecision::DownloadRemoteEdit,
+                InodeKind::Dir => PlannerDecision::MaterializeRemoteDir,
+                InodeKind::Symlink | InodeKind::Mount => PlannerDecision::NoOp,
+            },
             PlannerReason::RemoteObservedWithoutAnchor,
         ),
         (Some(remote), Some(local), None)
             if remote_only_placeholder_matches_remote(local, remote) =>
         {
             (
-                PlannerDecision::DownloadRemoteEdit,
+                match remote.inode_kind {
+                    InodeKind::File => PlannerDecision::DownloadRemoteEdit,
+                    InodeKind::Dir => PlannerDecision::MaterializeRemoteDir,
+                    InodeKind::Symlink | InodeKind::Mount => PlannerDecision::NoOp,
+                },
                 PlannerReason::RemoteObservedWithoutAnchor,
             )
         }
@@ -291,6 +300,7 @@ impl PlannerDecision {
             Self::UploadLocalCreate => "upload_local_create",
             Self::UploadLocalEdit => "upload_local_edit",
             Self::DownloadRemoteEdit => "download_remote_edit",
+            Self::MaterializeRemoteDir => "materialize_remote_dir",
             Self::CreateConflictCopy => "create_conflict_copy",
             Self::NoOp => "no_op",
         }
@@ -302,6 +312,7 @@ impl PlannerDecision {
             "upload_local_create" => Ok(Self::UploadLocalCreate),
             "upload_local_edit" => Ok(Self::UploadLocalEdit),
             "download_remote_edit" => Ok(Self::DownloadRemoteEdit),
+            "materialize_remote_dir" => Ok(Self::MaterializeRemoteDir),
             "create_conflict_copy" => Ok(Self::CreateConflictCopy),
             "no_op" => Ok(Self::NoOp),
             other => Err(PlannerError::UnknownDecision(other.to_owned())),
@@ -487,6 +498,43 @@ mod tests {
         let planned = decide_file_action(&views, 1_700_000_610_000);
 
         assert_eq!(planned.decision, PlannerDecision::DownloadRemoteEdit);
+        assert_eq!(planned.reason, PlannerReason::RemoteObservedWithoutAnchor);
+    }
+
+    #[test]
+    fn planner_materializes_remote_only_directory_without_anchor() {
+        let views = FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(701),
+            remote: Some(RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(701),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(52),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "incoming".to_owned(),
+                is_deleted: false,
+            }),
+            local: Some(LocalFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(701),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "incoming".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_708_000,
+            }),
+            sync_anchor: None,
+        };
+
+        let planned = decide_file_action(&views, 1_700_000_710_000);
+
+        assert_eq!(planned.decision, PlannerDecision::MaterializeRemoteDir);
         assert_eq!(planned.reason, PlannerReason::RemoteObservedWithoutAnchor);
     }
 

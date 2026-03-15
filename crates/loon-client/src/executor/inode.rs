@@ -1,12 +1,12 @@
 use super::dispatch::dispatch_inode_mutation_from_state;
 use super::*;
 use crate::download::download_file_to_bytes;
-use crate::local_apply::apply_bytes_atomically;
+use crate::local_apply::{apply_bytes_atomically, create_directory_durably};
 use crate::planner::{PlannedActionRecord, PlannerDecision};
 use crate::state_db::{InodeUploadRow, RemoteFileStateRow, SqliteStateDb};
 use crate::upload::upload_small_file_from_path;
 use loon_objectstore::ObjectStore;
-use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, NamespaceId};
+use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind, NamespaceId};
 use std::path::Path;
 
 pub fn execute_upload_local_edit_from_path<S: ObjectStore, F>(
@@ -50,6 +50,18 @@ pub fn execute_download_remote_edit_to_path<S: ObjectStore>(
         Some(target_path),
         applied_at_ms,
     )
+}
+
+pub fn execute_materialize_remote_dir_to_path<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    target_path: &Path,
+    applied_at_ms: u64,
+) -> Result<ExecutedMaterializeRemoteDir, ExecuteMaterializeRemoteDirError> {
+    let _ = store;
+    execute_materialize_remote_dir(db, namespace_id, inode_id, Some(target_path), applied_at_ms)
 }
 
 pub(super) fn execute_upload_local_edit<S: ObjectStore, F>(
@@ -135,6 +147,26 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
     })
 }
 
+pub(super) fn execute_materialize_remote_dir(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+) -> Result<ExecutedMaterializeRemoteDir, ExecuteMaterializeRemoteDirError> {
+    ensure_materialize_remote_dir_ready(db, namespace_id, inode_id)?;
+    let target_path =
+        target_path.ok_or_else(|| ExecuteMaterializeRemoteDirError::SourcePathMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+
+    create_directory_durably(target_path)?;
+
+    let applied = db.apply_materialize_remote_dir(namespace_id, inode_id, applied_at_ms)?;
+    Ok(ExecutedMaterializeRemoteDir { applied })
+}
+
 fn ensure_download_remote_edit_ready(
     db: &SqliteStateDb,
     namespace_id: &NamespaceId,
@@ -185,6 +217,61 @@ fn ensure_download_remote_edit_ready(
             Ok(remote)
         }
         _ => Err(StateDbError::DownloadRemoteEditStateMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        }
+        .into()),
+    }
+}
+
+fn ensure_materialize_remote_dir_ready(
+    db: &SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<(), ExecuteMaterializeRemoteDirError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::MaterializeRemoteDir {
+        return Err(
+            ExecuteMaterializeRemoteDirError::MaterializeRemoteDirDecisionMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                decision: planned.decision,
+            },
+        );
+    }
+
+    let views = db.load_file_sync_views(namespace_id, inode_id)?;
+    match (views.remote, views.local, views.sync_anchor) {
+        (Some(remote), Some(local), None)
+            if remote.inode_kind == InodeKind::Dir
+                && local.inode_kind == InodeKind::Dir
+                && !remote.is_deleted
+                && !local.exists_on_disk
+                && !local.dirty
+                && local.parent_inode_id == remote.parent_inode_id
+                && local.display_name == remote.display_name =>
+        {
+            Ok(())
+        }
+        (Some(remote), Some(local), None) => {
+            Err(StateDbError::MaterializeRemoteDirRequiresDirectory {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                inode_kind: if remote.inode_kind == InodeKind::Dir {
+                    format!("{:?}", local.inode_kind).to_lowercase()
+                } else {
+                    format!("{:?}", remote.inode_kind).to_lowercase()
+                },
+            }
+            .into())
+        }
+        _ => Err(StateDbError::MaterializeRemoteDirStateMissing {
             namespace_id: namespace_id.as_str().to_owned(),
             inode_id: inode_id.0,
         }

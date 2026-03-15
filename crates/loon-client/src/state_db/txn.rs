@@ -330,6 +330,17 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn apply_materialize_remote_dir(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_materialize_remote_dir", |tx| {
+            tx.apply_materialize_remote_dir(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
     pub fn apply_remote_observation(
         &mut self,
         observed: &ObservedRemoteInode,
@@ -983,7 +994,8 @@ impl PlannerTxn<'_> {
             }
             (Some(remote), Some(local), None)
                 if remote_only_placeholder_matches_remote_state(&local, &remote)
-                    && remote_only_file_discovery_supported(&remote) =>
+                    && remote.inode_kind == InodeKind::File
+                    && !remote.is_deleted =>
             {
                 (remote, local)
             }
@@ -1027,6 +1039,109 @@ impl PlannerTxn<'_> {
         })
     }
 
+    pub fn apply_materialize_remote_dir(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = self.load_file_sync_views(namespace_id, inode_id)?;
+        let (remote, local) = match (views.remote, views.local, views.sync_anchor) {
+            (Some(remote), Some(local), None) => (remote, local),
+            _ => {
+                return Err(StateDbError::MaterializeRemoteDirStateMissing {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    inode_id: inode_id.0,
+                })
+            }
+        };
+
+        if remote.inode_kind != InodeKind::Dir || local.inode_kind != InodeKind::Dir {
+            return Err(StateDbError::MaterializeRemoteDirRequiresDirectory {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                inode_kind: inode_kind_as_str(&local.inode_kind).to_owned(),
+            });
+        }
+        if remote.is_deleted {
+            return Err(StateDbError::MaterializeRemoteDirPlaceholderMismatch {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                field: "is_deleted",
+                local: "false".to_owned(),
+                remote: "true".to_owned(),
+            });
+        }
+        if local.exists_on_disk {
+            return Err(StateDbError::MaterializeRemoteDirPlaceholderMismatch {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                field: "exists_on_disk",
+                local: "true".to_owned(),
+                remote: "false".to_owned(),
+            });
+        }
+        if local.dirty {
+            return Err(StateDbError::MaterializeRemoteDirPlaceholderMismatch {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                field: "dirty",
+                local: "true".to_owned(),
+                remote: "false".to_owned(),
+            });
+        }
+        if local.parent_inode_id != remote.parent_inode_id {
+            return Err(StateDbError::MaterializeRemoteDirPlaceholderMismatch {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                field: "parent_inode_id",
+                local: format!("{:?}", local.parent_inode_id),
+                remote: format!("{:?}", remote.parent_inode_id),
+            });
+        }
+        if local.display_name != remote.display_name {
+            return Err(StateDbError::MaterializeRemoteDirPlaceholderMismatch {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                field: "display_name",
+                local: local.display_name.clone(),
+                remote: remote.display_name.clone(),
+            });
+        }
+
+        let next_local = LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: local.inode_kind,
+            content_digest: None,
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name.clone(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: applied_at_ms,
+        };
+        let next_anchor = SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            synced_seq: remote.observed_seq,
+            revision_no: remote.revision_no,
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name,
+        };
+
+        self.upsert_local_file(&next_local)?;
+        self.upsert_sync_anchor(&next_anchor)?;
+        self.delete_planned_action(namespace_id, inode_id)?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
     pub fn apply_remote_observation(
         &mut self,
         observed: &ObservedRemoteInode,
@@ -1051,7 +1166,7 @@ impl PlannerTxn<'_> {
         ) {
             if !local.exists_on_disk
                 && !local.dirty
-                && remote_only_file_discovery_supported(&observed_remote)
+                && remote_only_discovery_supported(&observed_remote)
             {
                 let next_local = LocalFileStateRow {
                     namespace_id: observed.namespace_id.clone(),
@@ -1134,7 +1249,7 @@ impl PlannerTxn<'_> {
                 .collect::<Vec<_>>();
         match matching_local_only.as_slice() {
             [] => {
-                if remote_only_file_discovery_supported(&observed_remote) {
+                if remote_only_discovery_supported(&observed_remote) {
                     let placeholder = LocalFileStateRow {
                         namespace_id: observed.namespace_id.clone(),
                         inode_id: observed.inode_id,

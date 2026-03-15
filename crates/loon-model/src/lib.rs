@@ -679,7 +679,7 @@ mod queue;
 pub use client::{
     allocate_client_request_id, bound_local_matches_remote_observation,
     local_only_matches_remote_observation, remote_observation_is_stale,
-    remote_only_file_discovery_supported, remote_only_placeholder_matches_remote_observation,
+    remote_only_discovery_supported, remote_only_placeholder_matches_remote_observation,
     reuse_or_allocate_client_request_id, select_local_only_observation_bind_candidate,
     select_next_client_action, select_next_local_only_action,
 };

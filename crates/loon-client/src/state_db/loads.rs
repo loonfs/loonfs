@@ -237,7 +237,7 @@ pub(super) fn load_next_executable_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision IN ('upload_local_edit', 'download_remote_edit')
+        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -250,7 +250,7 @@ pub(super) fn load_next_deferred_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit')
+        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )

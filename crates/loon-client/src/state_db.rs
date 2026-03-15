@@ -225,6 +225,22 @@ pub enum StateDbError {
         local: String,
         anchor: String,
     },
+    #[error("materialize_remote_dir_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    MaterializeRemoteDirStateMissing { namespace_id: String, inode_id: u64 },
+    #[error("materialize_remote_dir_requires_directory: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
+    MaterializeRemoteDirRequiresDirectory {
+        namespace_id: String,
+        inode_id: u64,
+        inode_kind: String,
+    },
+    #[error("materialize_remote_dir_placeholder_mismatch: namespace `{namespace_id}` inode `{inode_id}` field `{field}` local `{local}` != remote `{remote}`")]
+    MaterializeRemoteDirPlaceholderMismatch {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        local: String,
+        remote: String,
+    },
     #[error("remote_observation_bind_ambiguous: namespace `{namespace_id}` inode `{inode_id}` matches `{matches}`")]
     RemoteObservationBindAmbiguous {
         namespace_id: String,
@@ -616,8 +632,8 @@ fn local_only_matches_remote_observation(
         && local_only.display_name == observed.display_name
 }
 
-fn remote_only_file_discovery_supported(observed: &RemoteFileStateRow) -> bool {
-    observed.inode_kind == InodeKind::File && !observed.is_deleted
+fn remote_only_discovery_supported(observed: &RemoteFileStateRow) -> bool {
+    matches!(observed.inode_kind, InodeKind::File | InodeKind::Dir) && !observed.is_deleted
 }
 
 fn remote_only_placeholder_matches_remote_state(

@@ -90,8 +90,8 @@ pub fn local_only_matches_remote_observation(
         && candidate.display_name == observed.display_name
 }
 
-pub fn remote_only_file_discovery_supported(observed: &ModelObservedRemoteInode) -> bool {
-    observed.inode_kind == InodeKind::File && !observed.is_deleted
+pub fn remote_only_discovery_supported(observed: &ModelObservedRemoteInode) -> bool {
+    matches!(observed.inode_kind, InodeKind::File | InodeKind::Dir) && !observed.is_deleted
 }
 
 pub fn remote_only_placeholder_matches_remote_observation(

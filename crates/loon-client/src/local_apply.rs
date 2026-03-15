@@ -39,6 +39,16 @@ pub(crate) fn apply_bytes_atomically(
     Ok(())
 }
 
+pub(crate) fn create_directory_durably(target_path: &Path) -> Result<(), LocalApplyError> {
+    let parent_dir = target_parent_dir(target_path);
+    fs::create_dir_all(target_path)
+        .map_err(|source| io_error("create_target_dir", target_path, source))?;
+    sync_dir(target_path).map_err(|source| io_error("sync_target_dir", target_path, source))?;
+    sync_parent_dir(parent_dir)
+        .map_err(|source| io_error("sync_parent_dir", parent_dir, source))?;
+    Ok(())
+}
+
 pub(crate) fn staging_path_for_target(target_path: &Path) -> Result<PathBuf, LocalApplyError> {
     let file_name = target_path.file_name().ok_or_else(|| {
         io_error(
@@ -79,9 +89,19 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> LocalApp
     }
 }
 
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_bytes_atomically, staging_path_for_target};
+    use super::{apply_bytes_atomically, create_directory_durably, staging_path_for_target};
     use loon_testkit::tempdir::TestDir;
     use std::fs;
     use std::path::Path;
@@ -129,5 +149,15 @@ mod tests {
             Path::new("reports/.report.txt.loon-stage"),
             "stage file should stay in the target directory"
         );
+    }
+
+    #[test]
+    fn create_directory_durably_creates_target_directory() {
+        let temp_dir = TestDir::new("local-apply-dir");
+        let target_path = temp_dir.path().join("nested/incoming");
+
+        create_directory_durably(&target_path).expect("create directory durably");
+
+        assert!(target_path.is_dir(), "target directory should exist");
     }
 }

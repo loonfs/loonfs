@@ -254,6 +254,13 @@ fn load_next_executable_planned_action_skips_deferred_rows() {
             reason: "local_differs_from_anchor".to_owned(),
             created_at_ms: 1_700_000_210_000,
         })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(6),
+            decision: "materialize_remote_dir".to_owned(),
+            reason: "remote_observed_without_anchor".to_owned(),
+            created_at_ms: 1_700_000_202_000,
+        })?;
         Ok(())
     })
     .expect("seed planned actions");
@@ -263,10 +270,10 @@ fn load_next_executable_planned_action_skips_deferred_rows() {
             .expect("load next executable planned action"),
         Some(PlannedActionRow {
             namespace_id: NamespaceId::from("ns-1"),
-            inode_id: InodeId(8),
-            decision: "download_remote_edit".to_owned(),
-            reason: "remote_differs_from_anchor".to_owned(),
-            created_at_ms: 1_700_000_205_000,
+            inode_id: InodeId(6),
+            decision: "materialize_remote_dir".to_owned(),
+            reason: "remote_observed_without_anchor".to_owned(),
+            created_at_ms: 1_700_000_202_000,
         })
     );
 }
@@ -296,6 +303,13 @@ fn load_next_deferred_planned_action_skips_executable_rows() {
             decision: "upload_local_edit".to_owned(),
             reason: "local_differs_from_anchor".to_owned(),
             created_at_ms: 1_700_000_210_000,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(6),
+            decision: "materialize_remote_dir".to_owned(),
+            reason: "remote_observed_without_anchor".to_owned(),
+            created_at_ms: 1_700_000_202_000,
         })?;
         Ok(())
     })

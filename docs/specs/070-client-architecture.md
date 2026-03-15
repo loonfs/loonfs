@@ -905,10 +905,10 @@ Rules:
     the deterministic next row from `planned_local_only_actions`
   - `executable_inode_action`:
     the deterministic next row from `planned_actions` where
-    `decision in {upload_local_edit, download_remote_edit}`
+    `decision in {upload_local_edit, download_remote_edit, materialize_remote_dir}`
   - `deferred_inode_action`:
     the deterministic next row from `planned_actions` where
-    `decision not in {upload_local_edit, download_remote_edit}`
+    `decision not in {upload_local_edit, download_remote_edit, materialize_remote_dir}`
 - the tick must load at most one candidate row from each scheduler bucket
 - bucket priority is strict:
   - `local_only_create` always wins over `executable_inode_action`
@@ -927,6 +927,9 @@ Rules:
   `decision = download_remote_edit`, the tick must execute it through the bound-file download
   executor, which may either refresh an already bound file or materialize a discovered remote-only
   file
+- if the selected row comes from `executable_inode_action` and
+  `decision = materialize_remote_dir`, the tick must execute it through the remote-only directory
+  materialization executor
 - if the selected row comes from `deferred_inode_action`, the tick must return that planned action
   as the next scheduled work item without trying to silently emulate download/conflict behavior yet
 - if both tables are empty, the tick must return `no_work`
@@ -1131,8 +1134,7 @@ Rules:
 - if a later newer observation arrives for that same remote-only placeholder before local
   materialization, the client may advance `remote_state` and refresh the placeholder path view from
   the newer authoritative observation
-- unmatched remote-only directories, deleted inodes, and unsupported kinds may still be ignored in
-  this first slice
+- deleted inodes and unsupported kinds may still be ignored in this first slice
 
 Why this rule exists:
 
@@ -1149,6 +1151,8 @@ Failure modes prevented:
 - a successful local-only create being uploaded again after a later remote observation
 - two temp identities both binding to the same observed remote inode
 - dropping a remote-only authoritative file on the floor because no immediate local bind exists
+- dropping a remote-only authoritative directory on the floor because no immediate local bind
+  exists
 
 Failure modes named for the first implementation:
 
@@ -1188,6 +1192,45 @@ Failure modes prevented:
 
 - remote-only files surviving restart in SQLite but never becoming executable work
 - downloading a remote-only file without ever establishing a durable synced anchor
+
+## First remote-only directory materialization path
+
+The first remote-only directory materialization path is separate from file download and uses one
+explicit planner decision:
+
+- `materialize_remote_dir`
+
+Rules:
+
+- `materialize_remote_dir` is valid only when:
+  - `remote_state(namespace_id, inode_id)` exists
+  - `remote_state.inode_kind = dir`
+  - `remote_state.is_deleted = false`
+  - `local_state(namespace_id, inode_id)` exists as a non-dirty placeholder with:
+    - `inode_kind = dir`
+    - `content_digest = null`
+    - `exists_on_disk = false`
+  - `sync_anchor(namespace_id, inode_id)` is still absent
+- the local placeholder must still match the authoritative path view on:
+  - `parent_inode_id`
+  - `display_name`
+- after the local directory is created durably, one SQLite transaction must:
+  - update `local_state` to `exists_on_disk = true`, `dirty = false`
+  - create `sync_anchor(namespace_id, inode_id)` from the authoritative remote row
+  - clear `planned_actions(namespace_id, inode_id)`
+
+Why this rule exists:
+
+- remote-only directory discovery should become executable work, not durable dead state
+- directory materialization should stay explicit instead of being smuggled through the file
+  download path
+
+Failure modes prevented:
+
+- a discovered remote-only directory never becoming visible on disk because it has no content
+  manifest to download
+- reusing the file download executor for a directory inode and silently depending on file-only
+  assumptions
 
 ## Local data model inspiration
 
