@@ -3,6 +3,7 @@ use loon_types::{
     ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
     CONTENT_BLOCK_SIZE_BYTES,
 };
+use serde_json::json;
 use std::collections::BTreeMap;
 
 fn seeded_metadata_state() -> ModelMetadataState {
@@ -660,6 +661,69 @@ fn model_supports_remote_only_discovery_from_authoritative_observation() {
     };
 
     assert!(remote_only_discovery_supported(&observed_dir));
+}
+
+#[test]
+fn model_builds_remote_observation_bind_ambiguous_issue() {
+    let observed = ModelObservedRemoteInode {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(601),
+        inode_kind: InodeKind::File,
+        observed_seq: ChangeSeq(42),
+        revision_no: RevisionNo(1),
+        content_digest: Some(
+            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9".to_owned(),
+        ),
+        content_manifest_digest: Some(
+            "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6".to_owned(),
+        ),
+        parent_inode_id: Some(InodeId(2)),
+        display_name: "welcome.txt".to_owned(),
+        is_deleted: false,
+    };
+
+    let issue = remote_observation_bind_ambiguous_issue(&observed, 2, 1700000708000);
+
+    assert_eq!(issue.kind, "remote_observation_bind_ambiguous");
+    assert_eq!(
+        issue.summary,
+        "ambiguous remote observation bind matched 2 local-only candidates"
+    );
+    assert_eq!(
+        issue.detail_json,
+        json!({
+            "matches": 2,
+            "observed_seq": 42,
+            "revision_no": 1,
+            "inode_kind": "file",
+            "parent_inode_id": 2,
+            "display_name": "welcome.txt",
+        })
+    );
+}
+
+#[test]
+fn model_upserts_client_issue_by_inode_and_kind() {
+    let first = ModelClientIssue {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(701),
+        kind: "materialize_remote_dir_local_apply_failed".to_owned(),
+        summary: "old summary".to_owned(),
+        detail_json: json!({"operation": "create_target_dir"}),
+        created_at_ms: 1,
+    };
+    let second = ModelClientIssue {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(701),
+        kind: "materialize_remote_dir_local_apply_failed".to_owned(),
+        summary: "new summary".to_owned(),
+        detail_json: json!({"operation": "sync_target_dir"}),
+        created_at_ms: 2,
+    };
+
+    let issues = upsert_client_issue(&[first], second.clone());
+
+    assert_eq!(issues, vec![second]);
 }
 
 #[test]

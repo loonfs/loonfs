@@ -1007,6 +1007,7 @@ version = "0.1.0"
 dependencies = [
  "loon-types",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

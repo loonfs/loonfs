@@ -10,6 +10,7 @@ use loon_types::{
     ContentManifestEnvelope, ContentManifestPayload, CreatedRemoteInode, InodeId, InodeKind,
     NamespaceId, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
+use serde_json::json;
 
 #[test]
 fn sqlite_state_db_applies_schema_v8() {
@@ -94,6 +95,42 @@ fn planner_transaction_persists_three_views() {
     assert_eq!(views.remote, Some(sample_remote()));
     assert_eq!(views.local, Some(sample_local()));
     assert_eq!(views.sync_anchor, Some(sample_anchor()));
+}
+
+#[test]
+fn record_conflict_or_error_replaces_previous_row_for_same_inode_and_kind() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let inode_id = InodeId(42);
+
+    db.record_conflict_or_error(
+        &namespace_id,
+        inode_id,
+        "remote_observation_bind_ambiguous",
+        "first summary",
+        &json!({"matches": 2}),
+        10,
+    )
+    .expect("record first issue");
+    db.record_conflict_or_error(
+        &namespace_id,
+        inode_id,
+        "remote_observation_bind_ambiguous",
+        "second summary",
+        &json!({"matches": 3}),
+        20,
+    )
+    .expect("record second issue");
+
+    let issues = db
+        .load_conflicts_and_errors(&namespace_id, inode_id)
+        .expect("load issues");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].kind, "remote_observation_bind_ambiguous");
+    assert_eq!(issues[0].summary, "second summary");
+    assert_eq!(issues[0].detail_json, json!({"matches": 3}));
+    assert_eq!(issues[0].created_at_ms, 20);
 }
 
 #[test]

@@ -1,9 +1,9 @@
 use super::loads::{
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
-    load_inode_upload, load_local_file, load_local_only_candidates_for_namespace,
-    load_local_only_file, load_local_only_upload, load_next_deferred_planned_action,
-    load_next_executable_planned_action, load_next_planned_action,
-    load_next_planned_local_only_action, load_pending_client_mutation,
+    load_conflicts_and_errors, load_inode_upload, load_local_file,
+    load_local_only_candidates_for_namespace, load_local_only_file, load_local_only_upload,
+    load_next_deferred_planned_action, load_next_executable_planned_action,
+    load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
     load_pending_client_mutation_for_client_file, load_pending_inode_mutation,
     load_pending_inode_mutation_for_inode, load_planned_action, load_planned_local_only_action,
     load_remote_file, load_sync_anchor,
@@ -12,6 +12,7 @@ use super::schema::initialize_connection;
 use super::*;
 use crate::upload::UploadedContent;
 use rusqlite::{params, Connection};
+use serde_json::json;
 use std::path::Path;
 
 impl ObservedRemoteInode {
@@ -201,6 +202,14 @@ impl SqliteStateDb {
         load_pending_inode_mutation_for_inode(&self.conn, namespace_id, inode_id)
     }
 
+    pub fn load_conflicts_and_errors(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<Vec<ConflictOrErrorRow>, StateDbError> {
+        load_conflicts_and_errors(&self.conn, namespace_id, inode_id)
+    }
+
     pub fn observe_local_only_inode_under_parent(
         &mut self,
         observed: &ObservedLocalOnlyInode,
@@ -350,6 +359,27 @@ impl SqliteStateDb {
             tx.apply_remote_observation(observed, applied_at_ms)
         })
     }
+
+    pub(crate) fn record_conflict_or_error(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        kind: &str,
+        summary: &str,
+        detail_json: &serde_json::Value,
+        created_at_ms: u64,
+    ) -> Result<ConflictOrErrorRow, StateDbError> {
+        self.planner_transaction("record_conflict_or_error", |tx| {
+            tx.record_conflict_or_error(
+                namespace_id,
+                inode_id,
+                kind,
+                summary,
+                detail_json,
+                created_at_ms,
+            )
+        })
+    }
 }
 
 impl PlannerTxn<'_> {
@@ -399,6 +429,66 @@ impl PlannerTxn<'_> {
         )?;
 
         Ok(format!("client-req-{next_counter:020}"))
+    }
+
+    pub fn record_conflict_or_error(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        kind: &str,
+        summary: &str,
+        detail_json: &serde_json::Value,
+        created_at_ms: u64,
+    ) -> Result<ConflictOrErrorRow, StateDbError> {
+        self.delete_conflict_or_error_kind(namespace_id, inode_id, kind)?;
+        let detail_json_text =
+            serde_json::to_string(detail_json).map_err(StateDbError::ConflictOrErrorDetailCodec)?;
+        self.tx.execute(
+            "INSERT INTO conflicts_and_errors (
+                namespace_id,
+                inode_id,
+                kind,
+                summary,
+                detail_json,
+                created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                namespace_id.as_str(),
+                to_sql_u64(inode_id.0, "inode_id")?,
+                kind,
+                summary,
+                detail_json_text,
+                to_sql_u64(created_at_ms, "created_at_ms")?,
+            ],
+        )?;
+
+        Ok(ConflictOrErrorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            record_id: from_sql_u64(self.tx.last_insert_rowid(), "record_id")?,
+            kind: kind.to_owned(),
+            summary: summary.to_owned(),
+            detail_json: detail_json.clone(),
+            created_at_ms,
+        })
+    }
+
+    pub fn delete_conflict_or_error_kind(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        kind: &str,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM conflicts_and_errors
+            WHERE namespace_id = ?1 AND inode_id = ?2 AND kind = ?3",
+            params![
+                namespace_id.as_str(),
+                to_sql_u64(inode_id.0, "inode_id")?,
+                kind,
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn upsert_remote_file(&mut self, row: &RemoteFileStateRow) -> Result<(), StateDbError> {
@@ -1032,6 +1122,16 @@ impl PlannerTxn<'_> {
         self.upsert_local_file(&next_local)?;
         self.upsert_sync_anchor(&next_anchor)?;
         self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "download_remote_edit_remote_digest_mismatch",
+        )?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "download_remote_edit_local_apply_failed",
+        )?;
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -1135,6 +1235,11 @@ impl PlannerTxn<'_> {
         self.upsert_local_file(&next_local)?;
         self.upsert_sync_anchor(&next_anchor)?;
         self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "materialize_remote_dir_local_apply_failed",
+        )?;
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -1181,6 +1286,11 @@ impl PlannerTxn<'_> {
                 };
                 self.upsert_remote_file(&observed_remote)?;
                 self.upsert_local_file(&next_local)?;
+                self.delete_conflict_or_error_kind(
+                    &observed.namespace_id,
+                    observed.inode_id,
+                    "remote_observation_bind_ambiguous",
+                )?;
                 return Ok(AppliedRemoteObservation::DiscoveredRemoteOnly {
                     namespace_id: observed.namespace_id.clone(),
                     inode_id: observed.inode_id,
@@ -1219,6 +1329,11 @@ impl PlannerTxn<'_> {
                 self.upsert_local_file(&next_local)?;
                 self.upsert_sync_anchor(&next_anchor)?;
                 self.delete_planned_action(&observed.namespace_id, observed.inode_id)?;
+                self.delete_conflict_or_error_kind(
+                    &observed.namespace_id,
+                    observed.inode_id,
+                    "remote_observation_bind_ambiguous",
+                )?;
                 if let Some(pending) = load_pending_inode_mutation_for_inode(
                     &self.tx,
                     &observed.namespace_id,
@@ -1234,6 +1349,11 @@ impl PlannerTxn<'_> {
                 ));
             }
 
+            self.delete_conflict_or_error_kind(
+                &observed.namespace_id,
+                observed.inode_id,
+                "remote_observation_bind_ambiguous",
+            )?;
             return Ok(AppliedRemoteObservation::UpdatedBoundRemoteState {
                 namespace_id: observed.namespace_id.clone(),
                 inode_id: observed.inode_id,
@@ -1263,6 +1383,11 @@ impl PlannerTxn<'_> {
                     };
                     self.upsert_remote_file(&observed_remote)?;
                     self.upsert_local_file(&placeholder)?;
+                    self.delete_conflict_or_error_kind(
+                        &observed.namespace_id,
+                        observed.inode_id,
+                        "remote_observation_bind_ambiguous",
+                    )?;
                     Ok(AppliedRemoteObservation::DiscoveredRemoteOnly {
                         namespace_id: observed.namespace_id.clone(),
                         inode_id: observed.inode_id,
@@ -1277,6 +1402,11 @@ impl PlannerTxn<'_> {
             [candidate] => {
                 let bound = self
                     .bind_local_only_inode_to_remote(&candidate.client_file_id, &observed_remote)?;
+                self.delete_conflict_or_error_kind(
+                    &observed.namespace_id,
+                    observed.inode_id,
+                    "remote_observation_bind_ambiguous",
+                )?;
                 if let Some(pending) = load_pending_client_mutation_for_client_file(
                     &self.tx,
                     &candidate.client_file_id,
@@ -1285,11 +1415,31 @@ impl PlannerTxn<'_> {
                 }
                 Ok(AppliedRemoteObservation::BoundLocalOnly(bound))
             }
-            many => Err(StateDbError::RemoteObservationBindAmbiguous {
-                namespace_id: observed.namespace_id.as_str().to_owned(),
-                inode_id: observed.inode_id.0,
-                matches: many.len(),
-            }),
+            many => {
+                self.record_conflict_or_error(
+                    &observed.namespace_id,
+                    observed.inode_id,
+                    "remote_observation_bind_ambiguous",
+                    &format!(
+                        "ambiguous remote observation bind matched {} local-only candidates",
+                        many.len()
+                    ),
+                    &json!({
+                        "matches": many.len(),
+                        "observed_seq": observed.observed_seq.0,
+                        "revision_no": observed.revision_no.0,
+                        "inode_kind": inode_kind_as_str(&observed.inode_kind),
+                        "parent_inode_id": observed.parent_inode_id.map(|inode_id| inode_id.0),
+                        "display_name": observed.display_name.clone(),
+                    }),
+                    applied_at_ms,
+                )?;
+                Ok(AppliedRemoteObservation::RecordedConflictOrError {
+                    namespace_id: observed.namespace_id.clone(),
+                    inode_id: observed.inode_id,
+                    kind: "remote_observation_bind_ambiguous".to_owned(),
+                })
+            }
         }
     }
 

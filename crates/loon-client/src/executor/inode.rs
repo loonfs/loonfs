@@ -7,6 +7,7 @@ use crate::state_db::{InodeUploadRow, RemoteFileStateRow, SqliteStateDb};
 use crate::upload::upload_small_file_from_path;
 use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind, NamespaceId};
+use serde_json::json;
 use std::path::Path;
 
 pub fn execute_upload_local_edit_from_path<S: ObjectStore, F>(
@@ -113,38 +114,46 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
     target_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedDownloadRemoteEdit, ExecuteDownloadRemoteEditError> {
-    let remote = ensure_download_remote_edit_ready(db, namespace_id, inode_id)?;
-    let target_path =
-        target_path.ok_or_else(|| ExecuteDownloadRemoteEditError::SourcePathMissing {
-            namespace_id: namespace_id.as_str().to_owned(),
-            inode_id: inode_id.0,
-        })?;
-    let manifest_digest = remote
-        .content_manifest_digest
-        .as_deref()
-        .expect("download_remote_edit should require manifest digest");
-    let downloaded = download_file_to_bytes(store, namespace_id, manifest_digest)?;
-    let remote_content_digest = remote
-        .content_digest
-        .as_deref()
-        .expect("download_remote_edit should require remote content digest");
-    if downloaded.file_digest_sha256 != remote_content_digest {
-        return Err(ExecuteDownloadRemoteEditError::RemoteDigestMismatch {
-            namespace_id: namespace_id.as_str().to_owned(),
-            inode_id: inode_id.0,
-            remote_content_digest: remote_content_digest.to_owned(),
-            downloaded_file_digest: downloaded.file_digest_sha256.clone(),
-        });
+    let result = (|| {
+        let remote = ensure_download_remote_edit_ready(db, namespace_id, inode_id)?;
+        let target_path =
+            target_path.ok_or_else(|| ExecuteDownloadRemoteEditError::SourcePathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+        let manifest_digest = remote
+            .content_manifest_digest
+            .as_deref()
+            .expect("download_remote_edit should require manifest digest");
+        let downloaded = download_file_to_bytes(store, namespace_id, manifest_digest)?;
+        let remote_content_digest = remote
+            .content_digest
+            .as_deref()
+            .expect("download_remote_edit should require remote content digest");
+        if downloaded.file_digest_sha256 != remote_content_digest {
+            return Err(ExecuteDownloadRemoteEditError::RemoteDigestMismatch {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                remote_content_digest: remote_content_digest.to_owned(),
+                downloaded_file_digest: downloaded.file_digest_sha256.clone(),
+            });
+        }
+
+        apply_bytes_atomically(target_path, &downloaded.bytes)?;
+
+        let applied = db.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)?;
+        Ok(ExecutedDownloadRemoteEdit {
+            downloaded_content_manifest_digest: downloaded.content_manifest_digest,
+            downloaded_file_digest_sha256: downloaded.file_digest_sha256,
+            applied,
+        })
+    })();
+
+    if let Err(error) = &result {
+        record_download_remote_edit_issue(db, namespace_id, inode_id, error, applied_at_ms);
     }
 
-    apply_bytes_atomically(target_path, &downloaded.bytes)?;
-
-    let applied = db.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)?;
-    Ok(ExecutedDownloadRemoteEdit {
-        downloaded_content_manifest_digest: downloaded.content_manifest_digest,
-        downloaded_file_digest_sha256: downloaded.file_digest_sha256,
-        applied,
-    })
+    result
 }
 
 pub(super) fn execute_materialize_remote_dir(
@@ -154,17 +163,25 @@ pub(super) fn execute_materialize_remote_dir(
     target_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedMaterializeRemoteDir, ExecuteMaterializeRemoteDirError> {
-    ensure_materialize_remote_dir_ready(db, namespace_id, inode_id)?;
-    let target_path =
-        target_path.ok_or_else(|| ExecuteMaterializeRemoteDirError::SourcePathMissing {
-            namespace_id: namespace_id.as_str().to_owned(),
-            inode_id: inode_id.0,
-        })?;
+    let result = (|| {
+        ensure_materialize_remote_dir_ready(db, namespace_id, inode_id)?;
+        let target_path =
+            target_path.ok_or_else(|| ExecuteMaterializeRemoteDirError::SourcePathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
 
-    create_directory_durably(target_path)?;
+        create_directory_durably(target_path)?;
 
-    let applied = db.apply_materialize_remote_dir(namespace_id, inode_id, applied_at_ms)?;
-    Ok(ExecutedMaterializeRemoteDir { applied })
+        let applied = db.apply_materialize_remote_dir(namespace_id, inode_id, applied_at_ms)?;
+        Ok(ExecutedMaterializeRemoteDir { applied })
+    })();
+
+    if let Err(error) = &result {
+        record_materialize_remote_dir_issue(db, namespace_id, inode_id, error, applied_at_ms);
+    }
+
+    result
 }
 
 fn ensure_download_remote_edit_ready(
@@ -324,4 +341,88 @@ fn ensure_upload_local_edit_ready<S: ObjectStore>(
         .record_inode_upload(namespace_id, inode_id, &uploaded, uploaded_at_ms)
         .map_err(ExecuteUploadLocalEditError::from)?;
     Ok((recorded, false))
+}
+
+fn record_download_remote_edit_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    error: &ExecuteDownloadRemoteEditError,
+    created_at_ms: u64,
+) {
+    let issue = match error {
+        ExecuteDownloadRemoteEditError::RemoteDigestMismatch {
+            remote_content_digest,
+            downloaded_file_digest,
+            ..
+        } => Some((
+            "download_remote_edit_remote_digest_mismatch",
+            "download_remote_edit downloaded bytes did not match the authoritative remote digest",
+            json!({
+                "remote_content_digest": remote_content_digest,
+                "downloaded_file_digest": downloaded_file_digest,
+            }),
+        )),
+        ExecuteDownloadRemoteEditError::LocalApplyFailed {
+            operation,
+            path,
+            source,
+        } => Some((
+            "download_remote_edit_local_apply_failed",
+            "download_remote_edit failed during local apply",
+            json!({
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        )),
+        _ => None,
+    };
+
+    if let Some((kind, summary, detail_json)) = issue {
+        let _ = db.record_conflict_or_error(
+            namespace_id,
+            inode_id,
+            kind,
+            summary,
+            &detail_json,
+            created_at_ms,
+        );
+    }
+}
+
+fn record_materialize_remote_dir_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    error: &ExecuteMaterializeRemoteDirError,
+    created_at_ms: u64,
+) {
+    let issue = match error {
+        ExecuteMaterializeRemoteDirError::LocalApplyFailed {
+            operation,
+            path,
+            source,
+        } => Some((
+            "materialize_remote_dir_local_apply_failed",
+            "materialize_remote_dir failed during local apply",
+            json!({
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        )),
+        _ => None,
+    };
+
+    if let Some((kind, summary, detail_json)) = issue {
+        let _ = db.record_conflict_or_error(
+            namespace_id,
+            inode_id,
+            kind,
+            summary,
+            &detail_json,
+            created_at_ms,
+        );
+    }
 }

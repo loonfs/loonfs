@@ -183,6 +183,61 @@ fn remote_observation_converges_bound_file_edit_and_restarts_clean() {
     );
 }
 
+#[test]
+fn remote_observation_ambiguous_bind_records_issue_and_preserves_local_only_state() {
+    let scenario =
+        load_fixture("client/client_remote_observation_ambiguous_bind_records_issue.yaml");
+    let initial: AmbiguousObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: AmbiguousObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-ambiguous");
+    let db_path = temp_dir.path().join("client.sqlite3");
+
+    seed_ambiguous_observation_state(&db_path, &initial.local_only_state);
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    assert_eq!(
+        db.load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(601))
+            .expect("load ambiguous views"),
+        loon_client::state_db::FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(601),
+            remote: expect.remote_state.clone(),
+            local: expect.local_state.clone(),
+            sync_anchor: expect.sync_anchor.clone(),
+        }
+    );
+    let actual_issues = db
+        .load_conflicts_and_errors(&NamespaceId::from("ns-1"), InodeId(601))
+        .expect("load durable issues")
+        .into_iter()
+        .map(RawConflictOrErrorExpect::from_row)
+        .collect::<Vec<_>>();
+    assert_eq!(actual_issues, expect.conflicts_and_errors);
+    let surviving_local_only = initial
+        .local_only_state
+        .iter()
+        .filter(|row| {
+            db.load_local_only_file(&row.client_file_id)
+                .expect("load local-only row")
+                .is_some()
+        })
+        .count();
+    assert_eq!(surviving_local_only, expect.local_only_state_count);
+}
+
 fn seed_create_observation_state(
     db_path: &Path,
     initial: &CreateObservationInitial,
@@ -233,6 +288,17 @@ fn seed_edit_observation_state(db_path: &Path, initial: &EditObservationInitial)
         pending_inode_mutation.created_at_ms,
     )
     .expect("record pending inode mutation");
+}
+
+fn seed_ambiguous_observation_state(db_path: &Path, local_only_state: &[LocalOnlyFileStateRow]) {
+    let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
+    db.planner_transaction("seed-ambiguous-observation-state", |tx| {
+        for row in local_only_state {
+            tx.upsert_local_only_file(row)?;
+        }
+        Ok(())
+    })
+    .expect("seed ambiguous local-only state");
 }
 
 fn write_source_file(source_root: &Path, relative_path: &Path, content_utf8: &str) -> PathBuf {
@@ -287,6 +353,21 @@ struct EditObservationExpect {
     planned_action_cleared: bool,
     pending_inode_mutation_cleared: bool,
     planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct AmbiguousObservationInitial {
+    local_only_state: Vec<LocalOnlyFileStateRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AmbiguousObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    remote_state: Option<RemoteFileStateRow>,
+    local_state: Option<LocalFileStateRow>,
+    sync_anchor: Option<SyncAnchorRow>,
+    conflicts_and_errors: Vec<RawConflictOrErrorExpect>,
+    local_only_state_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -439,6 +520,9 @@ enum RawAppliedRemoteObservation {
     IgnoredUnmatched {
         ignored_unmatched: RawAppliedRemoteObservationTarget,
     },
+    RecordedConflictOrError {
+        recorded_conflict_or_error: RawRecordedConflictOrError,
+    },
 }
 
 impl RawAppliedRemoteObservation {
@@ -466,6 +550,13 @@ impl RawAppliedRemoteObservation {
                     inode_id: ignored_unmatched.inode_id,
                 }
             }
+            Self::RecordedConflictOrError {
+                recorded_conflict_or_error,
+            } => AppliedRemoteObservation::RecordedConflictOrError {
+                namespace_id: recorded_conflict_or_error.namespace_id,
+                inode_id: recorded_conflict_or_error.inode_id,
+                kind: recorded_conflict_or_error.kind,
+            },
         }
     }
 }
@@ -474,6 +565,32 @@ impl RawAppliedRemoteObservation {
 struct RawAppliedRemoteObservationTarget {
     namespace_id: NamespaceId,
     inode_id: InodeId,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawRecordedConflictOrError {
+    namespace_id: NamespaceId,
+    inode_id: InodeId,
+    kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct RawConflictOrErrorExpect {
+    kind: String,
+    summary: String,
+    created_at_ms: u64,
+    detail_json: serde_json::Value,
+}
+
+impl RawConflictOrErrorExpect {
+    fn from_row(row: loon_client::state_db::ConflictOrErrorRow) -> Self {
+        Self {
+            kind: row.kind,
+            summary: row.summary,
+            created_at_ms: row.created_at_ms,
+            detail_json: row.detail_json,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

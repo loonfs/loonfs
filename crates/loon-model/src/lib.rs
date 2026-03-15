@@ -4,6 +4,7 @@ use loon_types::{
     ChangeSeq, ContentManifestEnvelope, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelNamespace {
@@ -251,6 +252,16 @@ pub struct ModelLocalOnlyObservationCandidate {
     pub parent_inode_id: Option<InodeId>,
     pub display_name: String,
     pub exists_on_disk: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelClientIssue {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub kind: String,
+    pub summary: String,
+    pub detail_json: Value,
+    pub created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -677,11 +688,12 @@ mod namespace;
 mod queue;
 
 pub use client::{
-    allocate_client_request_id, bound_local_matches_remote_observation,
-    local_only_matches_remote_observation, remote_observation_is_stale,
-    remote_only_discovery_supported, remote_only_placeholder_matches_remote_observation,
-    reuse_or_allocate_client_request_id, select_local_only_observation_bind_candidate,
-    select_next_client_action, select_next_local_only_action,
+    allocate_client_request_id, bound_local_matches_remote_observation, local_apply_failed_issue,
+    local_only_matches_remote_observation, remote_observation_bind_ambiguous_issue,
+    remote_observation_is_stale, remote_only_discovery_supported,
+    remote_only_placeholder_matches_remote_observation, reuse_or_allocate_client_request_id,
+    select_local_only_observation_bind_candidate, select_next_client_action,
+    select_next_local_only_action, upsert_client_issue,
 };
 pub use content::{
     build_uploaded_content, decide_inode_upload_action, decide_local_only_upload_action,

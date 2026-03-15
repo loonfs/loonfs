@@ -4,6 +4,7 @@ use loon_types::{
 };
 use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 mod loads;
@@ -24,6 +25,8 @@ pub enum StateDbError {
     UnsupportedSchemaVersion(i32),
     #[error("client mutation request JSON codec error: {0}")]
     ClientMutationRequestCodec(#[from] serde_json::Error),
+    #[error("conflict/error detail JSON codec error: {0}")]
+    ConflictOrErrorDetailCodec(serde_json::Error),
     #[error("SQLite integer out of range for {field}: {value}")]
     IntegerOutOfRange { field: &'static str, value: i64 },
     #[error("value out of range for SQLite {field}: {value}")]
@@ -432,6 +435,17 @@ pub struct PendingInodeMutationRow {
     pub created_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConflictOrErrorRow {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub record_id: u64,
+    pub kind: String,
+    pub summary: String,
+    pub detail_json: Value,
+    pub created_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundLocalOnlyFile {
     pub client_file_id: ClientFileId,
@@ -467,6 +481,11 @@ pub enum AppliedRemoteObservation {
     DiscoveredRemoteOnly {
         namespace_id: NamespaceId,
         inode_id: InodeId,
+    },
+    RecordedConflictOrError {
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+        kind: String,
     },
     UpdatedBoundRemoteState {
         namespace_id: NamespaceId,

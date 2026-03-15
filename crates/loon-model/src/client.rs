@@ -1,8 +1,10 @@
 use crate::{
-    ModelLocalOnlyObservationCandidate, ModelObservedRemoteInode, ModelPlannedInodeAction,
-    ModelPlannedLocalOnlyAction, ModelRemoteObservationSelectionError, ModelScheduledClientAction,
+    ModelClientIssue, ModelLocalOnlyObservationCandidate, ModelObservedRemoteInode,
+    ModelPlannedInodeAction, ModelPlannedLocalOnlyAction, ModelRemoteObservationSelectionError,
+    ModelScheduledClientAction,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind};
+use serde_json::json;
 
 pub fn allocate_client_request_id(next_counter: u64) -> String {
     format!("client-req-{next_counter:020}")
@@ -134,5 +136,80 @@ pub fn select_local_only_observation_bind_candidate(
                 },
             )
         }
+    }
+}
+
+pub fn upsert_client_issue(
+    issues: &[ModelClientIssue],
+    next_issue: ModelClientIssue,
+) -> Vec<ModelClientIssue> {
+    let mut next = issues
+        .iter()
+        .filter(|issue| {
+            issue.namespace_id != next_issue.namespace_id
+                || issue.inode_id != next_issue.inode_id
+                || issue.kind != next_issue.kind
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    next.push(next_issue);
+    next.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    next
+}
+
+pub fn remote_observation_bind_ambiguous_issue(
+    observed: &ModelObservedRemoteInode,
+    matches: usize,
+    created_at_ms: u64,
+) -> ModelClientIssue {
+    ModelClientIssue {
+        namespace_id: observed.namespace_id.clone(),
+        inode_id: observed.inode_id,
+        kind: "remote_observation_bind_ambiguous".to_owned(),
+        summary: format!(
+            "ambiguous remote observation bind matched {matches} local-only candidates"
+        ),
+        detail_json: json!({
+            "matches": matches,
+            "observed_seq": observed.observed_seq.0,
+            "revision_no": observed.revision_no.0,
+            "inode_kind": match &observed.inode_kind {
+                InodeKind::File => "file",
+                InodeKind::Dir => "dir",
+                InodeKind::Symlink => "symlink",
+                InodeKind::Mount => "mount",
+            },
+            "parent_inode_id": observed.parent_inode_id.map(|inode_id| inode_id.0),
+            "display_name": observed.display_name.clone(),
+        }),
+        created_at_ms,
+    }
+}
+
+pub fn local_apply_failed_issue(
+    namespace_id: &loon_types::NamespaceId,
+    inode_id: InodeId,
+    kind: &str,
+    summary: &str,
+    operation: &str,
+    path: &str,
+    source: &str,
+    created_at_ms: u64,
+) -> ModelClientIssue {
+    ModelClientIssue {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        kind: kind.to_owned(),
+        summary: summary.to_owned(),
+        detail_json: json!({
+            "operation": operation,
+            "path": path,
+            "source": source,
+        }),
+        created_at_ms,
     }
 }

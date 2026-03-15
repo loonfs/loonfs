@@ -1,0 +1,57 @@
+name: client_remote_observation_ambiguous_bind_records_issue
+initial:
+  local_only_state:
+    - client_file_id: tmp:ns-1:00000000000000000001
+      namespace_id: ns-1
+      inode_kind: file
+      parent_inode_id: 2
+      display_name: welcome.txt
+      content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+      exists_on_disk: true
+      dirty: true
+      last_local_change_ms: 1700000700000
+    - client_file_id: tmp:ns-1:00000000000000000002
+      namespace_id: ns-1
+      inode_kind: file
+      parent_inode_id: 2
+      display_name: welcome.txt
+      content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+      exists_on_disk: true
+      dirty: true
+      last_local_change_ms: 1700000701000
+actions:
+  - apply_remote_observation:
+      applied_at_ms: 1700000708000
+      remote_observation:
+        namespace_id: ns-1
+        inode_id: 601
+        inode_kind: file
+        observed_seq: 42
+        revision_no: 1
+        content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+        content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+        parent_inode_id: 2
+        display_name: welcome.txt
+        is_deleted: false
+  - restart_client_state_db: true
+expect:
+  outcome:
+    recorded_conflict_or_error:
+      namespace_id: ns-1
+      inode_id: 601
+      kind: remote_observation_bind_ambiguous
+  remote_state: null
+  local_state: null
+  sync_anchor: null
+  conflicts_and_errors:
+    - kind: remote_observation_bind_ambiguous
+      summary: ambiguous remote observation bind matched 2 local-only candidates
+      created_at_ms: 1700000708000
+      detail_json:
+        matches: 2
+        observed_seq: 42
+        revision_no: 1
+        inode_kind: file
+        parent_inode_id: 2
+        display_name: welcome.txt
+  local_only_state_count: 2

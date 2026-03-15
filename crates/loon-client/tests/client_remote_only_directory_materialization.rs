@@ -1,4 +1,7 @@
-use loon_client::executor::{execute_next_client_action, NextClientAction};
+use loon_client::executor::{
+    execute_next_client_action, ExecuteMaterializeRemoteDirError, ExecuteNextClientActionError,
+    NextClientAction,
+};
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
     AppliedInodeMutation, FileSyncViews, LocalFileStateRow, PlannedActionRow, RemoteFileStateRow,
@@ -49,6 +52,7 @@ fn execute_next_client_action_materializes_remote_only_directory() {
 
     let executed =
         run_execute_next_client_action(&db_path, &store, Some(target_path.as_path()), &execute)
+            .expect("execute next client action")
             .expect("one action should be scheduled");
 
     let materialized = match executed {
@@ -109,12 +113,103 @@ fn execute_next_client_action_materializes_remote_only_directory() {
     );
 }
 
+#[test]
+fn execute_next_client_action_materialize_remote_only_directory_local_apply_failure_records_issue()
+{
+    let scenario = load_fixture(
+        "client/execute_next_client_action_materialize_remote_only_directory_local_apply_failure_records_issue.yaml",
+    );
+    let initial: MaterializeDirectoryInitialState =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<MaterializeDirectoryFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: MaterializeDirectoryFailureExpect =
+        scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-only-dir-materialization-failure");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let local_root = temp_dir.path().join("local");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&local_root).expect("create local root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let execute = actions[0].execute().expect("execute action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+
+    let target_relative = execute
+        .source_path_relative
+        .as_deref()
+        .expect("materialization failure fixture should include target path");
+    let target_path = local_root.join(target_relative);
+    fs::create_dir_all(target_path.parent().expect("target parent")).expect("create target parent");
+    fs::write(&target_path, b"blocking file").expect("seed blocking file");
+
+    seed_remote_only_directory_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.planned_actions,
+    );
+
+    let error =
+        run_execute_next_client_action(&db_path, &store, Some(target_path.as_path()), &execute)
+            .expect_err("local apply should fail");
+    assert!(matches!(
+        error,
+        ExecuteNextClientActionError::MaterializeRemoteDir(
+            ExecuteMaterializeRemoteDirError::LocalApplyFailed { .. }
+        )
+    ));
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen client state DB after failure");
+    assert_eq!(
+        db.load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(701))
+            .expect("load views after failure"),
+        FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(701),
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: expect.sync_anchor.clone(),
+        }
+    );
+    assert_eq!(
+        db.load_planned_action(&NamespaceId::from("ns-1"), InodeId(701))
+            .expect("load planned action after failure"),
+        Some(expect.planned_action.clone()),
+    );
+    let issues = db
+        .load_conflicts_and_errors(&NamespaceId::from("ns-1"), InodeId(701))
+        .expect("load persisted issues");
+    assert_eq!(issues.len(), 1, "expected one persisted issue row");
+    let issue = &issues[0];
+    assert_eq!(issue.kind, expect.issue.kind);
+    assert_eq!(issue.summary, expect.issue.summary);
+    assert_eq!(issue.created_at_ms, expect.issue.created_at_ms);
+    assert_eq!(
+        issue.detail_json["operation"].as_str(),
+        Some(expect.issue.detail_operation.as_str())
+    );
+    let recorded_path = issue.detail_json["path"]
+        .as_str()
+        .expect("issue detail path should be a string");
+    assert!(
+        recorded_path.ends_with(&expect.issue.detail_path_suffix),
+        "expected `{recorded_path}` to end with `{}`",
+        expect.issue.detail_path_suffix
+    );
+    assert!(
+        target_path.is_file(),
+        "blocking file should remain in place"
+    );
+}
+
 fn run_execute_next_client_action(
     db_path: &Path,
     store: &LocalFsStore,
     inode_path: Option<&Path>,
     action: &ExecuteNextClientActionAction,
-) -> Option<NextClientAction> {
+) -> Result<Option<NextClientAction>, ExecuteNextClientActionError> {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     execute_next_client_action(
         &mut db,
@@ -125,7 +220,6 @@ fn run_execute_next_client_action(
         action.created_at_ms,
         |_request| panic!("remote-only dir materialization should not dispatch a mutation request"),
     )
-    .expect("execute next client action")
 }
 
 fn seed_remote_only_directory_state(
@@ -187,6 +281,15 @@ struct MaterializeDirectoryExpectedState {
 }
 
 #[derive(Debug, Deserialize)]
+struct MaterializeDirectoryFailureExpect {
+    issue: RawMaterializeDirectoryIssueExpect,
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: Option<SyncAnchorRow>,
+    planned_action: PlannedActionRow,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum MaterializeDirectoryFixtureAction {
     ExecuteNextClientAction {
@@ -239,6 +342,15 @@ struct PlannerTickAction {
     namespace_id: NamespaceId,
     inode_id: InodeId,
     now_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMaterializeDirectoryIssueExpect {
+    kind: String,
+    summary: String,
+    created_at_ms: u64,
+    detail_operation: String,
+    detail_path_suffix: String,
 }
 
 type TestDir = loon_testkit::tempdir::TestDir;

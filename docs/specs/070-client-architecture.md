@@ -1114,11 +1114,13 @@ Rules:
   when all of the strict local-only bind preconditions still hold
 - after a late bind succeeds, the client must also clear any matching
   `pending_client_mutations(client_file_id)` row
-- if more than one `local_only_state` row matches the same observation, the apply step must fail
-  without partial migration
+- if more than one `local_only_state` row matches the same observation, the apply step must:
+  - avoid partial migration of `remote_state`, `local_state`, or `sync_anchor`
+  - record or replace one durable `conflicts_and_errors` row with
+    `kind = remote_observation_bind_ambiguous`
 - if there is still no bound inode and no matching `local_only_state`, the first post-reset remote
-  discovery slice may materialize one remote-only file placeholder when all of the following hold:
-  - `inode_kind = file`
+  discovery slice may materialize one remote-only placeholder when all of the following hold:
+  - `inode_kind in {file, dir}`
   - `is_deleted = false`
   - the client does not already have a bound `local_state` row for that inode
 - remote-only discovery must:
@@ -1141,8 +1143,8 @@ Why this rule exists:
 - authoritative success should still converge the client when the immediate response is lost
 - the first remote-observation path should repair known create/edit flows without pretending the
   client already has full remote tree ingestion
-- remote-only file discovery should become restart-safe durable state before full remote crawl and
-  tree materialization exist
+- remote-only file and directory discovery should become restart-safe durable state before full
+  remote crawl and tree materialization exist
 - temp identities should only bind through one deterministic matching rule
 
 Failure modes prevented:
@@ -1231,6 +1233,55 @@ Failure modes prevented:
   manifest to download
 - reusing the file download executor for a directory inode and silently depending on file-only
   assumptions
+
+## First durable discovery and reconciliation issue records
+
+The first durable failure surfacing path uses the already-reserved SQLite table:
+
+- `conflicts_and_errors`
+
+Row shape:
+
+- `namespace_id`
+- `inode_id`
+- `kind`
+- `summary`
+- `detail_json`
+- `created_at_ms`
+
+Rules:
+
+- the first implementation keeps at most one latest row per `(namespace_id, inode_id, kind)`
+- recording the same `kind` again for the same inode must replace the older row instead of
+  appending unbounded duplicates
+- successful recovery of the same action may clear the matching `kind`
+- these rows are durable debug/user-facing explanations; they do not replace the authoritative
+  `remote_state`, `local_state`, or `sync_anchor` views
+
+The first issue kinds are:
+
+- `remote_observation_bind_ambiguous`
+  - recorded when one authoritative observation matches more than one `local_only_state` row
+  - `detail_json` must include at least the observed inode identity plus `matches`
+- `download_remote_edit_remote_digest_mismatch`
+  - recorded when downloaded durable content does not match the authoritative remote digest
+- `download_remote_edit_local_apply_failed`
+  - recorded when the file download executor cannot stage or atomically apply local bytes
+- `materialize_remote_dir_local_apply_failed`
+  - recorded when the remote-only directory materializer cannot create the local directory durably
+
+Why this rule exists:
+
+- restart-safe remote discovery is much less useful if failures disappear into transient executor
+  errors
+- ambiguous bind failures need a durable breadcrumb even when the client intentionally refuses to
+  guess
+
+Failure modes prevented:
+
+- a remote observation bind ambiguity being lost after restart with no durable evidence
+- a discovered remote-only inode failing local materialization repeatedly without any persisted
+  explanation
 
 ## Local data model inspiration
 
