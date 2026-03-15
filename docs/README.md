@@ -16,4 +16,5 @@ Recommended first reading for implementers:
 2. `specs/060-testing-strategy.md`
 3. `specs/090-major-implementation-decisions.md`
 4. `adr/` in numerical order
-5. `roadmap/010-foundation-workstreams.md`
+5. `roadmap/020-semantic-core-reset.md`
+6. `roadmap/010-foundation-workstreams.md` for the original workstream breakdown

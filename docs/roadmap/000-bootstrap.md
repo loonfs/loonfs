@@ -50,4 +50,6 @@ Exit criteria:
 
 ## Next reading
 
-Once bootstrap is understood, continue with `docs/roadmap/010-foundation-workstreams.md`.
+Once bootstrap is understood, continue with `docs/roadmap/020-semantic-core-reset.md` for the
+current execution order. `docs/roadmap/010-foundation-workstreams.md` remains useful as the
+original workstream breakdown.

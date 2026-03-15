@@ -37,7 +37,8 @@ For now, this repository is a **development bootstrap**, not a finished product.
 3. Read `docs/specs/060-testing-strategy.md`.
 4. Read `docs/specs/090-major-implementation-decisions.md`.
 5. Read `docs/adr/` in numerical order.
-6. Read `docs/roadmap/000-bootstrap.md` and `docs/roadmap/010-foundation-workstreams.md` before planning the first milestone.
+6. Read `docs/roadmap/020-semantic-core-reset.md` for the current execution order.
+7. Read `docs/roadmap/000-bootstrap.md` and `docs/roadmap/010-foundation-workstreams.md` only for historical context.
 
 ## Repository map
 
@@ -71,7 +72,6 @@ tests/
   snapshots/        expected rendered outputs
 
 xtask/              repository automation entrypoints
-.config/nextest.toml
 ```
 
 ## Recommended first implementation order
@@ -97,7 +97,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Run the built-in test runner across all crates
 cargo test --workspace
 
-# Run the same tests with nextest (faster, better output, per-test timeouts)
+# Run the same tests with nextest (optional, if installed)
 cargo nextest run
 
 # Render a YAML scenario fixture into human-readable form
