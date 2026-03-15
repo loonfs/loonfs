@@ -626,6 +626,65 @@ fn model_detects_bound_local_match_for_remote_observation() {
 }
 
 #[test]
+fn model_supports_remote_only_file_discovery_from_authoritative_observation() {
+    let observed = ModelObservedRemoteInode {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(601),
+        inode_kind: InodeKind::File,
+        observed_seq: ChangeSeq(42),
+        revision_no: RevisionNo(1),
+        content_digest: Some(
+            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9".to_owned(),
+        ),
+        content_manifest_digest: Some(
+            "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6".to_owned(),
+        ),
+        parent_inode_id: Some(InodeId(2)),
+        display_name: "welcome.txt".to_owned(),
+        is_deleted: false,
+    };
+
+    assert!(remote_only_file_discovery_supported(&observed));
+}
+
+#[test]
+fn model_detects_remote_only_placeholder_match_for_materialization() {
+    let observed = ModelObservedRemoteInode {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(601),
+        inode_kind: InodeKind::File,
+        observed_seq: ChangeSeq(42),
+        revision_no: RevisionNo(1),
+        content_digest: Some(
+            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9".to_owned(),
+        ),
+        content_manifest_digest: Some(
+            "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6".to_owned(),
+        ),
+        parent_inode_id: Some(InodeId(2)),
+        display_name: "welcome.txt".to_owned(),
+        is_deleted: false,
+    };
+
+    assert!(remote_only_placeholder_matches_remote_observation(
+        &InodeKind::File,
+        Some(InodeId(2)),
+        "welcome.txt",
+        false,
+        false,
+        &observed,
+    ));
+    assert!(!remote_only_placeholder_matches_remote_observation(
+        &InodeKind::File,
+        Some(InodeId(2)),
+        "welcome.txt",
+        true,
+        false,
+        &observed,
+    ));
+}
+
+#[test]
 fn model_child_name_absent_rejects_existing_bound_name() {
     let metadata = seeded_metadata_state();
 

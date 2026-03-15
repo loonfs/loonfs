@@ -1,0 +1,93 @@
+name: execute_next_client_action_materializes_remote_only_file
+initial:
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 601
+    inode_kind: file
+    observed_seq: 42
+    revision_no: 1
+    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+    parent_inode_id: 2
+    display_name: welcome.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 601
+    inode_kind: file
+    content_digest: null
+    parent_inode_id: 2
+    display_name: welcome.txt
+    exists_on_disk: false
+    dirty: false
+    last_local_change_ms: 1700000608000
+  remote_file:
+    content_utf8: |
+      hello from loon
+  planned_actions:
+    - namespace_id: ns-1
+      inode_id: 601
+      decision: download_remote_edit
+      reason: remote_observed_without_anchor
+      created_at_ms: 1700000610000
+actions:
+  - execute_next_client_action:
+      source_path_relative: inbox/welcome.txt
+      uploaded_at_ms: 1700000612000
+      created_at_ms: 1700000612000
+      writer_id: unused
+      writer_version: unused
+      now_ms: 0
+  - restart_client_state_db: true
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 601
+      now_ms: 1700000615000
+expect:
+  downloaded_content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+  downloaded_file_digest_sha256: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+  applied_inode_mutation:
+    namespace_id: ns-1
+    inode_id: 601
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 601
+    inode_kind: file
+    observed_seq: 42
+    revision_no: 1
+    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+    parent_inode_id: 2
+    display_name: welcome.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 601
+    inode_kind: file
+    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    parent_inode_id: 2
+    display_name: welcome.txt
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700000612000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 601
+    inode_kind: file
+    synced_seq: 42
+    revision_no: 1
+    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+    parent_inode_id: 2
+    display_name: welcome.txt
+  planned_action_cleared: true
+  local_file_content_utf8: |
+    hello from loon
+  local_parent_entries:
+    - welcome.txt
+  planner_result:
+    namespace_id: ns-1
+    inode_id: 601
+    decision: no_op
+    reason: already_converged
+    created_at_ms: 1700000615000

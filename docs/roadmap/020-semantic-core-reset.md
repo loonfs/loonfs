@@ -182,6 +182,39 @@ Exit criteria:
 - scheduler behavior is named and testable
 - delivery docs match what actually exists in the repo
 
+## Milestone 5: client remote discovery and reconciliation
+
+Goal:
+resume feature expansion narrowly by teaching the client to ingest authoritative remote state that
+did not originate from its own immediate mutation-response loop.
+
+Primary crates:
+
+- `loon-client`
+- `loon-model`
+
+Deliverables:
+
+- remote-only authoritative inode discovery persisted into SQLite instead of being ignored
+- the first remote-only file materialization path from durable remote metadata into local mirror
+  state
+- later remote observation convergence that works even when the authoritative success response was
+  lost
+- durable conflict/error surfacing for discovery/reconciliation failures
+- continued work toward the transfer-ledger pieces from Workstream E once remote discovery is real
+
+Required rule:
+
+- resume feature expansion only by extending already-real client truth and execution paths; do not
+  widen placeholder delivery surfaces again
+
+Exit criteria:
+
+- an unmatched authoritative file observation can survive restart as durable client state
+- the mixed client tick can materialize that discovered remote-only file into a converged bound
+  inode
+- client-side remote discovery failures are named and durable enough to debug
+
 ## First implementation slices
 
 The next slices should be executed in this order.

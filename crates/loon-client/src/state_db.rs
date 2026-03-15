@@ -448,6 +448,10 @@ pub struct ObservedRemoteInode {
 pub enum AppliedRemoteObservation {
     BoundLocalOnly(BoundLocalOnlyFile),
     ConvergedBoundInode(AppliedInodeMutation),
+    DiscoveredRemoteOnly {
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+    },
     UpdatedBoundRemoteState {
         namespace_id: NamespaceId,
         inode_id: InodeId,
@@ -610,6 +614,21 @@ fn local_only_matches_remote_observation(
         && local_only.content_digest == observed.content_digest
         && local_only.parent_inode_id == observed.parent_inode_id
         && local_only.display_name == observed.display_name
+}
+
+fn remote_only_file_discovery_supported(observed: &RemoteFileStateRow) -> bool {
+    observed.inode_kind == InodeKind::File && !observed.is_deleted
+}
+
+fn remote_only_placeholder_matches_remote_state(
+    local: &LocalFileStateRow,
+    observed: &RemoteFileStateRow,
+) -> bool {
+    !local.exists_on_disk
+        && !local.dirty
+        && local.inode_kind == observed.inode_kind
+        && local.parent_inode_id == observed.parent_inode_id
+        && local.display_name == observed.display_name
 }
 
 fn validate_local_only_upload(

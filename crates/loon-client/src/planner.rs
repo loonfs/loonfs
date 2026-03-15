@@ -145,6 +145,14 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
             PlannerDecision::DownloadRemoteEdit,
             PlannerReason::RemoteObservedWithoutAnchor,
         ),
+        (Some(remote), Some(local), None)
+            if remote_only_placeholder_matches_remote(local, remote) =>
+        {
+            (
+                PlannerDecision::DownloadRemoteEdit,
+                PlannerReason::RemoteObservedWithoutAnchor,
+            )
+        }
         (None, Some(_), None) => (
             PlannerDecision::UploadLocalEdit,
             PlannerReason::LocalObservedWithoutAnchor,
@@ -366,6 +374,18 @@ fn local_matches_anchor(
         && local.display_name == anchor.display_name
 }
 
+fn remote_only_placeholder_matches_remote(
+    local: &crate::state_db::LocalFileStateRow,
+    remote: &crate::state_db::RemoteFileStateRow,
+) -> bool {
+    !local.exists_on_disk
+        && !local.dirty
+        && !remote.is_deleted
+        && local.inode_kind == remote.inode_kind
+        && local.parent_inode_id == remote.parent_inode_id
+        && local.display_name == remote.display_name
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -425,6 +445,49 @@ mod tests {
             planned.reason,
             PlannerReason::LocalAndRemoteDifferFromAnchor
         );
+    }
+
+    #[test]
+    fn planner_materializes_remote_only_file_without_anchor() {
+        let views = FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(601),
+            remote: Some(RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(601),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(1),
+                content_digest: Some(
+                    "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                        .to_owned(),
+                ),
+                content_manifest_digest: Some(
+                    "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                        .to_owned(),
+                ),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "welcome.txt".to_owned(),
+                is_deleted: false,
+            }),
+            local: Some(LocalFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(601),
+                inode_kind: InodeKind::File,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "welcome.txt".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_608_000,
+            }),
+            sync_anchor: None,
+        };
+
+        let planned = decide_file_action(&views, 1_700_000_610_000);
+
+        assert_eq!(planned.decision, PlannerDecision::DownloadRemoteEdit);
+        assert_eq!(planned.reason, PlannerReason::RemoteObservedWithoutAnchor);
     }
 
     #[test]

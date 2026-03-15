@@ -1,0 +1,158 @@
+use loon_client::planner::{plan_file, PlannedActionRecord};
+use loon_client::state_db::{
+    AppliedRemoteObservation, FileSyncViews, LocalFileStateRow, ObservedRemoteInode,
+    PlannedActionRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
+};
+use loon_testkit::scenario::Scenario;
+use loon_types::{InodeId, NamespaceId};
+use serde::Deserialize;
+
+#[test]
+fn remote_observation_discovers_remote_only_file_and_restarts_plannable() {
+    let scenario = load_fixture("client/client_remote_observation_discovers_remote_only_file.yaml");
+    let _initial: RemoteOnlyDiscoveryInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: RemoteOnlyDiscoveryExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-only-discovery");
+    let db_path = temp_dir.path().join("client.sqlite3");
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let planner_tick = actions[2].planner().expect("planner action third");
+
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan discovered remote-only inode after restart");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_eq!(
+        db.load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load discovered views"),
+        FileSyncViews {
+            namespace_id: planner_tick.namespace_id.clone(),
+            inode_id: planner_tick.inode_id,
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: expect.sync_anchor.clone(),
+        }
+    );
+    assert_eq!(
+        db.load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load planned action"),
+        expect.planned_action.clone()
+    );
+}
+
+fn load_fixture(relative_path: &str) -> Scenario {
+    loon_testkit::fixtures::load_fixture(relative_path)
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteOnlyDiscoveryInitial {}
+
+#[derive(Debug, Deserialize)]
+struct RemoteOnlyDiscoveryExpect {
+    outcome: RawAppliedRemoteObservation,
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: Option<SyncAnchorRow>,
+    planned_action: Option<PlannedActionRow>,
+    planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RemoteObservationFixtureAction {
+    ApplyRemoteObservation {
+        apply_remote_observation: ApplyRemoteObservationAction,
+    },
+    RestartClientStateDb {
+        restart_client_state_db: bool,
+    },
+    PlannerTick {
+        planner_tick: PlannerTickAction,
+    },
+}
+
+impl RemoteObservationFixtureAction {
+    fn apply(&self) -> Option<ApplyRemoteObservationAction> {
+        match self {
+            Self::ApplyRemoteObservation {
+                apply_remote_observation,
+            } => Some(apply_remote_observation.clone()),
+            _ => None,
+        }
+    }
+
+    fn is_restart(&self) -> bool {
+        matches!(
+            self,
+            Self::RestartClientStateDb {
+                restart_client_state_db: true
+            }
+        )
+    }
+
+    fn planner(&self) -> Option<PlannerTickAction> {
+        match self {
+            Self::PlannerTick { planner_tick } => Some(planner_tick.clone()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApplyRemoteObservationAction {
+    applied_at_ms: u64,
+    remote_observation: ObservedRemoteInode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PlannerTickAction {
+    namespace_id: NamespaceId,
+    inode_id: InodeId,
+    now_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RawAppliedRemoteObservation {
+    DiscoveredRemoteOnly {
+        discovered_remote_only: RawAppliedRemoteObservationTarget,
+    },
+}
+
+impl RawAppliedRemoteObservation {
+    fn into_outcome(self) -> AppliedRemoteObservation {
+        match self {
+            Self::DiscoveredRemoteOnly {
+                discovered_remote_only,
+            } => AppliedRemoteObservation::DiscoveredRemoteOnly {
+                namespace_id: discovered_remote_only.namespace_id,
+                inode_id: discovered_remote_only.inode_id,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawAppliedRemoteObservationTarget {
+    namespace_id: NamespaceId,
+    inode_id: InodeId,
+}
+
+type TestDir = loon_testkit::tempdir::TestDir;

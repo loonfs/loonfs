@@ -2,7 +2,7 @@ use crate::{
     ModelLocalOnlyObservationCandidate, ModelObservedRemoteInode, ModelPlannedInodeAction,
     ModelPlannedLocalOnlyAction, ModelRemoteObservationSelectionError, ModelScheduledClientAction,
 };
-use loon_types::{ChangeSeq, InodeId};
+use loon_types::{ChangeSeq, InodeId, InodeKind};
 
 pub fn allocate_client_request_id(next_counter: u64) -> String {
     format!("client-req-{next_counter:020}")
@@ -88,6 +88,26 @@ pub fn local_only_matches_remote_observation(
         && candidate.content_digest == observed.content_digest
         && candidate.parent_inode_id == observed.parent_inode_id
         && candidate.display_name == observed.display_name
+}
+
+pub fn remote_only_file_discovery_supported(observed: &ModelObservedRemoteInode) -> bool {
+    observed.inode_kind == InodeKind::File && !observed.is_deleted
+}
+
+pub fn remote_only_placeholder_matches_remote_observation(
+    inode_kind: &loon_types::InodeKind,
+    parent_inode_id: Option<InodeId>,
+    display_name: &str,
+    exists_on_disk: bool,
+    dirty: bool,
+    observed: &ModelObservedRemoteInode,
+) -> bool {
+    !exists_on_disk
+        && !dirty
+        && !observed.is_deleted
+        && observed.inode_kind == *inode_kind
+        && observed.parent_inode_id == parent_inode_id
+        && observed.display_name == display_name
 }
 
 pub fn select_local_only_observation_bind_candidate(

@@ -925,7 +925,8 @@ Rules:
   the tick must execute it through the bound-file edit executor
 - if the selected row comes from `executable_inode_action` and
   `decision = download_remote_edit`, the tick must execute it through the bound-file download
-  executor
+  executor, which may either refresh an already bound file or materialize a discovered remote-only
+  file
 - if the selected row comes from `deferred_inode_action`, the tick must return that planned action
   as the next scheduled work item without trying to silently emulate download/conflict behavior yet
 - if both tables are empty, the tick must return `no_work`
@@ -1112,14 +1113,34 @@ Rules:
   `pending_client_mutations(client_file_id)` row
 - if more than one `local_only_state` row matches the same observation, the apply step must fail
   without partial migration
-- the first implementation ignores unmatched remote-only observations because the repo does not yet
-  have a full remote discovery and path-materialization loop
+- if there is still no bound inode and no matching `local_only_state`, the first post-reset remote
+  discovery slice may materialize one remote-only file placeholder when all of the following hold:
+  - `inode_kind = file`
+  - `is_deleted = false`
+  - the client does not already have a bound `local_state` row for that inode
+- remote-only discovery must:
+  - upsert `remote_state(namespace_id, inode_id)` from the authoritative observation
+  - upsert `local_state(namespace_id, inode_id)` as a placeholder with:
+    - `inode_kind = observed.inode_kind`
+    - `content_digest = null`
+    - `parent_inode_id = observed.parent_inode_id`
+    - `display_name = observed.display_name`
+    - `exists_on_disk = false`
+    - `dirty = false`
+  - leave `sync_anchor(namespace_id, inode_id)` absent until local materialization succeeds
+- if a later newer observation arrives for that same remote-only placeholder before local
+  materialization, the client may advance `remote_state` and refresh the placeholder path view from
+  the newer authoritative observation
+- unmatched remote-only directories, deleted inodes, and unsupported kinds may still be ignored in
+  this first slice
 
 Why this rule exists:
 
 - authoritative success should still converge the client when the immediate response is lost
 - the first remote-observation path should repair known create/edit flows without pretending the
   client already has full remote tree ingestion
+- remote-only file discovery should become restart-safe durable state before full remote crawl and
+  tree materialization exist
 - temp identities should only bind through one deterministic matching rule
 
 Failure modes prevented:
@@ -1127,10 +1148,46 @@ Failure modes prevented:
 - a successful `replace_file` remaining dirty forever because the success response was dropped
 - a successful local-only create being uploaded again after a later remote observation
 - two temp identities both binding to the same observed remote inode
+- dropping a remote-only authoritative file on the floor because no immediate local bind exists
 
 Failure modes named for the first implementation:
 
 - `remote_observation_bind_ambiguous`
+
+## First remote-only file materialization path
+
+The first remote-only materialization path is intentionally file-only and reuses
+`download_remote_edit`.
+
+Rules:
+
+- `download_remote_edit` may run in either of two shapes:
+  - bound-file refresh:
+    `remote_state`, `local_state`, and `sync_anchor` all exist for the inode
+  - discovered remote-only file materialization:
+    `remote_state` exists, `local_state` exists as a non-dirty placeholder with
+    `exists_on_disk = false`, and `sync_anchor` is still absent
+- for the discovered remote-only file shape, the local placeholder must still match the remote
+  path view on:
+  - `inode_kind`
+  - `parent_inode_id`
+  - `display_name`
+- after bytes are downloaded and atomically written locally, one SQLite transaction must:
+  - update `local_state` to `exists_on_disk = true`, `dirty = false`, and
+    `content_digest = remote_state.content_digest`
+  - create `sync_anchor(namespace_id, inode_id)` from the authoritative remote row
+  - clear `planned_actions(namespace_id, inode_id)`
+
+Why this rule exists:
+
+- remote-only discovery is not useful if the client cannot later materialize the discovered file
+- the first remote-only path should reuse the existing durable download executor instead of growing
+  a separate ad hoc materializer
+
+Failure modes prevented:
+
+- remote-only files surviving restart in SQLite but never becoming executable work
+- downloading a remote-only file without ever establishing a durable synced anchor
 
 ## Local data model inspiration
 

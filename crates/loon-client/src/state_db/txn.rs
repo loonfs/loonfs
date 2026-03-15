@@ -971,15 +971,36 @@ impl PlannerTxn<'_> {
         inode_id: InodeId,
         applied_at_ms: u64,
     ) -> Result<AppliedInodeMutation, StateDbError> {
-        let (remote, local, _anchor) =
-            load_bound_download_remote_edit_views_from_conn(&self.tx, namespace_id, inode_id)?;
+        let views = self.load_file_sync_views(namespace_id, inode_id)?;
+        let (remote, local) = match (views.remote, views.local, views.sync_anchor) {
+            (Some(_), Some(_), Some(_)) => {
+                let (remote, local, _anchor) = load_bound_download_remote_edit_views_from_conn(
+                    &self.tx,
+                    namespace_id,
+                    inode_id,
+                )?;
+                (remote, local)
+            }
+            (Some(remote), Some(local), None)
+                if remote_only_placeholder_matches_remote_state(&local, &remote)
+                    && remote_only_file_discovery_supported(&remote) =>
+            {
+                (remote, local)
+            }
+            _ => {
+                return Err(StateDbError::DownloadRemoteEditStateMissing {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    inode_id: inode_id.0,
+                })
+            }
+        };
         let next_local = LocalFileStateRow {
             namespace_id: namespace_id.clone(),
             inode_id,
             inode_kind: local.inode_kind,
             content_digest: remote.content_digest.clone(),
-            parent_inode_id: local.parent_inode_id,
-            display_name: local.display_name,
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name.clone(),
             exists_on_disk: true,
             dirty: false,
             last_local_change_ms: applied_at_ms,
@@ -1023,6 +1044,34 @@ impl PlannerTxn<'_> {
         }
 
         let views = self.load_file_sync_views(&observed.namespace_id, observed.inode_id)?;
+        if let (Some(_remote), Some(local), None) = (
+            views.remote.as_ref(),
+            views.local.as_ref(),
+            views.sync_anchor.as_ref(),
+        ) {
+            if !local.exists_on_disk
+                && !local.dirty
+                && remote_only_file_discovery_supported(&observed_remote)
+            {
+                let next_local = LocalFileStateRow {
+                    namespace_id: observed.namespace_id.clone(),
+                    inode_id: observed.inode_id,
+                    inode_kind: observed.inode_kind.clone(),
+                    content_digest: None,
+                    parent_inode_id: observed.parent_inode_id,
+                    display_name: observed.display_name.clone(),
+                    exists_on_disk: false,
+                    dirty: false,
+                    last_local_change_ms: applied_at_ms,
+                };
+                self.upsert_remote_file(&observed_remote)?;
+                self.upsert_local_file(&next_local)?;
+                return Ok(AppliedRemoteObservation::DiscoveredRemoteOnly {
+                    namespace_id: observed.namespace_id.clone(),
+                    inode_id: observed.inode_id,
+                });
+            }
+        }
         if let (Some(_remote), Some(local), Some(_anchor)) = (
             views.remote.as_ref(),
             views.local.as_ref(),
@@ -1084,10 +1133,32 @@ impl PlannerTxn<'_> {
                 })
                 .collect::<Vec<_>>();
         match matching_local_only.as_slice() {
-            [] => Ok(AppliedRemoteObservation::IgnoredUnmatched {
-                namespace_id: observed.namespace_id.clone(),
-                inode_id: observed.inode_id,
-            }),
+            [] => {
+                if remote_only_file_discovery_supported(&observed_remote) {
+                    let placeholder = LocalFileStateRow {
+                        namespace_id: observed.namespace_id.clone(),
+                        inode_id: observed.inode_id,
+                        inode_kind: observed.inode_kind.clone(),
+                        content_digest: None,
+                        parent_inode_id: observed.parent_inode_id,
+                        display_name: observed.display_name.clone(),
+                        exists_on_disk: false,
+                        dirty: false,
+                        last_local_change_ms: applied_at_ms,
+                    };
+                    self.upsert_remote_file(&observed_remote)?;
+                    self.upsert_local_file(&placeholder)?;
+                    Ok(AppliedRemoteObservation::DiscoveredRemoteOnly {
+                        namespace_id: observed.namespace_id.clone(),
+                        inode_id: observed.inode_id,
+                    })
+                } else {
+                    Ok(AppliedRemoteObservation::IgnoredUnmatched {
+                        namespace_id: observed.namespace_id.clone(),
+                        inode_id: observed.inode_id,
+                    })
+                }
+            }
             [candidate] => {
                 let bound = self
                     .bind_local_only_inode_to_remote(&candidate.client_file_id, &observed_remote)?;

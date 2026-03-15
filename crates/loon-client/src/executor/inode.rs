@@ -157,9 +157,39 @@ fn ensure_download_remote_edit_ready(
         );
     }
 
-    let (remote, _local, _anchor) =
-        db.load_bound_download_remote_edit_views(namespace_id, inode_id)?;
-    Ok(remote)
+    let views = db.load_file_sync_views(namespace_id, inode_id)?;
+    match (views.remote, views.local, views.sync_anchor) {
+        (Some(_), Some(_), Some(_)) => {
+            let (remote, _local, _anchor) =
+                db.load_bound_download_remote_edit_views(namespace_id, inode_id)?;
+            Ok(remote)
+        }
+        (Some(remote), Some(local), None)
+            if !local.exists_on_disk
+                && !local.dirty
+                && !remote.is_deleted
+                && local.inode_kind == remote.inode_kind
+                && local.parent_inode_id == remote.parent_inode_id
+                && local.display_name == remote.display_name =>
+        {
+            if remote.inode_kind != loon_types::InodeKind::File
+                || local.inode_kind != loon_types::InodeKind::File
+            {
+                return Err(StateDbError::DownloadRemoteEditRequiresFile {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    inode_id: inode_id.0,
+                    inode_kind: format!("{:?}", local.inode_kind).to_lowercase(),
+                }
+                .into());
+            }
+            Ok(remote)
+        }
+        _ => Err(StateDbError::DownloadRemoteEditStateMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        }
+        .into()),
+    }
 }
 
 fn ensure_upload_local_edit_ready<S: ObjectStore>(
