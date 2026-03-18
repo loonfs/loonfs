@@ -96,6 +96,7 @@ fn dispatch_retry_reuses_pending_request_id_after_failure() {
             &initial.local_only_state.client_file_id,
             1_700_000_106_999,
             |request| {
+                support::seed_server_basis_for_request(&store, request, "loon-server-test");
                 execute_client_mutation(
                     &store,
                     request,
@@ -103,7 +104,6 @@ fn dispatch_retry_reuses_pending_request_id_after_failure() {
                         writer_id: "writer-a".to_owned(),
                         writer_version: "loon-server-test".to_owned(),
                         now_ms: 1_700_000_107_000,
-                        metadata_state: support::server_metadata_for_request(request),
                     },
                 )
                 .map(|executed| executed.response)
@@ -179,6 +179,7 @@ fn run_fixture(relative_path: &str) {
             &initial.local_only_state.client_file_id,
             dispatch.created_at_ms,
             |request| {
+                support::seed_server_basis_for_request(&store, request, &dispatch.writer_version);
                 execute_client_mutation(
                     &store,
                     request,
@@ -186,7 +187,6 @@ fn run_fixture(relative_path: &str) {
                         writer_id: dispatch.writer_id.clone(),
                         writer_version: dispatch.writer_version.clone(),
                         now_ms: dispatch.now_ms,
-                        metadata_state: support::server_metadata_for_request(request),
                     },
                 )
                 .map(|executed| executed.response)

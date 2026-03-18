@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: validated_commit_writes_immutable_wal_object
 initial:
   head:

@@ -47,6 +47,9 @@ Treat the durable replay basis as:
 - the latest **verified checkpoint** at or before the desired head
 - plus the immutable WAL entries after that checkpoint
 
+The authoritative mutation path must build its validation basis from that same durable replay
+model. It must not accept caller-supplied metadata state as authority.
+
 Do **not** make read correctness depend on a rewritten “compacted WAL.” In v1, compaction means “write a newer checkpoint and later advance retention,” not “mutate history.”
 
 ### Concrete storage shape
@@ -214,6 +217,9 @@ The rule is:
 
 - one user commit request may contain multiple operations
 - that request publishes as one `seq` if it succeeds
+- the vector position in `CommitRequest.ops` is the authoritative within-request order
+- same-request order must stay durable through WAL `op_index`, metadata application, replay, and
+  checkpoint materialization
 - unrelated user requests do not share a `seq` in v1
 
 ### Why

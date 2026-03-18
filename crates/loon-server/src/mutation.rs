@@ -1,31 +1,32 @@
+mod basis;
+mod loading;
+mod translate;
+
+use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::mutation::translate::{
+    build_client_mutation_response, translate_client_mutation_request,
+    validate_referenced_durable_content,
+};
 use loon_core::commit::{
     build_commit_plan, prepare_commit_head_publish, publish_commit_head, CommitHeadPublishError,
-    CommitOp, CommitPlan, CommitRequest, CommitValidationContext, CommitValidationError,
-    Precondition, PreparedCommitHeadPublish,
-};
-use loon_core::content::{
-    validate_durable_content_reference, DurableContentValidationError, ValidatedDurableContent,
+    CommitPlan, CommitRequest, CommitValidationContext, CommitValidationError,
+    PreparedCommitHeadPublish,
 };
 use loon_core::metadata::{MetadataApplyError, MetadataState};
 use loon_core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
 use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::{ObjectMetadata, ObjectStore};
-use loon_types::{
-    payload_checksum_sha256, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
-    ControlObjectKind, CreatedRemoteInode, HeadState, HeadStateEnvelope, LeaseStateEnvelope,
-    NamespaceId, ReplacedRemoteFile, RevisionNo,
-};
+use loon_types::{ClientMutationRequest, ClientMutationResponse};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use crate::mutation::translate::ClientMutationTranslationError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientMutationExecutionParams {
     pub writer_id: String,
     pub writer_version: String,
     pub now_ms: u64,
-    #[serde(default)]
-    pub metadata_state: MetadataState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,86 +42,14 @@ pub struct ExecutedClientMutation {
     pub checked_invariants: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct LoadedHeadObject {
-    object_key: String,
-    metadata: ObjectMetadata,
-    envelope: HeadStateEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct LoadedLeaseObject {
-    object_key: String,
-    envelope: LeaseStateEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum ControlObjectLoadError {
-    #[error("missing control object `{object_key}`")]
-    MissingObject { object_key: String },
-    #[error("missing control object after head `{object_key}`")]
-    MissingObjectAfterHead { object_key: String },
-    #[error(
-        "control object kind mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
-    )]
-    KindMismatch {
-        object_key: String,
-        expected: ControlObjectKind,
-        actual: ControlObjectKind,
-    },
-    #[error(
-        "control object namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    NamespaceMismatch {
-        object_key: String,
-        expected: NamespaceId,
-        actual: NamespaceId,
-    },
-    #[error(
-        "control object checksum mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    ChecksumMismatch {
-        object_key: String,
-        expected: String,
-        actual: String,
-    },
-    #[error("control object codec error for `{object_key}`: {message}")]
-    Codec { object_key: String, message: String },
-    #[error("control object store error: {0}")]
-    Store(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
-pub enum ClientMutationTranslationError {
-    #[error("empty client request id")]
-    EmptyClientRequestId,
-    #[error("empty writer id")]
-    EmptyWriterId,
-    #[error("empty display name")]
-    EmptyDisplayName,
-    #[error("empty content manifest digest")]
-    EmptyContentManifestDigest,
-    #[error(
-        "replace file revision overflow for inode `{inode_id:?}` base revision `{base_revision:?}`"
-    )]
-    ReplaceFileRevisionOverflow {
-        inode_id: loon_types::InodeId,
-        base_revision: RevisionNo,
-    },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ClientMutationExecutionError {
     #[error(transparent)]
-    LoadHead(#[from] ControlObjectLoadError),
-    #[error("failed to load lease object: {0}")]
-    LoadLease(ControlObjectLoadError),
+    Basis(#[from] BasisLoadError),
     #[error("durable content validation failed: {0}")]
-    DurableContent(DurableContentValidationError),
-    #[error("missing head etag for `{object_key}`")]
-    MissingHeadEtag { object_key: String },
+    DurableContent(loon_core::content::DurableContentValidationError),
     #[error(transparent)]
-    Translate(#[from] ClientMutationTranslationError),
+    Translate(ClientMutationTranslationError),
     #[error("commit validation failed: {0:?}")]
     CommitValidation(CommitValidationError),
     #[error("WAL build failed: {0:?}")]
@@ -142,35 +71,26 @@ pub fn execute_client_mutation<S: ObjectStore>(
     request: &ClientMutationRequest,
     params: &ClientMutationExecutionParams,
 ) -> Result<ExecutedClientMutation, ClientMutationExecutionError> {
-    let loaded_head = read_head_object(store, &request.namespace_id)?;
-    let loaded_lease = read_lease_object(store, &request.namespace_id)
-        .map_err(ClientMutationExecutionError::LoadLease)?;
     let validated_content = validate_referenced_durable_content(store, request)?;
-    let head_etag = loaded_head.metadata.etag.clone().ok_or_else(|| {
-        ClientMutationExecutionError::MissingHeadEtag {
-            object_key: loaded_head.object_key.clone(),
-        }
-    })?;
-    let commit_request =
-        translate_client_mutation_request(request, params, &loaded_head.envelope.state)?;
+    let basis = load_verified_namespace_basis(store, &request.namespace_id)?;
+    let commit_request = translate_client_mutation_request(request, params, &basis.head)?;
     let context = CommitValidationContext {
-        head: loaded_head.envelope.state.clone(),
-        lease: loaded_lease.envelope.state.clone(),
+        head: basis.head.clone(),
+        lease: basis.lease.clone(),
         now_ms: params.now_ms,
-        metadata_state: params.metadata_state.clone(),
+        metadata_state: basis.metadata_state.clone(),
     };
     let plan = build_commit_plan(&commit_request, &context)?;
     let wal = prepare_wal_commit(&commit_request, &plan, &params.writer_version)?;
-    let applied_metadata = params
+    let applied_metadata = basis
         .metadata_state
         .apply_committed_wal_ops(plan.next_seq, &wal.envelope.payload.ops)
         .map_err(ClientMutationExecutionError::MetadataApply)?;
-    let head_publish =
-        prepare_commit_head_publish(&loaded_head.envelope.state, &plan, &params.writer_version)?;
+    let head_publish = prepare_commit_head_publish(&basis.head, &plan, &params.writer_version)?;
     let wal_metadata = store
         .put_if_absent(&wal.object_key, &wal.encoded_bytes)
         .map_err(map_store_write_error)?;
-    let head_metadata = publish_commit_head(store, &head_etag, &head_publish)
+    let head_metadata = publish_commit_head(store, &basis.head_etag, &head_publish)
         .map_err(|err| ClientMutationExecutionError::HeadWrite(format!("{err:?}")))?;
     let response =
         build_client_mutation_response(request, validated_content.as_ref(), &plan, &head_publish)?;
@@ -203,380 +123,12 @@ pub fn execute_client_mutation<S: ObjectStore>(
     })
 }
 
-fn validate_referenced_durable_content<S: ObjectStore>(
-    store: &S,
-    request: &ClientMutationRequest,
-) -> Result<Option<ValidatedDurableContent>, ClientMutationExecutionError> {
-    match &request.op {
-        ClientMutationOp::CreateFile {
-            content_manifest_digest,
-            ..
-        }
-        | ClientMutationOp::ReplaceFile {
-            content_manifest_digest,
-            ..
-        } => validate_durable_content_reference(
-            store,
-            &request.namespace_id,
-            content_manifest_digest,
-        )
-        .map(Some)
-        .map_err(ClientMutationExecutionError::DurableContent),
-        ClientMutationOp::CreateDir { .. } => Ok(None),
-    }
-}
-
-fn build_client_mutation_response(
-    request: &ClientMutationRequest,
-    validated_content: Option<&ValidatedDurableContent>,
-    plan: &CommitPlan,
-    head_publish: &PreparedCommitHeadPublish,
-) -> Result<ClientMutationResponse, ClientMutationExecutionError> {
-    let (created_inode, replaced_file) = match &request.op {
-        ClientMutationOp::CreateDir {
-            parent_inode_id,
-            display_name,
-        } => {
-            if plan.allocated_inode_ids.len() != 1 {
-                return Err(
-                    ClientMutationExecutionError::UnexpectedAllocatedInodeCount {
-                        actual: plan.allocated_inode_ids.len(),
-                    },
-                );
-            }
-            let inode_id = plan.allocated_inode_ids[0];
-            (
-                Some(CreatedRemoteInode {
-                    inode_id,
-                    inode_kind: loon_types::InodeKind::Dir,
-                    revision_no: RevisionNo(1),
-                    parent_inode_id: *parent_inode_id,
-                    display_name: display_name.clone(),
-                    content_digest: None,
-                }),
-                None,
-            )
-        }
-        ClientMutationOp::CreateFile {
-            parent_inode_id,
-            display_name,
-            ..
-        } => {
-            if plan.allocated_inode_ids.len() != 1 {
-                return Err(
-                    ClientMutationExecutionError::UnexpectedAllocatedInodeCount {
-                        actual: plan.allocated_inode_ids.len(),
-                    },
-                );
-            }
-            let inode_id = plan.allocated_inode_ids[0];
-            (
-                Some(CreatedRemoteInode {
-                    inode_id,
-                    inode_kind: loon_types::InodeKind::File,
-                    revision_no: RevisionNo(1),
-                    parent_inode_id: *parent_inode_id,
-                    display_name: display_name.clone(),
-                    content_digest: Some(
-                        validated_content
-                            .expect("create_file response requires validated durable content")
-                            .file_digest_sha256
-                            .clone(),
-                    ),
-                }),
-                None,
-            )
-        }
-        ClientMutationOp::ReplaceFile {
-            inode_id,
-            base_revision_no,
-            ..
-        } => {
-            let revision_no = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
-                ClientMutationTranslationError::ReplaceFileRevisionOverflow {
-                    inode_id: *inode_id,
-                    base_revision: *base_revision_no,
-                },
-            )?;
-            (
-                None,
-                Some(ReplacedRemoteFile {
-                    inode_id: *inode_id,
-                    inode_kind: loon_types::InodeKind::File,
-                    revision_no,
-                    content_digest: validated_content
-                        .expect("replace_file response requires validated durable content")
-                        .file_digest_sha256
-                        .clone(),
-                }),
-            )
-        }
-    };
-
-    Ok(ClientMutationResponse {
-        namespace_id: request.namespace_id.clone(),
-        client_request_id: request.client_request_id.clone(),
-        committed_seq: head_publish.resulting_head.seq,
-        created_inode,
-        replaced_file,
-    })
-}
-
-fn translate_client_mutation_request(
-    request: &ClientMutationRequest,
-    params: &ClientMutationExecutionParams,
-    current_head: &HeadState,
-) -> Result<CommitRequest, ClientMutationTranslationError> {
-    if request.client_request_id.trim().is_empty() {
-        return Err(ClientMutationTranslationError::EmptyClientRequestId);
-    }
-
-    if params.writer_id.trim().is_empty() {
-        return Err(ClientMutationTranslationError::EmptyWriterId);
-    }
-
-    let (op, preconditions) = match &request.op {
-        ClientMutationOp::CreateDir {
-            parent_inode_id,
-            display_name,
-        } => (
-            CommitOp::CreateDir {
-                parent_inode: *parent_inode_id,
-                display_name: display_name.clone(),
-            },
-            vec![
-                Precondition::HeadSeqIs(current_head.seq),
-                Precondition::ChildNameAbsent {
-                    parent_inode: *parent_inode_id,
-                    name_key: display_name.clone(),
-                },
-                Precondition::AncestorsNotSubtreeDeleted {
-                    inode_id: *parent_inode_id,
-                },
-            ],
-        ),
-        ClientMutationOp::CreateFile {
-            parent_inode_id,
-            display_name,
-            content_manifest_digest,
-        } => {
-            if content_manifest_digest.trim().is_empty() {
-                return Err(ClientMutationTranslationError::EmptyContentManifestDigest);
-            }
-
-            (
-                CommitOp::CreateFile {
-                    parent_inode: *parent_inode_id,
-                    display_name: display_name.clone(),
-                    content_manifest_digest: content_manifest_digest.clone(),
-                },
-                vec![
-                    Precondition::HeadSeqIs(current_head.seq),
-                    Precondition::ChildNameAbsent {
-                        parent_inode: *parent_inode_id,
-                        name_key: display_name.clone(),
-                    },
-                    Precondition::AncestorsNotSubtreeDeleted {
-                        inode_id: *parent_inode_id,
-                    },
-                ],
-            )
-        }
-        ClientMutationOp::ReplaceFile {
-            inode_id,
-            base_revision_no,
-            content_manifest_digest,
-        } => {
-            if content_manifest_digest.trim().is_empty() {
-                return Err(ClientMutationTranslationError::EmptyContentManifestDigest);
-            }
-
-            (
-                CommitOp::ReplaceFile {
-                    inode_id: *inode_id,
-                    base_revision: *base_revision_no,
-                    content_manifest_digest: content_manifest_digest.clone(),
-                },
-                vec![
-                    Precondition::HeadSeqIs(current_head.seq),
-                    Precondition::InodeRevisionIs {
-                        inode_id: *inode_id,
-                        revision: *base_revision_no,
-                    },
-                    Precondition::AncestorsNotSubtreeDeleted {
-                        inode_id: *inode_id,
-                    },
-                ],
-            )
-        }
-    };
-
-    if matches!(
-        &request.op,
-        ClientMutationOp::CreateDir { display_name, .. }
-            | ClientMutationOp::CreateFile { display_name, .. } if display_name.trim().is_empty()
-    ) {
-        return Err(ClientMutationTranslationError::EmptyDisplayName);
-    }
-
-    Ok(CommitRequest {
-        namespace_id: request.namespace_id.clone(),
-        request_id: request.client_request_id.clone(),
-        writer_id: params.writer_id.clone(),
-        writer_fence_token: current_head.active_fence_token,
-        planned_head_seq: current_head.seq,
-        ops: vec![op],
-        preconditions,
-    })
-}
-
-fn read_head_object<S: ObjectStore>(
-    store: &S,
-    expected_namespace: &NamespaceId,
-) -> Result<LoadedHeadObject, ControlObjectLoadError> {
-    let object_key = namespace_head(expected_namespace.as_str());
-    let metadata = store
-        .head(&object_key)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObject {
-            object_key: object_key.clone(),
-        })?;
-    let encoded_bytes = store
-        .get(&object_key, None)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObjectAfterHead {
-            object_key: object_key.clone(),
-        })?;
-    let envelope: HeadStateEnvelope =
-        serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
-            object_key: object_key.clone(),
-            message: err.to_string(),
-        })?;
-    validate_head_envelope(expected_namespace, &object_key, &envelope)?;
-
-    Ok(LoadedHeadObject {
-        object_key,
-        metadata,
-        envelope,
-    })
-}
-
-fn read_lease_object<S: ObjectStore>(
-    store: &S,
-    expected_namespace: &NamespaceId,
-) -> Result<LoadedLeaseObject, ControlObjectLoadError> {
-    let object_key = namespace_lease(expected_namespace.as_str());
-    let encoded_bytes = store
-        .get(&object_key, None)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObject {
-            object_key: object_key.clone(),
-        })?;
-    let envelope: LeaseStateEnvelope =
-        serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
-            object_key: object_key.clone(),
-            message: err.to_string(),
-        })?;
-    validate_lease_envelope(expected_namespace, &object_key, &envelope)?;
-
-    Ok(LoadedLeaseObject {
-        object_key,
-        envelope,
-    })
-}
-
-fn validate_head_envelope(
-    expected_namespace: &NamespaceId,
-    object_key: &str,
-    envelope: &HeadStateEnvelope,
-) -> Result<(), ControlObjectLoadError> {
-    if envelope.kind != ControlObjectKind::NamespaceHead {
-        return Err(ControlObjectLoadError::KindMismatch {
-            object_key: object_key.to_owned(),
-            expected: ControlObjectKind::NamespaceHead,
-            actual: envelope.kind,
-        });
-    }
-
-    validate_control_checksum(
-        object_key,
-        &envelope.payload_checksum_sha256,
-        &envelope.state,
-    )?;
-
-    if &envelope.state.namespace_id != expected_namespace {
-        return Err(ControlObjectLoadError::NamespaceMismatch {
-            object_key: object_key.to_owned(),
-            expected: expected_namespace.clone(),
-            actual: envelope.state.namespace_id.clone(),
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_lease_envelope(
-    expected_namespace: &NamespaceId,
-    object_key: &str,
-    envelope: &LeaseStateEnvelope,
-) -> Result<(), ControlObjectLoadError> {
-    if envelope.kind != ControlObjectKind::NamespaceLease {
-        return Err(ControlObjectLoadError::KindMismatch {
-            object_key: object_key.to_owned(),
-            expected: ControlObjectKind::NamespaceLease,
-            actual: envelope.kind,
-        });
-    }
-
-    validate_control_checksum(
-        object_key,
-        &envelope.payload_checksum_sha256,
-        &envelope.state,
-    )?;
-
-    if &envelope.state.namespace_id != expected_namespace {
-        return Err(ControlObjectLoadError::NamespaceMismatch {
-            object_key: object_key.to_owned(),
-            expected: expected_namespace.clone(),
-            actual: envelope.state.namespace_id.clone(),
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_control_checksum<T: Serialize>(
-    object_key: &str,
-    expected_checksum: &str,
-    state: &T,
-) -> Result<(), ControlObjectLoadError> {
-    let actual_checksum =
-        payload_checksum_sha256(state).map_err(|err| ControlObjectLoadError::Codec {
-            object_key: object_key.to_owned(),
-            message: err.to_string(),
-        })?;
-
-    if expected_checksum != actual_checksum {
-        return Err(ControlObjectLoadError::ChecksumMismatch {
-            object_key: object_key.to_owned(),
-            expected: expected_checksum.to_owned(),
-            actual: actual_checksum,
-        });
-    }
-
-    Ok(())
-}
-
 fn extend_invariants(out: &mut Vec<String>, next: &[String]) {
     for name in next {
         if !out.iter().any(|existing| existing == name) {
             out.push(name.clone());
         }
     }
-}
-
-fn map_store_load_error(err: ObjectStoreError) -> ControlObjectLoadError {
-    ControlObjectLoadError::Store(err.to_string())
 }
 
 fn map_store_write_error(err: ObjectStoreError) -> ClientMutationExecutionError {
@@ -605,17 +157,23 @@ impl From<CommitHeadPublishError> for ClientMutationExecutionError {
 mod tests {
     use super::{
         execute_client_mutation, translate_client_mutation_request, ClientMutationExecutionError,
-        ClientMutationExecutionParams, DurableContentValidationError,
+        ClientMutationExecutionParams,
     };
+    use loon_core::checkpoint::prepare_checkpoint;
+    use loon_core::content::DurableContentValidationError;
     use loon_core::metadata::MetadataState;
     use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
+    use loon_objectstore::keys::{
+        blob, content_manifest, namespace_head, namespace_lease, wal_commit,
+    };
     use loon_objectstore::ObjectStore;
     use loon_testkit::scenario::Scenario;
     use loon_types::{
-        decode_wal_commit_envelope_zstd, encode_content_manifest_json, sha256_digest,
-        ClientMutationRequest, ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind,
-        HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId, WalOp,
+        decode_wal_commit_envelope_zstd, encode_content_manifest_json,
+        encode_wal_commit_envelope_zstd, sha256_digest, ChangeSeq, ClientMutationRequest,
+        ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, FenceToken, HeadState,
+        HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,
+        WalCommitEnvelope, WalCommitPayload, WalOp,
     };
     use serde::Deserialize;
     use std::fs;
@@ -636,7 +194,6 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "loon-server-test".to_owned(),
             now_ms: 1_500,
-            metadata_state: MetadataState::default(),
         };
         let head = HeadState {
             namespace_id: loon_types::NamespaceId::from("ns-1"),
@@ -689,7 +246,6 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "loon-server-test".to_owned(),
             now_ms: 1_500,
-            metadata_state: MetadataState::default(),
         };
         let head = HeadState {
             namespace_id: loon_types::NamespaceId::from("ns-1"),
@@ -739,6 +295,7 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
 
         seed_head_and_lease(&store, &initial.head, &initial.lease);
+        seed_verified_basis(&store, &initial.head, &initial.metadata_state);
         seed_content_objects(
             &store,
             &initial.head.namespace_id,
@@ -761,7 +318,6 @@ mod tests {
                 writer_id: initial.lease.holder_id.clone(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
-                metadata_state: initial.metadata_state.clone(),
             },
         )
         .expect("execute client create-file mutation");
@@ -785,6 +341,7 @@ mod tests {
         assert_eq!(
             decoded_wal.payload.ops,
             vec![WalOp::CreateFile {
+                op_index: 0,
                 inode_id: expect.wal_object.payload.create_file_inode_id,
                 parent_inode: loon_types::InodeId(902),
                 display_name: "note.txt".to_owned(),
@@ -844,6 +401,7 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
 
         seed_head_and_lease(&store, &initial.head, &initial.lease);
+        seed_verified_basis(&store, &initial.head, &initial.metadata_state);
         seed_content_objects(
             &store,
             &initial.head.namespace_id,
@@ -866,7 +424,6 @@ mod tests {
                 writer_id: initial.lease.holder_id.clone(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
-                metadata_state: initial.metadata_state.clone(),
             },
         )
         .expect("execute client replace-file mutation");
@@ -890,6 +447,7 @@ mod tests {
         assert_eq!(
             decoded_wal.payload.ops,
             vec![WalOp::ReplaceFile {
+                op_index: 0,
                 inode_id: expect.wal_object.payload.inode_id,
                 base_revision: expect.wal_object.payload.base_revision_no,
                 content_manifest_digest: content_manifest_digest,
@@ -941,7 +499,6 @@ mod tests {
                 writer_id: initial.lease.holder_id,
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
-                metadata_state: initial.metadata_state,
             },
         )
         .expect_err("missing content block should reject create-file mutation");
@@ -1146,6 +703,239 @@ mod tests {
         store
             .put_if_absent(&namespace_lease(lease.namespace_id.as_str()), &lease_bytes)
             .expect("seed lease object");
+    }
+
+    fn seed_verified_basis(store: &LocalFsStore, head: &HeadState, metadata_state: &MetadataState) {
+        let basis_head = HeadState {
+            snapshot_hint_seq: Some(head.seq),
+            ..head.clone()
+        };
+        let checkpoint = prepare_checkpoint(&basis_head, metadata_state, "loon-server-test")
+            .expect("prepare checkpoint");
+        store
+            .put_overwrite(
+                &checkpoint.manifest.object_key,
+                &checkpoint.manifest.encoded_bytes,
+            )
+            .expect("seed checkpoint manifest");
+        for segment in &checkpoint.segments {
+            store
+                .put_overwrite(&segment.object_key, &segment.encoded_bytes)
+                .expect("seed checkpoint segment");
+        }
+
+        let head_envelope = HeadStateEnvelope::from_state(
+            ControlObjectKind::NamespaceHead,
+            "loon-server-test",
+            basis_head,
+        )
+        .expect("encode basis head envelope");
+        let head_bytes = serde_json::to_vec(&head_envelope).expect("serialize basis head envelope");
+        store
+            .put_overwrite(&namespace_head(head.namespace_id.as_str()), &head_bytes)
+            .expect("overwrite head with checkpoint-backed basis");
+    }
+
+    #[test]
+    fn execute_client_mutation_reconstructs_basis_from_checkpoint_and_wal_tail() {
+        let temp_dir = TestDir::new("client-mutation-basis-replay");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        let namespace_id = NamespaceId::from("ns-1");
+        let checkpoint_head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(40),
+            active_fence_token: FenceToken(8),
+            next_inode_id: loon_types::InodeId(501),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let current_head = HeadState {
+            seq: ChangeSeq(41),
+            ..checkpoint_head.clone()
+        };
+        let lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(8),
+            lease_expires_at_ms: 2_000,
+        };
+        let checkpoint_metadata = MetadataState {
+            inodes: vec![
+                loon_core::metadata::InodeRecord {
+                    inode_id: loon_types::InodeId(902),
+                    inode_kind: loon_types::InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                loon_core::metadata::InodeRecord {
+                    inode_id: loon_types::InodeId(42),
+                    inode_kind: loon_types::InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+            ],
+            revisions: vec![loon_core::metadata::RevisionRecord {
+                inode_id: loon_types::InodeId(42),
+                revision_no: RevisionNo(16),
+                committed_seq: ChangeSeq(16),
+                revision_op_index: 0,
+                content_manifest_digest: "sha256:report-v16".to_owned(),
+            }],
+            ..MetadataState::default()
+        };
+
+        seed_head_and_lease(&store, &current_head, &lease);
+        let checkpoint =
+            prepare_checkpoint(&checkpoint_head, &checkpoint_metadata, "loon-server-test")
+                .expect("prepare basis checkpoint");
+        store
+            .put_if_absent(
+                &checkpoint.manifest.object_key,
+                &checkpoint.manifest.encoded_bytes,
+            )
+            .expect("seed checkpoint manifest");
+        for segment in &checkpoint.segments {
+            store
+                .put_if_absent(&segment.object_key, &segment.encoded_bytes)
+                .expect("seed checkpoint segment");
+        }
+
+        let wal_payload = WalCommitPayload {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(41),
+            base_head_seq: ChangeSeq(40),
+            commit_id: "commit-41".to_owned(),
+            request_id: "client-req-prior".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            ops: vec![WalOp::ReplaceFile {
+                op_index: 0,
+                inode_id: loon_types::InodeId(42),
+                base_revision: RevisionNo(16),
+                content_manifest_digest: "sha256:report-v17".to_owned(),
+            }],
+            preconditions: vec![],
+        };
+        let wal_envelope =
+            WalCommitEnvelope::from_payload("loon-server-test", wal_payload).expect("build wal");
+        let wal_bytes =
+            encode_wal_commit_envelope_zstd(&wal_envelope).expect("encode wal envelope");
+        store
+            .put_if_absent(
+                &wal_commit(namespace_id.as_str(), 41, "commit-41"),
+                &wal_bytes,
+            )
+            .expect("seed prior wal");
+
+        seed_content_objects(
+            &store,
+            &namespace_id,
+            &SeededContentObjects {
+                manifest: SeededManifestObject {
+                    digest: "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                        .to_owned(),
+                    payload: ContentManifestPayload {
+                        namespace_id: namespace_id.clone(),
+                        file_size_bytes: 16,
+                        file_digest_sha256:
+                            "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                                .to_owned(),
+                        block_size_bytes: 16 * 1024 * 1024,
+                        blocks: vec![loon_types::ContentBlockDescriptor {
+                            content_digest_sha256:
+                                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                                    .to_owned(),
+                            plaintext_size_bytes: 16,
+                        }],
+                    },
+                },
+                blocks: vec![SeededBlockObject {
+                    digest:
+                        "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
+                            .to_owned(),
+                    body_utf8: "hello from loon\n".to_owned(),
+                }],
+            },
+        );
+
+        let request = ClientMutationRequest {
+            namespace_id,
+            client_request_id: "client-req-0001".to_owned(),
+            op: loon_types::ClientMutationOp::ReplaceFile {
+                inode_id: loon_types::InodeId(42),
+                base_revision_no: RevisionNo(17),
+                content_manifest_digest:
+                    "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+                        .to_owned(),
+            },
+        };
+
+        let executed = execute_client_mutation(
+            &store,
+            &request,
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+            },
+        )
+        .expect("execute mutation with reconstructed basis");
+
+        assert_eq!(executed.response.committed_seq, ChangeSeq(42));
+        assert_eq!(
+            executed
+                .resulting_metadata_state
+                .current_revision_head(loon_types::InodeId(42), ChangeSeq(42))
+                .unwrap()
+                .revision_no,
+            RevisionNo(18)
+        );
+    }
+
+    #[test]
+    fn execute_client_mutation_rejects_missing_checkpoint_basis() {
+        let temp_dir = TestDir::new("client-mutation-missing-basis");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        let head = HeadState {
+            namespace_id: NamespaceId::from("ns-1"),
+            seq: ChangeSeq(41),
+            active_fence_token: FenceToken(8),
+            next_inode_id: loon_types::InodeId(501),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let lease = LeaseState {
+            namespace_id: NamespaceId::from("ns-1"),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(8),
+            lease_expires_at_ms: 2_000,
+        };
+
+        seed_head_and_lease(&store, &head, &lease);
+        let request = ClientMutationRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            client_request_id: "client-req-0001".to_owned(),
+            op: loon_types::ClientMutationOp::CreateDir {
+                parent_inode_id: loon_types::InodeId(2),
+                display_name: "drafts".to_owned(),
+            },
+        };
+
+        let error = execute_client_mutation(
+            &store,
+            &request,
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+            },
+        )
+        .expect_err("missing checkpoint basis should fail closed");
+
+        assert!(matches!(
+            error,
+            ClientMutationExecutionError::Basis(
+                super::BasisLoadError::MissingCheckpointManifest { .. }
+            )
+        ));
     }
 
     fn seed_content_objects(

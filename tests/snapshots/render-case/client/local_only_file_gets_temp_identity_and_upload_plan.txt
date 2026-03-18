@@ -1,6 +1,6 @@
 command=render-case
 fixture=client/local_only_file_gets_temp_identity_and_upload_plan.yaml
-scenario=local_only_file_gets_temp_identity_and_upload_plan seed=None actions=1 faults=0 expect_keys=1
+scenario=local_only_file_gets_temp_identity_and_upload_plan kind=client schema_version=1 seed=None actions=1 faults=0 expect_keys=1
 
 [initial]
     local_only_state:

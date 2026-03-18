@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: delete_subtree_commit_appends_tombstone_row
 initial:
   head:

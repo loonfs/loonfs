@@ -9,7 +9,7 @@ use loon_client::state_db::{
 use loon_client::upload::upload_small_file_from_path;
 use loon_objectstore::fs::LocalFsStore;
 use loon_testkit::scenario::Scenario;
-use loon_types::{InodeId, NamespaceId};
+use loon_types::{InodeId, InodeKind, NamespaceId};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -213,6 +213,34 @@ fn seed_bound_download_state(
         tx.upsert_local_file(local_state)?;
         tx.upsert_sync_anchor(sync_anchor)?;
         for planned_action in planned_actions {
+            if planned_action.namespace_id != local_state.namespace_id
+                || planned_action.inode_id != local_state.inode_id
+            {
+                let inode_kind = if planned_action.decision == "materialize_remote_dir" {
+                    InodeKind::Dir
+                } else {
+                    InodeKind::File
+                };
+                tx.upsert_local_file(&LocalFileStateRow {
+                    namespace_id: planned_action.namespace_id.clone(),
+                    inode_id: planned_action.inode_id,
+                    inode_kind: inode_kind.clone(),
+                    content_digest: if inode_kind == InodeKind::Dir {
+                        None
+                    } else {
+                        Some(format!(
+                            "sha256:planned-{}-{}",
+                            planned_action.namespace_id.as_str(),
+                            planned_action.inode_id.0
+                        ))
+                    },
+                    parent_inode_id: Some(InodeId(2)),
+                    display_name: format!("inode-{}", planned_action.inode_id.0),
+                    exists_on_disk: inode_kind != InodeKind::Dir,
+                    dirty: false,
+                    last_local_change_ms: planned_action.created_at_ms,
+                })?;
+            }
             tx.upsert_planned_action(planned_action)?;
         }
         Ok(())

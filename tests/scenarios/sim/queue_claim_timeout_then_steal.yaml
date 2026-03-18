@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: sim
 name: queue_claim_timeout_then_steal
 seed: 9001
 initial:

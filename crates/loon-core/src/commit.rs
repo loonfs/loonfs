@@ -1,14 +1,16 @@
-use crate::invariants::INVARIANTS;
 use crate::metadata::MetadataState;
-use crate::namespace::head_and_lease_fence_tokens_agree;
-use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::keys::namespace_head;
-use loon_objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{
-    ChangeSeq, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
-    LeaseState, NamespaceId, RevisionNo,
+    ChangeSeq, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState,
+    NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
+
+mod frame;
+mod ordered;
+mod publish;
+
+pub use self::ordered::build_commit_plan;
+pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitRequest {
@@ -225,6 +227,14 @@ pub enum CommitValidationError {
         root_inode: InodeId,
         tombstone_seq: ChangeSeq,
     },
+    ReplaceFileRevisionOverflow {
+        inode_id: InodeId,
+        base_revision: RevisionNo,
+    },
+    RestoreRevisionOverflow {
+        inode_id: InodeId,
+        base_revision: RevisionNo,
+    },
     StaleWriterFenceToken {
         active: FenceToken,
         requested: FenceToken,
@@ -239,6 +249,7 @@ pub enum CommitValidationError {
     },
     SeqOverflow,
     NextInodeOverflow,
+    OpIndexOverflow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,690 +272,10 @@ pub enum CommitHeadPublishError {
     Store(String),
 }
 
-pub fn build_commit_plan(
-    request: &CommitRequest,
-    context: &CommitValidationContext,
-) -> Result<CommitPlan, CommitValidationError> {
-    if request.ops.is_empty() {
-        return Err(CommitValidationError::EmptyCommit);
-    }
-
-    if request.namespace_id != context.head.namespace_id
-        || request.namespace_id != context.lease.namespace_id
-    {
-        return Err(CommitValidationError::NamespaceMismatch);
-    }
-
-    if context.head.namespace_id != context.lease.namespace_id {
-        return Err(CommitValidationError::HeadLeaseNamespaceMismatch);
-    }
-
-    if !head_and_lease_fence_tokens_agree(&context.head, &context.lease) {
-        return Err(CommitValidationError::HeadLeaseFenceMismatch {
-            head: context.head.active_fence_token,
-            lease: context.lease.fence_token,
-        });
-    }
-
-    if request.planned_head_seq != context.head.seq {
-        return Err(CommitValidationError::PlannedHeadSeqMismatch {
-            expected: context.head.seq,
-            actual: request.planned_head_seq,
-        });
-    }
-
-    validate_head_seq_preconditions(&request.preconditions, request.planned_head_seq)?;
-
-    if request.writer_fence_token != context.head.active_fence_token {
-        return Err(CommitValidationError::StaleWriterFenceToken {
-            active: context.head.active_fence_token,
-            requested: request.writer_fence_token,
-        });
-    }
-
-    if request.writer_id != context.lease.holder_id {
-        return Err(CommitValidationError::LeaseHolderMismatch {
-            expected: context.lease.holder_id.clone(),
-            actual: request.writer_id.clone(),
-        });
-    }
-
-    if !context.lease.is_valid_at(context.now_ms) {
-        return Err(CommitValidationError::LeaseExpired {
-            lease_expires_at_ms: context.lease.lease_expires_at_ms,
-            now_ms: context.now_ms,
-        });
-    }
-
-    let mut checked_invariants = INVARIANTS
-        .iter()
-        .copied()
-        .filter(|name| {
-            matches!(
-                *name,
-                "stale_writer_cannot_publish"
-                    | "head_and_lease_fence_tokens_agree"
-                    | "next_inode_id_is_monotonic"
-            )
-        })
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    validate_metadata_preconditions(
-        request,
-        &context.metadata_state,
-        request.planned_head_seq,
-        &mut checked_invariants,
-    )?;
-
-    let next_seq = context
-        .head
-        .seq
-        .0
-        .checked_add(1)
-        .map(ChangeSeq)
-        .ok_or(CommitValidationError::SeqOverflow)?;
-    let create_op_count = request
-        .ops
-        .iter()
-        .filter(|op| matches!(op, CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. }))
-        .count();
-    let allocated_inode_ids = (0..create_op_count)
-        .map(|offset| {
-            let offset =
-                u64::try_from(offset).map_err(|_| CommitValidationError::NextInodeOverflow)?;
-            context
-                .head
-                .next_inode_id
-                .0
-                .checked_add(offset)
-                .map(InodeId)
-                .ok_or(CommitValidationError::NextInodeOverflow)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let resulting_next_inode_id = context
-        .head
-        .next_inode_id
-        .0
-        .checked_add(
-            u64::try_from(create_op_count).map_err(|_| CommitValidationError::NextInodeOverflow)?,
-        )
-        .map(InodeId)
-        .ok_or(CommitValidationError::NextInodeOverflow)?;
-
-    let durable_content_required = request.ops.iter().any(|op| {
-        matches!(
-            op,
-            CommitOp::CreateFile { .. } | CommitOp::ReplaceFile { .. }
-        )
-    });
-    if create_op_count > 0 {
-        push_unique_invariant(
-            &mut checked_invariants,
-            "create_mutation_consumes_next_inode_id",
-        );
-    }
-    if request
-        .ops
-        .iter()
-        .any(|op| matches!(op, CommitOp::CreateFile { .. }))
-    {
-        push_unique_invariant(
-            &mut checked_invariants,
-            "create_file_requires_durable_content",
-        );
-    }
-    if request
-        .ops
-        .iter()
-        .any(|op| matches!(op, CommitOp::ReplaceFile { .. }))
-    {
-        push_unique_invariant(
-            &mut checked_invariants,
-            "replace_file_requires_durable_content",
-        );
-    }
-
-    Ok(CommitPlan {
-        namespace_id: request.namespace_id.clone(),
-        commit_id: request.request_id.clone(),
-        base_head_seq: request.planned_head_seq,
-        next_seq,
-        allocated_inode_ids,
-        resulting_next_inode_id,
-        durable_content_required,
-        wal_object_must_be_written: true,
-        head_cas_must_succeed: true,
-        metadata_preconditions: request.preconditions.clone(),
-        checked_invariants,
-    })
-}
-
-pub fn prepare_commit_head_publish(
-    current_head: &HeadState,
-    plan: &CommitPlan,
-    writer_version: &str,
-) -> Result<PreparedCommitHeadPublish, CommitHeadPublishError> {
-    if writer_version.trim().is_empty() {
-        return Err(CommitHeadPublishError::EmptyWriterVersion);
-    }
-
-    if current_head.namespace_id != plan.namespace_id {
-        return Err(CommitHeadPublishError::NamespaceMismatch {
-            head: current_head.namespace_id.clone(),
-            plan: plan.namespace_id.clone(),
-        });
-    }
-
-    if current_head.seq != plan.base_head_seq {
-        return Err(CommitHeadPublishError::PlanBaseHeadSeqMismatch {
-            head: current_head.seq,
-            plan: plan.base_head_seq,
-        });
-    }
-
-    if current_head.seq.0.checked_add(1).map(ChangeSeq) != Some(plan.next_seq) {
-        return Err(CommitHeadPublishError::PlanNextSeqMismatch {
-            head: current_head.seq,
-            plan: plan.next_seq,
-        });
-    }
-
-    let resulting_head = HeadState {
-        namespace_id: current_head.namespace_id.clone(),
-        seq: plan.next_seq,
-        active_fence_token: current_head.active_fence_token,
-        next_inode_id: plan.resulting_next_inode_id,
-        snapshot_hint_seq: current_head.snapshot_hint_seq,
-        retention_floor_seq: current_head.retention_floor_seq,
-    };
-    let envelope = HeadStateEnvelope::from_state(
-        ControlObjectKind::NamespaceHead,
-        writer_version,
-        resulting_head.clone(),
-    )
-    .map_err(|err| CommitHeadPublishError::Codec(err.to_string()))?;
-    let encoded_bytes = serde_json::to_vec(&envelope)
-        .map_err(|err| CommitHeadPublishError::Codec(err.to_string()))?;
-
-    let mut checked_invariants = plan.checked_invariants.clone();
-    push_unique_invariant(&mut checked_invariants, "head_publish_requires_durable_wal");
-
-    Ok(PreparedCommitHeadPublish {
-        object_key: namespace_head(current_head.namespace_id.as_str()),
-        resulting_head,
-        envelope,
-        encoded_bytes,
-        checked_invariants,
-    })
-}
-
-pub fn publish_commit_head<S: ObjectStore>(
-    store: &S,
-    expected_head_etag: &str,
-    prepared: &PreparedCommitHeadPublish,
-) -> Result<ObjectMetadata, CommitHeadPublishError> {
-    if expected_head_etag.trim().is_empty() {
-        return Err(CommitHeadPublishError::EmptyExpectedHeadEtag);
-    }
-
-    store
-        .compare_and_swap(
-            &prepared.object_key,
-            expected_head_etag,
-            &prepared.encoded_bytes,
-        )
-        .map_err(map_object_store_error)
-}
-
-fn validate_head_seq_preconditions(
-    preconditions: &[Precondition],
-    planned_head_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let mut saw_head_seq_precondition = false;
-
-    for precondition in preconditions {
-        if let Precondition::HeadSeqIs(actual) = precondition {
-            saw_head_seq_precondition = true;
-            if *actual != planned_head_seq {
-                return Err(CommitValidationError::ConflictingHeadSeqPrecondition {
-                    expected: planned_head_seq,
-                    actual: *actual,
-                });
-            }
-        }
-    }
-
-    if !saw_head_seq_precondition {
-        return Err(CommitValidationError::MissingHeadSeqPrecondition {
-            expected: planned_head_seq,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_metadata_preconditions(
-    request: &CommitRequest,
-    metadata_state: &MetadataState,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
-) -> Result<(), CommitValidationError> {
-    for op in &request.ops {
-        match op {
-            CommitOp::CreateDir {
-                parent_inode,
-                display_name,
-            }
-            | CommitOp::CreateFile {
-                parent_inode,
-                display_name,
-                ..
-            } => {
-                validate_child_name_absent(metadata_state, *parent_inode, display_name, base_seq)?;
-                validate_ancestors_not_subtree_deleted(
-                    metadata_state,
-                    *parent_inode,
-                    base_seq,
-                    checked_invariants,
-                    true,
-                )?;
-            }
-            CommitOp::ReplaceFile {
-                inode_id,
-                base_revision,
-                ..
-            } => {
-                validate_inode_revision_is(metadata_state, *inode_id, *base_revision, base_seq)?;
-                validate_ancestors_not_subtree_deleted(
-                    metadata_state,
-                    *inode_id,
-                    base_seq,
-                    checked_invariants,
-                    false,
-                )?;
-            }
-            CommitOp::Rename {
-                inode_id,
-                new_parent_inode,
-                new_display_name,
-            } => {
-                validate_rename_source(metadata_state, *inode_id, base_seq)?;
-                validate_rename_target_name_absent(
-                    metadata_state,
-                    *new_parent_inode,
-                    new_display_name,
-                    base_seq,
-                )?;
-                validate_rename_does_not_cycle(
-                    metadata_state,
-                    *inode_id,
-                    *new_parent_inode,
-                    base_seq,
-                )?;
-                validate_rename_inode_not_covered(
-                    metadata_state,
-                    *inode_id,
-                    base_seq,
-                    checked_invariants,
-                )?;
-                validate_rename_target_parent_not_covered(
-                    metadata_state,
-                    *new_parent_inode,
-                    base_seq,
-                    checked_invariants,
-                )?;
-            }
-            CommitOp::DeleteSubtree { root_inode } => {
-                validate_delete_subtree_root(metadata_state, *root_inode, base_seq)?;
-                validate_delete_subtree_not_covered(
-                    metadata_state,
-                    *root_inode,
-                    base_seq,
-                    checked_invariants,
-                )?;
-            }
-            CommitOp::RestoreRevision {
-                inode_id,
-                base_revision,
-                restore_from_revision,
-            } => {
-                validate_restore_revision(
-                    metadata_state,
-                    *inode_id,
-                    *base_revision,
-                    *restore_from_revision,
-                    base_seq,
-                )?;
-                validate_restore_revision_not_covered(
-                    metadata_state,
-                    *inode_id,
-                    base_seq,
-                    checked_invariants,
-                )?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_child_name_absent(
-    metadata_state: &MetadataState,
-    parent_inode: InodeId,
-    display_name: &str,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::CreateParentMissing { parent_inode })?;
-    if parent.inode_kind != InodeKind::Dir {
-        return Err(CommitValidationError::CreateParentNotDirectory {
-            parent_inode,
-            actual_kind: parent.inode_kind,
-        });
-    }
-
-    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
-        return Err(CommitValidationError::CreateChildNameCollision {
-            parent_inode,
-            name_key: display_name.to_owned(),
-            child_inode: existing.child_inode_id,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_inode_revision_is(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    expected_revision: RevisionNo,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::ReplaceFileInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::File {
-        return Err(CommitValidationError::ReplaceFileInodeNotFile {
-            inode_id,
-            actual_kind: inode.inode_kind,
-        });
-    }
-
-    let actual_revision = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
-        .map(|revision| revision.revision_no);
-    if actual_revision != Some(expected_revision) {
-        return Err(CommitValidationError::ReplaceFileBaseRevisionMismatch {
-            inode_id,
-            expected: expected_revision,
-            actual: actual_revision,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_ancestors_not_subtree_deleted(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
-    is_create: bool,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
-        return if is_create {
-            Err(CommitValidationError::CreateUnderSubtreeTombstone {
-                parent_inode: inode_id,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            })
-        } else {
-            Err(CommitValidationError::ReplaceFileUnderSubtreeTombstone {
-                inode_id,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            })
-        };
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
-    );
-    Ok(())
-}
-
-fn validate_delete_subtree_root(
-    metadata_state: &MetadataState,
-    root_inode: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(root_inode, base_seq)
-        .ok_or(CommitValidationError::DeleteSubtreeRootMissing { root_inode })?;
-    if inode.inode_kind != InodeKind::Dir {
-        return Err(CommitValidationError::DeleteSubtreeRootNotDirectory {
-            root_inode,
-            actual_kind: inode.inode_kind,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_delete_subtree_not_covered(
-    metadata_state: &MetadataState,
-    root_inode: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(root_inode, base_seq) {
-        return Err(CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
-            root_inode,
-            covering_root_inode: tombstone.root_inode_id,
-            tombstone_seq: tombstone.tombstone_seq,
-        });
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
-    );
-    Ok(())
-}
-
-fn validate_rename_source(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
-    if metadata_state
-        .current_parent_binding_for_child(inode_id, base_seq)
-        .is_none()
-    {
-        return Err(CommitValidationError::RenameSourceBindingMissing { inode_id });
-    }
-
-    Ok(())
-}
-
-fn validate_rename_target_name_absent(
-    metadata_state: &MetadataState,
-    parent_inode: InodeId,
-    display_name: &str,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::RenameTargetParentMissing { parent_inode })?;
-    if parent.inode_kind != InodeKind::Dir {
-        return Err(CommitValidationError::RenameTargetParentNotDirectory {
-            parent_inode,
-            actual_kind: parent.inode_kind,
-        });
-    }
-
-    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
-        return Err(CommitValidationError::RenameTargetNameCollision {
-            parent_inode,
-            name_key: display_name.to_owned(),
-            child_inode: existing.child_inode_id,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_rename_does_not_cycle(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    new_parent_inode: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::Dir {
-        return Ok(());
-    }
-    if metadata_state.would_create_directory_cycle(inode_id, new_parent_inode, base_seq) {
-        return Err(CommitValidationError::RenameWouldCycleDirectory {
-            inode_id,
-            new_parent_inode,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_rename_inode_not_covered(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
-        return Err(CommitValidationError::RenameInodeUnderSubtreeTombstone {
-            inode_id,
-            root_inode: tombstone.root_inode_id,
-            tombstone_seq: tombstone.tombstone_seq,
-        });
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
-    );
-    Ok(())
-}
-
-fn validate_rename_target_parent_not_covered(
-    metadata_state: &MetadataState,
-    parent_inode: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(parent_inode, base_seq) {
-        return Err(
-            CommitValidationError::RenameTargetParentUnderSubtreeTombstone {
-                parent_inode,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            },
-        );
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
-    );
-    Ok(())
-}
-
-fn validate_restore_revision(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    base_revision: RevisionNo,
-    restore_from_revision: RevisionNo,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::RestoreRevisionInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::File {
-        return Err(CommitValidationError::RestoreRevisionInodeNotFile {
-            inode_id,
-            actual_kind: inode.inode_kind,
-        });
-    }
-
-    let actual_revision = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
-        .map(|revision| revision.revision_no);
-    if actual_revision != Some(base_revision) {
-        return Err(CommitValidationError::RestoreRevisionBaseRevisionMismatch {
-            inode_id,
-            expected: base_revision,
-            actual: actual_revision,
-        });
-    }
-
-    if metadata_state
-        .revision_at_seq(inode_id, restore_from_revision, base_seq)
-        .is_none()
-    {
-        return Err(CommitValidationError::RestoreRevisionSourceMissing {
-            inode_id,
-            restore_from_revision,
-        });
-    }
-
-    if restore_from_revision >= base_revision {
-        return Err(CommitValidationError::RestoreRevisionSourceNotHistorical {
-            inode_id,
-            base_revision,
-            restore_from_revision,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_restore_revision_not_covered(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
-        return Err(
-            CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
-                inode_id,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            },
-        );
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
-    );
-    Ok(())
-}
-
-fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
+pub(crate) fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
     if !invariants.iter().any(|existing| existing == name) {
         invariants.push(name.to_owned());
     }
-}
-
-fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
-    CommitHeadPublishError::Store(err.to_string())
 }
 
 #[cfg(test)]
@@ -1739,6 +1070,235 @@ mod tests {
         assert_eq!(stored.state.next_inode_id, InodeId(502));
     }
 
+    #[test]
+    fn build_commit_plan_accepts_ordered_multi_op_create_then_child_create() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-multi-create".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![
+                CommitOp::CreateDir {
+                    parent_inode: InodeId(2),
+                    display_name: "drafts".to_owned(),
+                },
+                CommitOp::CreateFile {
+                    parent_inode: InodeId(501),
+                    display_name: "note.txt".to_owned(),
+                    content_manifest_digest: "sha256:note-v1".to_owned(),
+                },
+            ],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(41))],
+        };
+
+        let plan = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, create_parent_metadata_state(InodeId(2))),
+        )
+        .expect("ordered multi-op create should validate");
+
+        assert_eq!(plan.next_seq, ChangeSeq(42));
+        assert_eq!(plan.allocated_inode_ids, vec![InodeId(501), InodeId(502)]);
+        assert_eq!(plan.resulting_next_inode_id, InodeId(503));
+    }
+
+    #[test]
+    fn build_commit_plan_rejects_duplicate_child_name_create_in_one_request() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-multi-collision".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![
+                CommitOp::CreateFile {
+                    parent_inode: InodeId(2),
+                    display_name: "note.txt".to_owned(),
+                    content_manifest_digest: "sha256:note-a".to_owned(),
+                },
+                CommitOp::CreateDir {
+                    parent_inode: InodeId(2),
+                    display_name: "note.txt".to_owned(),
+                },
+            ],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(41))],
+        };
+
+        let error = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, create_parent_metadata_state(InodeId(2))),
+        )
+        .expect_err("second create should see same-request name collision");
+
+        assert_eq!(
+            error,
+            CommitValidationError::CreateChildNameCollision {
+                parent_inode: InodeId(2),
+                name_key: "note.txt".to_owned(),
+                child_inode: InodeId(501),
+            }
+        );
+    }
+
+    #[test]
+    fn build_commit_plan_rejects_double_replace_in_one_request() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-double-replace".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![
+                CommitOp::ReplaceFile {
+                    inode_id: InodeId(42),
+                    base_revision: RevisionNo(7),
+                    content_manifest_digest: "sha256:report-v8".to_owned(),
+                },
+                CommitOp::ReplaceFile {
+                    inode_id: InodeId(42),
+                    base_revision: RevisionNo(7),
+                    content_manifest_digest: "sha256:report-v9".to_owned(),
+                },
+            ],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(41))],
+        };
+
+        let error = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, replace_metadata_state()),
+        )
+        .expect_err("second replace should see advanced same-request revision");
+
+        assert_eq!(
+            error,
+            CommitValidationError::ReplaceFileBaseRevisionMismatch {
+                inode_id: InodeId(42),
+                expected: RevisionNo(7),
+                actual: Some(RevisionNo(8)),
+            }
+        );
+    }
+
+    #[test]
+    fn build_commit_plan_rejects_rename_plus_create_into_same_slot() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-rename-then-create".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![
+                CommitOp::Rename {
+                    inode_id: InodeId(42),
+                    new_parent_inode: InodeId(7),
+                    new_display_name: "archive.txt".to_owned(),
+                },
+                CommitOp::CreateFile {
+                    parent_inode: InodeId(7),
+                    display_name: "archive.txt".to_owned(),
+                    content_manifest_digest: "sha256:archive".to_owned(),
+                },
+            ],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(41))],
+        };
+
+        let error = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, rename_metadata_state()),
+        )
+        .expect_err("create should see rename-applied slot collision");
+
+        assert_eq!(
+            error,
+            CommitValidationError::CreateChildNameCollision {
+                parent_inode: InodeId(7),
+                name_key: "archive.txt".to_owned(),
+                child_inode: InodeId(42),
+            }
+        );
+    }
+
+    #[test]
+    fn build_commit_plan_rejects_restore_plus_replace_on_same_inode() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-restore-then-replace".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(52),
+            ops: vec![
+                CommitOp::RestoreRevision {
+                    inode_id: InodeId(42),
+                    base_revision: RevisionNo(5),
+                    restore_from_revision: RevisionNo(3),
+                },
+                CommitOp::ReplaceFile {
+                    inode_id: InodeId(42),
+                    base_revision: RevisionNo(5),
+                    content_manifest_digest: "sha256:report-v6".to_owned(),
+                },
+            ],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(52))],
+        };
+
+        let error = build_commit_plan(
+            &request,
+            &validation_context_with_metadata_at_seq(
+                999,
+                ChangeSeq(52),
+                restore_revision_metadata_state(),
+            ),
+        )
+        .expect_err("replace should see same-request restored revision head");
+
+        assert_eq!(
+            error,
+            CommitValidationError::ReplaceFileBaseRevisionMismatch {
+                inode_id: InodeId(42),
+                expected: RevisionNo(5),
+                actual: Some(RevisionNo(6)),
+            }
+        );
+    }
+
+    #[test]
+    fn build_commit_plan_rejects_delete_plus_descendant_mutation_in_one_request() {
+        let request = CommitRequest {
+            namespace_id: NamespaceId::from("ns-1"),
+            request_id: "req-delete-then-mutate".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            planned_head_seq: ChangeSeq(41),
+            ops: vec![
+                CommitOp::DeleteSubtree {
+                    root_inode: InodeId(7),
+                },
+                CommitOp::ReplaceFile {
+                    inode_id: InodeId(42),
+                    base_revision: RevisionNo(1),
+                    content_manifest_digest: "sha256:report-v2".to_owned(),
+                },
+            ],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(41))],
+        };
+
+        let error = build_commit_plan(
+            &request,
+            &validation_context_with_metadata(999, delete_root_metadata_state()),
+        )
+        .expect_err("descendant mutation should see same-request tombstone");
+
+        assert_eq!(
+            error,
+            CommitValidationError::ReplaceFileUnderSubtreeTombstone {
+                inode_id: InodeId(42),
+                root_inode: InodeId(7),
+                tombstone_seq: ChangeSeq(42),
+            }
+        );
+    }
+
     fn validation_context(now_ms: u64) -> CommitValidationContext {
         validation_context_with_metadata(now_ms, MetadataState::default())
     }
@@ -1808,11 +1368,13 @@ mod tests {
                 display_name: "note.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(41),
+                bind_op_index: 0,
             }],
             revisions: vec![RevisionRecord {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(17),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:existing-note".to_owned(),
             }],
             subtree_tombstones: Vec::new(),
@@ -1831,6 +1393,7 @@ mod tests {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(7),
                 committed_seq: ChangeSeq(41),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:manifest".to_owned(),
             }],
             subtree_tombstones: Vec::new(),
@@ -1850,12 +1413,14 @@ mod tests {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(16),
                     committed_seq: ChangeSeq(35),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:report-v16".to_owned(),
                 },
                 RevisionRecord {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(17),
                     committed_seq: ChangeSeq(41),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:report-v17".to_owned(),
                 },
             ],
@@ -1889,6 +1454,7 @@ mod tests {
                     display_name: "docs".to_owned(),
                     child_inode_id: InodeId(7),
                     bind_seq: ChangeSeq(5),
+                    bind_op_index: 0,
                 },
                 DirentryRecord {
                     parent_inode_id: InodeId(7),
@@ -1896,12 +1462,14 @@ mod tests {
                     display_name: "report.txt".to_owned(),
                     child_inode_id: InodeId(42),
                     bind_seq: ChangeSeq(17),
+                    bind_op_index: 0,
                 },
             ],
             revisions: vec![RevisionRecord {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(17),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v1".to_owned(),
             }],
             subtree_tombstones: Vec::new(),
@@ -1928,18 +1496,21 @@ mod tests {
                 display_name: "report.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(9),
+                bind_op_index: 0,
             }],
             revisions: vec![
                 RevisionRecord {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(3),
                     committed_seq: ChangeSeq(17),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:report-v3".to_owned(),
                 },
                 RevisionRecord {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(5),
                     committed_seq: ChangeSeq(52),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:report-v5".to_owned(),
                 },
             ],
@@ -1973,6 +1544,7 @@ mod tests {
                     display_name: "docs".to_owned(),
                     child_inode_id: InodeId(7),
                     bind_seq: ChangeSeq(5),
+                    bind_op_index: 0,
                 },
                 DirentryRecord {
                     parent_inode_id: InodeId(2),
@@ -1980,12 +1552,14 @@ mod tests {
                     display_name: "report.txt".to_owned(),
                     child_inode_id: InodeId(42),
                     bind_seq: ChangeSeq(17),
+                    bind_op_index: 0,
                 },
             ],
             revisions: vec![RevisionRecord {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(5),
                 committed_seq: ChangeSeq(52),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v5".to_owned(),
             }],
             subtree_tombstones: Vec::new(),
@@ -2005,6 +1579,7 @@ mod tests {
             display_name: "archive.txt".to_owned(),
             child_inode_id: InodeId(88),
             bind_seq: ChangeSeq(21),
+            bind_op_index: 0,
         });
         metadata_state
     }
@@ -2035,6 +1610,7 @@ mod tests {
                     display_name: "docs".to_owned(),
                     child_inode_id: InodeId(7),
                     bind_seq: ChangeSeq(5),
+                    bind_op_index: 0,
                 },
                 DirentryRecord {
                     parent_inode_id: InodeId(7),
@@ -2042,6 +1618,7 @@ mod tests {
                     display_name: "archive".to_owned(),
                     child_inode_id: InodeId(9),
                     bind_seq: ChangeSeq(8),
+                    bind_op_index: 0,
                 },
             ],
             revisions: Vec::new(),
@@ -2056,6 +1633,7 @@ mod tests {
             .push(SubtreeTombstoneRecord {
                 root_inode_id: InodeId(7),
                 tombstone_seq: ChangeSeq(41),
+                tombstone_op_index: 0,
             });
         metadata_state
     }
@@ -2086,6 +1664,7 @@ mod tests {
                     display_name: "docs".to_owned(),
                     child_inode_id: InodeId(7),
                     bind_seq: ChangeSeq(5),
+                    bind_op_index: 0,
                 },
                 DirentryRecord {
                     parent_inode_id: InodeId(7),
@@ -2093,6 +1672,7 @@ mod tests {
                     display_name: "report.txt".to_owned(),
                     child_inode_id: InodeId(42),
                     bind_seq: ChangeSeq(9),
+                    bind_op_index: 0,
                 },
             ],
             revisions: vec![
@@ -2100,18 +1680,21 @@ mod tests {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(3),
                     committed_seq: ChangeSeq(17),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:report-v3".to_owned(),
                 },
                 RevisionRecord {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(5),
                     committed_seq: ChangeSeq(52),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:report-v5".to_owned(),
                 },
             ],
             subtree_tombstones: vec![SubtreeTombstoneRecord {
                 root_inode_id: InodeId(7),
                 tombstone_seq: ChangeSeq(52),
+                tombstone_op_index: 0,
             }],
         }
     }

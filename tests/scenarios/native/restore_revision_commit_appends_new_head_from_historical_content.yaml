@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: restore_revision_commit_appends_new_head_from_historical_content
 initial:
   head:

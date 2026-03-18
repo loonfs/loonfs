@@ -15,7 +15,8 @@ impl ModelMetadataState {
         let mut metadata_state = self.clone();
         let mut checked_invariants = Vec::new();
 
-        for mutation in mutations {
+        for (op_index, mutation) in mutations.iter().enumerate() {
+            let op_index = u32::try_from(op_index).expect("mutation index should fit in u32");
             match mutation {
                 ModelMetadataMutation::CreateDir {
                     inode_id,
@@ -33,6 +34,7 @@ impl ModelMetadataState {
                         display_name: display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
+                        bind_op_index: op_index,
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
@@ -56,11 +58,13 @@ impl ModelMetadataState {
                         display_name: display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
+                        bind_op_index: op_index,
                     });
                     metadata_state.revisions.push(ModelRevisionRecord {
                         inode_id: *inode_id,
                         revision_no: RevisionNo(1),
                         committed_seq,
+                        revision_op_index: op_index,
                         content_manifest_digest: content_manifest_digest.clone(),
                     });
                     push_unique_invariant(
@@ -84,6 +88,7 @@ impl ModelMetadataState {
                         inode_id: *inode_id,
                         revision_no: next_revision_no,
                         committed_seq,
+                        revision_op_index: op_index,
                         content_manifest_digest: content_manifest_digest.clone(),
                     });
                     push_unique_invariant(
@@ -102,6 +107,7 @@ impl ModelMetadataState {
                         display_name: new_display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
+                        bind_op_index: op_index,
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
@@ -130,6 +136,7 @@ impl ModelMetadataState {
                         inode_id: *inode_id,
                         revision_no: next_revision_no,
                         committed_seq,
+                        revision_op_index: op_index,
                         content_manifest_digest: source_revision.content_manifest_digest,
                     });
                     push_unique_invariant(
@@ -143,6 +150,7 @@ impl ModelMetadataState {
                         .push(ModelSubtreeTombstoneRecord {
                             root_inode_id: *root_inode_id,
                             tombstone_seq: committed_seq,
+                            tombstone_op_index: op_index,
                         });
                     push_unique_invariant(
                         &mut checked_invariants,
@@ -173,7 +181,13 @@ impl ModelMetadataState {
         self.revisions
             .iter()
             .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
-            .max_by_key(|revision| revision.revision_no)
+            .max_by_key(|revision| {
+                (
+                    revision.revision_no,
+                    revision.committed_seq,
+                    revision.revision_op_index,
+                )
+            })
             .cloned()
     }
 
@@ -190,7 +204,7 @@ impl ModelMetadataState {
                     && revision.revision_no == revision_no
                     && revision.committed_seq <= base_seq
             })
-            .max_by_key(|revision| revision.committed_seq)
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_op_index))
             .cloned()
     }
 
@@ -207,7 +221,7 @@ impl ModelMetadataState {
                     && direntry.name_key == name_key
                     && direntry.bind_seq <= base_seq
             })
-            .max_by_key(|direntry| direntry.bind_seq)
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_op_index))
             .cloned()
     }
 
@@ -229,7 +243,7 @@ impl ModelMetadataState {
             .filter(|tombstone| {
                 tombstone.root_inode_id == root_inode_id && tombstone.tombstone_seq <= base_seq
             })
-            .max_by_key(|tombstone| tombstone.tombstone_seq)
+            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_op_index))
             .cloned()
     }
 
@@ -472,6 +486,7 @@ impl ModelMetadataState {
         if latest_binding.parent_inode_id != direntry.parent_inode_id
             || latest_binding.name_key != direntry.name_key
             || latest_binding.bind_seq != direntry.bind_seq
+            || latest_binding.bind_op_index != direntry.bind_op_index
         {
             return None;
         }
@@ -489,7 +504,7 @@ impl ModelMetadataState {
             .filter(|direntry| {
                 direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
             })
-            .max_by_key(|direntry| direntry.bind_seq)
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_op_index))
             .cloned()
     }
 

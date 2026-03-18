@@ -262,12 +262,15 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
     let mut allocated_inode_ids = plan.allocated_inode_ids.iter().copied();
     let mut wal_ops = Vec::with_capacity(request.ops.len());
 
-    for op in &request.ops {
+    for (op_index, op) in request.ops.iter().enumerate() {
+        let op_index = u32::try_from(op_index)
+            .map_err(|_| WalBuildError::Codec("op index overflow".to_owned()))?;
         let wal_op = match op {
             CommitOp::CreateDir {
                 parent_inode,
                 display_name,
             } => WalOp::CreateDir {
+                op_index,
                 inode_id: allocated_inode_ids.next().ok_or(
                     WalBuildError::AllocatedInodeCountMismatch {
                         request_create_ops,
@@ -282,6 +285,7 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
                 display_name,
                 content_manifest_digest,
             } => WalOp::CreateFile {
+                op_index,
                 inode_id: allocated_inode_ids.next().ok_or(
                     WalBuildError::AllocatedInodeCountMismatch {
                         request_create_ops,
@@ -297,6 +301,7 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
                 base_revision,
                 content_manifest_digest,
             } => WalOp::ReplaceFile {
+                op_index,
                 inode_id: *inode_id,
                 base_revision: *base_revision,
                 content_manifest_digest: content_manifest_digest.clone(),
@@ -306,11 +311,13 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
                 new_parent_inode,
                 new_display_name,
             } => WalOp::Rename {
+                op_index,
                 inode_id: *inode_id,
                 new_parent_inode: *new_parent_inode,
                 new_display_name: new_display_name.clone(),
             },
             CommitOp::DeleteSubtree { root_inode } => WalOp::DeleteSubtree {
+                op_index,
                 root_inode: *root_inode,
             },
             CommitOp::RestoreRevision {
@@ -318,6 +325,7 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
                 base_revision,
                 restore_from_revision,
             } => WalOp::RestoreRevision {
+                op_index,
                 inode_id: *inode_id,
                 base_revision: *base_revision,
                 restore_from_revision: *restore_from_revision,
@@ -512,6 +520,7 @@ mod tests {
         assert_eq!(
             decoded.payload.ops,
             vec![WalOp::ReplaceFile {
+                op_index: 0,
                 inode_id: InodeId(42),
                 base_revision: RevisionNo(7),
                 content_manifest_digest: "sha256:manifest".to_owned(),
@@ -564,6 +573,7 @@ mod tests {
         assert_eq!(
             decoded.payload.ops,
             vec![WalOp::CreateFile {
+                op_index: 0,
                 inode_id: InodeId(501),
                 parent_inode: InodeId(902),
                 display_name: "note.txt".to_owned(),
@@ -626,11 +636,13 @@ mod tests {
             FenceToken(8),
             vec![
                 WalOp::CreateDir {
+                    op_index: 0,
                     inode_id: InodeId(501),
                     parent_inode: InodeId(2),
                     display_name: "drafts".to_owned(),
                 },
                 WalOp::CreateFile {
+                    op_index: 0,
                     inode_id: InodeId(502),
                     parent_inode: InodeId(501),
                     display_name: "note.txt".to_owned(),
@@ -818,6 +830,7 @@ mod tests {
             commit_id,
             writer_fence_token,
             vec![WalOp::DeleteSubtree {
+                op_index: 0,
                 root_inode: InodeId(2),
             }],
         )
@@ -897,6 +910,7 @@ mod tests {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(7),
                 committed_seq: ChangeSeq(7),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:manifest".to_owned(),
             }],
             ..MetadataState::default()

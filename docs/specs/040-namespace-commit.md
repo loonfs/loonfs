@@ -24,6 +24,56 @@ readers seeing half-applied metadata.
 6. CAS-update the head object
 7. return success only after step 6 succeeds
 
+## Authoritative mutation basis rule
+
+The authoritative server-side mutation path must reconstruct or verify its metadata basis from
+durable namespace state. It must not accept arbitrary caller-supplied metadata as authority.
+
+Rules:
+
+- load and verify `head.json`
+- load and verify the active lease object
+- if `head.snapshot_hint_seq` is present, load that verified checkpoint and replay the contiguous
+  WAL tail through `head.seq`
+- if `head.snapshot_hint_seq` is absent, replay contiguous WAL from `HeadState::initial(...)`
+  through `head.seq`
+- reject the mutation if basis reconstruction is missing, partial, stale, or does not reproduce the
+  current head exactly
+
+Why it exists:
+commit validation is only authoritative when the metadata basis is proven fresh and complete for
+the current head.
+
+Failure modes prevented:
+
+- validating a mutation against stale cached metadata
+- treating partial metadata state as if it were authoritative
+- allowing callers to bypass checkpoint/WAL replay rules by injecting process-local state
+
+## Same-request operation ordering rule
+
+`CommitRequest.ops` remains a vector in v1, and its vector position is the authoritative
+within-request order for operations that publish at the same namespace `seq`.
+
+Rules:
+
+- commit validation must evaluate operations sequentially against one ephemeral metadata state
+  advanced by earlier accepted operations in the same request
+- the WAL must preserve that order with `WalOp.op_index`
+- metadata families and checkpoint rows must preserve the same order with the matching per-family
+  same-seq ordinals
+- visibility and replay must therefore order same-seq rows by `(seq, op_index)`, not only `seq`
+
+Why it exists:
+same-request contradictions must become explicit semantics instead of accidental vector-order side
+effects during validation, replay, or checkpoint restore.
+
+Failure modes prevented:
+
+- duplicate child-name creates in one request passing or failing accidentally
+- same-request replace/restore/delete contradictions replaying differently from validation
+- checkpoint restore losing the original within-request metadata order
+
 ## Preconditions
 
 Mutations are never path-addressed. They are inode-addressed and explicit.

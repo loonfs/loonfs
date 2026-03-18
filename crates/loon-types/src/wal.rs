@@ -15,30 +15,42 @@ pub enum WalEnvelopeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalOp {
     CreateDir {
+        #[serde(default)]
+        op_index: u32,
         inode_id: InodeId,
         parent_inode: InodeId,
         display_name: String,
     },
     CreateFile {
+        #[serde(default)]
+        op_index: u32,
         inode_id: InodeId,
         parent_inode: InodeId,
         display_name: String,
         content_manifest_digest: String,
     },
     ReplaceFile {
+        #[serde(default)]
+        op_index: u32,
         inode_id: InodeId,
         base_revision: RevisionNo,
         content_manifest_digest: String,
     },
     Rename {
+        #[serde(default)]
+        op_index: u32,
         inode_id: InodeId,
         new_parent_inode: InodeId,
         new_display_name: String,
     },
     DeleteSubtree {
+        #[serde(default)]
+        op_index: u32,
         root_inode: InodeId,
     },
     RestoreRevision {
+        #[serde(default)]
+        op_index: u32,
         inode_id: InodeId,
         base_revision: RevisionNo,
         restore_from_revision: RevisionNo,

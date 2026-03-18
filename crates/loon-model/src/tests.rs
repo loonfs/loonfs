@@ -37,6 +37,7 @@ fn seeded_metadata_state() -> ModelMetadataState {
                 display_name: "note.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(41),
+                bind_op_index: 0,
             },
             ModelDirentryRecord {
                 parent_inode_id: InodeId(2),
@@ -44,6 +45,7 @@ fn seeded_metadata_state() -> ModelMetadataState {
                 display_name: "docs".to_owned(),
                 child_inode_id: InodeId(7),
                 bind_seq: ChangeSeq(5),
+                bind_op_index: 0,
             },
             ModelDirentryRecord {
                 parent_inode_id: InodeId(7),
@@ -51,6 +53,7 @@ fn seeded_metadata_state() -> ModelMetadataState {
                 display_name: "report.txt".to_owned(),
                 child_inode_id: InodeId(88),
                 bind_seq: ChangeSeq(21),
+                bind_op_index: 0,
             },
         ],
         revisions: vec![
@@ -58,24 +61,28 @@ fn seeded_metadata_state() -> ModelMetadataState {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(17),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:note-v1".to_owned(),
             },
             ModelRevisionRecord {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(2),
                 committed_seq: ChangeSeq(41),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:note-v2".to_owned(),
             },
             ModelRevisionRecord {
                 inode_id: InodeId(88),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(21),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v1".to_owned(),
             },
         ],
         subtree_tombstones: vec![ModelSubtreeTombstoneRecord {
             root_inode_id: InodeId(7),
             tombstone_seq: ChangeSeq(40),
+            tombstone_op_index: 0,
         }],
     }
 }
@@ -1072,6 +1079,7 @@ fn model_distinguishes_raw_and_visible_metadata_queries() {
             display_name: "docs".to_owned(),
             child_inode_id: InodeId(7),
             bind_seq: ChangeSeq(5),
+            bind_op_index: 0,
         })
     );
     assert_eq!(
@@ -1084,6 +1092,7 @@ fn model_distinguishes_raw_and_visible_metadata_queries() {
             inode_id: InodeId(42),
             revision_no: RevisionNo(2),
             committed_seq: ChangeSeq(41),
+            revision_op_index: 0,
             content_manifest_digest: "sha256:note-v2".to_owned(),
         })
     );
@@ -1118,6 +1127,7 @@ fn model_apply_create_dir_appends_inode_and_direntry_rows() {
             display_name: "drafts".to_owned(),
             child_inode_id: InodeId(501),
             bind_seq: ChangeSeq(42),
+            bind_op_index: 0,
         }]
     );
     assert!(applied
@@ -1155,6 +1165,7 @@ fn model_apply_create_file_appends_initial_revision_row() {
             display_name: "note.txt".to_owned(),
             child_inode_id: InodeId(501),
             bind_seq: ChangeSeq(42),
+            bind_op_index: 0,
         }]
     );
     assert_eq!(
@@ -1163,6 +1174,7 @@ fn model_apply_create_file_appends_initial_revision_row() {
             inode_id: InodeId(501),
             revision_no: RevisionNo(1),
             committed_seq: ChangeSeq(42),
+            revision_op_index: 0,
             content_manifest_digest: "sha256:note-v1".to_owned(),
         }]
     );
@@ -1193,6 +1205,7 @@ fn model_apply_replace_file_appends_next_revision_row() {
             inode_id: InodeId(42),
             revision_no: RevisionNo(3),
             committed_seq: ChangeSeq(42),
+            revision_op_index: 0,
             content_manifest_digest: "sha256:note-v3".to_owned(),
         }
     );
@@ -1223,6 +1236,7 @@ fn model_apply_restore_revision_appends_new_head_from_historical_content() {
             inode_id: InodeId(42),
             revision_no: RevisionNo(3),
             committed_seq: ChangeSeq(42),
+            revision_op_index: 0,
             content_manifest_digest: "sha256:note-v1".to_owned(),
         }
     );
@@ -1290,6 +1304,7 @@ fn model_apply_delete_subtree_appends_tombstone_row_and_hides_descendants() {
                 display_name: "docs".to_owned(),
                 child_inode_id: InodeId(7),
                 bind_seq: ChangeSeq(5),
+                bind_op_index: 0,
             },
             ModelDirentryRecord {
                 parent_inode_id: InodeId(7),
@@ -1297,12 +1312,14 @@ fn model_apply_delete_subtree_appends_tombstone_row_and_hides_descendants() {
                 display_name: "report.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(17),
+                bind_op_index: 0,
             },
         ],
         revisions: vec![ModelRevisionRecord {
             inode_id: InodeId(42),
             revision_no: RevisionNo(1),
             committed_seq: ChangeSeq(17),
+            revision_op_index: 0,
             content_manifest_digest: "sha256:report-v1".to_owned(),
         }],
         subtree_tombstones: Vec::new(),
@@ -1320,6 +1337,7 @@ fn model_apply_delete_subtree_appends_tombstone_row_and_hides_descendants() {
         vec![ModelSubtreeTombstoneRecord {
             root_inode_id: InodeId(7),
             tombstone_seq: ChangeSeq(42),
+            tombstone_op_index: 0,
         }]
     );
     assert_eq!(
@@ -1387,6 +1405,7 @@ fn model_rejects_directory_rename_cycle() {
                 display_name: "docs".to_owned(),
                 child_inode_id: InodeId(7),
                 bind_seq: ChangeSeq(5),
+                bind_op_index: 0,
             },
             ModelDirentryRecord {
                 parent_inode_id: InodeId(7),
@@ -1394,6 +1413,7 @@ fn model_rejects_directory_rename_cycle() {
                 display_name: "archive".to_owned(),
                 child_inode_id: InodeId(9),
                 bind_seq: ChangeSeq(8),
+                bind_op_index: 0,
             },
         ],
         revisions: Vec::new(),
@@ -1440,6 +1460,7 @@ fn model_visible_child_prefers_latest_slot_binding_when_name_is_reused() {
                 display_name: "note.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(10),
+                bind_op_index: 0,
             },
             ModelDirentryRecord {
                 parent_inode_id: InodeId(2),
@@ -1447,6 +1468,7 @@ fn model_visible_child_prefers_latest_slot_binding_when_name_is_reused() {
                 display_name: "archive.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(20),
+                bind_op_index: 0,
             },
             ModelDirentryRecord {
                 parent_inode_id: InodeId(2),
@@ -1454,6 +1476,7 @@ fn model_visible_child_prefers_latest_slot_binding_when_name_is_reused() {
                 display_name: "note.txt".to_owned(),
                 child_inode_id: InodeId(77),
                 bind_seq: ChangeSeq(30),
+                bind_op_index: 0,
             },
         ],
         revisions: vec![
@@ -1461,12 +1484,14 @@ fn model_visible_child_prefers_latest_slot_binding_when_name_is_reused() {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(10),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:note-v1".to_owned(),
             },
             ModelRevisionRecord {
                 inode_id: InodeId(77),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(30),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:note-v2".to_owned(),
             },
         ],

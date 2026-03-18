@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: uploaded_local_only_file_builds_request_from_state
 initial:
   local_only_state:

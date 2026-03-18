@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml.workspace = true
 loon-model = { path = "../loon-model" }
 loon-core = { path = "../loon-core" }
@@ -16,4 +17,3 @@ loon-types = { path = "../loon-types" }
 
 [dev-dependencies]
 loon-queue = { path = "../loon-queue" }
-serde_json.workspace = true

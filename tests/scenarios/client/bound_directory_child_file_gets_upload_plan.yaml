@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: bound_directory_child_file_gets_upload_plan
 initial:
   remote_state:

@@ -256,6 +256,43 @@ Exit criteria:
 - at least one readable multi-tick download case and one readable multi-tick upload case require
   restart to finish and still converge correctly
 
+## Milestone 7: authority, ordered multi-op commits, and SQLite hardening
+
+Goal:
+pause further feature expansion and close the blocking correctness gaps that remain after the
+semantic core and bounded transfer work.
+
+Primary crates:
+
+- `loon-server`
+- `loon-core`
+- `loon-client`
+- `loon-testkit`
+
+Deliverables:
+
+- authoritative server-side mutation execution that reconstructs its metadata basis from verified
+  checkpoint state plus contiguous WAL tail instead of accepting caller-supplied metadata
+- explicit same-request operation ordering for multi-op commits, preserved through WAL, replay, and
+  checkpoint materialization
+- materially hardened SQLite schema constraints, indexes, and migration-ladder coverage
+- more productized scenario fixtures with typed top-level metadata and batch validation tooling
+
+Required rules:
+
+- do not add new mutations, new delivery shells, or new provider assumptions while these blockers
+  remain open
+- keep invariant wording unchanged in this tranche; executable invariant evaluation is deferred
+- active crates must not export public placeholder surfaces
+
+Exit criteria:
+
+- `execute_client_mutation()` can no longer be called with caller-supplied metadata basis
+- replay and checkpoint restore preserve ordered same-seq multi-op semantics exactly
+- the client DB rejects structurally invalid state earlier through schema constraints and tested
+  migrations
+- scenario fixtures have explicit top-level kind/version metadata and batch validation tooling
+
 ## First implementation slices
 
 The next slices should be executed in this order.

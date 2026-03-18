@@ -17,7 +17,7 @@ use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionPara
 use loon_testkit::scenario::Scenario;
 use loon_types::{
     ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind, HeadState,
-    HeadStateEnvelope, InodeId, LeaseState, LeaseStateEnvelope, NamespaceId,
+    HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId,
 };
 use serde::Deserialize;
 use std::fs;
@@ -245,13 +245,15 @@ fn execute_next_client_action_prefers_local_only_create_over_older_inode_action(
         let mut db =
             SqliteStateDb::open(&db_path).expect("open client state DB to seed inode action");
         db.planner_transaction("seed-inode-planned-action", |tx| {
-            tx.upsert_planned_action(&PlannedActionRow {
+            let planned_action = PlannedActionRow {
                 namespace_id: NamespaceId::from("ns-1"),
                 inode_id: InodeId(77),
                 decision: "download_remote_edit".to_owned(),
                 reason: "remote_differs_from_anchor".to_owned(),
                 created_at_ms: initial.planned_local_only_action.created_at_ms - 1_000,
-            })?;
+            };
+            tx.upsert_local_file(&placeholder_local_row(&planned_action))?;
+            tx.upsert_planned_action(&planned_action)?;
             Ok(())
         })
         .expect("seed inode planned action");
@@ -323,13 +325,15 @@ fn execute_next_client_action_prefers_local_only_create_on_equal_created_at_ms()
         let mut db =
             SqliteStateDb::open(&db_path).expect("open client state DB to seed inode action");
         db.planner_transaction("seed-inode-planned-action", |tx| {
-            tx.upsert_planned_action(&PlannedActionRow {
+            let planned_action = PlannedActionRow {
                 namespace_id: NamespaceId::from("ns-1"),
                 inode_id: InodeId(77),
                 decision: "download_remote_edit".to_owned(),
                 reason: "remote_differs_from_anchor".to_owned(),
                 created_at_ms: initial.planned_local_only_action.created_at_ms,
-            })?;
+            };
+            tx.upsert_local_file(&placeholder_local_row(&planned_action))?;
+            tx.upsert_planned_action(&planned_action)?;
             Ok(())
         })
         .expect("seed inode planned action");
@@ -390,6 +394,7 @@ fn run_execute_next_client_action(
         action.uploaded_at_ms,
         action.created_at_ms,
         |request| {
+            support::seed_server_basis_for_request(store, request, &action.writer_version);
             execute_client_mutation(
                 store,
                 request,
@@ -397,7 +402,6 @@ fn run_execute_next_client_action(
                     writer_id: action.writer_id.clone(),
                     writer_version: action.writer_version.clone(),
                     now_ms: action.now_ms,
-                    metadata_state: support::server_metadata_for_request(request),
                 },
             )
             .map(|executed| executed.response)
@@ -599,10 +603,38 @@ fn seed_local_only_client_state(
 fn seed_planned_action_state(db_path: &Path, planned_action: &PlannedActionRow) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-execute-next-client-action-planned-state", |tx| {
+        tx.upsert_local_file(&placeholder_local_row(planned_action))?;
         tx.upsert_planned_action(planned_action)?;
         Ok(())
     })
     .expect("seed planned action state");
+}
+
+fn placeholder_local_row(planned_action: &PlannedActionRow) -> LocalFileStateRow {
+    let inode_kind = if planned_action.decision == "materialize_remote_dir" {
+        InodeKind::Dir
+    } else {
+        InodeKind::File
+    };
+    LocalFileStateRow {
+        namespace_id: planned_action.namespace_id.clone(),
+        inode_id: planned_action.inode_id,
+        inode_kind: inode_kind.clone(),
+        content_digest: if inode_kind == InodeKind::Dir {
+            None
+        } else {
+            Some(format!(
+                "sha256:planned-{}-{}",
+                planned_action.namespace_id.as_str(),
+                planned_action.inode_id.0
+            ))
+        },
+        parent_inode_id: Some(InodeId(2)),
+        display_name: format!("inode-{}", planned_action.inode_id.0),
+        exists_on_disk: inode_kind != InodeKind::Dir,
+        dirty: false,
+        last_local_change_ms: planned_action.created_at_ms,
+    }
 }
 
 fn seed_head_and_lease(store: &LocalFsStore, head: &HeadState, lease: &LeaseState) {

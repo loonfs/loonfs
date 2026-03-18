@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: client_remote_observation_ambiguous_bind_records_issue
 initial:
   local_only_state:

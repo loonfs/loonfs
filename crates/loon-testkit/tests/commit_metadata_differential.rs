@@ -412,6 +412,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
                 display_name: direntry.display_name.clone(),
                 child_inode_id: direntry.child_inode_id,
                 bind_seq: direntry.bind_seq,
+                bind_op_index: direntry.bind_op_index,
             })
             .collect(),
         revisions: metadata_state
@@ -421,6 +422,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
+                revision_op_index: revision.revision_op_index,
                 content_manifest_digest: revision.content_manifest_digest.clone(),
             })
             .collect(),
@@ -430,6 +432,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
             .map(|tombstone| loon_model::ModelSubtreeTombstoneRecord {
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
+                tombstone_op_index: tombstone.tombstone_op_index,
             })
             .collect(),
     }
@@ -455,6 +458,7 @@ fn metadata_state_from_model(metadata_state: &ModelMetadataState) -> MetadataSta
                 display_name: direntry.display_name.clone(),
                 child_inode_id: direntry.child_inode_id,
                 bind_seq: direntry.bind_seq,
+                bind_op_index: direntry.bind_op_index,
             })
             .collect(),
         revisions: metadata_state
@@ -464,6 +468,7 @@ fn metadata_state_from_model(metadata_state: &ModelMetadataState) -> MetadataSta
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
+                revision_op_index: revision.revision_op_index,
                 content_manifest_digest: revision.content_manifest_digest.clone(),
             })
             .collect(),
@@ -473,6 +478,7 @@ fn metadata_state_from_model(metadata_state: &ModelMetadataState) -> MetadataSta
             .map(|tombstone| loon_core::metadata::SubtreeTombstoneRecord {
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
+                tombstone_op_index: tombstone.tombstone_op_index,
             })
             .collect(),
     }

@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: execute_next_client_action_multitick_upload_local_edit_survives_restart
 initial:
   remote_state:

@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: sim
 name: lost_enqueue_repair_recreates_snapshot_job
 seed: 4200
 initial:

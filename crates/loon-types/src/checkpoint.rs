@@ -70,16 +70,22 @@ pub enum CheckpointRow {
         display_name: String,
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
+        #[serde(default)]
+        bind_op_index: u32,
     },
     Revision {
         inode_id: InodeId,
         revision_no: RevisionNo,
         committed_seq: ChangeSeq,
+        #[serde(default)]
+        revision_op_index: u32,
         content_manifest_digest: String,
     },
     Tombstone {
         root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
+        #[serde(default)]
+        tombstone_op_index: u32,
     },
 }
 
@@ -91,20 +97,50 @@ impl CheckpointRow {
                 parent_inode_id,
                 name_key,
                 bind_seq,
+                bind_op_index,
                 ..
-            } => format!(
-                "direntry-{:020}-{name_key}-{:020}",
-                parent_inode_id.0, bind_seq.0
-            ),
+            } => {
+                if *bind_op_index == 0 {
+                    format!(
+                        "direntry-{:020}-{name_key}-{:020}",
+                        parent_inode_id.0, bind_seq.0
+                    )
+                } else {
+                    format!(
+                        "direntry-{:020}-{name_key}-{:020}-{:010}",
+                        parent_inode_id.0, bind_seq.0, bind_op_index
+                    )
+                }
+            }
             Self::Revision {
                 inode_id,
                 revision_no,
+                revision_op_index,
                 ..
-            } => format!("revision-{:020}-{:020}", inode_id.0, revision_no.0),
+            } => {
+                if *revision_op_index == 0 {
+                    format!("revision-{:020}-{:020}", inode_id.0, revision_no.0)
+                } else {
+                    format!(
+                        "revision-{:020}-{:020}-{:010}",
+                        inode_id.0, revision_no.0, revision_op_index
+                    )
+                }
+            }
             Self::Tombstone {
                 root_inode_id,
                 tombstone_seq,
-            } => format!("tombstone-{:020}-{:020}", root_inode_id.0, tombstone_seq.0),
+                tombstone_op_index,
+            } => {
+                if *tombstone_op_index == 0 {
+                    format!("tombstone-{:020}-{:020}", root_inode_id.0, tombstone_seq.0)
+                } else {
+                    format!(
+                        "tombstone-{:020}-{:020}-{:010}",
+                        root_inode_id.0, tombstone_seq.0, tombstone_op_index
+                    )
+                }
+            }
         }
     }
 }

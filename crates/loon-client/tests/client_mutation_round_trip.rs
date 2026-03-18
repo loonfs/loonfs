@@ -99,6 +99,7 @@ fn run_fixture(relative_path: &str) {
         .expect("record pending client mutation");
         drop(db);
 
+        support::seed_server_basis_for_request(&store, &request, &execute.writer_version);
         let executed = execute_client_mutation(
             &store,
             &request,
@@ -106,7 +107,6 @@ fn run_fixture(relative_path: &str) {
                 writer_id: execute.writer_id,
                 writer_version: execute.writer_version,
                 now_ms: execute.now_ms,
-                metadata_state: support::server_metadata_for_request(&request),
             },
         )
         .expect("execute authoritative client mutation");

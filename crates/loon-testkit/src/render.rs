@@ -5,8 +5,10 @@ use serde::Serialize;
 
 pub fn render_summary(s: &Scenario) -> String {
     format!(
-        "scenario={} seed={:?} actions={} faults={} expect_keys={}",
+        "scenario={} kind={} schema_version={} seed={:?} actions={} faults={} expect_keys={}",
         s.name,
+        s.scenario_kind.as_str(),
+        s.schema_version,
         s.seed,
         s.actions.len(),
         s.faults.len(),
@@ -98,6 +100,8 @@ mod tests {
     fn render_case_emits_sectioned_yaml() {
         let scenario: Scenario = from_str(
             r#"
+schema_version: 1
+scenario_kind: client
 name: demo_case
 seed: 42
 initial:

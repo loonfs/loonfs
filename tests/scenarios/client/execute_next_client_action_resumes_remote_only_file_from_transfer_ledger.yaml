@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: execute_next_client_action_resumes_remote_only_file_from_transfer_ledger
 initial:
   remote_state:

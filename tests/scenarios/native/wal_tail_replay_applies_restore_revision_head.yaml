@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: wal_tail_replay_applies_restore_revision_head
 initial:
   replay_basis_head:

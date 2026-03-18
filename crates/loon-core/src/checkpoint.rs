@@ -728,6 +728,7 @@ fn checkpoint_rows_for_family(
                     display_name: direntry.display_name.clone(),
                     child_inode_id: direntry.child_inode_id,
                     bind_seq: direntry.bind_seq,
+                    bind_op_index: direntry.bind_op_index,
                 })
                 .collect::<Vec<_>>();
             rows.sort_by_key(CheckpointRow::row_key);
@@ -741,6 +742,7 @@ fn checkpoint_rows_for_family(
                     inode_id: revision.inode_id,
                     revision_no: revision.revision_no,
                     committed_seq: revision.committed_seq,
+                    revision_op_index: revision.revision_op_index,
                     content_manifest_digest: revision.content_manifest_digest.clone(),
                 })
                 .collect::<Vec<_>>();
@@ -754,6 +756,7 @@ fn checkpoint_rows_for_family(
                 .map(|tombstone| CheckpointRow::Tombstone {
                     root_inode_id: tombstone.root_inode_id,
                     tombstone_seq: tombstone.tombstone_seq,
+                    tombstone_op_index: tombstone.tombstone_op_index,
                 })
                 .collect::<Vec<_>>();
             rows.sort_by_key(CheckpointRow::row_key);
@@ -788,32 +791,38 @@ fn metadata_state_from_checkpoint_segments(
                         display_name,
                         child_inode_id,
                         bind_seq,
+                        bind_op_index,
                     } => metadata_state.direntries.push(DirentryRecord {
                         parent_inode_id: *parent_inode_id,
                         name_key: name_key.clone(),
                         display_name: display_name.clone(),
                         child_inode_id: *child_inode_id,
                         bind_seq: *bind_seq,
+                        bind_op_index: *bind_op_index,
                     }),
                     CheckpointRow::Revision {
                         inode_id,
                         revision_no,
                         committed_seq,
+                        revision_op_index,
                         content_manifest_digest,
                     } => metadata_state.revisions.push(RevisionRecord {
                         inode_id: *inode_id,
                         revision_no: *revision_no,
                         committed_seq: *committed_seq,
+                        revision_op_index: *revision_op_index,
                         content_manifest_digest: content_manifest_digest.clone(),
                     }),
                     CheckpointRow::Tombstone {
                         root_inode_id,
                         tombstone_seq,
+                        tombstone_op_index,
                     } => metadata_state
                         .subtree_tombstones
                         .push(SubtreeTombstoneRecord {
                             root_inode_id: *root_inode_id,
                             tombstone_seq: *tombstone_seq,
+                            tombstone_op_index: *tombstone_op_index,
                         }),
                 }
             }
@@ -1298,6 +1307,7 @@ mod tests {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(8),
                 committed_seq: ChangeSeq(41),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v8".to_owned(),
             })
         );
@@ -1493,6 +1503,7 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_fence_token,
             ops: vec![WalOp::ReplaceFile {
+                op_index: 0,
                 inode_id: InodeId(42),
                 base_revision: RevisionNo(7),
                 content_manifest_digest: "sha256:report-v8".to_owned(),
@@ -1591,16 +1602,19 @@ mod tests {
                 display_name: "report.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(17),
+                bind_op_index: 0,
             }],
             revisions: vec![RevisionRecord {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(7),
                 committed_seq: ChangeSeq(40),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v7".to_owned(),
             }],
             subtree_tombstones: vec![SubtreeTombstoneRecord {
                 root_inode_id: InodeId(99),
                 tombstone_seq: ChangeSeq(39),
+                tombstone_op_index: 0,
             }],
         }
     }

@@ -572,7 +572,13 @@ fn stored_wal_object_from_fixture(
             .payload
             .ops
             .iter()
-            .map(shared_wal_op_from_fixture)
+            .enumerate()
+            .map(|(op_index, op)| {
+                shared_wal_op_from_fixture(
+                    u32::try_from(op_index).expect("fixture op index should fit in u32"),
+                    op,
+                )
+            })
             .collect(),
         preconditions: Vec::new(),
     };
@@ -823,41 +829,48 @@ fn model_checkpoint_row_from_shared(row: &CheckpointRow) -> ModelCheckpointRow {
             display_name,
             child_inode_id,
             bind_seq,
+            bind_op_index,
         } => ModelCheckpointRow::Direntry {
             parent_inode_id: *parent_inode_id,
             name_key: name_key.clone(),
             display_name: display_name.clone(),
             child_inode_id: *child_inode_id,
             bind_seq: *bind_seq,
+            bind_op_index: *bind_op_index,
         },
         CheckpointRow::Revision {
             inode_id,
             revision_no,
             committed_seq,
+            revision_op_index,
             content_manifest_digest,
         } => ModelCheckpointRow::Revision {
             inode_id: *inode_id,
             revision_no: *revision_no,
             committed_seq: *committed_seq,
+            revision_op_index: *revision_op_index,
             content_manifest_digest: content_manifest_digest.clone(),
         },
         CheckpointRow::Tombstone {
             root_inode_id,
             tombstone_seq,
+            tombstone_op_index,
         } => ModelCheckpointRow::Tombstone {
             root_inode_id: *root_inode_id,
             tombstone_seq: *tombstone_seq,
+            tombstone_op_index: *tombstone_op_index,
         },
     }
 }
 
-fn shared_wal_op_from_fixture(op: &FixtureWalOp) -> WalOp {
+fn shared_wal_op_from_fixture(op_index: u32, op: &FixtureWalOp) -> WalOp {
     match op {
         FixtureWalOp::CreateDir {
             inode_id,
             parent_inode,
             display_name,
         } => WalOp::CreateDir {
+            op_index,
             inode_id: *inode_id,
             parent_inode: *parent_inode,
             display_name: display_name.clone(),
@@ -868,6 +881,7 @@ fn shared_wal_op_from_fixture(op: &FixtureWalOp) -> WalOp {
             display_name,
             content_manifest_digest,
         } => WalOp::CreateFile {
+            op_index,
             inode_id: *inode_id,
             parent_inode: *parent_inode,
             display_name: display_name.clone(),
@@ -878,6 +892,7 @@ fn shared_wal_op_from_fixture(op: &FixtureWalOp) -> WalOp {
             base_revision,
             content_manifest_digest,
         } => WalOp::ReplaceFile {
+            op_index,
             inode_id: *inode_id,
             base_revision: *base_revision,
             content_manifest_digest: content_manifest_digest.clone(),
@@ -887,11 +902,13 @@ fn shared_wal_op_from_fixture(op: &FixtureWalOp) -> WalOp {
             new_parent_inode,
             new_display_name,
         } => WalOp::Rename {
+            op_index,
             inode_id: *inode_id,
             new_parent_inode: *new_parent_inode,
             new_display_name: new_display_name.clone(),
         },
         FixtureWalOp::DeleteSubtree { root_inode } => WalOp::DeleteSubtree {
+            op_index,
             root_inode: *root_inode,
         },
         FixtureWalOp::RestoreRevision {
@@ -899,6 +916,7 @@ fn shared_wal_op_from_fixture(op: &FixtureWalOp) -> WalOp {
             base_revision,
             restore_from_revision,
         } => WalOp::RestoreRevision {
+            op_index,
             inode_id: *inode_id,
             base_revision: *base_revision,
             restore_from_revision: *restore_from_revision,
@@ -981,6 +999,7 @@ fn model_metadata_state_from_core(metadata_state: &MetadataState) -> ModelMetada
                 display_name: direntry.display_name.clone(),
                 child_inode_id: direntry.child_inode_id,
                 bind_seq: direntry.bind_seq,
+                bind_op_index: direntry.bind_op_index,
             })
             .collect(),
         revisions: metadata_state
@@ -990,6 +1009,7 @@ fn model_metadata_state_from_core(metadata_state: &MetadataState) -> ModelMetada
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
+                revision_op_index: revision.revision_op_index,
                 content_manifest_digest: revision.content_manifest_digest.clone(),
             })
             .collect(),
@@ -999,6 +1019,7 @@ fn model_metadata_state_from_core(metadata_state: &MetadataState) -> ModelMetada
             .map(|tombstone| loon_model::ModelSubtreeTombstoneRecord {
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
+                tombstone_op_index: tombstone.tombstone_op_index,
             })
             .collect(),
     }
@@ -1024,6 +1045,7 @@ fn metadata_snapshot_from_model(metadata_state: &ModelMetadataState) -> Metadata
                 display_name: direntry.display_name.clone(),
                 child_inode_id: direntry.child_inode_id,
                 bind_seq: direntry.bind_seq,
+                bind_op_index: direntry.bind_op_index,
             })
             .collect(),
         revisions: metadata_state
@@ -1033,6 +1055,7 @@ fn metadata_snapshot_from_model(metadata_state: &ModelMetadataState) -> Metadata
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
+                revision_op_index: revision.revision_op_index,
                 content_manifest_digest: revision.content_manifest_digest.clone(),
             })
             .collect(),
@@ -1042,6 +1065,7 @@ fn metadata_snapshot_from_model(metadata_state: &ModelMetadataState) -> Metadata
             .map(|tombstone| SubtreeTombstoneRecord {
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
+                tombstone_op_index: tombstone.tombstone_op_index,
             })
             .collect(),
     }

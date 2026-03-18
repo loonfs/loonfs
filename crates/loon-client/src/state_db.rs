@@ -37,6 +37,8 @@ pub enum StateDbError {
     UnknownTransferDirection(String),
     #[error("unknown transfer state `{0}` in SQLite row")]
     UnknownTransferState(String),
+    #[error("client state schema foreign-key violation after migration: {0}")]
+    SchemaForeignKeyViolation(String),
     #[error("unsupported local-only inode kind `{0:?}`")]
     UnsupportedLocalOnlyInodeKind(InodeKind),
     #[error(

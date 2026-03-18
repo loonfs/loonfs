@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: upload_local_create_from_path_resumes_from_temp_transfer_ledger
 initial:
   local_only_state:

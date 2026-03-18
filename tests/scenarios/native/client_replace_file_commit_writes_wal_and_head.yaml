@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: client_replace_file_commit_writes_wal_and_head
 initial:
   head:
@@ -5,7 +7,7 @@ initial:
     seq: 41
     active_fence_token: 8
     next_inode_id: 501
-    snapshot_hint_seq: 40
+    snapshot_hint_seq: 41
     retention_floor_seq: 40
   lease:
     namespace_id: ns-1
@@ -65,7 +67,7 @@ expect:
     seq: 42
     active_fence_token: 8
     next_inode_id: 501
-    snapshot_hint_seq: 40
+    snapshot_hint_seq: 41
     retention_floor_seq: 40
   invariants:
     - replace_file_requires_durable_content

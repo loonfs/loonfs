@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: checkpoint_manifest_plus_delete_subtree_wal_tail_hides_descendants
 initial:
   checkpoint_manifest:

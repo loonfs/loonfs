@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: wal_tail_replay_seq_gap_minimize_case
 initial:
   replay_basis_head:

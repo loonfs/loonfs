@@ -28,6 +28,8 @@ pub struct DirentryRecord {
     pub display_name: String,
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
+    #[serde(default)]
+    pub bind_op_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +37,8 @@ pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     pub committed_seq: ChangeSeq,
+    #[serde(default)]
+    pub revision_op_index: u32,
     pub content_manifest_digest: String,
 }
 
@@ -42,6 +46,8 @@ pub struct RevisionRecord {
 pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
+    #[serde(default)]
+    pub tombstone_op_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +80,7 @@ impl MetadataState {
         for op in ops {
             match op {
                 WalOp::CreateDir {
+                    op_index,
                     inode_id,
                     parent_inode,
                     display_name,
@@ -89,6 +96,7 @@ impl MetadataState {
                         display_name: display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
+                        bind_op_index: *op_index,
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
@@ -96,6 +104,7 @@ impl MetadataState {
                     );
                 }
                 WalOp::CreateFile {
+                    op_index,
                     inode_id,
                     parent_inode,
                     display_name,
@@ -112,11 +121,13 @@ impl MetadataState {
                         display_name: display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
+                        bind_op_index: *op_index,
                     });
                     metadata_state.revisions.push(RevisionRecord {
                         inode_id: *inode_id,
                         revision_no: RevisionNo(1),
                         committed_seq,
+                        revision_op_index: *op_index,
                         content_manifest_digest: content_manifest_digest.clone(),
                     });
                     push_unique_invariant(
@@ -125,6 +136,7 @@ impl MetadataState {
                     );
                 }
                 WalOp::ReplaceFile {
+                    op_index,
                     inode_id,
                     base_revision,
                     content_manifest_digest,
@@ -139,6 +151,7 @@ impl MetadataState {
                         inode_id: *inode_id,
                         revision_no: next_revision,
                         committed_seq,
+                        revision_op_index: *op_index,
                         content_manifest_digest: content_manifest_digest.clone(),
                     });
                     push_unique_invariant(
@@ -147,6 +160,7 @@ impl MetadataState {
                     );
                 }
                 WalOp::Rename {
+                    op_index,
                     inode_id,
                     new_parent_inode,
                     new_display_name,
@@ -157,6 +171,7 @@ impl MetadataState {
                         display_name: new_display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
+                        bind_op_index: *op_index,
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
@@ -164,7 +179,11 @@ impl MetadataState {
                     );
                 }
                 WalOp::DeleteSubtree { .. } => {
-                    let WalOp::DeleteSubtree { root_inode } = op else {
+                    let WalOp::DeleteSubtree {
+                        op_index,
+                        root_inode,
+                    } = op
+                    else {
                         unreachable!();
                     };
                     metadata_state
@@ -172,6 +191,7 @@ impl MetadataState {
                         .push(SubtreeTombstoneRecord {
                             root_inode_id: *root_inode,
                             tombstone_seq: committed_seq,
+                            tombstone_op_index: *op_index,
                         });
                     push_unique_invariant(
                         &mut checked_invariants,
@@ -179,6 +199,7 @@ impl MetadataState {
                     );
                 }
                 WalOp::RestoreRevision {
+                    op_index,
                     inode_id,
                     base_revision,
                     restore_from_revision,
@@ -199,6 +220,7 @@ impl MetadataState {
                         inode_id: *inode_id,
                         revision_no: next_revision,
                         committed_seq,
+                        revision_op_index: *op_index,
                         content_manifest_digest: source_revision.content_manifest_digest,
                     });
                     push_unique_invariant(
@@ -230,7 +252,13 @@ impl MetadataState {
         self.revisions
             .iter()
             .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
-            .max_by_key(|revision| revision.revision_no)
+            .max_by_key(|revision| {
+                (
+                    revision.revision_no,
+                    revision.committed_seq,
+                    revision.revision_op_index,
+                )
+            })
             .cloned()
     }
 
@@ -247,7 +275,7 @@ impl MetadataState {
                     && revision.revision_no == revision_no
                     && revision.committed_seq <= base_seq
             })
-            .max_by_key(|revision| revision.committed_seq)
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_op_index))
             .cloned()
     }
 
@@ -264,7 +292,7 @@ impl MetadataState {
                     && direntry.name_key == name_key
                     && direntry.bind_seq <= base_seq
             })
-            .max_by_key(|direntry| direntry.bind_seq)
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_op_index))
             .cloned()
     }
 
@@ -286,7 +314,7 @@ impl MetadataState {
             .filter(|tombstone| {
                 tombstone.root_inode_id == root_inode_id && tombstone.tombstone_seq <= base_seq
             })
-            .max_by_key(|tombstone| tombstone.tombstone_seq)
+            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_op_index))
             .cloned()
     }
 
@@ -364,6 +392,7 @@ impl MetadataState {
         if latest_binding.parent_inode_id != direntry.parent_inode_id
             || latest_binding.name_key != direntry.name_key
             || latest_binding.bind_seq != direntry.bind_seq
+            || latest_binding.bind_op_index != direntry.bind_op_index
         {
             return None;
         }
@@ -381,7 +410,7 @@ impl MetadataState {
             .filter(|direntry| {
                 direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
             })
-            .max_by_key(|direntry| direntry.bind_seq)
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_op_index))
             .cloned()
     }
 
@@ -429,6 +458,7 @@ mod tests {
             .apply_committed_wal_ops(
                 ChangeSeq(42),
                 &[WalOp::CreateDir {
+                    op_index: 0,
                     inode_id: InodeId(501),
                     parent_inode: InodeId(2),
                     display_name: "drafts".to_owned(),
@@ -452,6 +482,7 @@ mod tests {
                 display_name: "drafts".to_owned(),
                 child_inode_id: InodeId(501),
                 bind_seq: ChangeSeq(42),
+                bind_op_index: 0,
             }]
         );
         assert!(applied
@@ -465,6 +496,7 @@ mod tests {
             .apply_committed_wal_ops(
                 ChangeSeq(42),
                 &[WalOp::CreateFile {
+                    op_index: 0,
                     inode_id: InodeId(501),
                     parent_inode: InodeId(2),
                     display_name: "note.txt".to_owned(),
@@ -489,6 +521,7 @@ mod tests {
                 display_name: "note.txt".to_owned(),
                 child_inode_id: InodeId(501),
                 bind_seq: ChangeSeq(42),
+                bind_op_index: 0,
             }]
         );
         assert_eq!(
@@ -497,6 +530,7 @@ mod tests {
                 inode_id: InodeId(501),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(42),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:note-v1".to_owned(),
             }]
         );
@@ -519,21 +553,25 @@ mod tests {
                 display_name: "report.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(17),
+                bind_op_index: 0,
             }],
             revisions: vec![RevisionRecord {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(17),
                 committed_seq: ChangeSeq(41),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v17".to_owned(),
             }],
             subtree_tombstones: vec![SubtreeTombstoneRecord {
                 root_inode_id: InodeId(99),
                 tombstone_seq: ChangeSeq(40),
+                tombstone_op_index: 0,
             }],
         }
         .apply_committed_wal_ops(
             ChangeSeq(42),
             &[WalOp::ReplaceFile {
+                op_index: 0,
                 inode_id: InodeId(42),
                 base_revision: RevisionNo(17),
                 content_manifest_digest: "sha256:report-v18".to_owned(),
@@ -547,6 +585,7 @@ mod tests {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(18),
                 committed_seq: ChangeSeq(42),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v18".to_owned(),
             })
         );
@@ -582,6 +621,7 @@ mod tests {
                     display_name: "docs".to_owned(),
                     child_inode_id: InodeId(7),
                     bind_seq: ChangeSeq(5),
+                    bind_op_index: 0,
                 },
                 DirentryRecord {
                     parent_inode_id: InodeId(7),
@@ -589,12 +629,14 @@ mod tests {
                     display_name: "report.txt".to_owned(),
                     child_inode_id: InodeId(42),
                     bind_seq: ChangeSeq(17),
+                    bind_op_index: 0,
                 },
             ],
             revisions: vec![RevisionRecord {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(1),
                 committed_seq: ChangeSeq(17),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v1".to_owned(),
             }],
             subtree_tombstones: Vec::new(),
@@ -602,6 +644,7 @@ mod tests {
         .apply_committed_wal_ops(
             ChangeSeq(42),
             &[WalOp::DeleteSubtree {
+                op_index: 0,
                 root_inode: InodeId(7),
             }],
         )
@@ -612,6 +655,7 @@ mod tests {
             vec![SubtreeTombstoneRecord {
                 root_inode_id: InodeId(7),
                 tombstone_seq: ChangeSeq(42),
+                tombstone_op_index: 0,
             }]
         );
         assert!(applied
@@ -640,18 +684,21 @@ mod tests {
                 display_name: "report.txt".to_owned(),
                 child_inode_id: InodeId(42),
                 bind_seq: ChangeSeq(9),
+                bind_op_index: 0,
             }],
             revisions: vec![
                 RevisionRecord {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(3),
                     committed_seq: ChangeSeq(17),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:report-v3".to_owned(),
                 },
                 RevisionRecord {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(5),
                     committed_seq: ChangeSeq(52),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:report-v5".to_owned(),
                 },
             ],
@@ -660,6 +707,7 @@ mod tests {
         .apply_committed_wal_ops(
             ChangeSeq(53),
             &[WalOp::RestoreRevision {
+                op_index: 0,
                 inode_id: InodeId(42),
                 base_revision: RevisionNo(5),
                 restore_from_revision: RevisionNo(3),
@@ -673,6 +721,7 @@ mod tests {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(6),
                 committed_seq: ChangeSeq(53),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v3".to_owned(),
             })
         );
@@ -708,6 +757,7 @@ mod tests {
                     display_name: "docs".to_owned(),
                     child_inode_id: InodeId(7),
                     bind_seq: ChangeSeq(5),
+                    bind_op_index: 0,
                 },
                 DirentryRecord {
                     parent_inode_id: InodeId(2),
@@ -715,12 +765,14 @@ mod tests {
                     display_name: "report.txt".to_owned(),
                     child_inode_id: InodeId(42),
                     bind_seq: ChangeSeq(17),
+                    bind_op_index: 0,
                 },
             ],
             revisions: vec![RevisionRecord {
                 inode_id: InodeId(42),
                 revision_no: RevisionNo(5),
                 committed_seq: ChangeSeq(52),
+                revision_op_index: 0,
                 content_manifest_digest: "sha256:report-v5".to_owned(),
             }],
             subtree_tombstones: Vec::new(),
@@ -728,6 +780,7 @@ mod tests {
         .apply_committed_wal_ops(
             ChangeSeq(53),
             &[WalOp::Rename {
+                op_index: 0,
                 inode_id: InodeId(42),
                 new_parent_inode: InodeId(7),
                 new_display_name: "report-renamed.txt".to_owned(),
@@ -781,6 +834,7 @@ mod tests {
                     display_name: "note.txt".to_owned(),
                     child_inode_id: InodeId(42),
                     bind_seq: ChangeSeq(10),
+                    bind_op_index: 0,
                 },
                 DirentryRecord {
                     parent_inode_id: InodeId(2),
@@ -788,6 +842,7 @@ mod tests {
                     display_name: "archive.txt".to_owned(),
                     child_inode_id: InodeId(42),
                     bind_seq: ChangeSeq(20),
+                    bind_op_index: 0,
                 },
                 DirentryRecord {
                     parent_inode_id: InodeId(2),
@@ -795,6 +850,7 @@ mod tests {
                     display_name: "note.txt".to_owned(),
                     child_inode_id: InodeId(77),
                     bind_seq: ChangeSeq(30),
+                    bind_op_index: 0,
                 },
             ],
             revisions: vec![
@@ -802,12 +858,14 @@ mod tests {
                     inode_id: InodeId(42),
                     revision_no: RevisionNo(1),
                     committed_seq: ChangeSeq(10),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:note-v1".to_owned(),
                 },
                 RevisionRecord {
                     inode_id: InodeId(77),
                     revision_no: RevisionNo(1),
                     committed_seq: ChangeSeq(30),
+                    revision_op_index: 0,
                     content_manifest_digest: "sha256:note-v2".to_owned(),
                 },
             ],

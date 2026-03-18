@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: checkpoint_builder_writes_verified_manifest_and_segments
 initial:
   head:

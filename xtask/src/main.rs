@@ -1,9 +1,9 @@
 use anyhow::{bail, Result};
-use loon_testkit::fixtures::fixture_path;
+use loon_testkit::fixtures::{fixture_path, fixture_paths};
 use loon_testkit::minimize::minimize_replay_scenario;
 use loon_testkit::render::{render_case, render_yaml};
 use loon_testkit::replay::run_replay_scenario;
-use loon_testkit::scenario::Scenario;
+use loon_testkit::scenario::{Scenario, ScenarioKind};
 use loon_testkit::seed::Seed;
 use loon_testkit::snapshots::{fixture_key_from_path, write_snapshot, SnapshotKind};
 use std::path::{Path, PathBuf};
@@ -29,6 +29,45 @@ fn main() -> Result<()> {
                     rendered
                 ),
             )?;
+            Ok(())
+        }
+        Some("render-kind") => {
+            let render_args = parse_render_kind_args(args)?;
+            let paths = fixture_paths(Some(render_args.kind))?;
+            for path in paths {
+                let scenario = Scenario::load(&path)?;
+                let rendered = render_case(&scenario);
+                println!("path={}", path.display());
+                println!("{rendered}");
+                maybe_write_snapshot(
+                    render_args.snapshot,
+                    &path,
+                    SnapshotKind::RenderCase,
+                    None,
+                    &format!(
+                        "command=render-kind\nfixture={}\nkind={}\n{}",
+                        fixture_key_from_path(&path)?,
+                        render_args.kind.as_str(),
+                        rendered
+                    ),
+                )?;
+            }
+            Ok(())
+        }
+        Some("validate-fixtures") => {
+            let validate_args = parse_validate_fixtures_args(args)?;
+            let paths = fixture_paths(validate_args.kind)?;
+            let mut validated = 0usize;
+            for path in paths {
+                let scenario = Scenario::load(&path)?;
+                println!(
+                    "validated path={} kind={}",
+                    path.display(),
+                    scenario.scenario_kind.as_str()
+                );
+                validated += 1;
+            }
+            println!("validated_count={validated}");
             Ok(())
         }
         Some("replay-seed") => {
@@ -123,7 +162,9 @@ fn main() -> Result<()> {
         }
         Some(other) => bail!("unknown xtask command: {other}"),
         None => {
-            println!("xtask commands: render-case | replay-seed | minimize-case");
+            println!(
+                "xtask commands: render-case | render-kind | validate-fixtures | replay-seed | minimize-case"
+            );
             Ok(())
         }
     }
@@ -216,6 +257,47 @@ fn parse_render_case_args(mut args: impl Iterator<Item = String>) -> Result<Rend
         scenario_path,
         snapshot,
     })
+}
+
+struct RenderKindArgs {
+    kind: ScenarioKind,
+    snapshot: bool,
+}
+
+fn parse_render_kind_args(mut args: impl Iterator<Item = String>) -> Result<RenderKindArgs> {
+    let kind = args.next().ok_or_else(|| {
+        anyhow::anyhow!("usage: render-kind <client|model|native|sim> [--snapshot]")
+    })?;
+    let kind = ScenarioKind::parse(&kind)?;
+    let mut snapshot = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--snapshot" => snapshot = true,
+            other => bail!("unexpected render-kind argument: {other}"),
+        }
+    }
+
+    Ok(RenderKindArgs { kind, snapshot })
+}
+
+struct ValidateFixturesArgs {
+    kind: Option<ScenarioKind>,
+}
+
+fn parse_validate_fixtures_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<ValidateFixturesArgs> {
+    let kind = match args.next() {
+        Some(value) => Some(ScenarioKind::parse(&value)?),
+        None => None,
+    };
+
+    if let Some(extra) = args.next() {
+        bail!("unexpected validate-fixtures argument: {extra}");
+    }
+
+    Ok(ValidateFixturesArgs { kind })
 }
 
 struct MinimizeCaseArgs {

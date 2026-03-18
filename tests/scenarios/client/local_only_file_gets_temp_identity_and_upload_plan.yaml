@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: local_only_file_gets_temp_identity_and_upload_plan
 initial:
   local_only_state:

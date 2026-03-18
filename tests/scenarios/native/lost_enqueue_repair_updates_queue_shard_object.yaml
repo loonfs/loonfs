@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: lost_enqueue_repair_updates_queue_shard_object
 initial:
   head:

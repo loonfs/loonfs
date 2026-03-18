@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: create_file_commit_applies_inode_direntry_and_revision_rows
 initial:
   head:

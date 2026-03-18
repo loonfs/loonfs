@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: model
 name: delete_then_stale_local_edit
 seed: 424242
 initial:

@@ -1,0 +1,74 @@
+command=render-kind
+fixture=sim/queue_claim_timeout_then_steal.yaml
+kind=sim
+scenario=queue_claim_timeout_then_steal kind=sim schema_version=1 seed=Some(9001) actions=7 faults=0 expect_keys=2
+
+[initial]
+    queue:
+      work_class: BuildSnapshot
+      shard: 17
+      broker: null
+      jobs:
+      - job_id: job-1
+        dedupe_key: BuildSnapshot:ns-1
+        state: Ready
+        payload:
+          namespace_id: ns-1
+          through_seq: 420
+
+[actions]
+  1.
+    broker_renew_lease:
+      broker: broker-a
+      now_ms: 0
+      lease_duration_ms: 10000
+  2.
+    worker_claim:
+      broker: broker-a
+      broker_epoch: 1
+      worker: worker-a
+      claim_token: claim-a
+      now_ms: 0
+      claim_timeout_ms: 10000
+      job_id: job-1
+  3.
+    advance_time_ms: 30000
+  4.
+    broker_renew_lease:
+      broker: broker-b
+      now_ms: 30000
+      lease_duration_ms: 10000
+  5.
+    worker_claim:
+      broker: broker-b
+      broker_epoch: 2
+      worker: worker-b
+      claim_token: claim-b
+      now_ms: 30000
+      claim_timeout_ms: 10000
+      job_id: job-1
+  6.
+    worker_complete:
+      broker: broker-b
+      broker_epoch: 2
+      worker: worker-a
+      claim_token: claim-a
+      job_id: job-1
+  7.
+    worker_complete:
+      broker: broker-b
+      broker_epoch: 2
+      worker: worker-b
+      claim_token: claim-b
+      job_id: job-1
+
+[faults]
+  <empty>
+
+[expect]
+    invariants:
+    - active_broker_lease_required_for_shard_mutation
+    - stale_claim_token_cannot_complete
+    - stolen_job_completes_once
+    queue:
+      jobs: []

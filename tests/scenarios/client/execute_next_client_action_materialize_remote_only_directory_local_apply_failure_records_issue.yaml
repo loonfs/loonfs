@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: execute_next_client_action_materialize_remote_only_directory_local_apply_failure_records_issue
 initial:
   remote_state:

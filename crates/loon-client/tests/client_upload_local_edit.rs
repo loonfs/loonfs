@@ -365,6 +365,7 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
             execute.uploaded_at_ms,
             execute.created_at_ms,
             |request| {
+                support::seed_server_basis_for_request(&store, request, &execute.writer_version);
                 execute_client_mutation(
                     &store,
                     request,
@@ -372,7 +373,6 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
                         writer_id: execute.writer_id.clone(),
                         writer_version: execute.writer_version.clone(),
                         now_ms: execute.now_ms,
-                        metadata_state: support::server_metadata_for_request(request),
                     },
                 )
                 .map(|executed| executed.response)
@@ -771,6 +771,7 @@ fn run_execute_next_client_action(
             if action.writer_id == "dispatch-fails" {
                 return Err("transient dispatcher failure".to_owned());
             }
+            support::seed_server_basis_for_request(store, request, &action.writer_version);
             execute_client_mutation(
                 store,
                 request,
@@ -778,7 +779,6 @@ fn run_execute_next_client_action(
                     writer_id: action.writer_id.clone(),
                     writer_version: action.writer_version.clone(),
                     now_ms: action.now_ms,
-                    metadata_state: support::server_metadata_for_request(request),
                 },
             )
             .map(|executed| executed.response)

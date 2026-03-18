@@ -202,6 +202,7 @@ fn run_execute(
 ) -> ExecutedCreateRemoteDir {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     execute_create_remote_dir(&mut db, client_file_id, action.created_at_ms, |request| {
+        support::seed_server_basis_for_request(store, request, &action.writer_version);
         execute_client_mutation(
             store,
             request,
@@ -209,7 +210,6 @@ fn run_execute(
                 writer_id: action.writer_id.clone(),
                 writer_version: action.writer_version.clone(),
                 now_ms: action.now_ms,
-                metadata_state: support::server_metadata_for_request(request),
             },
         )
         .map(|executed| executed.response)

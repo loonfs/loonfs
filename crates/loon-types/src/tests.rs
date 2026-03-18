@@ -301,6 +301,7 @@ fn sample_wal_payload() -> WalCommitPayload {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(8),
         ops: vec![WalOp::ReplaceFile {
+            op_index: 0,
             inode_id: InodeId(42),
             base_revision: RevisionNo(7),
             content_manifest_digest: "sha256:manifest".to_owned(),

@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: model
 name: mount_subtree_resolution
 initial:
   namespaces:

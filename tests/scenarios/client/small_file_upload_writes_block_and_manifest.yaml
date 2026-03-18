@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: small_file_upload_writes_block_and_manifest
 initial:
   namespace_id: ns-1

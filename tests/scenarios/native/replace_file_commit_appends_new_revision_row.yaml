@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: replace_file_commit_appends_new_revision_row
 initial:
   head:

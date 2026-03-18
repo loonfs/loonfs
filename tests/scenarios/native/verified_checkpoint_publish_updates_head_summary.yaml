@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: verified_checkpoint_publish_updates_head_summary
 initial:
   head:

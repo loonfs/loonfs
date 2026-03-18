@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: upload_local_create_from_path_progresses_one_block_per_tick
 initial:
   local_only_state:

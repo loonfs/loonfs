@@ -55,32 +55,38 @@ pub(crate) fn metadata_state_from_checkpoint(
                             display_name,
                             child_inode_id,
                             bind_seq,
+                            bind_op_index,
                         } => metadata_state.direntries.push(ModelDirentryRecord {
                             parent_inode_id: *parent_inode_id,
                             name_key: name_key.clone(),
                             display_name: display_name.clone(),
                             child_inode_id: *child_inode_id,
                             bind_seq: *bind_seq,
+                            bind_op_index: *bind_op_index,
                         }),
                         ModelCheckpointRow::Revision {
                             inode_id,
                             revision_no,
                             committed_seq,
+                            revision_op_index,
                             content_manifest_digest,
                         } => metadata_state.revisions.push(ModelRevisionRecord {
                             inode_id: *inode_id,
                             revision_no: *revision_no,
                             committed_seq: *committed_seq,
+                            revision_op_index: *revision_op_index,
                             content_manifest_digest: content_manifest_digest.clone(),
                         }),
                         ModelCheckpointRow::Tombstone {
                             root_inode_id,
                             tombstone_seq,
+                            tombstone_op_index,
                         } => metadata_state
                             .subtree_tombstones
                             .push(ModelSubtreeTombstoneRecord {
                                 root_inode_id: *root_inode_id,
                                 tombstone_seq: *tombstone_seq,
+                                tombstone_op_index: *tombstone_op_index,
                             }),
                     }
                 }
@@ -140,6 +146,7 @@ fn checkpoint_rows_for_family(
                     display_name: direntry.display_name.clone(),
                     child_inode_id: direntry.child_inode_id,
                     bind_seq: direntry.bind_seq,
+                    bind_op_index: direntry.bind_op_index,
                 })
                 .collect::<Vec<_>>();
             rows.sort_by_key(ModelCheckpointRow::row_key);
@@ -153,6 +160,7 @@ fn checkpoint_rows_for_family(
                     inode_id: revision.inode_id,
                     revision_no: revision.revision_no,
                     committed_seq: revision.committed_seq,
+                    revision_op_index: revision.revision_op_index,
                     content_manifest_digest: revision.content_manifest_digest.clone(),
                 })
                 .collect::<Vec<_>>();
@@ -166,6 +174,7 @@ fn checkpoint_rows_for_family(
                 .map(|tombstone| ModelCheckpointRow::Tombstone {
                     root_inode_id: tombstone.root_inode_id,
                     tombstone_seq: tombstone.tombstone_seq,
+                    tombstone_op_index: tombstone.tombstone_op_index,
                 })
                 .collect::<Vec<_>>();
             rows.sort_by_key(ModelCheckpointRow::row_key);
@@ -196,20 +205,50 @@ impl ModelCheckpointRow {
                 parent_inode_id,
                 name_key,
                 bind_seq,
+                bind_op_index,
                 ..
-            } => format!(
-                "direntry-{:020}-{name_key}-{:020}",
-                parent_inode_id.0, bind_seq.0
-            ),
+            } => {
+                if *bind_op_index == 0 {
+                    format!(
+                        "direntry-{:020}-{name_key}-{:020}",
+                        parent_inode_id.0, bind_seq.0
+                    )
+                } else {
+                    format!(
+                        "direntry-{:020}-{name_key}-{:020}-{:010}",
+                        parent_inode_id.0, bind_seq.0, bind_op_index
+                    )
+                }
+            }
             Self::Revision {
                 inode_id,
                 revision_no,
+                revision_op_index,
                 ..
-            } => format!("revision-{:020}-{:020}", inode_id.0, revision_no.0),
+            } => {
+                if *revision_op_index == 0 {
+                    format!("revision-{:020}-{:020}", inode_id.0, revision_no.0)
+                } else {
+                    format!(
+                        "revision-{:020}-{:020}-{:010}",
+                        inode_id.0, revision_no.0, revision_op_index
+                    )
+                }
+            }
             Self::Tombstone {
                 root_inode_id,
                 tombstone_seq,
-            } => format!("tombstone-{:020}-{:020}", root_inode_id.0, tombstone_seq.0),
+                tombstone_op_index,
+            } => {
+                if *tombstone_op_index == 0 {
+                    format!("tombstone-{:020}-{:020}", root_inode_id.0, tombstone_seq.0)
+                } else {
+                    format!(
+                        "tombstone-{:020}-{:020}-{:010}",
+                        root_inode_id.0, tombstone_seq.0, tombstone_op_index
+                    )
+                }
+            }
         }
     }
 }

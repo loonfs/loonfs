@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: local_only_directory_gets_remote_create_plan
 initial:
   local_only_state:

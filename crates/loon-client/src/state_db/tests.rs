@@ -14,7 +14,7 @@ use loon_types::{
 use serde_json::json;
 
 #[test]
-fn sqlite_state_db_applies_schema_v10() {
+fn sqlite_state_db_applies_schema_v11() {
     let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
     assert_eq!(
@@ -52,10 +52,271 @@ fn sqlite_state_db_applies_schema_v10() {
 }
 
 #[test]
+fn sqlite_state_db_migrates_every_historical_schema_version_to_latest() {
+    for version in 1..SCHEMA_VERSION {
+        let conn = rusqlite::Connection::open_in_memory().expect("open historical schema DB");
+        super::schema::initialize_connection(&conn).expect("initialize historical schema DB");
+        super::schema::install_schema_version_for_test(&conn, version)
+            .unwrap_or_else(|err| panic!("install schema version {version}: {err}"));
+
+        let mut db = SqliteStateDb { conn };
+        db.apply_migrations()
+            .unwrap_or_else(|err| panic!("migrate schema version {version}: {err}"));
+
+        assert_eq!(
+            db.schema_version().expect("read migrated schema version"),
+            SCHEMA_VERSION,
+            "expected historical schema version {version} to migrate to latest"
+        );
+
+        let mut stmt = db
+            .conn
+            .prepare("PRAGMA foreign_key_check")
+            .expect("prepare foreign_key_check");
+        let mut rows = stmt.query([]).expect("run foreign_key_check");
+        assert!(
+            rows.next()
+                .expect("advance foreign_key_check rows")
+                .is_none(),
+            "expected migrated schema version {version} to have no foreign-key violations"
+        );
+    }
+}
+
+#[test]
+fn sqlite_state_db_rejects_invalid_enum_like_values() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let inode_id = InodeId(42);
+    let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+
+    db.planner_transaction("seed-enum-check-parents", |tx| {
+        tx.upsert_local_file(&sample_local())?;
+        tx.upsert_local_only_file(&sample_local_only())?;
+        Ok(())
+    })
+    .expect("seed rows for enum-like checks");
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO remote_state (
+                    namespace_id,
+                    inode_id,
+                    observed_seq,
+                    revision_no,
+                    content_digest,
+                    content_manifest_digest,
+                    parent_inode_id,
+                    display_name,
+                    is_deleted,
+                    inode_kind
+                ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5, 0, 'bogus_kind')",
+                rusqlite::params![namespace_id.as_str(), 600_u64, 1_u64, 1_u64, "bad.txt"],
+            )
+            .is_err(),
+        "expected inode_kind CHECK constraint to reject invalid value"
+    );
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO planned_actions (
+                    namespace_id,
+                    inode_id,
+                    decision,
+                    reason,
+                    created_at_ms
+                ) VALUES (?1, ?2, 'bogus_decision', 'local_differs_from_anchor', ?3)",
+                rusqlite::params![namespace_id.as_str(), inode_id.0, 1_700_000_000_000_u64],
+            )
+            .is_err(),
+        "expected planner decision CHECK constraint to reject invalid value"
+    );
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO planned_local_only_actions (
+                    client_file_id,
+                    namespace_id,
+                    decision,
+                    reason,
+                    created_at_ms
+                ) VALUES (?1, ?2, 'upload_local_create', 'bogus_reason', ?3)",
+                rusqlite::params![
+                    client_file_id.as_str(),
+                    namespace_id.as_str(),
+                    1_700_000_000_000_u64
+                ],
+            )
+            .is_err(),
+        "expected planner reason CHECK constraint to reject invalid value"
+    );
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO transfer_ledger (
+                    namespace_id,
+                    inode_id,
+                    transfer_id,
+                    direction,
+                    object_key,
+                    block_index,
+                    block_count,
+                    state,
+                    updated_at_ms
+                ) VALUES (?1, ?2, 'transfer-1', 'bogus_direction', 'objects/x', 0, 1, 'staging', ?3)",
+                rusqlite::params![namespace_id.as_str(), inode_id.0, 1_700_000_000_000_u64],
+            )
+            .is_err(),
+        "expected transfer direction CHECK constraint to reject invalid value"
+    );
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO transfer_ledger (
+                    namespace_id,
+                    inode_id,
+                    transfer_id,
+                    direction,
+                    object_key,
+                    block_index,
+                    block_count,
+                    state,
+                    updated_at_ms
+                ) VALUES (?1, ?2, 'transfer-2', 'upload', 'objects/x', 0, 1, 'bogus_state', ?3)",
+                rusqlite::params![namespace_id.as_str(), inode_id.0, 1_700_000_000_000_u64],
+            )
+            .is_err(),
+        "expected transfer state CHECK constraint to reject invalid value"
+    );
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO conflicts_and_errors (
+                    namespace_id,
+                    inode_id,
+                    kind,
+                    summary,
+                    detail_json,
+                    created_at_ms
+                ) VALUES (?1, ?2, 'bogus_issue_kind', 'bad issue', '{}', ?3)",
+                rusqlite::params![namespace_id.as_str(), inode_id.0, 1_700_000_000_000_u64],
+            )
+            .is_err(),
+        "expected inode issue CHECK constraint to reject invalid value"
+    );
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO local_only_conflicts_and_errors (
+                    client_file_id,
+                    namespace_id,
+                    kind,
+                    summary,
+                    detail_json,
+                    created_at_ms
+                ) VALUES (?1, ?2, 'bogus_local_issue_kind', 'bad issue', '{}', ?3)",
+                rusqlite::params![
+                    client_file_id.as_str(),
+                    namespace_id.as_str(),
+                    1_700_000_000_000_u64
+                ],
+            )
+            .is_err(),
+        "expected local-only issue CHECK constraint to reject invalid value"
+    );
+}
+
+#[test]
+fn sqlite_state_db_rejects_orphan_adjunct_rows_via_foreign_keys() {
+    let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO planned_actions (
+                    namespace_id,
+                    inode_id,
+                    decision,
+                    reason,
+                    created_at_ms
+                ) VALUES ('ns-1', 42, 'download_remote_edit', 'remote_differs_from_anchor', 1)",
+                [],
+            )
+            .is_err(),
+        "expected planned_actions FK to reject orphan inode row"
+    );
+
+    assert!(
+        db.conn
+            .execute(
+                "INSERT INTO local_only_uploads (
+                    client_file_id,
+                    namespace_id,
+                    file_digest_sha256,
+                    content_manifest_digest,
+                    manifest_object_key,
+                    file_size_bytes,
+                    uploaded_at_ms
+                ) VALUES (
+                    'tmp:ns-1:00000000000000000001',
+                    'ns-1',
+                    'sha256:file',
+                    'sha256:manifest',
+                    'namespaces/ns-1/manifests/sha256:manifest.json',
+                    1,
+                    1
+                )",
+                [],
+            )
+            .is_err(),
+        "expected local_only_uploads FK to reject orphan temp row"
+    );
+}
+
+#[test]
+fn sqlite_state_db_creates_explicit_active_read_indexes() {
+    let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+
+    for index in [
+        "idx_planned_actions_created_at",
+        "idx_planned_local_only_actions_created_at",
+        "idx_transfer_ledger_inode_direction",
+        "idx_local_only_transfer_ledger_client_direction",
+        "idx_conflicts_and_errors_inode_created_at",
+        "idx_local_only_conflicts_and_errors_client_created_at",
+    ] {
+        let exists: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master for index");
+        assert_eq!(exists, 1, "expected index {index} to exist");
+    }
+}
+
+#[test]
 fn record_local_only_conflict_or_error_replaces_previous_row_for_same_client_file_and_kind() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
     let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
     let namespace_id = NamespaceId::from("ns-1");
+
+    seed_local_only_rows(
+        &mut db,
+        &[sample_local_only_with(
+            client_file_id.as_str(),
+            InodeKind::File,
+        )],
+    );
 
     db.record_local_only_conflict_or_error(
         &client_file_id,
@@ -149,6 +410,8 @@ fn record_conflict_or_error_replaces_previous_row_for_same_inode_and_kind() {
     let namespace_id = NamespaceId::from("ns-1");
     let inode_id = InodeId(42);
 
+    seed_local_rows(&mut db, &[sample_local_with("ns-1", 42, InodeKind::File)]);
+
     db.record_conflict_or_error(
         &namespace_id,
         inode_id,
@@ -210,6 +473,8 @@ fn allocate_client_request_ids_monotonically() {
 #[test]
 fn transfer_ledger_round_trips_by_inode_and_direction() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_local_rows(&mut db, &[sample_local_with("ns-1", 601, InodeKind::File)]);
+
     let row = TransferLedgerRow {
         namespace_id: NamespaceId::from("ns-1"),
         inode_id: InodeId(601),
@@ -256,6 +521,14 @@ fn transfer_ledger_round_trips_by_inode_and_direction() {
 #[test]
 fn local_only_transfer_ledger_round_trips_by_client_file_and_direction() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_local_only_rows(
+        &mut db,
+        &[sample_local_only_with(
+            "tmp:ns-1:00000000000000000001",
+            InodeKind::File,
+        )],
+    );
+
     let row = LocalOnlyTransferLedgerRow {
         client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
         namespace_id: NamespaceId::from("ns-1"),
@@ -317,6 +590,14 @@ fn planner_transaction_persists_local_only_state() {
 #[test]
 fn load_next_planned_local_only_action_orders_deterministically() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_local_only_rows(
+        &mut db,
+        &[
+            sample_local_only_with("tmp:ns-1:00000000000000000003", InodeKind::File),
+            sample_local_only_with("tmp:ns-1:00000000000000000002", InodeKind::Dir),
+            sample_local_only_with("tmp:ns-1:00000000000000000001", InodeKind::File),
+        ],
+    );
 
     db.planner_transaction("seed-planned-local-only-actions", |tx| {
         tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
@@ -360,6 +641,14 @@ fn load_next_planned_local_only_action_orders_deterministically() {
 #[test]
 fn load_next_planned_action_orders_deterministically() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_local_rows(
+        &mut db,
+        &[
+            sample_local_with("ns-2", 9, InodeKind::File),
+            sample_local_with("ns-1", 8, InodeKind::File),
+            sample_local_with("ns-1", 7, InodeKind::File),
+        ],
+    );
 
     db.planner_transaction("seed-planned-actions", |tx| {
         tx.upsert_planned_action(&PlannedActionRow {
@@ -403,6 +692,15 @@ fn load_next_planned_action_orders_deterministically() {
 #[test]
 fn load_next_executable_planned_action_skips_deferred_rows() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_local_rows(
+        &mut db,
+        &[
+            sample_local_with("ns-1", 7, InodeKind::File),
+            sample_local_with("ns-1", 8, InodeKind::File),
+            sample_local_with("ns-1", 9, InodeKind::File),
+            sample_local_with("ns-1", 6, InodeKind::Dir),
+        ],
+    );
 
     db.planner_transaction("seed-executable-and-deferred-actions", |tx| {
         tx.upsert_planned_action(&PlannedActionRow {
@@ -453,6 +751,15 @@ fn load_next_executable_planned_action_skips_deferred_rows() {
 #[test]
 fn load_next_deferred_planned_action_skips_executable_rows() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_local_rows(
+        &mut db,
+        &[
+            sample_local_with("ns-1", 8, InodeKind::File),
+            sample_local_with("ns-1", 7, InodeKind::File),
+            sample_local_with("ns-1", 9, InodeKind::File),
+            sample_local_with("ns-1", 6, InodeKind::Dir),
+        ],
+    );
 
     db.planner_transaction("seed-executable-and-deferred-actions", |tx| {
         tx.upsert_planned_action(&PlannedActionRow {
@@ -608,6 +915,14 @@ fn record_pending_client_mutation_persists_and_reuses_same_mapping() {
     let request = sample_client_create_file_request();
     let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
 
+    seed_local_only_rows(
+        &mut db,
+        &[sample_local_only_with(
+            client_file_id.as_str(),
+            InodeKind::File,
+        )],
+    );
+
     let recorded = db
         .record_pending_client_mutation(&client_file_id, &request, 1_700_000_106_000)
         .expect("record pending mutation");
@@ -643,6 +958,14 @@ fn record_pending_client_mutation_rejects_conflicting_temp_identity() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
     let request = sample_client_create_file_request();
 
+    seed_local_only_rows(
+        &mut db,
+        &[
+            sample_local_only_with("tmp:ns-1:00000000000000000001", InodeKind::File),
+            sample_local_only_with("tmp:ns-1:00000000000000000002", InodeKind::File),
+        ],
+    );
+
     db.record_pending_client_mutation(
         &ClientFileId::from("tmp:ns-1:00000000000000000001"),
         &request,
@@ -668,6 +991,14 @@ fn record_pending_client_mutation_rejects_conflicting_temp_identity() {
 fn record_pending_client_mutation_rejects_conflicting_request_for_same_client_file() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
     let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+
+    seed_local_only_rows(
+        &mut db,
+        &[sample_local_only_with(
+            client_file_id.as_str(),
+            InodeKind::File,
+        )],
+    );
 
     db.record_pending_client_mutation(
         &client_file_id,
@@ -1186,4 +1517,56 @@ fn seed_bound_directory_parent(db: &mut SqliteStateDb, inode_id: InodeId) {
         Ok(())
     })
     .expect("seed bound directory parent");
+}
+
+fn seed_local_rows(db: &mut SqliteStateDb, rows: &[LocalFileStateRow]) {
+    db.planner_transaction("seed-local-rows", |tx| {
+        for row in rows {
+            tx.upsert_local_file(row)?;
+        }
+        Ok(())
+    })
+    .expect("seed local rows");
+}
+
+fn seed_local_only_rows(db: &mut SqliteStateDb, rows: &[LocalOnlyFileStateRow]) {
+    db.planner_transaction("seed-local-only-rows", |tx| {
+        for row in rows {
+            tx.upsert_local_only_file(row)?;
+        }
+        Ok(())
+    })
+    .expect("seed local-only rows");
+}
+
+fn sample_local_with(
+    namespace_id: &str,
+    inode_id: u64,
+    inode_kind: InodeKind,
+) -> LocalFileStateRow {
+    LocalFileStateRow {
+        namespace_id: NamespaceId::from(namespace_id),
+        inode_id: InodeId(inode_id),
+        inode_kind,
+        content_digest: Some(format!("sha256:local-{namespace_id}-{inode_id}")),
+        parent_inode_id: Some(InodeId(2)),
+        display_name: format!("inode-{inode_id}"),
+        exists_on_disk: true,
+        dirty: false,
+        last_local_change_ms: 1_700_000_000_000 + inode_id,
+    }
+}
+
+fn sample_local_only_with(client_file_id: &str, inode_kind: InodeKind) -> LocalOnlyFileStateRow {
+    LocalOnlyFileStateRow {
+        client_file_id: ClientFileId::from(client_file_id),
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_kind,
+        parent_inode_id: Some(InodeId(2)),
+        display_name: client_file_id.to_owned(),
+        content_digest: Some(format!("sha256:{client_file_id}")),
+        exists_on_disk: true,
+        dirty: true,
+        last_local_change_ms: 1_700_000_100_000,
+    }
 }

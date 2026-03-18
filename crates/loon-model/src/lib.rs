@@ -89,16 +89,22 @@ pub enum ModelCheckpointRow {
         display_name: String,
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
+        #[serde(default)]
+        bind_op_index: u32,
     },
     Revision {
         inode_id: InodeId,
         revision_no: RevisionNo,
         committed_seq: ChangeSeq,
+        #[serde(default)]
+        revision_op_index: u32,
         content_manifest_digest: String,
     },
     Tombstone {
         root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
+        #[serde(default)]
+        tombstone_op_index: u32,
     },
 }
 
@@ -128,6 +134,8 @@ pub struct ModelDirentryRecord {
     pub display_name: String,
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
+    #[serde(default)]
+    pub bind_op_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +143,8 @@ pub struct ModelRevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     pub committed_seq: ChangeSeq,
+    #[serde(default)]
+    pub revision_op_index: u32,
     pub content_manifest_digest: String,
 }
 
@@ -142,6 +152,8 @@ pub struct ModelRevisionRecord {
 pub struct ModelSubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
+    #[serde(default)]
+    pub tombstone_op_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

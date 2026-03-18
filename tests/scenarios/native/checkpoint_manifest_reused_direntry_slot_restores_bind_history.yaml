@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: native
 name: checkpoint_manifest_reused_direntry_slot_restores_bind_history
 initial:
   checkpoint_manifest:

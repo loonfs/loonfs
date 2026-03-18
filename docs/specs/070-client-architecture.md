@@ -1536,6 +1536,35 @@ Rules:
   - `upload_local_create_upload_failed`
   - `upload_local_create_transfer_reset`
 
+## SQLite hardening boundary (schema v11)
+
+The next schema version does not add new client-truth tables. It hardens the existing durable
+shape into a stricter correctness boundary.
+
+Rules:
+
+- stable enum-like `TEXT` columns use SQLite `CHECK` constraints for:
+  - `inode_kind`
+  - planner `decision`
+  - planner `reason`
+  - transfer `direction`
+  - transfer `state`
+  - repo-defined issue `kind`
+- inode-keyed adjunct tables reference `local_state(namespace_id, inode_id)`
+- temp-identity adjunct tables reference `local_only_state(client_file_id)`
+- explicit read-path indexes exist for planned actions, transfer ledgers, and issue tables
+- migration coverage must prove every historical schema version upgrades cleanly to the latest one
+
+Why it exists:
+
+- the client database is durable protocol state, not a permissive cache
+
+Failure modes prevented:
+
+- invalid planner or transfer rows being inserted silently and failing later in Rust decode paths
+- orphaned ledger or issue rows surviving after their owning local state has been removed
+- schema upgrades only being tested from empty databases instead of real historical versions
+
 ## File-focused late authoritative observations during transfer work
 
 The first late-authoritative hardening slice stays file-focused.

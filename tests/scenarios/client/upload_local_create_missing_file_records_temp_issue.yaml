@@ -1,3 +1,5 @@
+schema_version: 1
+scenario_kind: client
 name: upload_local_create_missing_file_records_temp_issue
 initial:
   local_only_state:
