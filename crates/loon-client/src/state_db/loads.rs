@@ -303,6 +303,70 @@ pub(super) fn load_transfer_ledger_for_inode(
     .transpose()
 }
 
+pub(super) fn load_local_only_transfer_ledger(
+    conn: &Connection,
+    client_file_id: &ClientFileId,
+    direction: TransferDirection,
+) -> Result<Option<LocalOnlyTransferLedgerRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT
+                namespace_id,
+                transfer_id,
+                direction,
+                object_key,
+                block_index,
+                block_count,
+                state,
+                updated_at_ms
+            FROM local_only_transfer_ledger
+            WHERE client_file_id = ?1 AND direction = ?2",
+            params![
+                client_file_id.as_str(),
+                transfer_direction_as_str(direction),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(
+            namespace_id,
+            transfer_id,
+            direction,
+            object_key,
+            block_index,
+            block_count,
+            state,
+            updated_at_ms,
+        )| {
+            Ok(LocalOnlyTransferLedgerRow {
+                client_file_id: client_file_id.clone(),
+                namespace_id: NamespaceId::from(namespace_id),
+                transfer_id,
+                direction: transfer_direction_from_str(&direction)?,
+                object_key,
+                block_index: from_sql_u64(block_index, "block_index")?,
+                block_count: from_sql_u64(block_count, "block_count")?,
+                state: transfer_state_from_str(&state)?,
+                updated_at_ms: from_sql_u64(updated_at_ms, "updated_at_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
 pub(super) fn load_next_planned_action(
     conn: &Connection,
 ) -> Result<Option<PlannedActionRow>, StateDbError> {

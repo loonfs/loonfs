@@ -427,6 +427,14 @@ fn model_builds_deterministic_upload_transfer_id() {
 }
 
 #[test]
+fn model_builds_deterministic_local_only_upload_transfer_id() {
+    assert_eq!(
+        local_only_upload_transfer_id("tmp:ns-1:00000000000000000001", "sha256:manifest-abc"),
+        "upload-local-only:tmp:ns-1:00000000000000000001:sha256:manifest-abc"
+    );
+}
+
+#[test]
 fn model_sums_expected_download_prefix_size() {
     assert_eq!(expected_download_staged_size(&[6, 10, 4], 0), 0);
     assert_eq!(expected_download_staged_size(&[6, 10, 4], 1), 6);

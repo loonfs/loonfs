@@ -1,7 +1,7 @@
 use super::{SqliteStateDb, StateDbError};
 use rusqlite::Connection;
 
-pub(crate) const SCHEMA_VERSION: i32 = 8;
+pub(crate) const SCHEMA_VERSION: i32 = 9;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
@@ -174,6 +174,21 @@ ALTER TABLE sync_anchor
 ADD COLUMN content_manifest_digest TEXT;
 "#;
 
+const SCHEMA_V9_SQL: &str = r#"
+CREATE TABLE local_only_transfer_ledger (
+    client_file_id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    transfer_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    block_index INTEGER NOT NULL,
+    block_count INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (transfer_id)
+);
+"#;
+
 pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -245,6 +260,14 @@ impl SqliteStateDb {
         if current_version == 7 {
             let tx = self.conn.transaction()?;
             tx.execute_batch(SCHEMA_V8_SQL)?;
+            tx.pragma_update(None, "user_version", 8)?;
+            tx.commit()?;
+            current_version = 8;
+        }
+
+        if current_version == 8 {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V9_SQL)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
         }

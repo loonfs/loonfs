@@ -1,9 +1,10 @@
 use super::loads::{
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
     load_conflicts_and_errors, load_inode_upload, load_local_file,
-    load_local_only_candidates_for_namespace, load_local_only_file, load_local_only_upload,
-    load_next_deferred_planned_action, load_next_executable_planned_action,
-    load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
+    load_local_only_candidates_for_namespace, load_local_only_file,
+    load_local_only_transfer_ledger, load_local_only_upload, load_next_deferred_planned_action,
+    load_next_executable_planned_action, load_next_planned_action,
+    load_next_planned_local_only_action, load_pending_client_mutation,
     load_pending_client_mutation_for_client_file, load_pending_inode_mutation,
     load_pending_inode_mutation_for_inode, load_planned_action, load_planned_local_only_action,
     load_remote_file, load_sync_anchor, load_transfer_ledger_for_inode,
@@ -163,6 +164,14 @@ impl SqliteStateDb {
         client_file_id: &ClientFileId,
     ) -> Result<Option<LocalOnlyUploadRow>, StateDbError> {
         load_local_only_upload(&self.conn, client_file_id)
+    }
+
+    pub fn load_local_only_transfer_ledger(
+        &self,
+        client_file_id: &ClientFileId,
+        direction: TransferDirection,
+    ) -> Result<Option<LocalOnlyTransferLedgerRow>, StateDbError> {
+        load_local_only_transfer_ledger(&self.conn, client_file_id, direction)
     }
 
     pub fn load_inode_upload(
@@ -399,6 +408,15 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn upsert_local_only_transfer_ledger(
+        &mut self,
+        row: &LocalOnlyTransferLedgerRow,
+    ) -> Result<LocalOnlyTransferLedgerRow, StateDbError> {
+        self.planner_transaction("upsert_local_only_transfer_ledger", |tx| {
+            tx.upsert_local_only_transfer_ledger(row)
+        })
+    }
+
     pub fn delete_transfer_ledger_for_inode(
         &mut self,
         namespace_id: &NamespaceId,
@@ -407,6 +425,16 @@ impl SqliteStateDb {
     ) -> Result<(), StateDbError> {
         self.planner_transaction("delete_transfer_ledger_for_inode", |tx| {
             tx.delete_transfer_ledger_for_inode(namespace_id, inode_id, direction)
+        })
+    }
+
+    pub fn delete_local_only_transfer_ledger(
+        &mut self,
+        client_file_id: &ClientFileId,
+        direction: TransferDirection,
+    ) -> Result<(), StateDbError> {
+        self.planner_transaction("delete_local_only_transfer_ledger", |tx| {
+            tx.delete_local_only_transfer_ledger(client_file_id, direction)
         })
     }
 }
@@ -755,6 +783,7 @@ impl PlannerTxn<'_> {
                 to_sql_u64(row.uploaded_at_ms, "uploaded_at_ms")?,
             ],
         )?;
+        self.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
 
         Ok(row)
     }
@@ -867,6 +896,56 @@ impl PlannerTxn<'_> {
         Ok(row.clone())
     }
 
+    pub fn upsert_local_only_transfer_ledger(
+        &mut self,
+        row: &LocalOnlyTransferLedgerRow,
+    ) -> Result<LocalOnlyTransferLedgerRow, StateDbError> {
+        self.tx.execute(
+            "DELETE FROM local_only_transfer_ledger
+            WHERE client_file_id = ?1 AND direction = ?2 AND transfer_id != ?3",
+            params![
+                row.client_file_id.as_str(),
+                transfer_direction_as_str(row.direction),
+                &row.transfer_id,
+            ],
+        )?;
+        self.tx.execute(
+            "INSERT INTO local_only_transfer_ledger (
+                client_file_id,
+                namespace_id,
+                transfer_id,
+                direction,
+                object_key,
+                block_index,
+                block_count,
+                state,
+                updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(transfer_id) DO UPDATE SET
+                client_file_id = excluded.client_file_id,
+                namespace_id = excluded.namespace_id,
+                direction = excluded.direction,
+                object_key = excluded.object_key,
+                block_index = excluded.block_index,
+                block_count = excluded.block_count,
+                state = excluded.state,
+                updated_at_ms = excluded.updated_at_ms",
+            params![
+                row.client_file_id.as_str(),
+                row.namespace_id.as_str(),
+                &row.transfer_id,
+                transfer_direction_as_str(row.direction),
+                &row.object_key,
+                to_sql_u64(row.block_index, "block_index")?,
+                to_sql_u64(row.block_count, "block_count")?,
+                transfer_state_as_str(row.state),
+                to_sql_u64(row.updated_at_ms, "updated_at_ms")?,
+            ],
+        )?;
+
+        Ok(row.clone())
+    }
+
     pub fn delete_transfer_ledger_for_inode(
         &mut self,
         namespace_id: &NamespaceId,
@@ -879,6 +958,22 @@ impl PlannerTxn<'_> {
             params![
                 namespace_id.as_str(),
                 to_sql_u64(inode_id.0, "inode_id")?,
+                transfer_direction_as_str(direction),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_local_only_transfer_ledger(
+        &mut self,
+        client_file_id: &ClientFileId,
+        direction: TransferDirection,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM local_only_transfer_ledger
+            WHERE client_file_id = ?1 AND direction = ?2",
+            params![
+                client_file_id.as_str(),
                 transfer_direction_as_str(direction),
             ],
         )?;
@@ -1630,6 +1725,7 @@ impl PlannerTxn<'_> {
         self.upsert_sync_anchor(&anchor_row)?;
         self.delete_planned_action(&remote.namespace_id, remote.inode_id)?;
         self.delete_planned_local_only_action(client_file_id)?;
+        self.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
         self.delete_local_only_upload(client_file_id)?;
         self.delete_local_only_file(client_file_id)?;
 

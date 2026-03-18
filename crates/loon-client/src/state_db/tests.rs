@@ -1,8 +1,9 @@
 use super::{
     BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
-    LocalOnlyPlannedActionRow, LocalOnlyUploadRow, ObservedLocalOnlyInode,
-    PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError,
-    SyncAnchorRow, TransferDirection, TransferLedgerRow, TransferState, SCHEMA_VERSION,
+    LocalOnlyPlannedActionRow, LocalOnlyTransferLedgerRow, LocalOnlyUploadRow,
+    ObservedLocalOnlyInode, PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow,
+    SqliteStateDb, StateDbError, SyncAnchorRow, TransferDirection, TransferLedgerRow,
+    TransferState, SCHEMA_VERSION,
 };
 use crate::upload::UploadedContent;
 use loon_types::{
@@ -13,7 +14,7 @@ use loon_types::{
 use serde_json::json;
 
 #[test]
-fn sqlite_state_db_applies_schema_v8() {
+fn sqlite_state_db_applies_schema_v9() {
     let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
     assert_eq!(
@@ -30,6 +31,7 @@ fn sqlite_state_db_applies_schema_v8() {
         "local_only_state",
         "planned_local_only_actions",
         "local_only_uploads",
+        "local_only_transfer_ledger",
         "inode_uploads",
         "pending_client_mutations",
         "pending_inode_mutations",
@@ -203,6 +205,49 @@ fn transfer_ledger_round_trips_by_inode_and_direction() {
             TransferDirection::Upload,
         )
         .expect("load deleted transfer ledger row"),
+        None
+    );
+}
+
+#[test]
+fn local_only_transfer_ledger_round_trips_by_client_file_and_direction() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let row = LocalOnlyTransferLedgerRow {
+        client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+        namespace_id: NamespaceId::from("ns-1"),
+        transfer_id: "upload-local-only:tmp:ns-1:00000000000000000001:sha256:manifest-1".to_owned(),
+        direction: TransferDirection::Upload,
+        object_key: "namespaces/ns-1/manifests/sha256:manifest-1.json".to_owned(),
+        block_index: 1,
+        block_count: 2,
+        state: TransferState::Uploading,
+        updated_at_ms: 1_700_000_611_000,
+    };
+
+    db.upsert_local_only_transfer_ledger(&row)
+        .expect("record local-only transfer ledger row");
+
+    assert_eq!(
+        db.load_local_only_transfer_ledger(
+            &ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            TransferDirection::Upload,
+        )
+        .expect("load local-only transfer ledger row"),
+        Some(row.clone())
+    );
+
+    db.delete_local_only_transfer_ledger(
+        &ClientFileId::from("tmp:ns-1:00000000000000000001"),
+        TransferDirection::Upload,
+    )
+    .expect("delete local-only transfer ledger row");
+
+    assert_eq!(
+        db.load_local_only_transfer_ledger(
+            &ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            TransferDirection::Upload,
+        )
+        .expect("load deleted local-only transfer ledger row"),
         None
     );
 }
@@ -449,6 +494,41 @@ fn record_local_only_upload_persists_and_resolves_manifest_digest() {
         db.resolve_local_only_upload_content_manifest_digest(&local_only)
             .expect("resolve content manifest digest"),
         "sha256:manifest-new-local-file"
+    );
+}
+
+#[test]
+fn record_local_only_upload_clears_local_only_transfer_ledger() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let local_only = sample_local_only();
+    let uploaded = sample_uploaded_content();
+
+    db.planner_transaction("seed-local-only-and-transfer", |tx| {
+        tx.upsert_local_only_file(&local_only)?;
+        tx.upsert_local_only_transfer_ledger(&LocalOnlyTransferLedgerRow {
+            client_file_id: local_only.client_file_id.clone(),
+            namespace_id: local_only.namespace_id.clone(),
+            transfer_id:
+                "upload-local-only:tmp:ns-1:00000000000000000001:sha256:manifest-new-local-file"
+                    .to_owned(),
+            direction: TransferDirection::Upload,
+            object_key: uploaded.manifest_object_key.clone(),
+            block_index: 1,
+            block_count: 2,
+            state: TransferState::Uploading,
+            updated_at_ms: 1_700_000_104_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed local-only state and transfer");
+
+    db.record_local_only_upload(&local_only.client_file_id, &uploaded, 1_700_000_104_001)
+        .expect("record local-only upload");
+
+    assert_eq!(
+        db.load_local_only_transfer_ledger(&local_only.client_file_id, TransferDirection::Upload)
+            .expect("load local-only transfer ledger after upload"),
+        None
     );
 }
 

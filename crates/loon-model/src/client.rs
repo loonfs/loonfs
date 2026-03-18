@@ -46,6 +46,13 @@ pub fn upload_transfer_id(
     )
 }
 
+pub fn local_only_upload_transfer_id(
+    client_file_id: &str,
+    content_manifest_digest: &str,
+) -> String {
+    format!("upload-local-only:{client_file_id}:{content_manifest_digest}")
+}
+
 pub fn expected_download_staged_size(block_sizes: &[u64], next_block_index: u64) -> u64 {
     let clamped = usize::try_from(next_block_index)
         .unwrap_or(usize::MAX)

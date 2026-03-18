@@ -1,8 +1,13 @@
 use super::dispatch::dispatch_client_mutation_from_state;
 use super::*;
 use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision};
-use crate::state_db::{ClientFileId, LocalOnlyUploadRow, SqliteStateDb, StateDbError};
-use crate::upload::upload_small_file_from_path;
+use crate::state_db::{
+    ClientFileId, LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, SqliteStateDb, StateDbError,
+    TransferDirection, TransferState,
+};
+use crate::upload::{
+    finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
+};
 use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeKind};
 use std::path::Path;
@@ -193,6 +198,7 @@ fn ensure_upload_local_create_ready<S: ObjectStore>(
             && local_only.content_digest.as_deref()
                 == Some(existing_upload.file_digest_sha256.as_str())
         {
+            db.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
             return Ok((existing_upload, true));
         }
     }
@@ -201,7 +207,53 @@ fn ensure_upload_local_create_ready<S: ObjectStore>(
         source_path.ok_or_else(|| ExecuteUploadLocalCreateError::SourcePathMissing {
             client_file_id: client_file_id.as_str().to_owned(),
         })?;
-    let uploaded = upload_small_file_from_path(store, &local_only.namespace_id, source_path)?;
+    let plan = plan_upload_from_path(&local_only.namespace_id, source_path)?;
+    let block_count = u64::try_from(plan.blocks.len()).expect("block count should fit in u64");
+    let transfer_id = local_only_upload_transfer_id(client_file_id, &plan.content_manifest_digest);
+    let requested_block_index =
+        match db.load_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)? {
+            Some(existing)
+                if existing.transfer_id == transfer_id
+                    && existing.object_key == plan.manifest_object_key
+                    && existing.block_count == block_count
+                    && existing.state == TransferState::Uploading =>
+            {
+                existing.block_index
+            }
+            _ => 0,
+        };
+    let resume_block_index = requested_block_index.min(block_count);
+    db.upsert_local_only_transfer_ledger(&local_only_upload_transfer_row(
+        client_file_id,
+        &local_only.namespace_id,
+        &transfer_id,
+        &plan.manifest_object_key,
+        resume_block_index,
+        block_count,
+        uploaded_at_ms,
+    ))?;
+    for block_index in usize::try_from(resume_block_index).expect("resume block index should fit")
+        ..plan.blocks.len()
+    {
+        upload_planned_block_from_path(
+            store,
+            source_path,
+            &plan,
+            u64::try_from(block_index).expect("block index should fit in u64"),
+        )?;
+        let next_block_index =
+            u64::try_from(block_index + 1).expect("block index should fit in u64");
+        db.upsert_local_only_transfer_ledger(&local_only_upload_transfer_row(
+            client_file_id,
+            &local_only.namespace_id,
+            &transfer_id,
+            &plan.manifest_object_key,
+            next_block_index,
+            block_count,
+            uploaded_at_ms,
+        ))?;
+    }
+    let uploaded = finalize_planned_upload(store, &plan)?;
     let recorded = db
         .record_local_only_upload(client_file_id, &uploaded, uploaded_at_ms)
         .map_err(ExecuteUploadLocalCreateError::from)?;
@@ -242,4 +294,37 @@ fn ensure_create_remote_dir_ready(
     }
 
     Ok(())
+}
+
+fn local_only_upload_transfer_id(
+    client_file_id: &ClientFileId,
+    content_manifest_digest: &str,
+) -> String {
+    format!(
+        "upload-local-only:{}:{}",
+        client_file_id.as_str(),
+        content_manifest_digest
+    )
+}
+
+fn local_only_upload_transfer_row(
+    client_file_id: &ClientFileId,
+    namespace_id: &loon_types::NamespaceId,
+    transfer_id: &str,
+    object_key: &str,
+    block_index: u64,
+    block_count: u64,
+    updated_at_ms: u64,
+) -> LocalOnlyTransferLedgerRow {
+    LocalOnlyTransferLedgerRow {
+        client_file_id: client_file_id.clone(),
+        namespace_id: namespace_id.clone(),
+        transfer_id: transfer_id.to_owned(),
+        direction: TransferDirection::Upload,
+        object_key: object_key.to_owned(),
+        block_index,
+        block_count,
+        state: TransferState::Uploading,
+        updated_at_ms,
+    }
 }

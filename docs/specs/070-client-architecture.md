@@ -1360,8 +1360,7 @@ Rules:
 
 - the first implementation keeps at most one active upload row per `(namespace_id, inode_id)`
 - this slice applies only to inode-keyed `upload_local_edit`
-- local-only creates may continue using the smaller one-shot upload helper until the client has a
-  temp-identity keyed transfer ledger
+- local-only creates use the separate temp-identity keyed `local_only_transfer_ledger` path below
 - before uploading blocks, the executor must scan the local source path and derive one deterministic
   content manifest plan for the current local bytes
 - `transfer_id` must be deterministic for one planned upload:
@@ -1393,6 +1392,68 @@ Failure modes prevented:
 - depending on one in-memory upload call for inode-keyed file edits
 - losing a fully uploaded content manifest because upload completion and manifest publication were
   not named as separate durable steps
+
+## Temp-identity upload transfer ledger (schema v9)
+
+The next upload-side transfer-ledger slice is for local-only file creates that still have only a
+temporary `client_file_id`.
+
+It uses one new SQLite table:
+
+- `local_only_transfer_ledger`
+
+The first active temp upload row shape is:
+
+- `client_file_id`
+- `namespace_id`
+- `transfer_id`
+- `direction = upload`
+- `object_key = manifest_object_key`
+- `block_index = next block index to upload`
+- `block_count = total manifest block count`
+- `state = uploading`
+- `updated_at_ms`
+
+Rules:
+
+- the first implementation keeps at most one active temp upload row per `(client_file_id,
+  direction)`
+- this slice applies only to local-only `upload_local_create`
+- before uploading blocks, the executor must scan the local source path and derive one deterministic
+  content manifest plan for the current local bytes
+- `transfer_id` must be deterministic for one planned temp upload:
+  `upload-local-only:{client_file_id}:{content_manifest_digest}`
+- when an existing temp upload row matches the newly derived `transfer_id`, `object_key`, and
+  `block_count`, the executor may resume from the recorded `block_index`
+- when the existing row does not match the newly derived upload plan, the executor must restart
+  from `block_index = 0`
+- after one content block is durably written to object storage, the executor must advance
+  `local_only_transfer_ledger.block_index` durably
+- if the process crashes after a block object write but before the ledger advance, the retry path
+  may safely re-upload that block because immutable block keys are content-addressed
+- after all content blocks are durable, the executor may write the immutable manifest object
+- only after the manifest object exists may the client record `local_only_uploads(client_file_id)`
+  and clear the active temp upload ledger row
+- if a matching `local_only_uploads(client_file_id)` row already exists for the current local
+  digest, the executor may reuse it and clear any stale temp upload ledger row
+- if the temp identity later binds to a real inode, the bind transaction must clear any leftover
+  `local_only_transfer_ledger` row for that `client_file_id`
+
+Why this rule exists:
+
+- restart-safe inode uploads are only half of the transfer story if local-only file creates still
+  restart from block `0`
+- temp identities need their own durable transfer namespace before a remote inode exists
+- upload completion for local-only creates should stay durable before request dispatch, just like
+  inode-keyed uploads
+
+Failure modes prevented:
+
+- restarting a large local-only file create upload from byte `0` with no durable proof of prior
+  block progress
+- coupling temp-identity upload resume to inode-keyed tables that do not exist yet
+- leaving stale temp upload progress behind after a temp identity is already bound or a matching
+  durable upload row already exists
 
 ## Local data model inspiration
 

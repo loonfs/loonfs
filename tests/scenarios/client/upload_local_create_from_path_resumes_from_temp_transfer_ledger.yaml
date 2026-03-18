@@ -1,25 +1,32 @@
-name: upload_local_create_from_path_binds_and_restarts_converged
+name: upload_local_create_from_path_resumes_from_temp_transfer_ledger
 initial:
   local_only_state:
     client_file_id: tmp:ns-1:00000000000000000001
     namespace_id: ns-1
     inode_kind: file
     parent_inode_id: 2
-    display_name: draft.txt
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    display_name: draft-large.txt
+    content_digest:
     exists_on_disk: true
     dirty: true
-    last_local_change_ms: 1700000100000
+    last_local_change_ms: 1700000200000
   local_file:
-    relative_path: drafts/draft.txt
-    content_utf8: |
-      hello from loon
+    relative_path: drafts/draft-large.txt
+    generated_two_block:
+      first_block_fill_byte: a
+      second_block_utf8: "b"
   planned_local_only_action:
     client_file_id: tmp:ns-1:00000000000000000001
     namespace_id: ns-1
     decision: upload_local_create
     reason: local_only_file_without_remote_identity
-    created_at_ms: 1700000105000
+    created_at_ms: 1700000205000
+  local_only_transfer_ledger:
+    direction: upload
+    block_index: 1
+    block_count: 2
+    state: uploading
+    updated_at_ms: 1700000204500
   head:
     namespace_id: ns-1
     seq: 41
@@ -31,19 +38,19 @@ initial:
     namespace_id: ns-1
     holder_id: writer-a
     fence_token: 8
-    lease_expires_at_ms: 1700000115000
+    lease_expires_at_ms: 1700000215000
 actions:
   - execute_upload_local_create_from_path:
-      uploaded_at_ms: 1700000104000
-      created_at_ms: 1700000106000
+      uploaded_at_ms: 1700000204000
+      created_at_ms: 1700000206000
       writer_id: writer-a
       writer_version: loon-server-test
-      now_ms: 1700000107000
+      now_ms: 1700000207000
   - restart_client_state_db: true
   - planner_tick:
       namespace_id: ns-1
       inode_id: 501
-      now_ms: 1700000110000
+      now_ms: 1700000210000
 expect:
   upload_reused: false
   pending_request_id: client-req-00000000000000000001
@@ -53,8 +60,8 @@ expect:
     op:
       create_file:
         parent_inode_id: 2
-        display_name: draft.txt
-        content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+        display_name: draft-large.txt
+        content_manifest_digest:
   mutation_response:
     namespace_id: ns-1
     client_request_id: client-req-00000000000000000001
@@ -64,8 +71,8 @@ expect:
       inode_kind: file
       revision_no: 1
       parent_inode_id: 2
-      display_name: draft.txt
-      content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+      display_name: draft-large.txt
+      content_digest:
   bound_identity:
     client_file_id: tmp:ns-1:00000000000000000001
     namespace_id: ns-1
@@ -76,31 +83,31 @@ expect:
     inode_kind: file
     observed_seq: 42
     revision_no: 1
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
-    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+    content_digest:
+    content_manifest_digest:
     parent_inode_id: 2
-    display_name: draft.txt
+    display_name: draft-large.txt
     is_deleted: false
   local_state:
     namespace_id: ns-1
     inode_id: 501
     inode_kind: file
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+    content_digest:
     parent_inode_id: 2
-    display_name: draft.txt
+    display_name: draft-large.txt
     exists_on_disk: true
     dirty: false
-    last_local_change_ms: 1700000100000
+    last_local_change_ms: 1700000200000
   sync_anchor:
     namespace_id: ns-1
     inode_id: 501
     inode_kind: file
     synced_seq: 42
     revision_no: 1
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
-    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+    content_digest:
+    content_manifest_digest:
     parent_inode_id: 2
-    display_name: draft.txt
+    display_name: draft-large.txt
   local_only_state_cleared: true
   planned_local_only_action_cleared: true
   pending_mutation_cleared: true
@@ -110,4 +117,4 @@ expect:
     inode_id: 501
     decision: no_op
     reason: already_converged
-    created_at_ms: 1700000110000
+    created_at_ms: 1700000210000

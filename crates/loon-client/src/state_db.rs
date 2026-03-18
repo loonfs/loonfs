@@ -411,6 +411,19 @@ pub struct LocalOnlyUploadRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalOnlyTransferLedgerRow {
+    pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
+    pub transfer_id: String,
+    pub direction: TransferDirection,
+    pub object_key: String,
+    pub block_index: u64,
+    pub block_count: u64,
+    pub state: TransferState,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InodeUploadRow {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,

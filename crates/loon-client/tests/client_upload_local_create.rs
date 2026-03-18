@@ -6,17 +6,20 @@ use loon_client::executor::{
 };
 use loon_client::planner::PlannedActionRecord;
 use loon_client::state_db::{
-    BoundLocalOnlyFile, LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    LocalOnlyUploadRow, RemoteFileStateRow, SqliteStateDb, StateDbError, SyncAnchorRow,
+    BoundLocalOnlyFile, ClientFileId, LocalFileStateRow, LocalOnlyFileStateRow,
+    LocalOnlyPlannedActionRow, LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, RemoteFileStateRow,
+    SqliteStateDb, StateDbError, SyncAnchorRow, TransferDirection, TransferState,
 };
+use loon_client::upload::{upload_small_file_from_path, UploadedContent};
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
 use loon_testkit::scenario::Scenario;
 use loon_types::{
-    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind, HeadState,
-    HeadStateEnvelope, InodeId, LeaseState, LeaseStateEnvelope, NamespaceId,
+    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind,
+    CreatedRemoteInode, HeadState, HeadStateEnvelope, InodeId, LeaseState, LeaseStateEnvelope,
+    NamespaceId, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::Deserialize;
 use std::fs;
@@ -24,21 +27,116 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn upload_local_create_from_path_binds_and_restarts_converged() {
+    run_upload_local_create_fixture(
+        "client/upload_local_create_from_path_binds_and_restarts_converged.yaml",
+        "client-upload-local-create",
+    );
+}
+
+#[test]
+fn upload_local_create_from_path_resumes_from_temp_transfer_ledger() {
+    run_upload_local_create_fixture(
+        "client/upload_local_create_from_path_resumes_from_temp_transfer_ledger.yaml",
+        "client-upload-local-create-resume",
+    );
+}
+
+#[test]
+fn upload_local_create_retry_reuses_pending_request_without_rereading_source_path() {
     let scenario =
         load_fixture("client/upload_local_create_from_path_binds_and_restarts_converged.yaml");
-    let initial: InitialState = scenario.decode_initial().expect("decode initial state");
+    let mut initial: InitialState = scenario.decode_initial().expect("decode initial state");
     let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
-    let expect: ExpectedState = scenario.decode_expect().expect("decode expectations");
-    let temp_dir = TestDir::new("client-upload-local-create");
+    let mut expect: ExpectedState = scenario.decode_expect().expect("decode expectations");
+    let temp_dir = TestDir::new("client-upload-local-create-retry");
     let db_path = temp_dir.path().join("client.sqlite3");
     let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
     let source_root = temp_dir.path().join("source");
     fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
     fs::create_dir_all(&source_root).expect("create local source root");
     let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
 
     seed_head_and_lease(&store, &initial.head, &initial.lease);
-    seed_client_state(&db_path, &initial);
+    let execute = actions[0].execute().expect("execute action first");
+    let source_path = write_source_file(&source_root, &initial.local_file);
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.local_only_state.namespace_id,
+        &source_path,
+    )
+    .expect("build expected upload");
+    fill_upload_expectations(&mut initial, &mut expect, &expected_upload);
+    seed_client_state(&db_path, &initial, None);
+
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        let error = execute_upload_local_create_from_path(
+            &mut db,
+            &store,
+            &initial.local_only_state.client_file_id,
+            &source_path,
+            execute.uploaded_at_ms,
+            execute.created_at_ms,
+            |_request| Err("temporary dispatch failure".to_owned()),
+        )
+        .expect_err("first dispatch should fail");
+        let message = error.to_string();
+        assert!(message.contains("temporary dispatch failure"));
+    }
+
+    fs::remove_file(&source_path).expect("remove source path before retry");
+
+    let executed = run_execute(
+        &db_path,
+        &store,
+        &initial.local_only_state.client_file_id,
+        &source_path,
+        &execute,
+    );
+
+    assert!(executed.upload_reused);
+    assert_eq!(
+        executed.dispatched.pending.client_request_id,
+        expect.pending_request_id
+    );
+    assert_eq!(
+        executed.dispatched.request,
+        expect.request.clone().into_request()
+    );
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen client state DB after retry");
+    assert_eq!(
+        db.load_local_only_transfer_ledger(
+            &initial.local_only_state.client_file_id,
+            TransferDirection::Upload,
+        )
+        .expect("load temp upload transfer ledger"),
+        None
+    );
+}
+
+fn run_upload_local_create_fixture(relative_path: &str, temp_label: &str) {
+    let scenario = load_fixture(relative_path);
+    let mut initial: InitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
+    let mut expect: ExpectedState = scenario.decode_expect().expect("decode expectations");
+    let temp_dir = TestDir::new(temp_label);
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
 
     assert_eq!(
         actions.len(),
@@ -50,6 +148,23 @@ fn upload_local_create_from_path_binds_and_restarts_converged() {
     let planner_tick = actions[2].planner().expect("planner action third");
 
     let source_path = write_source_file(&source_root, &initial.local_file);
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.local_only_state.namespace_id,
+        &source_path,
+    )
+    .expect("build expected upload");
+    fill_upload_expectations(&mut initial, &mut expect, &expected_upload);
+
+    let transfer_row = initial
+        .local_only_transfer_ledger
+        .as_ref()
+        .map(|seed| seed_transfer_ledger_row(&initial, seed, &expected_upload));
+    seed_client_state(&db_path, &initial, transfer_row.as_ref());
+    if let Some(seed) = &initial.local_only_transfer_ledger {
+        seed_uploaded_prefix_for_transfer(&store, &source_path, &expected_upload, seed.block_index);
+    }
+
     let executed = run_execute(
         &db_path,
         &store,
@@ -61,21 +176,12 @@ fn upload_local_create_from_path_binds_and_restarts_converged() {
     assert_eq!(executed.upload_reused, expect.upload_reused);
     assert_eq!(
         executed.ensured_upload,
-        Some(LocalOnlyUploadRow {
-            client_file_id: initial.local_only_state.client_file_id.clone(),
-            namespace_id: NamespaceId::from("ns-1"),
-            file_digest_sha256:
-                "sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9"
-                    .to_owned(),
-            content_manifest_digest:
-                "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
-                    .to_owned(),
-            manifest_object_key:
-                "namespaces/ns-1/manifests/sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6.json"
-                    .to_owned(),
-            file_size_bytes: 16,
-            uploaded_at_ms: execute.uploaded_at_ms,
-        })
+        Some(expected_local_only_upload(
+            &initial.local_only_state.client_file_id,
+            &initial.local_only_state.namespace_id,
+            &expected_upload,
+            execute.uploaded_at_ms,
+        ))
     );
     assert_eq!(
         executed.dispatched.pending.client_request_id,
@@ -87,7 +193,7 @@ fn upload_local_create_from_path_binds_and_restarts_converged() {
     );
     assert_eq!(
         executed.dispatched.response,
-        expect.mutation_response.clone()
+        expect.mutation_response.clone().into_response()
     );
     assert_eq!(
         executed.dispatched.bound_identity,
@@ -142,6 +248,16 @@ fn upload_local_create_from_path_binds_and_restarts_converged() {
             panic!("fixture currently expects pending mutation to clear");
         }
     );
+    if expect.local_only_transfer_ledger_cleared {
+        assert_eq!(
+            db.load_local_only_transfer_ledger(
+                &initial.local_only_state.client_file_id,
+                TransferDirection::Upload,
+            )
+            .expect("load temp upload transfer ledger"),
+            None
+        );
+    }
 
     let error = execute_upload_local_create_from_path(
         &mut db,
@@ -159,67 +275,10 @@ fn upload_local_create_from_path_binds_and_restarts_converged() {
     ));
 }
 
-#[test]
-fn upload_local_create_retry_reuses_pending_request_without_rereading_source_path() {
-    let scenario =
-        load_fixture("client/upload_local_create_from_path_binds_and_restarts_converged.yaml");
-    let initial: InitialState = scenario.decode_initial().expect("decode initial state");
-    let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
-    let temp_dir = TestDir::new("client-upload-local-create-retry");
-    let db_path = temp_dir.path().join("client.sqlite3");
-    let store_root = temp_dir.path().join("objectstore");
-    let source_root = temp_dir.path().join("source");
-    fs::create_dir_all(&store_root).expect("create local object store root");
-    fs::create_dir_all(&source_root).expect("create local source root");
-    let store = LocalFsStore::new(&store_root).expect("create local object store");
-
-    seed_head_and_lease(&store, &initial.head, &initial.lease);
-    seed_client_state(&db_path, &initial);
-
-    let execute = actions[0].execute().expect("execute action first");
-    let source_path = write_source_file(&source_root, &initial.local_file);
-
-    {
-        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
-        let error = execute_upload_local_create_from_path(
-            &mut db,
-            &store,
-            &initial.local_only_state.client_file_id,
-            &source_path,
-            execute.uploaded_at_ms,
-            execute.created_at_ms,
-            |_request| Err("temporary dispatch failure".to_owned()),
-        )
-        .expect_err("first dispatch should fail");
-        let message = error.to_string();
-        assert!(message.contains("temporary dispatch failure"));
-    }
-
-    fs::remove_file(&source_path).expect("remove source path before retry");
-
-    let executed = run_execute(
-        &db_path,
-        &store,
-        &initial.local_only_state.client_file_id,
-        &source_path,
-        &execute,
-    );
-
-    assert!(executed.upload_reused);
-    assert_eq!(
-        executed.dispatched.pending.client_request_id,
-        "client-req-00000000000000000001"
-    );
-    assert_eq!(
-        executed.dispatched.request.client_request_id,
-        "client-req-00000000000000000001"
-    );
-}
-
 fn run_execute(
     db_path: &Path,
     store: &LocalFsStore,
-    client_file_id: &loon_client::state_db::ClientFileId,
+    client_file_id: &ClientFileId,
     source_path: &Path,
     action: &ExecuteUploadLocalCreateAction,
 ) -> ExecutedUploadLocalCreate {
@@ -253,8 +312,135 @@ fn write_source_file(source_root: &Path, local_file: &FixtureLocalFile) -> PathB
     let source_path = source_root.join(&local_file.relative_path);
     fs::create_dir_all(source_path.parent().expect("source file parent"))
         .expect("create source file parent");
-    fs::write(&source_path, local_file.content_utf8.as_bytes()).expect("write source file");
+    fs::write(&source_path, local_file.file_bytes()).expect("write source file");
     source_path
+}
+
+fn fill_upload_expectations(
+    initial: &mut InitialState,
+    expect: &mut ExpectedState,
+    uploaded: &UploadedContent,
+) {
+    match &initial.local_only_state.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => initial.local_only_state.content_digest = Some(uploaded.file_digest_sha256.clone()),
+    }
+    match &mut expect.request.op {
+        RawExpectedRequestOp::CreateFile { create_file } => match &create_file
+            .content_manifest_digest
+        {
+            Some(digest) => assert_eq!(digest, &uploaded.content_manifest_digest),
+            None => {
+                create_file.content_manifest_digest = Some(uploaded.content_manifest_digest.clone())
+            }
+        },
+    }
+    if let Some(created_inode) = expect.mutation_response.created_inode.as_mut() {
+        match &created_inode.content_digest {
+            Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+            None => created_inode.content_digest = Some(uploaded.file_digest_sha256.clone()),
+        }
+    }
+    fill_remote_state_digests(&mut expect.remote_state, uploaded);
+    fill_local_state_digest(&mut expect.local_state, uploaded);
+    fill_sync_anchor_digests(&mut expect.sync_anchor, uploaded);
+}
+
+fn fill_remote_state_digests(state: &mut RemoteFileStateRow, uploaded: &UploadedContent) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => state.content_digest = Some(uploaded.file_digest_sha256.clone()),
+    }
+    match &state.content_manifest_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.content_manifest_digest),
+        None => state.content_manifest_digest = Some(uploaded.content_manifest_digest.clone()),
+    }
+}
+
+fn fill_local_state_digest(state: &mut LocalFileStateRow, uploaded: &UploadedContent) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => state.content_digest = Some(uploaded.file_digest_sha256.clone()),
+    }
+}
+
+fn fill_sync_anchor_digests(state: &mut SyncAnchorRow, uploaded: &UploadedContent) {
+    match &state.content_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.file_digest_sha256),
+        None => state.content_digest = Some(uploaded.file_digest_sha256.clone()),
+    }
+    match &state.content_manifest_digest {
+        Some(digest) => assert_eq!(digest, &uploaded.content_manifest_digest),
+        None => state.content_manifest_digest = Some(uploaded.content_manifest_digest.clone()),
+    }
+}
+
+fn expected_local_only_upload(
+    client_file_id: &ClientFileId,
+    namespace_id: &NamespaceId,
+    uploaded: &UploadedContent,
+    uploaded_at_ms: u64,
+) -> LocalOnlyUploadRow {
+    LocalOnlyUploadRow {
+        client_file_id: client_file_id.clone(),
+        namespace_id: namespace_id.clone(),
+        file_digest_sha256: uploaded.file_digest_sha256.clone(),
+        content_manifest_digest: uploaded.content_manifest_digest.clone(),
+        manifest_object_key: uploaded.manifest_object_key.clone(),
+        file_size_bytes: uploaded.file_size_bytes,
+        uploaded_at_ms,
+    }
+}
+
+fn seed_transfer_ledger_row(
+    initial: &InitialState,
+    seed: &FixtureTransferLedgerSeed,
+    uploaded: &UploadedContent,
+) -> LocalOnlyTransferLedgerRow {
+    LocalOnlyTransferLedgerRow {
+        client_file_id: initial.local_only_state.client_file_id.clone(),
+        namespace_id: initial.local_only_state.namespace_id.clone(),
+        transfer_id: local_only_upload_transfer_id(
+            &initial.local_only_state.client_file_id,
+            &uploaded.content_manifest_digest,
+        ),
+        direction: seed.direction,
+        object_key: uploaded.manifest_object_key.clone(),
+        block_index: seed.block_index,
+        block_count: seed.block_count,
+        state: seed.state,
+        updated_at_ms: seed.updated_at_ms,
+    }
+}
+
+fn seed_uploaded_prefix_for_transfer(
+    store: &LocalFsStore,
+    source_path: &Path,
+    uploaded: &UploadedContent,
+    block_index: u64,
+) {
+    let bytes = fs::read(source_path).expect("read source bytes for transfer seeding");
+    for (block_object, block_bytes) in uploaded
+        .block_objects
+        .iter()
+        .zip(bytes.chunks(CONTENT_BLOCK_SIZE_BYTES as usize))
+        .take(usize::try_from(block_index).expect("block index should fit"))
+    {
+        store
+            .put_if_absent(&block_object.object_key, block_bytes)
+            .expect("seed already-uploaded block object");
+    }
+}
+
+fn local_only_upload_transfer_id(
+    client_file_id: &ClientFileId,
+    content_manifest_digest: &str,
+) -> String {
+    format!(
+        "upload-local-only:{}:{}",
+        client_file_id.as_str(),
+        content_manifest_digest
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +448,8 @@ struct InitialState {
     local_only_state: LocalOnlyFileStateRow,
     local_file: FixtureLocalFile,
     planned_local_only_action: LocalOnlyPlannedActionRow,
+    #[serde(default)]
+    local_only_transfer_ledger: Option<FixtureTransferLedgerSeed>,
     head: HeadState,
     lease: LeaseState,
 }
@@ -270,8 +458,8 @@ struct InitialState {
 struct ExpectedState {
     upload_reused: bool,
     pending_request_id: String,
-    request: ExpectedRequest,
-    mutation_response: ClientMutationResponse,
+    request: RawExpectedRequest,
+    mutation_response: RawClientMutationResponse,
     bound_identity: BoundLocalOnlyFile,
     remote_state: RemoteFileStateRow,
     local_state: LocalFileStateRow,
@@ -279,13 +467,60 @@ struct ExpectedState {
     local_only_state_cleared: bool,
     planned_local_only_action_cleared: bool,
     pending_mutation_cleared: bool,
+    #[serde(default)]
+    local_only_transfer_ledger_cleared: bool,
     planner_result: PlannedActionRecord,
 }
 
 #[derive(Debug, Deserialize)]
 struct FixtureLocalFile {
     relative_path: PathBuf,
-    content_utf8: String,
+    #[serde(default)]
+    content_utf8: Option<String>,
+    #[serde(default)]
+    generated_two_block: Option<GeneratedTwoBlockFile>,
+}
+
+impl FixtureLocalFile {
+    fn file_bytes(&self) -> Vec<u8> {
+        if let Some(content_utf8) = &self.content_utf8 {
+            return content_utf8.as_bytes().to_vec();
+        }
+        let generated = self
+            .generated_two_block
+            .as_ref()
+            .expect("fixture local file should provide content");
+        generated.file_bytes()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedTwoBlockFile {
+    first_block_fill_byte: String,
+    second_block_utf8: String,
+}
+
+impl GeneratedTwoBlockFile {
+    fn file_bytes(&self) -> Vec<u8> {
+        let first_byte = self
+            .first_block_fill_byte
+            .as_bytes()
+            .first()
+            .copied()
+            .expect("first_block_fill_byte should not be empty");
+        let mut bytes = vec![first_byte; CONTENT_BLOCK_SIZE_BYTES as usize];
+        bytes.extend_from_slice(self.second_block_utf8.as_bytes());
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FixtureTransferLedgerSeed {
+    direction: TransferDirection,
+    block_index: u64,
+    block_count: u64,
+    state: TransferState,
+    updated_at_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,32 +581,36 @@ struct PlannerTickAction {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ExpectedRequest {
+struct RawExpectedRequest {
     namespace_id: NamespaceId,
     client_request_id: String,
-    op: ExpectedRequestOp,
+    op: RawExpectedRequestOp,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
-enum ExpectedRequestOp {
-    CreateFile { create_file: ExpectedCreateFileOp },
+enum RawExpectedRequestOp {
+    CreateFile {
+        create_file: RawExpectedCreateFileOp,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct ExpectedCreateFileOp {
+struct RawExpectedCreateFileOp {
     parent_inode_id: InodeId,
     display_name: String,
-    content_manifest_digest: String,
+    content_manifest_digest: Option<String>,
 }
 
-impl ExpectedRequest {
+impl RawExpectedRequest {
     fn into_request(self) -> ClientMutationRequest {
         let op = match self.op {
-            ExpectedRequestOp::CreateFile { create_file } => ClientMutationOp::CreateFile {
+            RawExpectedRequestOp::CreateFile { create_file } => ClientMutationOp::CreateFile {
                 parent_inode_id: create_file.parent_inode_id,
                 display_name: create_file.display_name,
-                content_manifest_digest: create_file.content_manifest_digest,
+                content_manifest_digest: create_file
+                    .content_manifest_digest
+                    .expect("expected create_file manifest digest"),
             },
         };
 
@@ -383,11 +622,61 @@ impl ExpectedRequest {
     }
 }
 
-fn seed_client_state(db_path: &Path, initial: &InitialState) {
+#[derive(Debug, Clone, Deserialize)]
+struct RawClientMutationResponse {
+    namespace_id: NamespaceId,
+    client_request_id: String,
+    committed_seq: ChangeSeq,
+    created_inode: Option<RawCreatedRemoteInode>,
+    #[serde(default)]
+    replaced_file: Option<serde_json::Value>,
+}
+
+impl RawClientMutationResponse {
+    fn into_response(self) -> ClientMutationResponse {
+        assert!(
+            self.replaced_file.is_none(),
+            "local-only upload fixture should not include replaced_file"
+        );
+        ClientMutationResponse {
+            namespace_id: self.namespace_id,
+            client_request_id: self.client_request_id,
+            committed_seq: self.committed_seq,
+            created_inode: self.created_inode.map(|created_inode| CreatedRemoteInode {
+                inode_id: created_inode.inode_id,
+                inode_kind: created_inode.inode_kind,
+                revision_no: created_inode.revision_no,
+                parent_inode_id: created_inode.parent_inode_id,
+                display_name: created_inode.display_name,
+                content_digest: created_inode.content_digest,
+            }),
+            replaced_file: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawCreatedRemoteInode {
+    inode_id: InodeId,
+    inode_kind: loon_types::InodeKind,
+    revision_no: RevisionNo,
+    parent_inode_id: InodeId,
+    display_name: String,
+    content_digest: Option<String>,
+}
+
+fn seed_client_state(
+    db_path: &Path,
+    initial: &InitialState,
+    transfer_ledger: Option<&LocalOnlyTransferLedgerRow>,
+) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-upload-local-create-initial-state", |tx| {
         tx.upsert_local_only_file(&initial.local_only_state)?;
         tx.upsert_planned_local_only_action(&initial.planned_local_only_action)?;
+        if let Some(transfer_ledger) = transfer_ledger {
+            tx.upsert_local_only_transfer_ledger(transfer_ledger)?;
+        }
         Ok(())
     })
     .expect("seed initial client state");
