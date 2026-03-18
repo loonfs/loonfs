@@ -74,6 +74,30 @@ Failure modes prevented:
 - same-request replace/restore/delete contradictions replaying differently from validation
 - checkpoint restore losing the original within-request metadata order
 
+## Executable invariant IDs
+
+Namespace-core invariant names remain stable string IDs.
+
+Rules for the first executable-invariant slice:
+
+- runtime `checked_invariants` strings remain part of the production surfaces for compatibility
+- the harnesses must independently evaluate the namespace-core invariant IDs that native
+  commit/replay fixtures list under `expect.invariants`
+- a fixture-listed invariant now means “this named invariant must evaluate `passed = true` for the
+  resulting commit/apply, WAL replay, or checkpoint-plus-WAL replay state”
+- the first slice covers namespace commit/apply, WAL replay, and checkpoint replay only; queue,
+  content-object, and client invariants are deferred
+
+Why it exists:
+string presence alone is not strong enough proof once the repo already has a semantic core worth
+checking directly.
+
+Failure modes prevented:
+
+- tests passing because production code mentioned an invariant name without actually satisfying it
+- model/core differential runs agreeing on final state while silently disagreeing on an important
+  semantic property
+
 ## Preconditions
 
 Mutations are never path-addressed. They are inode-addressed and explicit.

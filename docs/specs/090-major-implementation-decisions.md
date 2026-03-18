@@ -483,6 +483,42 @@ That is enough to produce a deterministic conflict outcome.
 
 ---
 
+## Decision 11: executable invariants start in harnesses before they move into runtime APIs
+
+### Problem
+
+The repo already names many invariants, but string names alone are weak evidence once the semantic
+core is real. At the same time, threading structured invariant reports through every production
+surface immediately would create broad API churn.
+
+### Recommendation
+
+Start executable invariant checking in the harnesses first.
+
+For the first slice:
+
+- keep runtime `checked_invariants` strings unchanged
+- add structured pass/fail invariant reports in `loon-testkit`
+- treat fixture `expect.invariants` as “these names must evaluate true”
+- scope the first evaluator set to namespace-core commit/apply, WAL replay, and
+  checkpoint-plus-WAL replay
+
+Only after the evaluator set is stable should structured invariant reports move into broader
+runtime APIs.
+
+### Why
+
+This raises the proof bar now without widening production compatibility work before the project has
+finished deciding which invariant families are worth keeping long term.
+
+### Failure modes prevented
+
+- tests passing because a string name was present even when the property was false
+- large production API churn before invariant definitions are stable
+- model/core differential runs hiding semantic disagreement behind matching final state
+
+---
+
 ## Decisions that are now safe to leave to implementers
 
 Once the decisions above are accepted, most remaining choices are comparatively low leverage. Examples:

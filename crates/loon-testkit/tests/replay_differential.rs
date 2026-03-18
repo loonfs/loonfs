@@ -1,4 +1,5 @@
 use loon_testkit::replay::run_replay_fixture;
+use loon_testkit::seed::Seed;
 
 #[test]
 fn wal_tail_replay_fixture_matches_model_and_core() {
@@ -47,4 +48,34 @@ fn checkpoint_plus_wal_tail_fixture_matches_model_and_core() {
         None,
     )
     .unwrap();
+}
+
+#[test]
+fn wal_tail_replay_snapshot_matches_checked_in_artifact() {
+    let report = run_replay_fixture(
+        "native/wal_tail_replay_advances_head.yaml",
+        Some(Seed(4242)),
+    )
+    .unwrap();
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/replay-differential/native/wal_tail_replay_advances_head.txt"
+        )
+    );
+}
+
+#[test]
+fn checkpoint_plus_wal_tail_snapshot_matches_checked_in_artifact() {
+    let report = run_replay_fixture(
+        "native/checkpoint_manifest_plus_wal_tail_reproduces_head.yaml",
+        Some(Seed(4242)),
+    )
+    .unwrap();
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/replay-differential/native/checkpoint_manifest_plus_wal_tail_reproduces_head.txt"
+        )
+    );
 }

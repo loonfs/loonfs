@@ -65,6 +65,24 @@ mocks can drift from reality.
 - rendered trace
 - minimized case when available
 
+## Invariant expectation semantics
+
+For fixtures that use `expect.invariants`:
+
+- each listed invariant name is a stable ID, not free-form commentary
+- the harness must evaluate that invariant explicitly for the scenario under test
+- the fixture passes only when every listed invariant evaluates `passed = true`
+- for differential harnesses, model and implementation must agree on the pass/fail outcome for the
+  same invariant name, not only on the final state snapshot
+
+The first executable-invariant slice is namespace-core only:
+
+- commit/apply invariants
+- WAL replay invariants
+- checkpoint-plus-WAL replay invariants
+
+Queue, content-object, and client invariants are deferred to later slices.
+
 ## Rule for PM-friendly tests
 
 If a scenario matters to product behavior, it should have a readable fixture and a rendered output, not only a Rust unit test.

@@ -1,3 +1,43 @@
+pub const NAMESPACE_CORE_COMMIT_FRAME_INVARIANTS: &[&str] = &[
+    "stale_writer_cannot_publish",
+    "head_and_lease_fence_tokens_agree",
+    "next_inode_id_is_monotonic",
+    "create_mutation_consumes_next_inode_id",
+    "create_file_requires_durable_content",
+    "replace_file_requires_durable_content",
+    "subtree_tombstone_blocks_descendant_mutation",
+];
+
+pub const NAMESPACE_CORE_METADATA_APPLY_INVARIANTS: &[&str] = &[
+    "create_dir_writes_inode_and_direntry_rows",
+    "create_file_writes_inode_direntry_and_initial_revision",
+    "replace_file_appends_new_revision_head",
+    "rename_appends_new_direntry_binding",
+    "delete_subtree_writes_tombstone_row",
+    "restore_creates_new_revision_head",
+];
+
+pub const NAMESPACE_CORE_WAL_REPLAY_INVARIANTS: &[&str] = &[
+    "wal_payload_checksum_matches_payload",
+    "wal_key_matches_committed_seq",
+    "head_publish_requires_durable_wal",
+    "wal_replay_requires_matching_namespace",
+    "wal_replay_requires_matching_base_head_seq",
+    "wal_tail_seq_is_contiguous",
+    "wal_replay_applies_metadata_rows",
+];
+
+pub const NAMESPACE_CORE_CHECKPOINT_REPLAY_INVARIANTS: &[&str] = &[
+    "checkpoint_manifest_checksum_matches_payload",
+    "checkpoint_manifest_key_matches_seq",
+    "checkpoint_manifest_must_be_verified",
+    "checkpoint_replay_requires_all_manifest_segments",
+    "checkpoint_segment_descriptor_matches_payload",
+    "checkpoint_segment_rows_restore_basis_metadata",
+    "checkpoint_plus_wal_tail_reproduces_head",
+    "checkpoint_plus_wal_tail_reproduces_metadata",
+];
+
 pub const INVARIANTS: &[&str] = &[
     "no_orphaned_live_entry",
     "visible_revision_points_to_durable_content",

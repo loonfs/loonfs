@@ -8,6 +8,9 @@ use loon_model::{
     ModelCommitValidationRequest, ModelMetadataMutation, ModelMetadataPreconditionError,
     ModelMetadataState, ModelNamespace,
 };
+use loon_testkit::invariants::{
+    evaluate_namespace_commit_invariants, CommitInvariantInputs, NamespaceCoreInvariantReport,
+};
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ChangeSeq, HeadState, InodeId, LeaseState, NamespaceId, RevisionNo};
@@ -47,6 +50,34 @@ fn rename_fixture_matches_model_and_core_metadata() {
 }
 
 fn run_fixture(relative_path: &str) {
+    let report = run_fixture_report(relative_path);
+    assert!(
+        report.model_report.checks.len() == report.core_report.checks.len(),
+        "mismatched report sizes:\n{}",
+        report.rendered_trace
+    );
+}
+
+#[test]
+fn create_file_fixture_snapshot_trace_matches_checked_in_artifact() {
+    let report = run_fixture_report(
+        "native/create_file_commit_applies_inode_direntry_and_revision_rows.yaml",
+    );
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/commit-metadata-differential/native/create_file_commit_applies_inode_direntry_and_revision_rows.txt"
+        )
+    );
+}
+
+struct CommitFixtureRunReport {
+    model_report: NamespaceCoreInvariantReport,
+    core_report: NamespaceCoreInvariantReport,
+    rendered_trace: String,
+}
+
+fn run_fixture_report(relative_path: &str) -> CommitFixtureRunReport {
     let scenario = load_fixture(relative_path);
     let initial: MetadataFixtureInitial = scenario.decode_initial().expect("decode initial state");
     let expect: MetadataFixtureExpect = scenario.decode_expect().expect("decode expectations");
@@ -164,17 +195,36 @@ fn run_fixture(relative_path: &str) {
         );
     }
 
-    let mut observed_invariants = Vec::new();
-    extend_invariants(&mut observed_invariants, &core_plan.checked_invariants);
-    extend_invariants(&mut observed_invariants, &prepared_wal.checked_invariants);
-    extend_invariants(&mut observed_invariants, &core_metadata.checked_invariants);
+    let model_report = evaluate_namespace_commit_invariants(CommitInvariantInputs {
+        request: &request,
+        before_head: &initial.head,
+        before_lease: &initial.lease,
+        before_metadata: &initial.metadata_state,
+        prepared_wal: &prepared_wal,
+        after_head: &model_head,
+        after_metadata: &model_snapshot.metadata_state,
+        now_ms: NOW_MS,
+    });
+    let core_report = evaluate_namespace_commit_invariants(CommitInvariantInputs {
+        request: &request,
+        before_head: &initial.head,
+        before_lease: &initial.lease,
+        before_metadata: &initial.metadata_state,
+        prepared_wal: &prepared_wal,
+        after_head: &core_head,
+        after_metadata: &core_snapshot.metadata_state,
+        now_ms: NOW_MS,
+    });
+    trace.extend(model_report.render_trace_lines("commit-model"));
+    trace.extend(core_report.render_trace_lines("commit-core"));
 
-    for invariant in &expect.invariants {
-        assert!(
-            observed_invariants.iter().any(|value| value == invariant),
-            "missing expected invariant `{invariant}`:\n{}",
-            render_trace(&scenario, &trace)
-        );
+    assert_report_agreement(&scenario, &trace, &model_report, &core_report);
+    assert_expected_invariants(&scenario, &trace, &expect.invariants, &core_report);
+
+    CommitFixtureRunReport {
+        model_report,
+        core_report,
+        rendered_trace: render_trace(&scenario, &trace),
     }
 }
 
@@ -618,14 +668,52 @@ fn validate_model_request_ops(
     Ok(())
 }
 
-fn extend_invariants(out: &mut Vec<String>, incoming: &[String]) {
-    for name in incoming {
-        if !out.iter().any(|existing| existing == name) {
-            out.push(name.clone());
-        }
+fn assert_report_agreement(
+    scenario: &Scenario,
+    trace: &[String],
+    model_report: &NamespaceCoreInvariantReport,
+    core_report: &NamespaceCoreInvariantReport,
+) {
+    for core_check in &core_report.checks {
+        let Some(model_check) = model_report.check(&core_check.name) else {
+            panic!(
+                "model report missing invariant `{}`:\n{}",
+                core_check.name,
+                render_trace(scenario, trace)
+            );
+        };
+        assert_eq!(
+            model_check.passed,
+            core_check.passed,
+            "model/core invariant disagreement for `{}`:\n{}",
+            core_check.name,
+            render_trace(scenario, trace)
+        );
     }
 }
 
 fn load_fixture(relative_path: &str) -> Scenario {
     loon_testkit::fixtures::load_fixture(relative_path)
+}
+
+fn assert_expected_invariants(
+    scenario: &Scenario,
+    trace: &[String],
+    expected: &[String],
+    report: &NamespaceCoreInvariantReport,
+) {
+    for invariant in expected {
+        let Some(check) = report.check(invariant) else {
+            panic!(
+                "expected invariant `{invariant}` was not evaluated:\n{}",
+                render_trace(scenario, trace)
+            );
+        };
+        assert!(
+            check.passed,
+            "expected invariant `{invariant}` evaluated false: {}:\n{}",
+            check.detail,
+            render_trace(scenario, trace)
+        );
+    }
 }

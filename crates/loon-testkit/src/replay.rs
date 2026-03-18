@@ -1,4 +1,8 @@
 use crate::fixtures::load_fixture;
+use crate::invariants::{
+    evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_wal_replay_invariants,
+    CheckpointReplayInvariantInputs, NamespaceCoreInvariantReport, WalReplayInvariantInputs,
+};
 use crate::render::render_trace;
 use crate::scenario::Scenario;
 use crate::seed::Seed;
@@ -91,7 +95,6 @@ fn run_wal_replay_scenario(scenario: &Scenario) -> Result<ReplayRunReport> {
     let mut core_metadata = initial.replay_basis_metadata.clone();
     let stored_wal_objects = stored_wal_objects_from_fixture(&initial.wal_objects)?;
 
-    let mut observed_invariants = Vec::new();
     let mut trace = vec![format!(
         "initial model={:?} core={:?}",
         snapshot_from_model_namespace(&model_namespace),
@@ -114,12 +117,7 @@ fn run_wal_replay_scenario(scenario: &Scenario) -> Result<ReplayRunReport> {
     {
         let model_outcome =
             apply_model_wal(&mut model_namespace, &model_wal_from_fixture(fixture_wal));
-        let core_outcome = apply_core_wal(
-            &mut core_head,
-            &mut core_metadata,
-            stored_wal,
-            &mut observed_invariants,
-        );
+        let core_outcome = apply_core_wal(&mut core_head, &mut core_metadata, stored_wal);
 
         trace.push(format!(
             "step={} wal_key={} model_outcome={:?} core_outcome={:?} model_state={:?} core_state={:?}",
@@ -175,13 +173,35 @@ fn run_wal_replay_scenario(scenario: &Scenario) -> Result<ReplayRunReport> {
         return fail_with_trace(scenario, &trace, "WAL replay final expectation mismatch");
     }
 
-    assert_expected_invariants(scenario, &trace, &expect.invariants, &observed_invariants)?;
+    let model_final = state_from_snapshot(&actual_model);
+    let core_final = state_from_snapshot(&actual_core);
+    let model_report = evaluate_namespace_wal_replay_invariants(WalReplayInvariantInputs {
+        expected_namespace: initial.replay_basis_head.namespace_id.as_str(),
+        basis_head: &initial.replay_basis_head,
+        basis_metadata: &initial.replay_basis_metadata,
+        wal_objects: &stored_wal_objects,
+        after_head: &model_final.0,
+        after_metadata: &model_final.1,
+    });
+    let core_report = evaluate_namespace_wal_replay_invariants(WalReplayInvariantInputs {
+        expected_namespace: initial.replay_basis_head.namespace_id.as_str(),
+        basis_head: &initial.replay_basis_head,
+        basis_metadata: &initial.replay_basis_metadata,
+        wal_objects: &stored_wal_objects,
+        after_head: &core_final.0,
+        after_metadata: &core_final.1,
+    });
+    trace.extend(model_report.render_trace_lines("wal-model"));
+    trace.extend(core_report.render_trace_lines("wal-core"));
+
+    assert_report_agreement(scenario, &trace, &model_report, &core_report)?;
+    assert_expected_report_invariants(scenario, &trace, &expect.invariants, &core_report)?;
 
     Ok(ReplayRunReport {
         scenario_name: scenario.name.clone(),
         effective_seed: scenario.seed.map(Seed),
         harness_kind: ReplayHarnessKind::WalTail,
-        observed_invariants,
+        observed_invariants: core_report.passed_names(),
         rendered_trace: render_trace(scenario, &trace),
     })
 }
@@ -192,7 +212,6 @@ fn run_checkpoint_replay_scenario(scenario: &Scenario) -> Result<ReplayRunReport
 
     let materialized =
         materialize_checkpoint_fixture(&initial.checkpoint_manifest, &initial.checkpoint_segments)?;
-    let mut observed_invariants = Vec::new();
     let mut trace = vec![format!(
         "initial checkpoint_manifest={} segment_count={} wal_count={}",
         initial.checkpoint_manifest.key,
@@ -211,11 +230,6 @@ fn run_checkpoint_replay_scenario(scenario: &Scenario) -> Result<ReplayRunReport
         &materialized.stored_segments,
     )
     .map_err(|err| anyhow::anyhow!("{err:?}"))?;
-
-    extend_invariants(
-        &mut observed_invariants,
-        &loaded_checkpoint.checked_invariants,
-    );
 
     let basis_model = snapshot_from_model_namespace(&model_namespace);
     let basis_core = snapshot_from_core_state(
@@ -248,12 +262,7 @@ fn run_checkpoint_replay_scenario(scenario: &Scenario) -> Result<ReplayRunReport
     {
         let model_outcome =
             apply_model_wal(&mut model_namespace, &model_wal_from_fixture(fixture_wal));
-        let core_outcome = apply_core_wal(
-            &mut core_head,
-            &mut core_metadata,
-            stored_wal,
-            &mut observed_invariants,
-        );
+        let core_outcome = apply_core_wal(&mut core_head, &mut core_metadata, stored_wal);
 
         trace.push(format!(
             "step={} wal_key={} model_outcome={:?} core_outcome={:?} model_state={:?} core_state={:?}",
@@ -291,9 +300,6 @@ fn run_checkpoint_replay_scenario(scenario: &Scenario) -> Result<ReplayRunReport
         &materialized.stored_segments,
         &stored_wal_objects,
     );
-    if let Ok(replayed) = &high_level_core_result {
-        extend_invariants(&mut observed_invariants, &replayed.checked_invariants);
-    }
     let high_level_core = high_level_core_result
         .map(|replayed| {
             snapshot_from_core_state(&replayed.resulting_head, &replayed.resulting_metadata_state)
@@ -323,17 +329,43 @@ fn run_checkpoint_replay_scenario(scenario: &Scenario) -> Result<ReplayRunReport
         );
     }
 
-    add_invariant(
-        &mut observed_invariants,
-        "checkpoint_plus_wal_tail_reproduces_head",
-    );
-    assert_expected_invariants(scenario, &trace, &expect.invariants, &observed_invariants)?;
+    let basis_model_state = state_from_snapshot(&basis_model);
+    let basis_core_state = state_from_snapshot(&basis_core);
+    let model_final = state_from_snapshot(&actual_model);
+    let core_final = state_from_snapshot(&actual_core);
+    let model_report =
+        evaluate_namespace_checkpoint_replay_invariants(CheckpointReplayInvariantInputs {
+            expected_namespace: materialized.model_checkpoint.namespace_id.as_str(),
+            stored_manifest: &materialized.stored_manifest,
+            stored_segments: &materialized.stored_segments,
+            basis_head: &basis_model_state.0,
+            basis_metadata: &basis_model_state.1,
+            wal_objects: &stored_wal_objects,
+            after_head: &model_final.0,
+            after_metadata: &model_final.1,
+        });
+    let core_report =
+        evaluate_namespace_checkpoint_replay_invariants(CheckpointReplayInvariantInputs {
+            expected_namespace: materialized.model_checkpoint.namespace_id.as_str(),
+            stored_manifest: &materialized.stored_manifest,
+            stored_segments: &materialized.stored_segments,
+            basis_head: &basis_core_state.0,
+            basis_metadata: &basis_core_state.1,
+            wal_objects: &stored_wal_objects,
+            after_head: &core_final.0,
+            after_metadata: &core_final.1,
+        });
+    trace.extend(model_report.render_trace_lines("checkpoint-model"));
+    trace.extend(core_report.render_trace_lines("checkpoint-core"));
+
+    assert_report_agreement(scenario, &trace, &model_report, &core_report)?;
+    assert_expected_report_invariants(scenario, &trace, &expect.invariants, &core_report)?;
 
     Ok(ReplayRunReport {
         scenario_name: scenario.name.clone(),
         effective_seed: scenario.seed.map(Seed),
         harness_kind: ReplayHarnessKind::CheckpointAndWalTail,
-        observed_invariants,
+        observed_invariants: core_report.passed_names(),
         rendered_trace: render_trace(scenario, &trace),
     })
 }
@@ -622,11 +654,9 @@ fn apply_core_wal(
     head: &mut HeadState,
     metadata_state: &mut MetadataState,
     wal: &StoredWalObject,
-    observed_invariants: &mut Vec<String>,
 ) -> Result<NamespaceSnapshot, String> {
     replay_wal_commit_with_metadata(head, metadata_state, wal)
         .map(|replayed| {
-            extend_invariants(observed_invariants, &replayed.checked_invariants);
             *head = replayed.resulting_head;
             *metadata_state = replayed.resulting_metadata_state;
             snapshot_from_core_state(head, metadata_state)
@@ -1115,34 +1145,79 @@ fn assert_states_match(
     Ok(())
 }
 
-fn extend_invariants(observed_invariants: &mut Vec<String>, invariants: &[String]) {
-    for invariant in invariants {
-        add_invariant(observed_invariants, invariant);
-    }
-}
-
-fn add_invariant(observed_invariants: &mut Vec<String>, invariant: &str) {
-    if !observed_invariants.iter().any(|value| value == invariant) {
-        observed_invariants.push(invariant.to_owned());
-    }
-}
-
-fn assert_expected_invariants(
+fn assert_expected_report_invariants(
     scenario: &Scenario,
     trace: &[String],
     expected: &[String],
-    observed: &[String],
+    report: &NamespaceCoreInvariantReport,
 ) -> Result<()> {
     for invariant in expected {
-        if !observed.iter().any(|value| value == invariant) {
+        let Some(check) = report.check(invariant) else {
             return fail_with_trace(
                 scenario,
                 trace,
-                format!("missing expected invariant `{invariant}`"),
+                format!("expected invariant `{invariant}` was not evaluated"),
+            );
+        };
+        if !check.passed {
+            return fail_with_trace(
+                scenario,
+                trace,
+                format!(
+                    "expected invariant `{invariant}` evaluated false: {}",
+                    check.detail
+                ),
             );
         }
     }
     Ok(())
+}
+
+fn assert_report_agreement(
+    scenario: &Scenario,
+    trace: &[String],
+    model_report: &NamespaceCoreInvariantReport,
+    core_report: &NamespaceCoreInvariantReport,
+) -> Result<()> {
+    for core_check in &core_report.checks {
+        let Some(model_check) = model_report.check(&core_check.name) else {
+            return fail_with_trace(
+                scenario,
+                trace,
+                format!("model report missing invariant `{}`", core_check.name),
+            );
+        };
+        if model_check.passed != core_check.passed {
+            return fail_with_trace(
+                scenario,
+                trace,
+                format!(
+                    "model/core invariant disagreement for `{}`: model={} core={}",
+                    core_check.name, model_check.passed, core_check.passed
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn state_from_snapshot(snapshot: &NamespaceSnapshot) -> (HeadState, MetadataState) {
+    (
+        HeadState {
+            namespace_id: snapshot.namespace_id.clone(),
+            seq: snapshot.seq,
+            active_fence_token: snapshot.active_fence_token,
+            next_inode_id: snapshot.next_inode_id,
+            snapshot_hint_seq: snapshot.snapshot_hint_seq,
+            retention_floor_seq: snapshot.retention_floor_seq,
+        },
+        MetadataState {
+            inodes: snapshot.metadata_state.inodes.clone(),
+            direntries: snapshot.metadata_state.direntries.clone(),
+            revisions: snapshot.metadata_state.revisions.clone(),
+            subtree_tombstones: snapshot.metadata_state.subtree_tombstones.clone(),
+        },
+    )
 }
 
 fn fail_with_trace<T>(
