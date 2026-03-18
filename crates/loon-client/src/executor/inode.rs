@@ -89,32 +89,48 @@ pub(super) fn execute_upload_local_edit<S: ObjectStore, F>(
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
-    let had_pending_request = db
-        .load_pending_inode_mutation_for_inode(namespace_id, inode_id)?
-        .is_some();
+    let result = (|| {
+        let had_pending_request = db
+            .load_pending_inode_mutation_for_inode(namespace_id, inode_id)?
+            .is_some();
 
-    let (ensured_upload, upload_reused) = if had_pending_request {
-        (db.load_inode_upload(namespace_id, inode_id)?, true)
-    } else {
-        let (upload_row, reused_existing) = ensure_upload_local_edit_ready(
+        let (ensured_upload, upload_reused) = if had_pending_request {
+            (db.load_inode_upload(namespace_id, inode_id)?, true)
+        } else {
+            let (upload_row, reused_existing) = ensure_upload_local_edit_ready(
+                db,
+                store,
+                namespace_id,
+                inode_id,
+                source_path,
+                uploaded_at_ms,
+            )?;
+            (Some(upload_row), reused_existing)
+        };
+
+        let dispatched = dispatch_inode_mutation_from_state(
             db,
-            store,
             namespace_id,
             inode_id,
-            source_path,
-            uploaded_at_ms,
+            created_at_ms,
+            dispatch,
         )?;
-        (Some(upload_row), reused_existing)
-    };
 
-    let dispatched =
-        dispatch_inode_mutation_from_state(db, namespace_id, inode_id, created_at_ms, dispatch)?;
+        Ok(ExecutedUploadLocalEdit {
+            ensured_upload,
+            upload_reused,
+            dispatched,
+        })
+    })();
 
-    Ok(ExecutedUploadLocalEdit {
-        ensured_upload,
-        upload_reused,
-        dispatched,
-    })
+    match &result {
+        Ok(_) => clear_upload_local_edit_issue(db, namespace_id, inode_id),
+        Err(error) => {
+            record_upload_local_edit_issue(db, namespace_id, inode_id, error, uploaded_at_ms)
+        }
+    }
+
+    result
 }
 
 pub(super) fn execute_download_remote_edit<S: ObjectStore>(
@@ -537,6 +553,106 @@ fn upload_transfer_row(
         block_count,
         state: TransferState::Uploading,
         updated_at_ms,
+    }
+}
+
+fn clear_upload_local_edit_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) {
+    let _ =
+        db.clear_conflict_or_error_kind(namespace_id, inode_id, "upload_local_edit_upload_failed");
+}
+
+fn record_upload_local_edit_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    error: &ExecuteUploadLocalEditError,
+    created_at_ms: u64,
+) {
+    let issue = match error {
+        ExecuteUploadLocalEditError::SourcePathMissing { .. } => Some((
+            "upload_local_edit_upload_failed",
+            "upload_local_edit could not prepare durable local content for upload",
+            json!({
+                "failure": "source_path_missing",
+            }),
+        )),
+        ExecuteUploadLocalEditError::Upload(upload_error) => Some((
+            "upload_local_edit_upload_failed",
+            "upload_local_edit could not prepare durable local content for upload",
+            upload_error_detail_json(upload_error),
+        )),
+        _ => None,
+    };
+
+    if let Some((kind, summary, detail_json)) = issue {
+        let _ = db.record_conflict_or_error(
+            namespace_id,
+            inode_id,
+            kind,
+            summary,
+            &detail_json,
+            created_at_ms,
+        );
+    }
+}
+
+fn upload_error_detail_json(error: &crate::upload::UploadError) -> serde_json::Value {
+    match error {
+        crate::upload::UploadError::LocalFileRead { path, message } => json!({
+            "failure": "local_file_read",
+            "path": path,
+            "message": message,
+        }),
+        crate::upload::UploadError::ContentManifestCodec(source) => json!({
+            "failure": "content_manifest_codec",
+            "message": source.to_string(),
+        }),
+        crate::upload::UploadError::StoreWrite { object_key, source } => json!({
+            "failure": "store_write",
+            "object_key": object_key,
+            "message": source.to_string(),
+        }),
+        crate::upload::UploadError::StoreRead { object_key, source } => json!({
+            "failure": "store_read",
+            "object_key": object_key,
+            "message": source.to_string(),
+        }),
+        crate::upload::UploadError::ExistingObjectMissing { object_key } => json!({
+            "failure": "existing_object_missing",
+            "object_key": object_key,
+        }),
+        crate::upload::UploadError::ExistingObjectMismatch { object_key } => json!({
+            "failure": "existing_object_mismatch",
+            "object_key": object_key,
+        }),
+        crate::upload::UploadError::LocalFileChangedDuringUpload {
+            path,
+            block_index,
+            expected_digest,
+            actual_digest,
+        } => json!({
+            "failure": "local_file_changed_during_upload",
+            "path": path,
+            "block_index": block_index,
+            "expected_digest": expected_digest,
+            "actual_digest": actual_digest,
+        }),
+        crate::upload::UploadError::LocalFileTruncatedDuringUpload {
+            path,
+            block_index,
+            expected_size,
+            actual_size,
+        } => json!({
+            "failure": "local_file_truncated_during_upload",
+            "path": path,
+            "block_index": block_index,
+            "expected_size": expected_size,
+            "actual_size": actual_size,
+        }),
     }
 }
 

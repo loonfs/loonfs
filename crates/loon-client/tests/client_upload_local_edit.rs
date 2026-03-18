@@ -1,14 +1,17 @@
 #[path = "common/support.rs"]
 mod support;
 
-use loon_client::executor::{execute_next_client_action, NextClientAction};
+use loon_client::executor::{
+    execute_next_client_action, ExecuteNextClientActionError, ExecuteUploadLocalEditError,
+    NextClientAction,
+};
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
     AppliedInodeMutation, FileSyncViews, InodeUploadRow, LocalFileStateRow, PlannedActionRow,
     RemoteFileStateRow, SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow,
     TransferState,
 };
-use loon_client::upload::{upload_small_file_from_path, UploadedContent};
+use loon_client::upload::{upload_small_file_from_path, UploadError, UploadedContent};
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
@@ -196,6 +199,161 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
     );
     assert!(edit.upload_reused, "retry should reuse uploaded content");
     assert_eq!(edit.ensured_upload, Some(expect.inode_upload.into_row()));
+}
+
+#[test]
+fn execute_next_client_action_upload_local_edit_missing_file_records_issue_and_clears_on_recovery()
+{
+    let scenario = load_fixture(
+        "client/execute_next_client_action_upload_local_edit_missing_file_records_issue.yaml",
+    );
+    let initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<EditFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let expect: EditFailureExpectedState = scenario.decode_expect().expect("decode expectations");
+    let execute = actions[0].execute().expect("execute action first");
+    let temp_dir = TestDir::new("client-upload-local-edit-missing-file");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    seed_bound_edit_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.sync_anchor,
+        &initial.planned_action,
+        None,
+    );
+
+    let missing_source_path = source_root.join(
+        execute
+            .source_path_relative
+            .as_deref()
+            .expect("failure fixture should include source path"),
+    );
+
+    let error = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(missing_source_path.as_path()),
+        execute,
+    )
+    .expect_err("missing source file should fail");
+    assert!(matches!(
+        error,
+        ExecuteNextClientActionError::UploadLocalEdit(ExecuteUploadLocalEditError::Upload(
+            UploadError::LocalFileRead { .. }
+        ))
+    ));
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after missing-file failure");
+    assert_eq!(
+        db.load_planned_action(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id
+        )
+        .expect("load planned action after missing-file failure"),
+        if expect.planned_action_retained {
+            Some(initial.planned_action.clone())
+        } else {
+            None
+        }
+    );
+    assert_eq!(
+        db.load_inode_upload(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id
+        )
+        .expect("load inode upload after missing-file failure"),
+        None
+    );
+    let issues = db
+        .load_conflicts_and_errors(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+        )
+        .expect("load persisted upload failure issue");
+    assert_eq!(
+        issues.len(),
+        1,
+        "expected one persisted upload failure issue"
+    );
+    let issue = &issues[0];
+    assert_eq!(issue.kind, expect.issue.kind);
+    assert_eq!(issue.summary, expect.issue.summary);
+    assert_eq!(
+        issue.detail_json["failure"].as_str(),
+        Some(expect.issue.failure.as_str())
+    );
+    let recorded_path = issue.detail_json["path"]
+        .as_str()
+        .expect("upload failure issue path should be a string");
+    assert!(
+        recorded_path.ends_with(
+            execute
+                .source_path_relative
+                .as_deref()
+                .expect("failure fixture should include source path")
+        ),
+        "expected `{recorded_path}` to end with source path"
+    );
+    drop(db);
+
+    let source_path = write_source_file(
+        &source_root,
+        execute
+            .source_path_relative
+            .as_ref()
+            .expect("failure fixture should include source path"),
+        &initial.local_file,
+    );
+
+    let recovered = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(source_path.as_path()),
+        execute,
+    )
+    .expect("retry after recreating source file should succeed")
+    .expect("retry should execute one action");
+
+    match recovered {
+        NextClientAction::ExecutedUploadLocalEdit(_) => {}
+        other => panic!("expected executed upload_local_edit on recovery, got {other:?}"),
+    }
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after recovered upload");
+    assert_eq!(
+        db.load_conflicts_and_errors(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id
+        )
+        .expect("load conflicts and errors after successful recovery"),
+        Vec::new()
+    );
+    assert!(
+        db.load_inode_upload(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id
+        )
+        .expect("load inode upload after successful recovery")
+        .is_some(),
+        "successful recovery should record inode upload"
+    );
+    assert_eq!(
+        db.load_planned_action(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id
+        )
+        .expect("load planned action after successful recovery"),
+        None
+    );
 }
 
 fn run_upload_local_edit_fixture(relative_path: &str, temp_label: &str) {
@@ -721,6 +879,19 @@ struct EditExpectedState {
     #[serde(default)]
     upload_reused: bool,
     planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct EditFailureExpectedState {
+    issue: RawUploadFailureIssueExpect,
+    planned_action_retained: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUploadFailureIssueExpect {
+    kind: String,
+    summary: String,
+    failure: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

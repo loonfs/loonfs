@@ -1263,6 +1263,14 @@ The first issue kinds are:
 - `remote_observation_bind_ambiguous`
   - recorded when one authoritative observation matches more than one `local_only_state` row
   - `detail_json` must include at least the observed inode identity plus `matches`
+- `upload_local_edit_upload_failed`
+  - recorded when inode-keyed `upload_local_edit` cannot prepare durable immutable content before
+    dispatch
+  - this first slice applies only to inode-keyed uploads, because `conflicts_and_errors` is still
+    keyed by authoritative inode identity rather than temporary `client_file_id`
+  - `detail_json` must include at least a failure class such as `source_path_missing`,
+    `local_file_read`, `store_write`, or `local_file_changed_during_upload`, plus any available
+    path, object-key, block, or digest context
 - `download_remote_edit_remote_digest_mismatch`
   - recorded when downloaded durable content does not match the authoritative remote digest
 - `download_remote_edit_local_apply_failed`
@@ -1279,6 +1287,8 @@ Why this rule exists:
 
 Failure modes prevented:
 
+- an inode-keyed local edit upload failing repeatedly with no durable explanation of why bytes are
+  not reaching durable content storage
 - a remote observation bind ambiguity being lost after restart with no durable evidence
 - a discovered remote-only inode failing local materialization repeatedly without any persisted
   explanation

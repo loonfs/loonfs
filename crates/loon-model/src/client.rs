@@ -278,3 +278,21 @@ pub fn local_apply_failed_issue(
         created_at_ms,
     }
 }
+
+pub fn upload_failed_issue(
+    namespace_id: &loon_types::NamespaceId,
+    inode_id: InodeId,
+    kind: &str,
+    summary: &str,
+    detail_json: serde_json::Value,
+    created_at_ms: u64,
+) -> ModelClientIssue {
+    ModelClientIssue {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        kind: kind.to_owned(),
+        summary: summary.to_owned(),
+        detail_json,
+        created_at_ms,
+    }
+}

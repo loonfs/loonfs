@@ -399,6 +399,17 @@ impl SqliteStateDb {
         })
     }
 
+    pub(crate) fn clear_conflict_or_error_kind(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        kind: &str,
+    ) -> Result<(), StateDbError> {
+        self.planner_transaction("clear_conflict_or_error_kind", |tx| {
+            tx.delete_conflict_or_error_kind(namespace_id, inode_id, kind)
+        })
+    }
+
     pub fn upsert_transfer_ledger(
         &mut self,
         row: &TransferLedgerRow,

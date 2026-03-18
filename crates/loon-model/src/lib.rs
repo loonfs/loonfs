@@ -695,7 +695,7 @@ pub use client::{
     remote_observation_is_stale, remote_only_discovery_supported,
     remote_only_placeholder_matches_remote_observation, reuse_or_allocate_client_request_id,
     select_local_only_observation_bind_candidate, select_next_client_action,
-    select_next_local_only_action, upload_transfer_id, upsert_client_issue,
+    select_next_local_only_action, upload_failed_issue, upload_transfer_id, upsert_client_issue,
 };
 pub use content::{
     build_uploaded_content, decide_inode_upload_action, decide_local_only_upload_action,

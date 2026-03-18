@@ -805,6 +805,38 @@ fn model_upserts_client_issue_by_inode_and_kind() {
 }
 
 #[test]
+fn model_builds_upload_failed_issue() {
+    let issue = upload_failed_issue(
+        &NamespaceId::from("ns-1"),
+        InodeId(42),
+        "upload_local_edit_upload_failed",
+        "upload_local_edit could not prepare durable local content for upload",
+        json!({
+            "failure": "local_file_read",
+            "path": "/tmp/report.txt",
+            "message": "No such file or directory",
+        }),
+        1_700_000_507_000,
+    );
+
+    assert_eq!(issue.namespace_id, NamespaceId::from("ns-1"));
+    assert_eq!(issue.inode_id, InodeId(42));
+    assert_eq!(issue.kind, "upload_local_edit_upload_failed");
+    assert_eq!(
+        issue.summary,
+        "upload_local_edit could not prepare durable local content for upload"
+    );
+    assert_eq!(
+        issue.detail_json,
+        json!({
+            "failure": "local_file_read",
+            "path": "/tmp/report.txt",
+            "message": "No such file or directory",
+        })
+    );
+}
+
+#[test]
 fn model_detects_remote_only_placeholder_match_for_materialization() {
     let observed = ModelObservedRemoteInode {
         namespace_id: NamespaceId::from("ns-1"),
