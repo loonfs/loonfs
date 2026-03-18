@@ -10,6 +10,7 @@ use crate::upload::{
 };
 use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeKind};
+use serde_json::json;
 use std::path::Path;
 
 pub fn execute_local_only_create<S: ObjectStore, F>(
@@ -139,31 +140,40 @@ fn execute_upload_local_create<S: ObjectStore, F>(
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
-    let had_pending_request = db
-        .load_pending_client_mutation_for_client_file(client_file_id)?
-        .is_some();
+    let result = (|| {
+        let had_pending_request = db
+            .load_pending_client_mutation_for_client_file(client_file_id)?
+            .is_some();
 
-    let (ensured_upload, upload_reused) = if had_pending_request {
-        (db.load_local_only_upload(client_file_id)?, true)
-    } else {
-        let (upload_row, reused_existing) = ensure_upload_local_create_ready(
-            db,
-            store,
-            client_file_id,
-            source_path,
-            uploaded_at_ms,
-        )?;
-        (Some(upload_row), reused_existing)
-    };
+        let (ensured_upload, upload_reused) = if had_pending_request {
+            (db.load_local_only_upload(client_file_id)?, true)
+        } else {
+            let (upload_row, reused_existing) = ensure_upload_local_create_ready(
+                db,
+                store,
+                client_file_id,
+                source_path,
+                uploaded_at_ms,
+            )?;
+            (Some(upload_row), reused_existing)
+        };
 
-    let dispatched =
-        dispatch_client_mutation_from_state(db, client_file_id, created_at_ms, dispatch)?;
+        let dispatched =
+            dispatch_client_mutation_from_state(db, client_file_id, created_at_ms, dispatch)?;
 
-    Ok(ExecutedUploadLocalCreate {
-        ensured_upload,
-        upload_reused,
-        dispatched,
-    })
+        Ok(ExecutedUploadLocalCreate {
+            ensured_upload,
+            upload_reused,
+            dispatched,
+        })
+    })();
+
+    match &result {
+        Ok(_) => clear_upload_local_create_issue(db, client_file_id),
+        Err(error) => record_upload_local_create_issue(db, client_file_id, error, uploaded_at_ms),
+    }
+
+    result
 }
 
 fn ensure_upload_local_create_ready<S: ObjectStore>(
@@ -326,5 +336,56 @@ fn local_only_upload_transfer_row(
         block_count,
         state: TransferState::Uploading,
         updated_at_ms,
+    }
+}
+
+fn clear_upload_local_create_issue(db: &mut SqliteStateDb, client_file_id: &ClientFileId) {
+    let _ = db.clear_local_only_conflict_or_error_kind(
+        client_file_id,
+        "upload_local_create_upload_failed",
+    );
+}
+
+fn record_upload_local_create_issue(
+    db: &mut SqliteStateDb,
+    client_file_id: &ClientFileId,
+    error: &ExecuteUploadLocalCreateError,
+    created_at_ms: u64,
+) {
+    let namespace_id = match db
+        .load_local_only_file(client_file_id)
+        .ok()
+        .flatten()
+        .map(|row| row.namespace_id)
+    {
+        Some(namespace_id) => namespace_id,
+        None => return,
+    };
+
+    let issue = match error {
+        ExecuteUploadLocalCreateError::SourcePathMissing { .. } => Some((
+            "upload_local_create_upload_failed",
+            "upload_local_create could not prepare durable local content for upload",
+            json!({
+                "failure": "source_path_missing",
+            }),
+        )),
+        ExecuteUploadLocalCreateError::Upload(upload_error) => Some((
+            "upload_local_create_upload_failed",
+            "upload_local_create could not prepare durable local content for upload",
+            super::inode::upload_error_detail_json(upload_error),
+        )),
+        _ => None,
+    };
+
+    if let Some((kind, summary, detail_json)) = issue {
+        let _ = db.record_local_only_conflict_or_error(
+            client_file_id,
+            &namespace_id,
+            kind,
+            summary,
+            &detail_json,
+            created_at_ms,
+        );
     }
 }

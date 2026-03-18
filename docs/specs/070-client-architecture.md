@@ -1236,11 +1236,15 @@ Failure modes prevented:
 
 ## First durable discovery and reconciliation issue records
 
-The first durable failure surfacing path uses the already-reserved SQLite table:
+The first durable failure surfacing paths use two SQLite tables:
 
 - `conflicts_and_errors`
+- `local_only_conflicts_and_errors`
 
-Row shape:
+`local_only_conflicts_and_errors` is introduced in schema v10 so temp-identity upload failures can
+survive restart before a real inode exists.
+
+The inode-keyed row shape is:
 
 - `namespace_id`
 - `inode_id`
@@ -1249,14 +1253,27 @@ Row shape:
 - `detail_json`
 - `created_at_ms`
 
+The temp-identity row shape is:
+
+- `client_file_id`
+- `namespace_id`
+- `kind`
+- `summary`
+- `detail_json`
+- `created_at_ms`
+
 Rules:
 
-- the first implementation keeps at most one latest row per `(namespace_id, inode_id, kind)`
-- recording the same `kind` again for the same inode must replace the older row instead of
+- the inode-keyed implementation keeps at most one latest row per `(namespace_id, inode_id,
+  kind)`
+- the temp-identity implementation keeps at most one latest row per `(client_file_id, kind)`
+- recording the same `kind` again for the same identity must replace the older row instead of
   appending unbounded duplicates
 - successful recovery of the same action may clear the matching `kind`
+- when a temp identity later binds to a real remote inode, the bind transaction must clear any
+  leftover `local_only_conflicts_and_errors(client_file_id)` rows
 - these rows are durable debug/user-facing explanations; they do not replace the authoritative
-  `remote_state`, `local_state`, or `sync_anchor` views
+  `remote_state`, `local_state`, `sync_anchor`, or `local_only_state` views
 
 The first issue kinds are:
 
@@ -1266,8 +1283,14 @@ The first issue kinds are:
 - `upload_local_edit_upload_failed`
   - recorded when inode-keyed `upload_local_edit` cannot prepare durable immutable content before
     dispatch
-  - this first slice applies only to inode-keyed uploads, because `conflicts_and_errors` is still
-    keyed by authoritative inode identity rather than temporary `client_file_id`
+  - `detail_json` must include at least a failure class such as `source_path_missing`,
+    `local_file_read`, `store_write`, or `local_file_changed_during_upload`, plus any available
+    path, object-key, block, or digest context
+- `upload_local_create_upload_failed`
+  - recorded when temp-identity `upload_local_create` cannot prepare durable immutable content
+    before dispatch
+  - it uses `local_only_conflicts_and_errors(client_file_id)` because no authoritative inode
+    exists yet
   - `detail_json` must include at least a failure class such as `source_path_missing`,
     `local_file_read`, `store_write`, or `local_file_changed_during_upload`, plus any available
     path, object-key, block, or digest context
@@ -1284,11 +1307,15 @@ Why this rule exists:
   errors
 - ambiguous bind failures need a durable breadcrumb even when the client intentionally refuses to
   guess
+- a local-only create can fail repeatedly before remote inode allocation ever happens, so it needs
+  a temp-identity durable issue path rather than only inode-keyed issue rows
 
 Failure modes prevented:
 
 - an inode-keyed local edit upload failing repeatedly with no durable explanation of why bytes are
   not reaching durable content storage
+- a local-only file create upload failing repeatedly with no durable explanation before the temp
+  identity binds to a real inode
 - a remote observation bind ambiguity being lost after restart with no durable evidence
 - a discovered remote-only inode failing local materialization repeatedly without any persisted
   explanation

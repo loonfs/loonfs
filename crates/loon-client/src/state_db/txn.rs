@@ -1,10 +1,10 @@
 use super::loads::{
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
     load_conflicts_and_errors, load_inode_upload, load_local_file,
-    load_local_only_candidates_for_namespace, load_local_only_file,
-    load_local_only_transfer_ledger, load_local_only_upload, load_next_deferred_planned_action,
-    load_next_executable_planned_action, load_next_planned_action,
-    load_next_planned_local_only_action, load_pending_client_mutation,
+    load_local_only_candidates_for_namespace, load_local_only_conflicts_and_errors,
+    load_local_only_file, load_local_only_transfer_ledger, load_local_only_upload,
+    load_next_deferred_planned_action, load_next_executable_planned_action,
+    load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
     load_pending_client_mutation_for_client_file, load_pending_inode_mutation,
     load_pending_inode_mutation_for_inode, load_planned_action, load_planned_local_only_action,
     load_remote_file, load_sync_anchor, load_transfer_ledger_for_inode,
@@ -219,6 +219,13 @@ impl SqliteStateDb {
         load_conflicts_and_errors(&self.conn, namespace_id, inode_id)
     }
 
+    pub fn load_local_only_conflicts_and_errors(
+        &self,
+        client_file_id: &ClientFileId,
+    ) -> Result<Vec<LocalOnlyConflictOrErrorRow>, StateDbError> {
+        load_local_only_conflicts_and_errors(&self.conn, client_file_id)
+    }
+
     pub fn load_transfer_ledger_for_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -399,6 +406,27 @@ impl SqliteStateDb {
         })
     }
 
+    pub(crate) fn record_local_only_conflict_or_error(
+        &mut self,
+        client_file_id: &ClientFileId,
+        namespace_id: &NamespaceId,
+        kind: &str,
+        summary: &str,
+        detail_json: &serde_json::Value,
+        created_at_ms: u64,
+    ) -> Result<LocalOnlyConflictOrErrorRow, StateDbError> {
+        self.planner_transaction("record_local_only_conflict_or_error", |tx| {
+            tx.record_local_only_conflict_or_error(
+                client_file_id,
+                namespace_id,
+                kind,
+                summary,
+                detail_json,
+                created_at_ms,
+            )
+        })
+    }
+
     pub(crate) fn clear_conflict_or_error_kind(
         &mut self,
         namespace_id: &NamespaceId,
@@ -407,6 +435,16 @@ impl SqliteStateDb {
     ) -> Result<(), StateDbError> {
         self.planner_transaction("clear_conflict_or_error_kind", |tx| {
             tx.delete_conflict_or_error_kind(namespace_id, inode_id, kind)
+        })
+    }
+
+    pub(crate) fn clear_local_only_conflict_or_error_kind(
+        &mut self,
+        client_file_id: &ClientFileId,
+        kind: &str,
+    ) -> Result<(), StateDbError> {
+        self.planner_transaction("clear_local_only_conflict_or_error_kind", |tx| {
+            tx.delete_local_only_conflict_or_error_kind(client_file_id, kind)
         })
     }
 
@@ -541,6 +579,48 @@ impl PlannerTxn<'_> {
         })
     }
 
+    pub fn record_local_only_conflict_or_error(
+        &mut self,
+        client_file_id: &ClientFileId,
+        namespace_id: &NamespaceId,
+        kind: &str,
+        summary: &str,
+        detail_json: &serde_json::Value,
+        created_at_ms: u64,
+    ) -> Result<LocalOnlyConflictOrErrorRow, StateDbError> {
+        self.delete_local_only_conflict_or_error_kind(client_file_id, kind)?;
+        let detail_json_text =
+            serde_json::to_string(detail_json).map_err(StateDbError::ConflictOrErrorDetailCodec)?;
+        self.tx.execute(
+            "INSERT INTO local_only_conflicts_and_errors (
+                client_file_id,
+                namespace_id,
+                kind,
+                summary,
+                detail_json,
+                created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                client_file_id.as_str(),
+                namespace_id.as_str(),
+                kind,
+                summary,
+                detail_json_text,
+                to_sql_u64(created_at_ms, "created_at_ms")?,
+            ],
+        )?;
+
+        Ok(LocalOnlyConflictOrErrorRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: namespace_id.clone(),
+            record_id: from_sql_u64(self.tx.last_insert_rowid(), "record_id")?,
+            kind: kind.to_owned(),
+            summary: summary.to_owned(),
+            detail_json: detail_json.clone(),
+            created_at_ms,
+        })
+    }
+
     pub fn delete_conflict_or_error_kind(
         &mut self,
         namespace_id: &NamespaceId,
@@ -555,6 +635,31 @@ impl PlannerTxn<'_> {
                 to_sql_u64(inode_id.0, "inode_id")?,
                 kind,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_local_only_conflict_or_error_kind(
+        &mut self,
+        client_file_id: &ClientFileId,
+        kind: &str,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM local_only_conflicts_and_errors
+            WHERE client_file_id = ?1 AND kind = ?2",
+            params![client_file_id.as_str(), kind],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_local_only_conflicts_and_errors(
+        &mut self,
+        client_file_id: &ClientFileId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM local_only_conflicts_and_errors
+            WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
         )?;
         Ok(())
     }
@@ -1738,6 +1843,7 @@ impl PlannerTxn<'_> {
         self.delete_planned_local_only_action(client_file_id)?;
         self.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
         self.delete_local_only_upload(client_file_id)?;
+        self.delete_local_only_conflicts_and_errors(client_file_id)?;
         self.delete_local_only_file(client_file_id)?;
 
         Ok(BoundLocalOnlyFile {

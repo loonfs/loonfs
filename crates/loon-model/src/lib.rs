@@ -264,6 +264,16 @@ pub struct ModelClientIssue {
     pub created_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelLocalOnlyIssue {
+    pub client_file_id: String,
+    pub namespace_id: NamespaceId,
+    pub kind: String,
+    pub summary: String,
+    pub detail_json: Value,
+    pub created_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelRemoteObservationSelectionError {
     AmbiguousLocalOnlyBind { matches: usize },
@@ -690,12 +700,13 @@ mod queue;
 pub use client::{
     allocate_client_request_id, bound_local_matches_remote_observation, download_transfer_id,
     expected_download_staged_size, local_apply_failed_issue, local_only_matches_remote_observation,
-    local_only_upload_transfer_id, reconcile_download_resume_block_index,
-    reconcile_upload_resume_block_index, remote_observation_bind_ambiguous_issue,
-    remote_observation_is_stale, remote_only_discovery_supported,
-    remote_only_placeholder_matches_remote_observation, reuse_or_allocate_client_request_id,
-    select_local_only_observation_bind_candidate, select_next_client_action,
-    select_next_local_only_action, upload_failed_issue, upload_transfer_id, upsert_client_issue,
+    local_only_upload_failed_issue, local_only_upload_transfer_id,
+    reconcile_download_resume_block_index, reconcile_upload_resume_block_index,
+    remote_observation_bind_ambiguous_issue, remote_observation_is_stale,
+    remote_only_discovery_supported, remote_only_placeholder_matches_remote_observation,
+    reuse_or_allocate_client_request_id, select_local_only_observation_bind_candidate,
+    select_next_client_action, select_next_local_only_action, upload_failed_issue,
+    upload_transfer_id, upsert_client_issue, upsert_local_only_issue,
 };
 pub use content::{
     build_uploaded_content, decide_inode_upload_action, decide_local_only_upload_action,

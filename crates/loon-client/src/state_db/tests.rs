@@ -1,9 +1,9 @@
 use super::{
-    BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow,
-    LocalOnlyPlannedActionRow, LocalOnlyTransferLedgerRow, LocalOnlyUploadRow,
-    ObservedLocalOnlyInode, PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow,
-    SqliteStateDb, StateDbError, SyncAnchorRow, TransferDirection, TransferLedgerRow,
-    TransferState, SCHEMA_VERSION,
+    BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow,
+    LocalOnlyConflictOrErrorRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
+    LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, ObservedLocalOnlyInode,
+    PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError,
+    SyncAnchorRow, TransferDirection, TransferLedgerRow, TransferState, SCHEMA_VERSION,
 };
 use crate::upload::UploadedContent;
 use loon_types::{
@@ -14,7 +14,7 @@ use loon_types::{
 use serde_json::json;
 
 #[test]
-fn sqlite_state_db_applies_schema_v9() {
+fn sqlite_state_db_applies_schema_v10() {
     let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
     assert_eq!(
@@ -32,6 +32,7 @@ fn sqlite_state_db_applies_schema_v9() {
         "planned_local_only_actions",
         "local_only_uploads",
         "local_only_transfer_ledger",
+        "local_only_conflicts_and_errors",
         "inode_uploads",
         "pending_client_mutations",
         "pending_inode_mutations",
@@ -48,6 +49,49 @@ fn sqlite_state_db_applies_schema_v9() {
             .expect("query sqlite_master");
         assert_eq!(exists, 1, "expected table {table} to exist");
     }
+}
+
+#[test]
+fn record_local_only_conflict_or_error_replaces_previous_row_for_same_client_file_and_kind() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+    let namespace_id = NamespaceId::from("ns-1");
+
+    db.record_local_only_conflict_or_error(
+        &client_file_id,
+        &namespace_id,
+        "upload_local_create_upload_failed",
+        "first summary",
+        &json!({"failure": "source_path_missing"}),
+        10,
+    )
+    .expect("record first temp issue");
+    db.record_local_only_conflict_or_error(
+        &client_file_id,
+        &namespace_id,
+        "upload_local_create_upload_failed",
+        "second summary",
+        &json!({"failure": "local_file_read"}),
+        20,
+    )
+    .expect("record second temp issue");
+
+    let issues = db
+        .load_local_only_conflicts_and_errors(&client_file_id)
+        .expect("load temp issues");
+
+    assert_eq!(
+        issues,
+        vec![LocalOnlyConflictOrErrorRow {
+            client_file_id,
+            namespace_id,
+            record_id: issues[0].record_id,
+            kind: "upload_local_create_upload_failed".to_owned(),
+            summary: "second summary".to_owned(),
+            detail_json: json!({"failure": "local_file_read"}),
+            created_at_ms: 20,
+        }]
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::{
-    ModelClientIssue, ModelLocalOnlyObservationCandidate, ModelObservedRemoteInode,
-    ModelPlannedInodeAction, ModelPlannedLocalOnlyAction, ModelRemoteObservationSelectionError,
-    ModelScheduledClientAction,
+    ModelClientIssue, ModelLocalOnlyIssue, ModelLocalOnlyObservationCandidate,
+    ModelObservedRemoteInode, ModelPlannedInodeAction, ModelPlannedLocalOnlyAction,
+    ModelRemoteObservationSelectionError, ModelScheduledClientAction,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId};
 use serde_json::json;
@@ -226,6 +226,26 @@ pub fn upsert_client_issue(
     next
 }
 
+pub fn upsert_local_only_issue(
+    issues: &[ModelLocalOnlyIssue],
+    next_issue: ModelLocalOnlyIssue,
+) -> Vec<ModelLocalOnlyIssue> {
+    let mut next: Vec<ModelLocalOnlyIssue> = issues
+        .iter()
+        .filter(|issue| {
+            issue.client_file_id != next_issue.client_file_id || issue.kind != next_issue.kind
+        })
+        .cloned()
+        .collect();
+    next.push(next_issue);
+    next.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    next
+}
+
 pub fn remote_observation_bind_ambiguous_issue(
     observed: &ModelObservedRemoteInode,
     matches: usize,
@@ -290,6 +310,24 @@ pub fn upload_failed_issue(
     ModelClientIssue {
         namespace_id: namespace_id.clone(),
         inode_id,
+        kind: kind.to_owned(),
+        summary: summary.to_owned(),
+        detail_json,
+        created_at_ms,
+    }
+}
+
+pub fn local_only_upload_failed_issue(
+    client_file_id: &str,
+    namespace_id: &loon_types::NamespaceId,
+    kind: &str,
+    summary: &str,
+    detail_json: serde_json::Value,
+    created_at_ms: u64,
+) -> ModelLocalOnlyIssue {
+    ModelLocalOnlyIssue {
+        client_file_id: client_file_id.to_owned(),
+        namespace_id: namespace_id.clone(),
         kind: kind.to_owned(),
         summary: summary.to_owned(),
         detail_json,

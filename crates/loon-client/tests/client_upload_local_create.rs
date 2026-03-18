@@ -10,7 +10,7 @@ use loon_client::state_db::{
     LocalOnlyPlannedActionRow, LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, RemoteFileStateRow,
     SqliteStateDb, StateDbError, SyncAnchorRow, TransferDirection, TransferState,
 };
-use loon_client::upload::{upload_small_file_from_path, UploadedContent};
+use loon_client::upload::{upload_small_file_from_path, UploadError, UploadedContent};
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
@@ -115,6 +115,109 @@ fn upload_local_create_retry_reuses_pending_request_without_rereading_source_pat
             TransferDirection::Upload,
         )
         .expect("load temp upload transfer ledger"),
+        None
+    );
+}
+
+#[test]
+fn upload_local_create_missing_file_records_temp_issue_and_clears_on_recovery() {
+    let scenario = load_fixture("client/upload_local_create_missing_file_records_temp_issue.yaml");
+    let initial: InitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
+    let expect: FailureExpectedState = scenario.decode_expect().expect("decode expectations");
+    let temp_dir = TestDir::new("client-upload-local-create-missing-file");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    seed_client_state(&db_path, &initial, None);
+
+    let execute = actions[0].execute().expect("execute action first");
+    let missing_source_path = source_root.join(&initial.local_file.relative_path);
+
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client DB for missing-file case");
+        let error = execute_upload_local_create_from_path(
+            &mut db,
+            &store,
+            &initial.local_only_state.client_file_id,
+            &missing_source_path,
+            execute.uploaded_at_ms,
+            execute.created_at_ms,
+            |_request| unreachable!("missing-file failure should happen before dispatch"),
+        )
+        .expect_err("missing source file should fail");
+        assert!(matches!(
+            error,
+            ExecuteUploadLocalCreateError::Upload(UploadError::LocalFileRead { .. })
+        ));
+    }
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after missing-file failure");
+    assert_eq!(
+        db.load_planned_local_only_action(&initial.local_only_state.client_file_id)
+            .expect("load planned local-only action after failure"),
+        if expect.planned_local_only_action_retained {
+            Some(initial.planned_local_only_action.clone())
+        } else {
+            None
+        }
+    );
+    assert_eq!(
+        db.load_local_only_upload(&initial.local_only_state.client_file_id)
+            .expect("load local-only upload after failure"),
+        None
+    );
+    let issues = db
+        .load_local_only_conflicts_and_errors(&initial.local_only_state.client_file_id)
+        .expect("load temp issue rows after failure");
+    assert_eq!(issues.len(), 1, "expected one temp upload failure issue");
+    let issue = &issues[0];
+    assert_eq!(issue.kind, expect.issue.kind);
+    assert_eq!(issue.summary, expect.issue.summary);
+    assert_eq!(
+        issue.detail_json["failure"].as_str(),
+        Some(expect.issue.failure.as_str())
+    );
+    let recorded_path = issue.detail_json["path"]
+        .as_str()
+        .expect("temp upload failure path should be present");
+    assert!(
+        recorded_path.ends_with(
+            initial
+                .local_file
+                .relative_path
+                .to_str()
+                .expect("fixture path should be valid UTF-8")
+        ),
+        "expected `{recorded_path}` to end with relative source path"
+    );
+    drop(db);
+
+    let source_path = write_source_file(&source_root, &initial.local_file);
+    let recovered = run_execute(
+        &db_path,
+        &store,
+        &initial.local_only_state.client_file_id,
+        &source_path,
+        &execute,
+    );
+
+    assert!(!recovered.upload_reused);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after recovered upload");
+    assert_eq!(
+        db.load_local_only_conflicts_and_errors(&initial.local_only_state.client_file_id)
+            .expect("load temp issue rows after recovery"),
+        Vec::new()
+    );
+    assert_eq!(
+        db.load_local_only_file(&initial.local_only_state.client_file_id)
+            .expect("load local-only row after recovery"),
         None
     );
 }
@@ -470,6 +573,19 @@ struct ExpectedState {
     #[serde(default)]
     local_only_transfer_ledger_cleared: bool,
     planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct FailureExpectedState {
+    issue: RawLocalOnlyUploadFailureIssueExpect,
+    planned_local_only_action_retained: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawLocalOnlyUploadFailureIssueExpect {
+    kind: String,
+    summary: String,
+    failure: String,
 }
 
 #[derive(Debug, Deserialize)]

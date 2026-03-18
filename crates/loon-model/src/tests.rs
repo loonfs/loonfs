@@ -837,6 +837,62 @@ fn model_builds_upload_failed_issue() {
 }
 
 #[test]
+fn model_upserts_local_only_issue_by_client_file_and_kind() {
+    let first = ModelLocalOnlyIssue {
+        client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
+        namespace_id: NamespaceId::from("ns-1"),
+        kind: "upload_local_create_upload_failed".to_owned(),
+        summary: "old summary".to_owned(),
+        detail_json: json!({"failure": "source_path_missing"}),
+        created_at_ms: 1,
+    };
+    let second = ModelLocalOnlyIssue {
+        client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
+        namespace_id: NamespaceId::from("ns-1"),
+        kind: "upload_local_create_upload_failed".to_owned(),
+        summary: "new summary".to_owned(),
+        detail_json: json!({"failure": "local_file_read"}),
+        created_at_ms: 2,
+    };
+
+    let issues = upsert_local_only_issue(&[first], second.clone());
+
+    assert_eq!(issues, vec![second]);
+}
+
+#[test]
+fn model_builds_local_only_upload_failed_issue() {
+    let issue = local_only_upload_failed_issue(
+        "tmp:ns-1:00000000000000000001",
+        &NamespaceId::from("ns-1"),
+        "upload_local_create_upload_failed",
+        "upload_local_create could not prepare durable local content for upload",
+        json!({
+            "failure": "local_file_read",
+            "path": "/tmp/draft.txt",
+            "message": "No such file or directory",
+        }),
+        1_700_000_507_000,
+    );
+
+    assert_eq!(issue.client_file_id, "tmp:ns-1:00000000000000000001");
+    assert_eq!(issue.namespace_id, NamespaceId::from("ns-1"));
+    assert_eq!(issue.kind, "upload_local_create_upload_failed");
+    assert_eq!(
+        issue.summary,
+        "upload_local_create could not prepare durable local content for upload"
+    );
+    assert_eq!(
+        issue.detail_json,
+        json!({
+            "failure": "local_file_read",
+            "path": "/tmp/draft.txt",
+            "message": "No such file or directory",
+        })
+    );
+}
+
+#[test]
 fn model_detects_remote_only_placeholder_match_for_materialization() {
     let observed = ModelObservedRemoteInode {
         namespace_id: NamespaceId::from("ns-1"),

@@ -255,6 +255,40 @@ pub(super) fn load_conflicts_and_errors(
     Ok(issues)
 }
 
+pub(super) fn load_local_only_conflicts_and_errors(
+    conn: &Connection,
+    client_file_id: &ClientFileId,
+) -> Result<Vec<LocalOnlyConflictOrErrorRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT record_id, namespace_id, kind, summary, detail_json, created_at_ms
+        FROM local_only_conflicts_and_errors
+        WHERE client_file_id = ?1
+        ORDER BY created_at_ms ASC, record_id ASC",
+    )?;
+    let mut rows = stmt.query(params![client_file_id.as_str()])?;
+    let mut issues = Vec::new();
+    while let Some(row) = rows.next()? {
+        let record_id = row.get::<_, i64>(0)?;
+        let namespace_id_text = row.get::<_, String>(1)?;
+        let kind = row.get::<_, String>(2)?;
+        let summary = row.get::<_, String>(3)?;
+        let detail_json_text = row.get::<_, String>(4)?;
+        let created_at_ms = row.get::<_, i64>(5)?;
+        let detail_json = serde_json::from_str(&detail_json_text)
+            .map_err(StateDbError::ConflictOrErrorDetailCodec)?;
+        issues.push(LocalOnlyConflictOrErrorRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: NamespaceId::from(namespace_id_text),
+            record_id: from_sql_u64(record_id, "record_id")?,
+            kind,
+            summary,
+            detail_json,
+            created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+        });
+    }
+    Ok(issues)
+}
+
 pub(super) fn load_transfer_ledger_for_inode(
     conn: &Connection,
     namespace_id: &NamespaceId,

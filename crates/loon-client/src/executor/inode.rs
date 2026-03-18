@@ -600,7 +600,7 @@ fn record_upload_local_edit_issue(
     }
 }
 
-fn upload_error_detail_json(error: &crate::upload::UploadError) -> serde_json::Value {
+pub(super) fn upload_error_detail_json(error: &crate::upload::UploadError) -> serde_json::Value {
     match error {
         crate::upload::UploadError::LocalFileRead { path, message } => json!({
             "failure": "local_file_read",

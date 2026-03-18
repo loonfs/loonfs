@@ -423,6 +423,17 @@ pub struct LocalOnlyTransferLedgerRow {
     pub updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocalOnlyConflictOrErrorRow {
+    pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
+    pub record_id: u64,
+    pub kind: String,
+    pub summary: String,
+    pub detail_json: Value,
+    pub created_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InodeUploadRow {
     pub namespace_id: NamespaceId,
