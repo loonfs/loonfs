@@ -92,7 +92,7 @@ expect:
   local_only_state_cleared: true
   local_only_upload_cleared: true
   planned_local_only_action_cleared: true
-  pending_client_mutation_cleared: true
+  pending_client_mutation_cleared: false
   planner_result:
     namespace_id: ns-1
     inode_id: 501

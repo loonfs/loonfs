@@ -3,8 +3,9 @@ use crate::local_apply::LocalApplyError;
 use crate::planner::{PlannerDecision, PlannerError};
 use crate::state_db::{
     AppliedInodeMutation, BoundLocalOnlyFile, ClientFileId, InodeUploadRow,
-    LocalOnlyPlannedActionRow, LocalOnlyUploadRow, PendingClientMutationRow,
-    PendingInodeMutationRow, PlannedActionRow, StateDbError,
+    LocalOnlyPlannedActionRow, LocalOnlyTransferLedgerRow, LocalOnlyUploadRow,
+    PendingClientMutationRow, PendingInodeMutationRow, PlannedActionRow, StateDbError,
+    TransferLedgerRow,
 };
 use crate::upload::UploadError;
 use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeKind};
@@ -141,6 +142,11 @@ pub struct ExecutedUploadLocalCreate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressedUploadLocalCreate {
+    pub transfer: LocalOnlyTransferLedgerRow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutedCreateRemoteDir {
     pub reused_pending_request: bool,
     pub dispatched: DispatchedClientMutation,
@@ -154,10 +160,20 @@ pub struct ExecutedUploadLocalEdit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressedUploadLocalEdit {
+    pub transfer: TransferLedgerRow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutedDownloadRemoteEdit {
     pub downloaded_content_manifest_digest: String,
     pub downloaded_file_digest_sha256: String,
     pub applied: AppliedInodeMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressedDownloadRemoteEdit {
+    pub transfer: TransferLedgerRow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,8 +183,26 @@ pub struct ExecutedMaterializeRemoteDir {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutedLocalOnlyCreate {
-    UploadLocalCreate(ExecutedUploadLocalCreate),
+    UploadLocalCreate(UploadLocalCreateExecution),
     CreateRemoteDir(ExecutedCreateRemoteDir),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadLocalCreateExecution {
+    Progressed(ProgressedUploadLocalCreate),
+    Completed(ExecutedUploadLocalCreate),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UploadLocalEditExecution {
+    Progressed(ProgressedUploadLocalEdit),
+    Completed(ExecutedUploadLocalEdit),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadRemoteEditExecution {
+    Progressed(ProgressedDownloadRemoteEdit),
+    Completed(ExecutedDownloadRemoteEdit),
 }
 
 #[derive(Debug, Error)]
@@ -359,8 +393,8 @@ pub enum ExecuteNextLocalOnlyCreateError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextClientAction {
     ExecutedLocalOnlyCreate(ExecutedNextLocalOnlyCreate),
-    ExecutedUploadLocalEdit(ExecutedUploadLocalEdit),
-    ExecutedDownloadRemoteEdit(ExecutedDownloadRemoteEdit),
+    ExecutedUploadLocalEdit(UploadLocalEditExecution),
+    ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution),
     ExecutedMaterializeRemoteDir(ExecutedMaterializeRemoteDir),
     SelectedPlannedAction(PlannedActionRow),
 }

@@ -1,4 +1,6 @@
-use loon_client::executor::{execute_next_client_action, NextClientAction};
+use loon_client::executor::{
+    execute_next_client_action, DownloadRemoteEditExecution, NextClientAction,
+};
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
     AppliedInodeMutation, FileSyncViews, LocalFileStateRow, PlannedActionRow, RemoteFileStateRow,
@@ -31,6 +33,209 @@ fn execute_next_client_action_resumes_remote_only_file_from_transfer_ledger() {
     run_remote_only_materialization_fixture(
         "client/execute_next_client_action_resumes_remote_only_file_from_transfer_ledger.yaml",
         "client-remote-only-materialization-resume",
+    );
+}
+
+#[test]
+fn execute_next_client_action_multitick_remote_only_file_download_survives_restart() {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_multitick_remote_only_file_download_survives_restart.yaml",
+    );
+    let mut initial: MaterializeInitialState = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<MaterializeFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let mut expect: MaterializeExpectedState = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-only-materialization-multitick");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let local_root = temp_dir.path().join("local");
+    let remote_seed_root = temp_dir.path().join("remote-seed");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&local_root).expect("create local root");
+    fs::create_dir_all(&remote_seed_root).expect("create remote seed root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let first_execute = actions[0].execute().expect("first execute action");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let second_execute = actions[2].execute().expect("second execute action");
+    assert!(actions[3].is_restart(), "restart should be fourth");
+    let planner_tick = actions[4].planner().expect("planner action fifth");
+
+    let target_relative = first_execute
+        .source_path_relative
+        .as_deref()
+        .expect("fixture should include target path");
+    let target_path = local_root.join(target_relative);
+    fs::create_dir_all(target_path.parent().expect("target parent")).expect("create target parent");
+
+    let seeded_remote = seed_remote_content(
+        &store,
+        &initial.remote_state.namespace_id,
+        &initial.remote_file,
+        &remote_seed_root,
+    );
+    fill_materialization_expectations(&mut initial, &mut expect, &seeded_remote);
+    seed_remote_only_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.planned_actions,
+        initial.transfer_ledger.as_ref(),
+        &seeded_remote,
+        &initial.remote_file,
+        &target_path,
+        initial.stale_stage_bytes_utf8.as_deref(),
+    );
+
+    let first = run_execute_next_client_action(
+        &db_path,
+        &store,
+        Some(target_path.as_path()),
+        &first_execute,
+    )
+    .expect("first action should be scheduled");
+    let first_transfer = match first {
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Progressed(
+            progressed,
+        )) => progressed.transfer,
+        other => panic!("expected progressed download on first tick, got {other:?}"),
+    };
+    assert_eq!(first_transfer.block_index, 1);
+    assert_eq!(first_transfer.block_count, 2);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after first tick");
+    assert_eq!(
+        db.load_transfer_ledger_for_inode(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+            TransferDirection::Download,
+        )
+        .expect("load download transfer ledger after first tick"),
+        Some(first_transfer.clone())
+    );
+    assert!(
+        !target_path.exists(),
+        "target file should not be published before terminal block"
+    );
+    drop(db);
+
+    let second = run_execute_next_client_action(
+        &db_path,
+        &store,
+        Some(target_path.as_path()),
+        &second_execute,
+    )
+    .expect("second action should be scheduled");
+    match second {
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Completed(
+            download,
+        )) => {
+            assert_eq!(
+                download.downloaded_file_digest_sha256,
+                expect
+                    .downloaded_file_digest_sha256
+                    .clone()
+                    .expect("expected downloaded file digest"),
+            );
+        }
+        other => panic!("expected completed download on second tick, got {other:?}"),
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen client state DB after second tick");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan converged inode after restart");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_eq!(
+        db.load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load converged views"),
+        FileSyncViews {
+            namespace_id: planner_tick.namespace_id.clone(),
+            inode_id: planner_tick.inode_id,
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: Some(expect.sync_anchor.clone()),
+        }
+    );
+}
+
+#[test]
+fn execute_next_client_action_stale_download_stage_resets_and_records_issue() {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_stale_download_stage_resets_and_records_issue.yaml",
+    );
+    let mut initial: MaterializeInitialState = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<MaterializeFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let expect: MaterializeProgressExpectedState = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-only-materialization-reset");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let local_root = temp_dir.path().join("local");
+    let remote_seed_root = temp_dir.path().join("remote-seed");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&local_root).expect("create local root");
+    fs::create_dir_all(&remote_seed_root).expect("create remote seed root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let execute = actions[0].execute().expect("execute action first");
+    let target_relative = execute
+        .source_path_relative
+        .as_deref()
+        .expect("fixture should include target path");
+    let target_path = local_root.join(target_relative);
+    fs::create_dir_all(target_path.parent().expect("target parent")).expect("create target parent");
+
+    let seeded_remote = seed_remote_content(
+        &store,
+        &initial.remote_state.namespace_id,
+        &initial.remote_file,
+        &remote_seed_root,
+    );
+    fill_remote_state_digests(&mut initial.remote_state, &seeded_remote);
+    seed_remote_only_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.planned_actions,
+        initial.transfer_ledger.as_ref(),
+        &seeded_remote,
+        &initial.remote_file,
+        &target_path,
+        initial.stale_stage_bytes_utf8.as_deref(),
+    );
+
+    let executed =
+        run_execute_next_client_action(&db_path, &store, Some(target_path.as_path()), &execute)
+            .expect("one action should be scheduled");
+    let transfer = match executed {
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Progressed(
+            progressed,
+        )) => progressed.transfer,
+        other => panic!("expected progressed download after reset, got {other:?}"),
+    };
+    assert_eq!(transfer.block_index, expect.transfer_ledger.block_index);
+    assert_eq!(transfer.block_count, expect.transfer_ledger.block_count);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after reset");
+    let issues = db
+        .load_conflicts_and_errors(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+        )
+        .expect("load transfer reset issue");
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].kind, expect.issue.kind);
+    assert_eq!(
+        issues[0].detail_json["reason"].as_str(),
+        Some(expect.issue.reason.as_str())
+    );
+    assert!(
+        !target_path.exists(),
+        "target file should still be absent after non-terminal tick"
     );
 }
 
@@ -77,6 +282,7 @@ fn run_remote_only_materialization_fixture(relative_path: &str, temp_label: &str
         &seeded_remote,
         &initial.remote_file,
         &target_path,
+        initial.stale_stage_bytes_utf8.as_deref(),
     );
 
     let executed =
@@ -84,7 +290,14 @@ fn run_remote_only_materialization_fixture(relative_path: &str, temp_label: &str
             .expect("one action should be scheduled");
 
     let download = match executed {
-        NextClientAction::ExecutedDownloadRemoteEdit(result) => result,
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Completed(
+            result,
+        )) => result,
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Progressed(
+            progress,
+        )) => {
+            panic!("expected completed download_remote_edit, got {progress:?}")
+        }
         other => panic!("expected executed download_remote_edit, got {other:?}"),
     };
 
@@ -208,6 +421,7 @@ fn seed_remote_only_state(
     seeded_remote: &SeededRemoteFile,
     remote_file: &FixtureRemoteFile,
     target_path: &Path,
+    stale_stage_bytes_utf8: Option<&str>,
 ) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-remote-only-state", |tx| {
@@ -238,13 +452,17 @@ fn seed_remote_only_state(
     .expect("seed remote-only state");
 
     if let Some(transfer_ledger) = transfer_ledger {
-        let mut stage_bytes = Vec::new();
-        for block in remote_file
-            .block_bytes()
-            .iter()
-            .take(usize::try_from(transfer_ledger.block_index).expect("block index should fit"))
-        {
-            stage_bytes.extend_from_slice(block);
+        let mut stage_bytes = stale_stage_bytes_utf8
+            .map(|bytes| bytes.as_bytes().to_vec())
+            .unwrap_or_default();
+        if stale_stage_bytes_utf8.is_none() {
+            for block in remote_file
+                .block_bytes()
+                .iter()
+                .take(usize::try_from(transfer_ledger.block_index).expect("block index should fit"))
+            {
+                stage_bytes.extend_from_slice(block);
+            }
         }
         let stage_path = stage_path_for_target(target_path);
         fs::create_dir_all(stage_path.parent().expect("stage parent"))
@@ -443,6 +661,8 @@ struct MaterializeInitialState {
     planned_actions: Vec<PlannedActionRow>,
     #[serde(default)]
     transfer_ledger: Option<FixtureTransferLedgerSeed>,
+    #[serde(default)]
+    stale_stage_bytes_utf8: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -465,6 +685,20 @@ struct MaterializeExpectedState {
     #[serde(default)]
     stage_file_cleared: bool,
     planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct MaterializeProgressExpectedState {
+    transfer_ledger: FixtureTransferLedgerSeed,
+    issue: RawTransferResetIssueExpect,
+    planned_action_retained: bool,
+    local_file_absent: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTransferResetIssueExpect {
+    kind: String,
+    reason: String,
 }
 
 #[derive(Debug, Deserialize)]

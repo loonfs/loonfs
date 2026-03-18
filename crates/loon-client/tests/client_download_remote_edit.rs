@@ -1,4 +1,6 @@
-use loon_client::executor::{execute_next_client_action, NextClientAction};
+use loon_client::executor::{
+    execute_next_client_action, DownloadRemoteEditExecution, NextClientAction,
+};
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
     AppliedInodeMutation, FileSyncViews, LocalFileStateRow, PlannedActionRow, RemoteFileStateRow,
@@ -101,7 +103,14 @@ fn run_download_remote_edit_scenario(scenario: &Scenario, temp_dir_name: &str) {
             .expect("one action should be scheduled");
 
     let download = match executed {
-        NextClientAction::ExecutedDownloadRemoteEdit(result) => result,
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Completed(
+            result,
+        )) => result,
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Progressed(
+            progress,
+        )) => {
+            panic!("expected completed download_remote_edit, got {progress:?}")
+        }
         other => panic!("expected executed download_remote_edit, got {other:?}"),
     };
 

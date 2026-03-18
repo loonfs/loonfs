@@ -1,0 +1,145 @@
+name: execute_next_client_action_multitick_upload_local_edit_survives_restart
+initial:
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    observed_seq: 41
+    revision_no: 17
+    content_digest: sha256:remote-17
+    parent_inode_id: 2
+    display_name: report.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    content_digest:
+    parent_inode_id: 2
+    display_name: report.txt
+    exists_on_disk: true
+    dirty: true
+    last_local_change_ms: 1700000400000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    synced_seq: 41
+    revision_no: 17
+    content_digest: sha256:remote-17
+    parent_inode_id: 2
+    display_name: report.txt
+  local_file:
+    relative_path: reports/report.txt
+    generated_two_block:
+      first_block_fill_byte: a
+      second_block_utf8: "b"
+  planned_action:
+    namespace_id: ns-1
+    inode_id: 42
+    decision: upload_local_edit
+    reason: local_differs_from_anchor
+    created_at_ms: 1700000405000
+  head:
+    namespace_id: ns-1
+    seq: 41
+    active_fence_token: 8
+    next_inode_id: 501
+    snapshot_hint_seq: 40
+    retention_floor_seq: 40
+  lease:
+    namespace_id: ns-1
+    holder_id: writer-a
+    fence_token: 8
+    lease_expires_at_ms: 1700000415000
+actions:
+  - execute_next_client_action:
+      source_path_relative: reports/report.txt
+      uploaded_at_ms: 1700000404000
+      created_at_ms: 1700000406000
+      writer_id: writer-a
+      writer_version: loon-server-test
+      now_ms: 1700000407000
+  - restart_client_state_db: true
+  - execute_next_client_action:
+      source_path_relative: reports/report.txt
+      uploaded_at_ms: 1700000408000
+      created_at_ms: 1700000409000
+      writer_id: writer-a
+      writer_version: loon-server-test
+      now_ms: 1700000410000
+  - restart_client_state_db: true
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 42
+      now_ms: 1700000411000
+expect:
+  pending_request_id: client-req-00000000000000000001
+  request:
+    namespace_id: ns-1
+    client_request_id: client-req-00000000000000000001
+    op:
+      replace_file:
+        inode_id: 42
+        base_revision_no: 17
+        content_manifest_digest:
+  mutation_response:
+    namespace_id: ns-1
+    client_request_id: client-req-00000000000000000001
+    committed_seq: 42
+    replaced_file:
+      inode_id: 42
+      inode_kind: file
+      revision_no: 18
+      content_digest:
+  applied_inode_mutation:
+    namespace_id: ns-1
+    inode_id: 42
+  inode_upload:
+    namespace_id: ns-1
+    inode_id: 42
+    file_digest_sha256:
+    content_manifest_digest:
+    manifest_object_key:
+    file_size_bytes: 16777217
+    uploaded_at_ms: 1700000408000
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    observed_seq: 42
+    revision_no: 18
+    content_digest:
+    content_manifest_digest:
+    parent_inode_id: 2
+    display_name: report.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    content_digest:
+    parent_inode_id: 2
+    display_name: report.txt
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700000400000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    synced_seq: 42
+    revision_no: 18
+    content_digest:
+    content_manifest_digest:
+    parent_inode_id: 2
+    display_name: report.txt
+  planned_action_cleared: true
+  pending_mutation_cleared: true
+  transfer_ledger_cleared: true
+  planner_result:
+    namespace_id: ns-1
+    inode_id: 42
+    decision: no_op
+    reason: already_converged
+    created_at_ms: 1700000411000

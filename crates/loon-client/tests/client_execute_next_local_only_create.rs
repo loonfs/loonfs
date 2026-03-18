@@ -3,6 +3,7 @@ mod support;
 
 use loon_client::executor::{
     execute_next_local_only_create, ExecutedLocalOnlyCreate, ExecutedNextLocalOnlyCreate,
+    UploadLocalCreateExecution,
 };
 use loon_client::planner::PlannedActionRecord;
 use loon_client::state_db::{
@@ -105,10 +106,15 @@ fn run_fixture(relative_path: &str) {
                 upload_local_create,
             },
             ExecutedLocalOnlyCreate::UploadLocalCreate(result),
-        ) => {
-            assert_eq!(result.upload_reused, upload_local_create.upload_reused);
-            result.dispatched
-        }
+        ) => match result {
+            UploadLocalCreateExecution::Completed(result) => {
+                assert_eq!(result.upload_reused, upload_local_create.upload_reused);
+                result.dispatched
+            }
+            UploadLocalCreateExecution::Progressed(progress) => {
+                panic!("expected completed upload_local_create, got {progress:?}")
+            }
+        },
         (
             ExpectedExecution::CreateRemoteDir { create_remote_dir },
             ExecutedLocalOnlyCreate::CreateRemoteDir(result),

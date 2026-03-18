@@ -1,4 +1,4 @@
-name: client_remote_observation_converges_bound_file_edit
+name: client_remote_observation_updates_bound_file_while_upload_transfer_active
 initial:
   remote_state:
     namespace_id: ns-1
@@ -6,7 +6,8 @@ initial:
     inode_kind: file
     observed_seq: 41
     revision_no: 17
-    content_digest: sha256:ca06c9bc08cca1905a7c16ddf1e97524367c6236e17310d8e56b8b060e83fd08
+    content_digest: sha256:remote-17
+    content_manifest_digest: sha256:manifest-17
     parent_inode_id: 2
     display_name: report.txt
     is_deleted: false
@@ -26,7 +27,8 @@ initial:
     inode_kind: file
     synced_seq: 41
     revision_no: 17
-    content_digest: sha256:ca06c9bc08cca1905a7c16ddf1e97524367c6236e17310d8e56b8b060e83fd08
+    content_digest: sha256:remote-17
+    content_manifest_digest: sha256:manifest-17
     parent_inode_id: 2
     display_name: report.txt
   local_file:
@@ -52,6 +54,12 @@ initial:
           base_revision_no: 17
           content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
     created_at_ms: 1700000406000
+  transfer_ledger:
+    direction: upload
+    block_index: 1
+    block_count: 2
+    state: uploading
+    updated_at_ms: 1700000407000
 actions:
   - apply_remote_observation:
       applied_at_ms: 1700000408000
@@ -73,7 +81,7 @@ actions:
       now_ms: 1700000410000
 expect:
   outcome:
-    converged_bound_inode:
+    updated_bound_remote_state:
       namespace_id: ns-1
       inode_id: 42
   remote_state:
@@ -95,23 +103,23 @@ expect:
     parent_inode_id: 2
     display_name: report.txt
     exists_on_disk: true
-    dirty: false
-    last_local_change_ms: 1700000408000
+    dirty: true
+    last_local_change_ms: 1700000400000
   sync_anchor:
     namespace_id: ns-1
     inode_id: 42
     inode_kind: file
-    synced_seq: 42
-    revision_no: 18
-    content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
-    content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
+    synced_seq: 41
+    revision_no: 17
+    content_digest: sha256:remote-17
+    content_manifest_digest: sha256:manifest-17
     parent_inode_id: 2
     display_name: report.txt
-  planned_action_cleared: true
+  planned_action_cleared: false
   pending_inode_mutation_cleared: false
   planner_result:
     namespace_id: ns-1
     inode_id: 42
-    decision: no_op
-    reason: already_converged
+    decision: create_conflict_copy
+    reason: local_and_remote_differ_from_anchor
     created_at_ms: 1700000410000

@@ -837,6 +837,28 @@ fn model_builds_upload_failed_issue() {
 }
 
 #[test]
+fn model_builds_inode_transfer_reset_issue() {
+    let issue = crate::client::transfer_reset_issue(
+        &NamespaceId::from("ns-1"),
+        InodeId(42),
+        "upload_local_edit_transfer_reset",
+        "upload_local_edit discarded stale transfer state and restarted from block 0",
+        "block_count_mismatch",
+        1_700_000_507_100,
+    );
+
+    assert_eq!(issue.namespace_id, NamespaceId::from("ns-1"));
+    assert_eq!(issue.inode_id, InodeId(42));
+    assert_eq!(issue.kind, "upload_local_edit_transfer_reset");
+    assert_eq!(
+        issue.detail_json,
+        json!({
+            "reason": "block_count_mismatch",
+        })
+    );
+}
+
+#[test]
 fn model_upserts_local_only_issue_by_client_file_and_kind() {
     let first = ModelLocalOnlyIssue {
         client_file_id: "tmp:ns-1:00000000000000000001".to_owned(),
@@ -890,6 +912,35 @@ fn model_builds_local_only_upload_failed_issue() {
             "message": "No such file or directory",
         })
     );
+}
+
+#[test]
+fn model_builds_local_only_transfer_reset_issue() {
+    let issue = crate::client::local_only_transfer_reset_issue(
+        "tmp:ns-1:00000000000000000001",
+        &NamespaceId::from("ns-1"),
+        "upload_local_create_transfer_reset",
+        "upload_local_create discarded stale transfer state and restarted from block 0",
+        "object_key_mismatch",
+        1_700_000_507_200,
+    );
+
+    assert_eq!(issue.client_file_id, "tmp:ns-1:00000000000000000001");
+    assert_eq!(issue.namespace_id, NamespaceId::from("ns-1"));
+    assert_eq!(issue.kind, "upload_local_create_transfer_reset");
+    assert_eq!(
+        issue.detail_json,
+        json!({
+            "reason": "object_key_mismatch",
+        })
+    );
+}
+
+#[test]
+fn model_advances_transfer_one_block_per_tick() {
+    assert_eq!(crate::client::advance_transfer_one_block(0, 2), (1, false));
+    assert_eq!(crate::client::advance_transfer_one_block(1, 2), (2, true));
+    assert_eq!(crate::client::advance_transfer_one_block(2, 2), (2, true));
 }
 
 #[test]

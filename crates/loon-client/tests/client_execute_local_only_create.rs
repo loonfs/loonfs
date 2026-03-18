@@ -3,7 +3,7 @@ mod support;
 
 use loon_client::executor::{
     execute_local_only_create, ExecuteLocalOnlyCreateError, ExecuteUploadLocalCreateError,
-    ExecutedLocalOnlyCreate,
+    ExecutedLocalOnlyCreate, UploadLocalCreateExecution,
 };
 use loon_client::planner::PlannedActionRecord;
 use loon_client::state_db::{
@@ -107,13 +107,18 @@ fn execute_local_only_create_reuses_existing_upload_without_source_path() {
     );
 
     match executed {
-        ExecutedLocalOnlyCreate::UploadLocalCreate(result) => {
-            assert!(result.upload_reused);
-            assert_eq!(
-                result.dispatched.request.client_request_id,
-                "client-req-00000000000000000001"
-            );
-        }
+        ExecutedLocalOnlyCreate::UploadLocalCreate(result) => match result {
+            UploadLocalCreateExecution::Completed(result) => {
+                assert!(result.upload_reused);
+                assert_eq!(
+                    result.dispatched.request.client_request_id,
+                    "client-req-00000000000000000001"
+                );
+            }
+            UploadLocalCreateExecution::Progressed(progress) => {
+                panic!("expected completed upload_local_create, got {progress:?}");
+            }
+        },
         other => panic!("expected file branch, got {other:?}"),
     }
 }
@@ -205,10 +210,15 @@ fn run_fixture(relative_path: &str) {
                 upload_local_create,
             },
             ExecutedLocalOnlyCreate::UploadLocalCreate(result),
-        ) => {
-            assert_eq!(result.upload_reused, upload_local_create.upload_reused);
-            result.dispatched
-        }
+        ) => match result {
+            UploadLocalCreateExecution::Completed(result) => {
+                assert_eq!(result.upload_reused, upload_local_create.upload_reused);
+                result.dispatched
+            }
+            UploadLocalCreateExecution::Progressed(progress) => {
+                panic!("expected completed upload_local_create, got {progress:?}")
+            }
+        },
         (
             ExpectedExecution::CreateRemoteDir { create_remote_dir },
             ExecutedLocalOnlyCreate::CreateRemoteDir(result),

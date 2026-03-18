@@ -317,6 +317,27 @@ pub fn upload_failed_issue(
     }
 }
 
+#[cfg(test)]
+pub fn transfer_reset_issue(
+    namespace_id: &loon_types::NamespaceId,
+    inode_id: InodeId,
+    kind: &str,
+    summary: &str,
+    reason: &str,
+    created_at_ms: u64,
+) -> ModelClientIssue {
+    ModelClientIssue {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        kind: kind.to_owned(),
+        summary: summary.to_owned(),
+        detail_json: json!({
+            "reason": reason,
+        }),
+        created_at_ms,
+    }
+}
+
 pub fn local_only_upload_failed_issue(
     client_file_id: &str,
     namespace_id: &loon_types::NamespaceId,
@@ -333,4 +354,32 @@ pub fn local_only_upload_failed_issue(
         detail_json,
         created_at_ms,
     }
+}
+
+#[cfg(test)]
+pub fn local_only_transfer_reset_issue(
+    client_file_id: &str,
+    namespace_id: &loon_types::NamespaceId,
+    kind: &str,
+    summary: &str,
+    reason: &str,
+    created_at_ms: u64,
+) -> ModelLocalOnlyIssue {
+    ModelLocalOnlyIssue {
+        client_file_id: client_file_id.to_owned(),
+        namespace_id: namespace_id.clone(),
+        kind: kind.to_owned(),
+        summary: summary.to_owned(),
+        detail_json: json!({
+            "reason": reason,
+        }),
+        created_at_ms,
+    }
+}
+
+#[cfg(test)]
+pub fn advance_transfer_one_block(next_block_index: u64, block_count: u64) -> (u64, bool) {
+    let next = next_block_index.saturating_add(1).min(block_count);
+    let completed = next >= block_count;
+    (next, completed)
 }

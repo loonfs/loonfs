@@ -3,7 +3,7 @@ mod support;
 
 use loon_client::executor::{
     execute_next_client_action, ExecuteNextClientActionError, ExecuteUploadLocalEditError,
-    NextClientAction,
+    NextClientAction, UploadLocalEditExecution,
 };
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
@@ -39,6 +39,219 @@ fn execute_next_client_action_resumes_upload_local_edit_from_transfer_ledger() {
     run_upload_local_edit_fixture(
         "client/execute_next_client_action_resumes_upload_local_edit_from_transfer_ledger.yaml",
         "client-upload-local-edit-resume",
+    );
+}
+
+#[test]
+fn execute_next_client_action_multitick_upload_local_edit_survives_restart() {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_multitick_upload_local_edit_survives_restart.yaml",
+    );
+    let mut initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<EditFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let mut expect: EditExpectedState = scenario.decode_expect().expect("decode expectations");
+    let temp_dir = TestDir::new("client-upload-local-edit-multitick");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    let first_execute = actions[0].execute().expect("first execute");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let second_execute = actions[2].execute().expect("second execute");
+    assert!(actions[3].is_restart(), "restart should be fourth");
+    let planner_tick = actions[4].planner().expect("planner tick fifth");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    let source_path = write_source_file(
+        &source_root,
+        first_execute
+            .source_path_relative
+            .as_ref()
+            .expect("fixture should include source path"),
+        &initial.local_file,
+    );
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.remote_state.namespace_id,
+        &source_path,
+    )
+    .expect("plan expected uploaded content");
+    fill_upload_expectations(&mut initial, &mut expect, &expected_upload);
+    seed_bound_edit_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.sync_anchor,
+        &initial.planned_action,
+        None,
+    );
+
+    let first = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(source_path.as_path()),
+        first_execute,
+    )
+    .expect("first action should execute");
+    let first_transfer = match first {
+        Some(NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Progressed(
+            progressed,
+        ))) => progressed.transfer,
+        other => panic!("expected progressed upload_local_edit on first tick, got {other:?}"),
+    };
+    assert_eq!(first_transfer.block_index, 1);
+    assert_eq!(first_transfer.block_count, 2);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after first tick");
+    assert_eq!(
+        db.load_transfer_ledger_for_inode(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+            TransferDirection::Upload,
+        )
+        .expect("load transfer ledger after first tick"),
+        Some(first_transfer.clone())
+    );
+    assert_eq!(
+        db.load_inode_upload(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id
+        )
+        .expect("load inode upload after first tick"),
+        None
+    );
+    assert_eq!(
+        db.load_pending_inode_mutation(
+            expect
+                .pending_request_id
+                .as_ref()
+                .expect("expected pending request id"),
+        )
+        .expect("load pending inode mutation after first tick"),
+        None
+    );
+    drop(db);
+
+    let second = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(source_path.as_path()),
+        second_execute,
+    )
+    .expect("second action should execute");
+    match second {
+        Some(NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Completed(
+            edit,
+        ))) => {
+            assert_eq!(
+                edit.ensured_upload,
+                Some(expect.inode_upload.clone().into_row())
+            );
+        }
+        other => panic!("expected completed upload_local_edit on second tick, got {other:?}"),
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after second tick");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan converged inode after restart");
+    assert_eq!(planner_result, expect.planner_result);
+}
+
+#[test]
+fn execute_next_client_action_stale_upload_local_edit_transfer_resets_and_records_issue() {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_stale_upload_local_edit_transfer_resets_and_records_issue.yaml",
+    );
+    let initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<EditFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let expect: EditProgressExpectedState = scenario.decode_expect().expect("decode expectations");
+    let temp_dir = TestDir::new("client-upload-local-edit-reset");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    let execute = actions[0].execute().expect("execute action first");
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    let source_path = write_source_file(
+        &source_root,
+        execute
+            .source_path_relative
+            .as_ref()
+            .expect("fixture should include source path"),
+        &initial.local_file,
+    );
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.remote_state.namespace_id,
+        &source_path,
+    )
+    .expect("plan expected uploaded content");
+    let transfer_row = initial
+        .transfer_ledger
+        .as_ref()
+        .map(|seed| seed_transfer_ledger_row(&initial, seed, &expected_upload));
+    seed_bound_edit_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.sync_anchor,
+        &initial.planned_action,
+        transfer_row.as_ref(),
+    );
+    if let Some(seed) = &initial.transfer_ledger {
+        seed_uploaded_prefix_for_transfer(&store, &source_path, &expected_upload, seed.block_index);
+    }
+
+    let executed = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(source_path.as_path()),
+        execute,
+    )
+    .expect("one action should execute");
+    let transfer = match executed {
+        Some(NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Progressed(
+            progressed,
+        ))) => progressed.transfer,
+        other => panic!("expected progressed upload_local_edit after reset, got {other:?}"),
+    };
+    assert_eq!(transfer.block_index, expect.transfer_ledger.block_index);
+    assert_eq!(transfer.block_count, expect.transfer_ledger.block_count);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after reset");
+    let issues = db
+        .load_conflicts_and_errors(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+        )
+        .expect("load transfer reset issue");
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].kind, expect.issue.kind);
+    assert_eq!(
+        issues[0].detail_json["reason"].as_str(),
+        Some(expect.issue.reason.as_str())
     );
 }
 
@@ -171,7 +384,14 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
     };
 
     let edit = match executed {
-        NextClientAction::ExecutedUploadLocalEdit(result) => result,
+        NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Completed(result)) => {
+            result
+        }
+        NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Progressed(
+            progress,
+        )) => {
+            panic!("expected completed upload_local_edit on retry, got {progress:?}")
+        }
         other => panic!("expected executed upload_local_edit on retry, got {other:?}"),
     };
 
@@ -324,7 +544,12 @@ fn execute_next_client_action_upload_local_edit_missing_file_records_issue_and_c
     .expect("retry should execute one action");
 
     match recovered {
-        NextClientAction::ExecutedUploadLocalEdit(_) => {}
+        NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Completed(_)) => {}
+        NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Progressed(
+            progress,
+        )) => {
+            panic!("expected completed upload_local_edit on recovery, got {progress:?}")
+        }
         other => panic!("expected executed upload_local_edit on recovery, got {other:?}"),
     }
 
@@ -426,7 +651,14 @@ fn run_upload_local_edit_fixture(relative_path: &str, temp_label: &str) {
     .expect("one action should be scheduled");
 
     let edit = match executed {
-        Some(NextClientAction::ExecutedUploadLocalEdit(result)) => result,
+        Some(NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Completed(
+            result,
+        ))) => result,
+        Some(NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Progressed(
+            progress,
+        ))) => {
+            panic!("expected completed upload_local_edit, got {progress:?}")
+        }
         other => panic!("expected executed upload_local_edit, got {other:?}"),
     };
 
@@ -888,10 +1120,25 @@ struct EditFailureExpectedState {
 }
 
 #[derive(Debug, Deserialize)]
+struct EditProgressExpectedState {
+    transfer_ledger: FixtureTransferLedgerSeed,
+    issue: RawTransferResetIssueExpect,
+    planned_action_retained: bool,
+    inode_upload_absent: bool,
+    pending_inode_mutation_absent: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RawUploadFailureIssueExpect {
     kind: String,
     summary: String,
     failure: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTransferResetIssueExpect {
+    kind: String,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

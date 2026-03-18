@@ -70,7 +70,7 @@ The first table contents are:
 - `local_state`: latest observed local content digest, current observed path view, `dirty`, and local observation time
 - `sync_anchor`: last fully synced remote revision, content digest, and optional downloadable content reference
 - `planned_actions`: the current planner output for one `(namespace_id, inode_id)` when work is needed
-- `transfer_ledger`: resumable transfer progress keyed to namespace file identity
+- `transfer_ledger`: bounded transfer progress keyed to namespace file identity
 - `conflicts_and_errors`: durable user-visible explanations
 
 Why the first schema is inode-keyed:
@@ -1298,6 +1298,30 @@ The first issue kinds are:
   - recorded when downloaded durable content does not match the authoritative remote digest
 - `download_remote_edit_local_apply_failed`
   - recorded when the file download executor cannot stage or atomically apply local bytes
+- `download_remote_edit_transfer_reset`
+  - recorded when inode-keyed download resume state is discarded and the executor restarts from
+    block `0`
+  - `detail_json.reason` must be one of:
+    - `stage_size_mismatch`
+    - `transfer_id_mismatch`
+    - `object_key_mismatch`
+    - `block_count_mismatch`
+- `upload_local_edit_transfer_reset`
+  - recorded when inode-keyed upload resume state is discarded and the executor restarts from
+    block `0`
+  - `detail_json.reason` must be one of:
+    - `transfer_id_mismatch`
+    - `object_key_mismatch`
+    - `block_count_mismatch`
+- `upload_local_create_transfer_reset`
+  - recorded when temp-identity upload resume state is discarded and the executor restarts from
+    block `0`
+  - it uses `local_only_conflicts_and_errors(client_file_id)` because no authoritative inode
+    exists yet
+  - `detail_json.reason` must be one of:
+    - `transfer_id_mismatch`
+    - `object_key_mismatch`
+    - `block_count_mismatch`
 - `materialize_remote_dir_local_apply_failed`
   - recorded when the remote-only directory materializer cannot create the local directory durably
 
@@ -1343,21 +1367,33 @@ The first active download row shape is:
 Rules:
 
 - the first implementation keeps at most one active download row per `(namespace_id, inode_id)`
+- the v1 transfer budget is one content block per executor tick
 - `transfer_id` must be deterministic for one remote file revision:
   `download:{namespace_id}:{inode_id}:{content_manifest_digest}`
 - before downloading blocks, the executor must load and verify the immutable manifest object
 - the executor must stage bytes in the same directory as the target file, using the durable stage
   path derived from the target path
+- one executor call may append at most one content block to the staged file
 - after one block is written and `sync_all()` succeeds on the stage file, the client must advance
   `transfer_ledger.block_index` durably
+- if blocks remain after that ledger advance, the executor must return `Progressed` and leave:
+  - `planned_actions(namespace_id, inode_id)` intact
+  - the active `transfer_ledger` row intact
+  - the stage file intact
 - after the final block is staged, the client must verify staged file size and file digest against
   the manifest before rename
 - only after full verification may the client atomically rename the staged file into the target
   path, clear the active `transfer_ledger` row, and apply `local_state` / `sync_anchor`
 - if the active ledger row and staged file length disagree on restart, the client must reset the
-  staged file and restart from `block_index = 0` rather than guessing partial recovery
+-  staged file and restart from `block_index = 0` rather than guessing partial recovery
+- when the client discards an existing staged file or active download row and restarts from block
+  `0`, it must record or replace one durable `download_remote_edit_transfer_reset` row
 - if the authoritative manifest digest changed, the client may discard the older active download
   row and restart from block `0` for the newer manifest
+- a successful terminal completion must clear:
+  - `download_remote_edit_transfer_reset`
+  - `download_remote_edit_remote_digest_mismatch`
+  - `download_remote_edit_local_apply_failed`
 
 Why this rule exists:
 
@@ -1400,21 +1436,33 @@ Rules:
 - local-only creates use the separate temp-identity keyed `local_only_transfer_ledger` path below
 - before uploading blocks, the executor must scan the local source path and derive one deterministic
   content manifest plan for the current local bytes
+- the v1 transfer budget is one content block per executor tick
 - `transfer_id` must be deterministic for one planned upload:
   `upload:{namespace_id}:{inode_id}:{content_manifest_digest}`
 - when an existing upload row matches the newly derived `transfer_id`, `object_key`, and
   `block_count`, the executor may resume from the recorded `block_index`
 - when the existing row does not match the newly derived upload plan, the executor must restart
   from `block_index = 0`
+- when the client discards an existing upload row and restarts from block `0`, it must record or
+  replace one durable `upload_local_edit_transfer_reset` row
+- one executor call may upload at most one content block
 - after one content block is durably written to object storage, the executor must advance
   `transfer_ledger.block_index` durably
 - if the process crashes after a block object write but before the ledger advance, the retry path
   may safely re-upload that block because immutable block keys are content-addressed
+- if blocks remain after that ledger advance, the executor must return `Progressed` and leave:
+  - `planned_actions(namespace_id, inode_id)` intact
+  - the active upload `transfer_ledger` row intact
+  - `inode_uploads(namespace_id, inode_id)` absent unless a matching durable upload row already
+    existed before this step
 - after all content blocks are durable, the executor may write the immutable manifest object
 - only after the manifest object exists may the client record `inode_uploads(namespace_id, inode_id)`
   and clear the active upload `transfer_ledger` row
 - dispatching `ClientMutationOp::ReplaceFile` remains a later step and may still fail independently
   after upload completion
+- a successful terminal completion of the whole `upload_local_edit` path must clear:
+  - `upload_local_edit_upload_failed`
+  - `upload_local_edit_transfer_reset`
 
 Why this rule exists:
 
@@ -1458,16 +1506,25 @@ Rules:
 - this slice applies only to local-only `upload_local_create`
 - before uploading blocks, the executor must scan the local source path and derive one deterministic
   content manifest plan for the current local bytes
+- the v1 transfer budget is one content block per executor tick
 - `transfer_id` must be deterministic for one planned temp upload:
   `upload-local-only:{client_file_id}:{content_manifest_digest}`
 - when an existing temp upload row matches the newly derived `transfer_id`, `object_key`, and
   `block_count`, the executor may resume from the recorded `block_index`
 - when the existing row does not match the newly derived upload plan, the executor must restart
   from `block_index = 0`
+- when the client discards an existing temp upload row and restarts from block `0`, it must record
+  or replace one durable `upload_local_create_transfer_reset` row
+- one executor call may upload at most one content block
 - after one content block is durably written to object storage, the executor must advance
   `local_only_transfer_ledger.block_index` durably
 - if the process crashes after a block object write but before the ledger advance, the retry path
   may safely re-upload that block because immutable block keys are content-addressed
+- if blocks remain after that ledger advance, the executor must return `Progressed` and leave:
+  - `planned_local_only_actions(client_file_id)` intact
+  - the active `local_only_transfer_ledger` row intact
+  - `local_only_uploads(client_file_id)` absent unless a matching durable upload row already
+    existed before this step
 - after all content blocks are durable, the executor may write the immutable manifest object
 - only after the manifest object exists may the client record `local_only_uploads(client_file_id)`
   and clear the active temp upload ledger row
@@ -1475,6 +1532,46 @@ Rules:
   digest, the executor may reuse it and clear any stale temp upload ledger row
 - if the temp identity later binds to a real inode, the bind transaction must clear any leftover
   `local_only_transfer_ledger` row for that `client_file_id`
+- a successful terminal completion of the whole `upload_local_create` path must clear:
+  - `upload_local_create_upload_failed`
+  - `upload_local_create_transfer_reset`
+
+## File-focused late authoritative observations during transfer work
+
+The first late-authoritative hardening slice stays file-focused.
+
+Rules:
+
+- later authoritative file observations may always advance `remote_state`
+- later authoritative file observations must not silently delete:
+  - `transfer_ledger(namespace_id, inode_id)`
+  - `local_only_transfer_ledger(client_file_id)`
+  - `pending_inode_mutations(client_request_id)`
+  - `pending_client_mutations(client_request_id)`
+- if an inode-keyed transfer is still active for `(namespace_id, inode_id)`, the apply step may
+  update `remote_state` but must leave `local_state`, `sync_anchor`, `planned_actions`, and the
+  active transfer row for the next executor tick to interpret
+- if a local-only temp identity already matches a later authoritative create observation, the
+  client may bind that temp identity into inode-keyed state before the immediate success response
+  arrives, but it must not silently delete the frozen `pending_client_mutations` row for that
+  request
+- if a bound inode already converges to a later authoritative observation while a matching
+  `pending_inode_mutations` row still exists, the client may advance `sync_anchor` but must not
+  silently delete that pending row; later response application remains responsible for clearing it
+
+Why this rule exists:
+
+- transfer or request execution can outlive the exact observation that later proves convergence
+- a late authoritative observation should improve the durable remote view without erasing the
+  client's evidence of in-flight work
+
+Failure modes prevented:
+
+- a later authoritative observation silently discarding an active staged download
+- a later authoritative observation silently discarding an in-flight upload request with no durable
+  response application
+- a temp-id create binding to a real inode and losing the durable frozen request that still needs
+  a response or reconciliation path
 
 Why this rule exists:
 

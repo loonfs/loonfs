@@ -13,6 +13,16 @@ use loon_types::{ClientMutationOp, ClientMutationRequest, ClientMutationResponse
 use serde_json::json;
 use std::path::Path;
 
+enum PreparedUploadLocalCreate {
+    Ready {
+        upload: LocalOnlyUploadRow,
+        upload_reused: bool,
+    },
+    Progressed {
+        transfer: LocalOnlyTransferLedgerRow,
+    },
+}
+
 pub fn execute_local_only_create<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -113,7 +123,7 @@ pub fn execute_upload_local_create_from_path<S: ObjectStore, F>(
     uploaded_at_ms: u64,
     created_at_ms: u64,
     dispatch: F,
-) -> Result<ExecutedUploadLocalCreate, ExecuteUploadLocalCreateError>
+) -> Result<UploadLocalCreateExecution, ExecuteUploadLocalCreateError>
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
@@ -136,7 +146,7 @@ fn execute_upload_local_create<S: ObjectStore, F>(
     uploaded_at_ms: u64,
     created_at_ms: u64,
     dispatch: F,
-) -> Result<ExecutedUploadLocalCreate, ExecuteUploadLocalCreateError>
+) -> Result<UploadLocalCreateExecution, ExecuteUploadLocalCreateError>
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
@@ -145,31 +155,54 @@ where
             .load_pending_client_mutation_for_client_file(client_file_id)?
             .is_some();
 
-        let (ensured_upload, upload_reused) = if had_pending_request {
-            (db.load_local_only_upload(client_file_id)?, true)
+        let prepared = if had_pending_request {
+            PreparedUploadLocalCreate::Ready {
+                upload: db
+                    .load_local_only_upload(client_file_id)?
+                    .expect("pending client mutation should have durable upload"),
+                upload_reused: true,
+            }
         } else {
-            let (upload_row, reused_existing) = ensure_upload_local_create_ready(
+            ensure_upload_local_create_ready(
                 db,
                 store,
                 client_file_id,
                 source_path,
                 uploaded_at_ms,
-            )?;
-            (Some(upload_row), reused_existing)
+            )?
+        };
+
+        let (ensured_upload, upload_reused) = match prepared {
+            PreparedUploadLocalCreate::Ready {
+                upload,
+                upload_reused,
+            } => (Some(upload), upload_reused),
+            PreparedUploadLocalCreate::Progressed { transfer } => {
+                return Ok(UploadLocalCreateExecution::Progressed(
+                    ProgressedUploadLocalCreate { transfer },
+                ));
+            }
         };
 
         let dispatched =
             dispatch_client_mutation_from_state(db, client_file_id, created_at_ms, dispatch)?;
 
-        Ok(ExecutedUploadLocalCreate {
-            ensured_upload,
-            upload_reused,
-            dispatched,
-        })
+        Ok(UploadLocalCreateExecution::Completed(
+            ExecutedUploadLocalCreate {
+                ensured_upload,
+                upload_reused,
+                dispatched,
+            },
+        ))
     })();
 
     match &result {
-        Ok(_) => clear_upload_local_create_issue(db, client_file_id),
+        Ok(UploadLocalCreateExecution::Completed(_)) => {
+            clear_upload_local_create_issues(db, client_file_id)
+        }
+        Ok(UploadLocalCreateExecution::Progressed(_)) => {
+            clear_upload_local_create_failure_issue(db, client_file_id)
+        }
         Err(error) => record_upload_local_create_issue(db, client_file_id, error, uploaded_at_ms),
     }
 
@@ -182,7 +215,7 @@ fn ensure_upload_local_create_ready<S: ObjectStore>(
     client_file_id: &ClientFileId,
     source_path: Option<&Path>,
     uploaded_at_ms: u64,
-) -> Result<(LocalOnlyUploadRow, bool), ExecuteUploadLocalCreateError> {
+) -> Result<PreparedUploadLocalCreate, ExecuteUploadLocalCreateError> {
     let local_only = db.load_local_only_file(client_file_id)?.ok_or_else(|| {
         StateDbError::LocalOnlyFileMissing {
             client_file_id: client_file_id.as_str().to_owned(),
@@ -209,7 +242,10 @@ fn ensure_upload_local_create_ready<S: ObjectStore>(
                 == Some(existing_upload.file_digest_sha256.as_str())
         {
             db.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
-            return Ok((existing_upload, true));
+            return Ok(PreparedUploadLocalCreate::Ready {
+                upload: existing_upload,
+                upload_reused: true,
+            });
         }
     }
 
@@ -220,20 +256,25 @@ fn ensure_upload_local_create_ready<S: ObjectStore>(
     let plan = plan_upload_from_path(&local_only.namespace_id, source_path)?;
     let block_count = u64::try_from(plan.blocks.len()).expect("block count should fit in u64");
     let transfer_id = local_only_upload_transfer_id(client_file_id, &plan.content_manifest_digest);
-    let requested_block_index =
-        match db.load_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)? {
-            Some(existing)
-                if existing.transfer_id == transfer_id
-                    && existing.object_key == plan.manifest_object_key
-                    && existing.block_count == block_count
-                    && existing.state == TransferState::Uploading =>
-            {
-                existing.block_index
-            }
-            _ => 0,
-        };
+    let existing_transfer =
+        db.load_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
+    let (requested_block_index, reset_reason) = reconcile_local_only_upload_transfer_resume(
+        existing_transfer.as_ref(),
+        &transfer_id,
+        &plan.manifest_object_key,
+        block_count,
+    );
+    if let Some(reason) = reset_reason {
+        record_upload_local_create_transfer_reset(
+            db,
+            client_file_id,
+            &local_only.namespace_id,
+            reason,
+            uploaded_at_ms,
+        );
+    }
     let resume_block_index = requested_block_index.min(block_count);
-    db.upsert_local_only_transfer_ledger(&local_only_upload_transfer_row(
+    let current_transfer = local_only_upload_transfer_row(
         client_file_id,
         &local_only.namespace_id,
         &transfer_id,
@@ -241,19 +282,14 @@ fn ensure_upload_local_create_ready<S: ObjectStore>(
         resume_block_index,
         block_count,
         uploaded_at_ms,
-    ))?;
-    for block_index in usize::try_from(resume_block_index).expect("resume block index should fit")
-        ..plan.blocks.len()
+    );
+    db.upsert_local_only_transfer_ledger(&current_transfer)?;
+    if usize::try_from(resume_block_index).expect("resume block index should fit")
+        < plan.blocks.len()
     {
-        upload_planned_block_from_path(
-            store,
-            source_path,
-            &plan,
-            u64::try_from(block_index).expect("block index should fit in u64"),
-        )?;
-        let next_block_index =
-            u64::try_from(block_index + 1).expect("block index should fit in u64");
-        db.upsert_local_only_transfer_ledger(&local_only_upload_transfer_row(
+        upload_planned_block_from_path(store, source_path, &plan, resume_block_index)?;
+        let next_block_index = resume_block_index.saturating_add(1);
+        let next_transfer = local_only_upload_transfer_row(
             client_file_id,
             &local_only.namespace_id,
             &transfer_id,
@@ -261,13 +297,23 @@ fn ensure_upload_local_create_ready<S: ObjectStore>(
             next_block_index,
             block_count,
             uploaded_at_ms,
-        ))?;
+        );
+        db.upsert_local_only_transfer_ledger(&next_transfer)?;
+        if next_block_index < block_count {
+            return Ok(PreparedUploadLocalCreate::Progressed {
+                transfer: next_transfer,
+            });
+        }
     }
     let uploaded = finalize_planned_upload(store, &plan)?;
     let recorded = db
         .record_local_only_upload(client_file_id, &uploaded, uploaded_at_ms)
         .map_err(ExecuteUploadLocalCreateError::from)?;
-    Ok((recorded, false))
+    db.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
+    Ok(PreparedUploadLocalCreate::Ready {
+        upload: recorded,
+        upload_reused: false,
+    })
 }
 
 fn ensure_create_remote_dir_ready(
@@ -339,10 +385,61 @@ fn local_only_upload_transfer_row(
     }
 }
 
-fn clear_upload_local_create_issue(db: &mut SqliteStateDb, client_file_id: &ClientFileId) {
+fn reconcile_local_only_upload_transfer_resume(
+    existing: Option<&LocalOnlyTransferLedgerRow>,
+    expected_transfer_id: &str,
+    expected_object_key: &str,
+    expected_block_count: u64,
+) -> (u64, Option<&'static str>) {
+    match existing {
+        Some(existing) if existing.transfer_id != expected_transfer_id => {
+            (0, Some("transfer_id_mismatch"))
+        }
+        Some(existing) if existing.object_key != expected_object_key => {
+            (0, Some("object_key_mismatch"))
+        }
+        Some(existing) if existing.block_count != expected_block_count => {
+            (0, Some("block_count_mismatch"))
+        }
+        Some(existing) if existing.state != TransferState::Uploading => {
+            (0, Some("transfer_id_mismatch"))
+        }
+        Some(existing) => (existing.block_index.min(expected_block_count), None),
+        None => (0, None),
+    }
+}
+
+fn clear_upload_local_create_failure_issue(db: &mut SqliteStateDb, client_file_id: &ClientFileId) {
     let _ = db.clear_local_only_conflict_or_error_kind(
         client_file_id,
         "upload_local_create_upload_failed",
+    );
+}
+
+fn clear_upload_local_create_issues(db: &mut SqliteStateDb, client_file_id: &ClientFileId) {
+    clear_upload_local_create_failure_issue(db, client_file_id);
+    let _ = db.clear_local_only_conflict_or_error_kind(
+        client_file_id,
+        "upload_local_create_transfer_reset",
+    );
+}
+
+fn record_upload_local_create_transfer_reset(
+    db: &mut SqliteStateDb,
+    client_file_id: &ClientFileId,
+    namespace_id: &loon_types::NamespaceId,
+    reason: &'static str,
+    created_at_ms: u64,
+) {
+    let _ = db.record_local_only_conflict_or_error(
+        client_file_id,
+        namespace_id,
+        "upload_local_create_transfer_reset",
+        "upload_local_create discarded stale transfer state and restarted from block 0",
+        &json!({
+            "reason": reason,
+        }),
+        created_at_ms,
     );
 }
 

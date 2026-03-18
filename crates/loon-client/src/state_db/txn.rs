@@ -1275,7 +1275,36 @@ impl PlannerTxn<'_> {
             display_name: created_inode.display_name.clone(),
             is_deleted: false,
         };
-        let bound = self.bind_local_only_inode_to_remote(&pending.client_file_id, &remote)?;
+        let bound = match self.bind_local_only_inode_to_remote(&pending.client_file_id, &remote) {
+            Ok(bound) => bound,
+            Err(StateDbError::LocalOnlyFileMissing { .. }) => {
+                let views =
+                    self.load_file_sync_views(&response.namespace_id, created_inode.inode_id)?;
+                match (views.remote, views.local, views.sync_anchor) {
+                    (Some(bound_remote), Some(_bound_local), Some(_bound_anchor))
+                        if bound_remote.inode_kind == created_inode.inode_kind
+                            && bound_remote.revision_no == created_inode.revision_no
+                            && bound_remote.content_digest == created_inode.content_digest
+                            && bound_remote.parent_inode_id
+                                == Some(created_inode.parent_inode_id)
+                            && bound_remote.display_name == created_inode.display_name
+                            && !bound_remote.is_deleted =>
+                    {
+                        BoundLocalOnlyFile {
+                            client_file_id: pending.client_file_id.clone(),
+                            namespace_id: response.namespace_id.clone(),
+                            inode_id: created_inode.inode_id,
+                        }
+                    }
+                    _ => {
+                        return Err(StateDbError::LocalOnlyFileMissing {
+                            client_file_id: pending.client_file_id.as_str().to_owned(),
+                        })
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
         self.delete_pending_client_mutation(&response.client_request_id)?;
 
         Ok(bound)
@@ -1442,6 +1471,11 @@ impl PlannerTxn<'_> {
             namespace_id,
             inode_id,
             "download_remote_edit_local_apply_failed",
+        )?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "download_remote_edit_transfer_reset",
         )?;
 
         Ok(AppliedInodeMutation {
@@ -1614,6 +1648,31 @@ impl PlannerTxn<'_> {
             views.sync_anchor.as_ref(),
         ) {
             self.upsert_remote_file(&observed_remote)?;
+            let has_active_transfer = load_transfer_ledger_for_inode(
+                &self.tx,
+                &observed.namespace_id,
+                observed.inode_id,
+                TransferDirection::Download,
+            )?
+            .is_some()
+                || load_transfer_ledger_for_inode(
+                    &self.tx,
+                    &observed.namespace_id,
+                    observed.inode_id,
+                    TransferDirection::Upload,
+                )?
+                .is_some();
+            if has_active_transfer {
+                self.delete_conflict_or_error_kind(
+                    &observed.namespace_id,
+                    observed.inode_id,
+                    "remote_observation_bind_ambiguous",
+                )?;
+                return Ok(AppliedRemoteObservation::UpdatedBoundRemoteState {
+                    namespace_id: observed.namespace_id.clone(),
+                    inode_id: observed.inode_id,
+                });
+            }
             if bound_local_matches_remote_observation(local, &observed_remote) {
                 let next_local = LocalFileStateRow {
                     namespace_id: observed.namespace_id.clone(),
@@ -1645,13 +1704,6 @@ impl PlannerTxn<'_> {
                     observed.inode_id,
                     "remote_observation_bind_ambiguous",
                 )?;
-                if let Some(pending) = load_pending_inode_mutation_for_inode(
-                    &self.tx,
-                    &observed.namespace_id,
-                    observed.inode_id,
-                )? {
-                    self.delete_pending_inode_mutation(&pending.client_request_id)?;
-                }
                 return Ok(AppliedRemoteObservation::ConvergedBoundInode(
                     AppliedInodeMutation {
                         namespace_id: observed.namespace_id.clone(),
@@ -1718,12 +1770,6 @@ impl PlannerTxn<'_> {
                     observed.inode_id,
                     "remote_observation_bind_ambiguous",
                 )?;
-                if let Some(pending) = load_pending_client_mutation_for_client_file(
-                    &self.tx,
-                    &candidate.client_file_id,
-                )? {
-                    self.delete_pending_client_mutation(&pending.client_request_id)?;
-                }
                 Ok(AppliedRemoteObservation::BoundLocalOnly(bound))
             }
             many => {

@@ -1,0 +1,81 @@
+name: execute_next_client_action_stale_upload_local_edit_transfer_resets_and_records_issue
+initial:
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    observed_seq: 41
+    revision_no: 17
+    content_digest: sha256:remote-17
+    parent_inode_id: 2
+    display_name: report.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    content_digest:
+    parent_inode_id: 2
+    display_name: report.txt
+    exists_on_disk: true
+    dirty: true
+    last_local_change_ms: 1700000400000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    synced_seq: 41
+    revision_no: 17
+    content_digest: sha256:remote-17
+    parent_inode_id: 2
+    display_name: report.txt
+  local_file:
+    relative_path: reports/report.txt
+    generated_two_block:
+      first_block_fill_byte: a
+      second_block_utf8: "b"
+  planned_action:
+    namespace_id: ns-1
+    inode_id: 42
+    decision: upload_local_edit
+    reason: local_differs_from_anchor
+    created_at_ms: 1700000405000
+  transfer_ledger:
+    direction: upload
+    block_index: 1
+    block_count: 3
+    state: uploading
+    updated_at_ms: 1700000404500
+  head:
+    namespace_id: ns-1
+    seq: 41
+    active_fence_token: 8
+    next_inode_id: 501
+    snapshot_hint_seq: 40
+    retention_floor_seq: 40
+  lease:
+    namespace_id: ns-1
+    holder_id: writer-a
+    fence_token: 8
+    lease_expires_at_ms: 1700000415000
+actions:
+  - execute_next_client_action:
+      source_path_relative: reports/report.txt
+      uploaded_at_ms: 1700000404000
+      created_at_ms: 1700000406000
+      writer_id: writer-a
+      writer_version: loon-server-test
+      now_ms: 1700000407000
+expect:
+  transfer_ledger:
+    direction: upload
+    block_index: 1
+    block_count: 2
+    state: uploading
+    updated_at_ms: 1700000404000
+  issue:
+    kind: upload_local_edit_transfer_reset
+    reason: block_count_mismatch
+  planned_action_retained: true
+  inode_upload_absent: true
+  pending_inode_mutation_absent: true

@@ -215,6 +215,47 @@ Exit criteria:
   inode
 - client-side remote discovery failures are named and durable enough to debug
 
+## Milestone 6: bounded transfer execution and file-focused reconciliation hardening
+
+Goal:
+finish the transfer-ledger half of Workstream E by turning the current ledgers into bounded,
+restart-safe execution state instead of "resume metadata," and harden late authoritative file
+observations while transfers or pending requests still exist.
+
+Primary crates:
+
+- `loon-client`
+- `loon-model`
+
+Deliverables:
+
+- explicit one-block-per-tick execution for:
+  - `download_remote_edit`
+  - `upload_local_edit`
+  - `upload_local_create`
+- durable reset visibility for transfer restarts using existing issue tables
+- file-focused late authoritative observation rules that do not silently clear active transfer
+  ledgers or pending mutation rows
+- restart-safe multi-tick readable fixtures that prove progress persists across process restarts
+
+Required rules:
+
+- keep the existing transfer table shape from schema v10; do not add new transfer tables unless a
+  later slice proves they are required
+- stay file-focused; remote rename/delete hierarchy reconciliation remains out of scope for this
+  phase
+- do not widen delivery surfaces while this transfer hardening work is underway
+
+Exit criteria:
+
+- each transfer-backed executor can return a durable "progressed" step without finishing the whole
+  file in one tick
+- stale transfer state is reset conservatively and leaves one durable named issue row
+- a later authoritative file observation never silently discards an active transfer ledger or
+  pending mutation row
+- at least one readable multi-tick download case and one readable multi-tick upload case require
+  restart to finish and still converge correctly
+
 ## First implementation slices
 
 The next slices should be executed in this order.

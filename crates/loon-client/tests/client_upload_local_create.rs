@@ -2,7 +2,8 @@
 mod support;
 
 use loon_client::executor::{
-    execute_upload_local_create_from_path, ExecuteUploadLocalCreateError, ExecutedUploadLocalCreate,
+    execute_upload_local_create_from_path, ExecuteUploadLocalCreateError,
+    ExecutedUploadLocalCreate, UploadLocalCreateExecution,
 };
 use loon_client::planner::PlannedActionRecord;
 use loon_client::state_db::{
@@ -38,6 +39,151 @@ fn upload_local_create_from_path_resumes_from_temp_transfer_ledger() {
     run_upload_local_create_fixture(
         "client/upload_local_create_from_path_resumes_from_temp_transfer_ledger.yaml",
         "client-upload-local-create-resume",
+    );
+}
+
+#[test]
+fn upload_local_create_from_path_progresses_one_block_per_tick() {
+    let scenario =
+        load_fixture("client/upload_local_create_from_path_progresses_one_block_per_tick.yaml");
+    let initial: InitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
+    let expect: UploadProgressExpectedState = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-upload-local-create-progress");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    seed_client_state(&db_path, &initial, None);
+    let execute = actions[0].execute().expect("execute action first");
+    let source_path = write_source_file(&source_root, &initial.local_file);
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    let executed = execute_upload_local_create_from_path(
+        &mut db,
+        &store,
+        &initial.local_only_state.client_file_id,
+        &source_path,
+        execute.uploaded_at_ms,
+        execute.created_at_ms,
+        |_request| unreachable!("progress tick should not dispatch"),
+    )
+    .expect("progress tick should succeed");
+
+    let transfer = match executed {
+        UploadLocalCreateExecution::Progressed(progress) => progress.transfer,
+        other => panic!("expected progressed upload_local_create, got {other:?}"),
+    };
+    assert_eq!(
+        transfer.block_index,
+        expect.local_only_transfer_ledger.block_index
+    );
+    assert_eq!(
+        transfer.block_count,
+        expect.local_only_transfer_ledger.block_count
+    );
+    drop(db);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after progress");
+    assert_eq!(
+        db.load_local_only_upload(&initial.local_only_state.client_file_id)
+            .expect("load local-only upload after progress"),
+        None
+    );
+    assert_eq!(
+        db.load_pending_client_mutation("client-req-00000000000000000001")
+            .expect("load pending client mutation after progress"),
+        None
+    );
+}
+
+#[test]
+fn upload_local_create_from_path_stale_transfer_resets_and_records_temp_issue() {
+    let scenario = load_fixture(
+        "client/upload_local_create_from_path_stale_transfer_resets_and_records_temp_issue.yaml",
+    );
+    let initial: InitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
+    let expect: UploadProgressExpectedState = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-upload-local-create-reset");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch local object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    let execute = actions[0].execute().expect("execute action first");
+    let source_path = write_source_file(&source_root, &initial.local_file);
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.local_only_state.namespace_id,
+        &source_path,
+    )
+    .expect("build expected upload");
+    let transfer_row = initial
+        .local_only_transfer_ledger
+        .as_ref()
+        .map(|seed| seed_transfer_ledger_row(&initial, seed, &expected_upload));
+    seed_client_state(&db_path, &initial, transfer_row.as_ref());
+    if let Some(seed) = &initial.local_only_transfer_ledger {
+        seed_uploaded_prefix_for_transfer(&store, &source_path, &expected_upload, seed.block_index);
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    let executed = execute_upload_local_create_from_path(
+        &mut db,
+        &store,
+        &initial.local_only_state.client_file_id,
+        &source_path,
+        execute.uploaded_at_ms,
+        execute.created_at_ms,
+        |_request| unreachable!("progress tick should not dispatch"),
+    )
+    .expect("reset tick should succeed");
+
+    let transfer = match executed {
+        UploadLocalCreateExecution::Progressed(progress) => progress.transfer,
+        other => panic!("expected progressed upload_local_create after reset, got {other:?}"),
+    };
+    assert_eq!(
+        transfer.block_index,
+        expect.local_only_transfer_ledger.block_index
+    );
+    assert_eq!(
+        transfer.block_count,
+        expect.local_only_transfer_ledger.block_count
+    );
+    drop(db);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after reset");
+    let issues = db
+        .load_local_only_conflicts_and_errors(&initial.local_only_state.client_file_id)
+        .expect("load temp reset issue");
+    assert_eq!(issues.len(), 1);
+    assert_eq!(
+        issues[0].kind,
+        expect.issue.as_ref().expect("expected issue").kind
+    );
+    assert_eq!(
+        issues[0].detail_json["reason"].as_str(),
+        Some(
+            expect
+                .issue
+                .as_ref()
+                .expect("expected issue")
+                .reason
+                .as_str()
+        )
     );
 }
 
@@ -386,7 +532,7 @@ fn run_execute(
     action: &ExecuteUploadLocalCreateAction,
 ) -> ExecutedUploadLocalCreate {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
-    execute_upload_local_create_from_path(
+    match execute_upload_local_create_from_path(
         &mut db,
         store,
         client_file_id,
@@ -407,8 +553,13 @@ fn run_execute(
             .map(|executed| executed.response)
             .map_err(|err| err.to_string())
         },
-    )
-    .expect("execute upload-local-create from path")
+    ) {
+        Ok(UploadLocalCreateExecution::Completed(executed)) => executed,
+        Ok(UploadLocalCreateExecution::Progressed(progress)) => {
+            panic!("expected completed upload_local_create, got {progress:?}")
+        }
+        Err(error) => panic!("expected upload_local_create to succeed: {error}"),
+    }
 }
 
 fn write_source_file(source_root: &Path, local_file: &FixtureLocalFile) -> PathBuf {
@@ -582,10 +733,27 @@ struct FailureExpectedState {
 }
 
 #[derive(Debug, Deserialize)]
+struct UploadProgressExpectedState {
+    local_only_transfer_ledger: FixtureTransferLedgerSeed,
+    #[serde(default)]
+    issue: Option<RawTransferResetIssueExpect>,
+    planned_local_only_action_retained: bool,
+    local_only_upload_absent: bool,
+    pending_client_mutation_absent: bool,
+    local_only_state_retained: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RawLocalOnlyUploadFailureIssueExpect {
     kind: String,
     summary: String,
     failure: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTransferResetIssueExpect {
+    kind: String,
+    reason: String,
 }
 
 #[derive(Debug, Deserialize)]

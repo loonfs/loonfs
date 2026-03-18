@@ -2,10 +2,12 @@ use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
     AppliedRemoteObservation, LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
     ObservedRemoteInode, PendingClientMutationRow, PendingInodeMutationRow, PlannedActionRow,
-    RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
+    RemoteFileStateRow, SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow,
+    TransferState,
 };
 use loon_client::upload::upload_small_file_from_path;
 use loon_objectstore::fs::LocalFsStore;
+use loon_objectstore::keys::content_manifest;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ClientMutationOp, ClientMutationRequest, InodeId, NamespaceId, RevisionNo};
 use serde::Deserialize;
@@ -238,6 +240,141 @@ fn remote_observation_ambiguous_bind_records_issue_and_preserves_local_only_stat
     assert_eq!(surviving_local_only, expect.local_only_state_count);
 }
 
+#[test]
+fn remote_observation_updates_bound_file_while_upload_transfer_active() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_updates_bound_file_while_upload_transfer_active.yaml",
+    );
+    let initial: EditObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: EditObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-active-upload");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let expected_pending_inode_mutation = initial.pending_inode_mutation.clone().into_row();
+    let local_path = write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+
+    seed_edit_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let planner_tick = actions[2].planner().expect("planner action third");
+
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan inode after restart");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_eq!(
+        db.load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load updated views"),
+        loon_client::state_db::FileSyncViews {
+            namespace_id: planner_tick.namespace_id.clone(),
+            inode_id: planner_tick.inode_id,
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: Some(expect.sync_anchor.clone()),
+        }
+    );
+    assert_eq!(
+        db.load_pending_inode_mutation(&initial.pending_inode_mutation.client_request_id)
+            .expect("load pending inode mutation"),
+        Some(expected_pending_inode_mutation)
+    );
+    assert!(
+        db.load_transfer_ledger_for_inode(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+            TransferDirection::Upload,
+        )
+        .expect("load upload transfer ledger")
+        .is_some(),
+        "active upload transfer should survive late observation",
+    );
+    assert_eq!(
+        fs::read_to_string(&local_path).expect("read local file after observation"),
+        initial.local_file.content_utf8
+    );
+}
+
+#[test]
+fn remote_observation_updates_remote_only_file_while_download_transfer_active() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_updates_remote_only_file_while_download_transfer_active.yaml",
+    );
+    let initial: DownloadObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: DownloadObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-active-download");
+    let db_path = temp_dir.path().join("client.sqlite3");
+
+    seed_remote_only_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let planner_tick = actions[2].planner().expect("planner action third");
+
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan inode after restart");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_eq!(
+        db.load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load remote-only views"),
+        loon_client::state_db::FileSyncViews {
+            namespace_id: planner_tick.namespace_id.clone(),
+            inode_id: planner_tick.inode_id,
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: None,
+        }
+    );
+    assert!(
+        db.load_transfer_ledger_for_inode(
+            &planner_tick.namespace_id,
+            planner_tick.inode_id,
+            TransferDirection::Download,
+        )
+        .expect("load download transfer ledger")
+        .is_some(),
+        "active download transfer should survive late observation",
+    );
+}
+
 fn seed_create_observation_state(
     db_path: &Path,
     initial: &CreateObservationInitial,
@@ -288,6 +425,79 @@ fn seed_edit_observation_state(db_path: &Path, initial: &EditObservationInitial)
         pending_inode_mutation.created_at_ms,
     )
     .expect("record pending inode mutation");
+    if let Some(transfer_ledger) = &initial.transfer_ledger {
+        db.upsert_transfer_ledger(&TransferLedgerRow {
+            namespace_id: initial.remote_state.namespace_id.clone(),
+            inode_id: initial.remote_state.inode_id,
+            transfer_id: format!(
+                "upload:{}:{}:{}",
+                initial.remote_state.namespace_id.as_str(),
+                initial.remote_state.inode_id.0,
+                match &pending_inode_mutation.request.op {
+                    ClientMutationOp::ReplaceFile {
+                        content_manifest_digest,
+                        ..
+                    } => content_manifest_digest,
+                    _ => unreachable!("pending inode mutation fixture should be replace_file"),
+                }
+            ),
+            direction: transfer_ledger.direction,
+            object_key: content_manifest(
+                initial.remote_state.namespace_id.as_str(),
+                match &pending_inode_mutation.request.op {
+                    ClientMutationOp::ReplaceFile {
+                        content_manifest_digest,
+                        ..
+                    } => content_manifest_digest,
+                    _ => unreachable!("pending inode mutation fixture should be replace_file"),
+                },
+            ),
+            block_index: transfer_ledger.block_index,
+            block_count: transfer_ledger.block_count,
+            state: transfer_ledger.state,
+            updated_at_ms: transfer_ledger.updated_at_ms,
+        })
+        .expect("record active transfer ledger");
+    }
+}
+
+fn seed_remote_only_observation_state(db_path: &Path, initial: &DownloadObservationInitial) {
+    let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
+    db.planner_transaction("seed-remote-only-observation-state", |tx| {
+        tx.upsert_remote_file(&initial.remote_state)?;
+        tx.upsert_local_file(&initial.local_state)?;
+        tx.upsert_planned_action(&initial.planned_action)?;
+        Ok(())
+    })
+    .expect("seed remote-only observation state");
+    db.upsert_transfer_ledger(&TransferLedgerRow {
+        namespace_id: initial.remote_state.namespace_id.clone(),
+        inode_id: initial.remote_state.inode_id,
+        transfer_id: format!(
+            "download:{}:{}:{}",
+            initial.remote_state.namespace_id.as_str(),
+            initial.remote_state.inode_id.0,
+            initial
+                .remote_state
+                .content_manifest_digest
+                .as_deref()
+                .expect("remote-only observation fixture should include manifest digest"),
+        ),
+        direction: initial.transfer_ledger.direction,
+        object_key: content_manifest(
+            initial.remote_state.namespace_id.as_str(),
+            initial
+                .remote_state
+                .content_manifest_digest
+                .as_deref()
+                .expect("remote-only observation fixture should include manifest digest"),
+        ),
+        block_index: initial.transfer_ledger.block_index,
+        block_count: initial.transfer_ledger.block_count,
+        state: initial.transfer_ledger.state,
+        updated_at_ms: initial.transfer_ledger.updated_at_ms,
+    })
+    .expect("record active download transfer ledger");
 }
 
 fn seed_ambiguous_observation_state(db_path: &Path, local_only_state: &[LocalOnlyFileStateRow]) {
@@ -342,6 +552,8 @@ struct EditObservationInitial {
     local_file: FixtureLocalFile,
     planned_action: PlannedActionRow,
     pending_inode_mutation: RawPendingInodeMutationRow,
+    #[serde(default)]
+    transfer_ledger: Option<FixtureTransferLedgerSeed>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,6 +565,32 @@ struct EditObservationExpect {
     planned_action_cleared: bool,
     pending_inode_mutation_cleared: bool,
     planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadObservationInitial {
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    planned_action: PlannedActionRow,
+    transfer_ledger: FixtureTransferLedgerSeed,
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    planned_action_cleared: bool,
+    planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FixtureTransferLedgerSeed {
+    direction: TransferDirection,
+    block_index: u64,
+    block_count: u64,
+    state: TransferState,
+    updated_at_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,6 +752,9 @@ enum RawAppliedRemoteObservation {
     UpdatedBoundRemoteState {
         updated_bound_remote_state: RawAppliedRemoteObservationTarget,
     },
+    DiscoveredRemoteOnly {
+        discovered_remote_only: RawAppliedRemoteObservationTarget,
+    },
     IgnoredStale {
         ignored_stale: RawAppliedRemoteObservationTarget,
     },
@@ -539,6 +780,12 @@ impl RawAppliedRemoteObservation {
             } => AppliedRemoteObservation::UpdatedBoundRemoteState {
                 namespace_id: updated_bound_remote_state.namespace_id,
                 inode_id: updated_bound_remote_state.inode_id,
+            },
+            Self::DiscoveredRemoteOnly {
+                discovered_remote_only,
+            } => AppliedRemoteObservation::DiscoveredRemoteOnly {
+                namespace_id: discovered_remote_only.namespace_id,
+                inode_id: discovered_remote_only.inode_id,
             },
             Self::IgnoredStale { ignored_stale } => AppliedRemoteObservation::IgnoredStale {
                 namespace_id: ignored_stale.namespace_id,

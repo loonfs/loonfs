@@ -21,6 +21,16 @@ use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, InodeKi
 use serde_json::json;
 use std::path::Path;
 
+enum PreparedUploadLocalEdit {
+    Ready {
+        upload: InodeUploadRow,
+        upload_reused: bool,
+    },
+    Progressed {
+        transfer: TransferLedgerRow,
+    },
+}
+
 pub fn execute_upload_local_edit_from_path<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -30,7 +40,7 @@ pub fn execute_upload_local_edit_from_path<S: ObjectStore, F>(
     uploaded_at_ms: u64,
     created_at_ms: u64,
     dispatch: F,
-) -> Result<ExecutedUploadLocalEdit, ExecuteUploadLocalEditError>
+) -> Result<UploadLocalEditExecution, ExecuteUploadLocalEditError>
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
@@ -53,7 +63,7 @@ pub fn execute_download_remote_edit_to_path<S: ObjectStore>(
     inode_id: InodeId,
     target_path: &Path,
     applied_at_ms: u64,
-) -> Result<ExecutedDownloadRemoteEdit, ExecuteDownloadRemoteEditError> {
+) -> Result<DownloadRemoteEditExecution, ExecuteDownloadRemoteEditError> {
     execute_download_remote_edit(
         db,
         store,
@@ -85,7 +95,7 @@ pub(super) fn execute_upload_local_edit<S: ObjectStore, F>(
     uploaded_at_ms: u64,
     created_at_ms: u64,
     dispatch: F,
-) -> Result<ExecutedUploadLocalEdit, ExecuteUploadLocalEditError>
+) -> Result<UploadLocalEditExecution, ExecuteUploadLocalEditError>
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
@@ -94,18 +104,34 @@ where
             .load_pending_inode_mutation_for_inode(namespace_id, inode_id)?
             .is_some();
 
-        let (ensured_upload, upload_reused) = if had_pending_request {
-            (db.load_inode_upload(namespace_id, inode_id)?, true)
+        let prepared = if had_pending_request {
+            PreparedUploadLocalEdit::Ready {
+                upload: db
+                    .load_inode_upload(namespace_id, inode_id)?
+                    .expect("pending inode mutation should have durable upload"),
+                upload_reused: true,
+            }
         } else {
-            let (upload_row, reused_existing) = ensure_upload_local_edit_ready(
+            ensure_upload_local_edit_ready(
                 db,
                 store,
                 namespace_id,
                 inode_id,
                 source_path,
                 uploaded_at_ms,
-            )?;
-            (Some(upload_row), reused_existing)
+            )?
+        };
+
+        let (ensured_upload, upload_reused) = match prepared {
+            PreparedUploadLocalEdit::Ready {
+                upload,
+                upload_reused,
+            } => (Some(upload), upload_reused),
+            PreparedUploadLocalEdit::Progressed { transfer } => {
+                return Ok(UploadLocalEditExecution::Progressed(
+                    ProgressedUploadLocalEdit { transfer },
+                ));
+            }
         };
 
         let dispatched = dispatch_inode_mutation_from_state(
@@ -116,15 +142,22 @@ where
             dispatch,
         )?;
 
-        Ok(ExecutedUploadLocalEdit {
-            ensured_upload,
-            upload_reused,
-            dispatched,
-        })
+        Ok(UploadLocalEditExecution::Completed(
+            ExecutedUploadLocalEdit {
+                ensured_upload,
+                upload_reused,
+                dispatched,
+            },
+        ))
     })();
 
     match &result {
-        Ok(_) => clear_upload_local_edit_issue(db, namespace_id, inode_id),
+        Ok(UploadLocalEditExecution::Completed(_)) => {
+            clear_upload_local_edit_issues(db, namespace_id, inode_id)
+        }
+        Ok(UploadLocalEditExecution::Progressed(_)) => {
+            clear_upload_local_edit_failure_issue(db, namespace_id, inode_id)
+        }
         Err(error) => {
             record_upload_local_edit_issue(db, namespace_id, inode_id, error, uploaded_at_ms)
         }
@@ -140,7 +173,7 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
     inode_id: InodeId,
     target_path: Option<&Path>,
     applied_at_ms: u64,
-) -> Result<ExecutedDownloadRemoteEdit, ExecuteDownloadRemoteEditError> {
+) -> Result<DownloadRemoteEditExecution, ExecuteDownloadRemoteEditError> {
     let result = (|| {
         let remote = ensure_download_remote_edit_ready(db, namespace_id, inode_id)?;
         let target_path =
@@ -160,21 +193,14 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
         let block_count = u64::try_from(loaded_manifest.manifest_envelope.payload.blocks.len())
             .expect("block count should fit in u64");
         let transfer_id = download_transfer_id(namespace_id, inode_id, manifest_digest);
-        let requested_block_index = match db.load_transfer_ledger_for_inode(
-            namespace_id,
-            inode_id,
-            TransferDirection::Download,
-        )? {
-            Some(existing)
-                if existing.transfer_id == transfer_id
-                    && existing.object_key == loaded_manifest.object_key
-                    && existing.block_count == block_count
-                    && existing.state == TransferState::Staging =>
-            {
-                existing.block_index
-            }
-            _ => 0,
-        };
+        let existing_transfer =
+            db.load_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Download)?;
+        let (requested_block_index, reset_reason) = reconcile_download_transfer_resume(
+            existing_transfer.as_ref(),
+            &transfer_id,
+            &loaded_manifest.object_key,
+            block_count,
+        );
         let staged_size_bytes = stage_file_size(target_path)?.unwrap_or(0);
         let resume_block_index = if staged_size_bytes
             == expected_staged_file_size(&loaded_manifest.manifest_envelope, requested_block_index)
@@ -184,11 +210,29 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
             0
         };
 
-        if resume_block_index == 0 {
+        let stage_reset =
+            resume_block_index == 0 && (requested_block_index != 0 || staged_size_bytes != 0);
+        let effective_reset_reason = if stage_reset {
+            Some("stage_size_mismatch")
+        } else {
+            reset_reason
+        };
+
+        if resume_block_index == 0 && (existing_transfer.is_some() || staged_size_bytes != 0) {
             reset_stage_file(target_path)?;
         }
 
-        db.upsert_transfer_ledger(&download_transfer_row(
+        if let Some(reason) = effective_reset_reason {
+            record_download_remote_edit_transfer_reset(
+                db,
+                namespace_id,
+                inode_id,
+                reason,
+                applied_at_ms,
+            );
+        }
+
+        let current_transfer = download_transfer_row(
             namespace_id,
             inode_id,
             &transfer_id,
@@ -196,21 +240,18 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
             resume_block_index,
             block_count,
             applied_at_ms,
-        ))?;
+        );
+        db.upsert_transfer_ledger(&current_transfer)?;
 
-        for (block_offset, block) in loaded_manifest
-            .manifest_envelope
-            .payload
-            .blocks
-            .iter()
-            .enumerate()
-            .skip(usize::try_from(resume_block_index).expect("resume block index should fit"))
+        if usize::try_from(resume_block_index).expect("resume block index should fit")
+            < loaded_manifest.manifest_envelope.payload.blocks.len()
         {
+            let block = &loaded_manifest.manifest_envelope.payload.blocks
+                [usize::try_from(resume_block_index).expect("resume block index should fit")];
             let block_bytes = load_validated_content_block(store, namespace_id, block)?;
             append_stage_bytes(target_path, &block_bytes)?;
-            let next_block_index =
-                u64::try_from(block_offset + 1).expect("block offset should fit in u64");
-            db.upsert_transfer_ledger(&download_transfer_row(
+            let next_block_index = resume_block_index.saturating_add(1);
+            let next_transfer = download_transfer_row(
                 namespace_id,
                 inode_id,
                 &transfer_id,
@@ -218,7 +259,16 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
                 next_block_index,
                 block_count,
                 applied_at_ms,
-            ))?;
+            );
+            db.upsert_transfer_ledger(&next_transfer)?;
+
+            if next_block_index < block_count {
+                return Ok(DownloadRemoteEditExecution::Progressed(
+                    ProgressedDownloadRemoteEdit {
+                        transfer: next_transfer,
+                    },
+                ));
+            }
         }
 
         let stage_path = staging_path_for_target(target_path)?;
@@ -235,11 +285,13 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
         finalize_stage_file(target_path)?;
 
         let applied = db.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)?;
-        Ok(ExecutedDownloadRemoteEdit {
-            downloaded_content_manifest_digest: downloaded.content_manifest_digest,
-            downloaded_file_digest_sha256: downloaded.file_digest_sha256,
-            applied,
-        })
+        Ok(DownloadRemoteEditExecution::Completed(
+            ExecutedDownloadRemoteEdit {
+                downloaded_content_manifest_digest: downloaded.content_manifest_digest,
+                downloaded_file_digest_sha256: downloaded.file_digest_sha256,
+                applied,
+            },
+        ))
     })();
 
     if let Err(error) = &result {
@@ -431,7 +483,7 @@ fn ensure_upload_local_edit_ready<S: ObjectStore>(
     inode_id: InodeId,
     source_path: Option<&Path>,
     uploaded_at_ms: u64,
-) -> Result<(InodeUploadRow, bool), ExecuteUploadLocalEditError> {
+) -> Result<PreparedUploadLocalEdit, ExecuteUploadLocalEditError> {
     let planned_row = db
         .load_planned_action(namespace_id, inode_id)?
         .ok_or_else(|| ExecutorError::PlannedActionMissing {
@@ -456,7 +508,10 @@ fn ensure_upload_local_edit_ready<S: ObjectStore>(
             && local.content_digest.as_deref() == Some(existing_upload.file_digest_sha256.as_str())
         {
             db.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
-            return Ok((existing_upload, true));
+            return Ok(PreparedUploadLocalEdit::Ready {
+                upload: existing_upload,
+                upload_reused: true,
+            });
         }
     }
 
@@ -468,23 +523,19 @@ fn ensure_upload_local_edit_ready<S: ObjectStore>(
     let plan = plan_upload_from_path(namespace_id, source_path)?;
     let block_count = u64::try_from(plan.blocks.len()).expect("block count should fit in u64");
     let transfer_id = upload_transfer_id(namespace_id, inode_id, &plan.content_manifest_digest);
-    let requested_block_index = match db.load_transfer_ledger_for_inode(
-        namespace_id,
-        inode_id,
-        TransferDirection::Upload,
-    )? {
-        Some(existing)
-            if existing.transfer_id == transfer_id
-                && existing.object_key == plan.manifest_object_key
-                && existing.block_count == block_count
-                && existing.state == TransferState::Uploading =>
-        {
-            existing.block_index
-        }
-        _ => 0,
-    };
+    let existing_transfer =
+        db.load_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
+    let (requested_block_index, reset_reason) = reconcile_upload_transfer_resume(
+        existing_transfer.as_ref(),
+        &transfer_id,
+        &plan.manifest_object_key,
+        block_count,
+    );
+    if let Some(reason) = reset_reason {
+        record_upload_local_edit_transfer_reset(db, namespace_id, inode_id, reason, uploaded_at_ms);
+    }
     let resume_block_index = requested_block_index.min(block_count);
-    db.upsert_transfer_ledger(&upload_transfer_row(
+    let current_transfer = upload_transfer_row(
         namespace_id,
         inode_id,
         &transfer_id,
@@ -492,19 +543,15 @@ fn ensure_upload_local_edit_ready<S: ObjectStore>(
         resume_block_index,
         block_count,
         uploaded_at_ms,
-    ))?;
-    for block_index in usize::try_from(resume_block_index).expect("resume block index should fit")
-        ..plan.blocks.len()
+    );
+    db.upsert_transfer_ledger(&current_transfer)?;
+
+    if usize::try_from(resume_block_index).expect("resume block index should fit")
+        < plan.blocks.len()
     {
-        upload_planned_block_from_path(
-            store,
-            source_path,
-            &plan,
-            u64::try_from(block_index).expect("block index should fit in u64"),
-        )?;
-        let next_block_index =
-            u64::try_from(block_index + 1).expect("block index should fit in u64");
-        db.upsert_transfer_ledger(&upload_transfer_row(
+        upload_planned_block_from_path(store, source_path, &plan, resume_block_index)?;
+        let next_block_index = resume_block_index.saturating_add(1);
+        let next_transfer = upload_transfer_row(
             namespace_id,
             inode_id,
             &transfer_id,
@@ -512,13 +559,24 @@ fn ensure_upload_local_edit_ready<S: ObjectStore>(
             next_block_index,
             block_count,
             uploaded_at_ms,
-        ))?;
+        );
+        db.upsert_transfer_ledger(&next_transfer)?;
+        if next_block_index < block_count {
+            return Ok(PreparedUploadLocalEdit::Progressed {
+                transfer: next_transfer,
+            });
+        }
     }
+
     let uploaded = finalize_planned_upload(store, &plan)?;
     let recorded = db
         .record_inode_upload(namespace_id, inode_id, &uploaded, uploaded_at_ms)
         .map_err(ExecuteUploadLocalEditError::from)?;
-    Ok((recorded, false))
+    db.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
+    Ok(PreparedUploadLocalEdit::Ready {
+        upload: recorded,
+        upload_reused: false,
+    })
 }
 
 fn upload_transfer_id(
@@ -556,13 +614,90 @@ fn upload_transfer_row(
     }
 }
 
-fn clear_upload_local_edit_issue(
+fn reconcile_download_transfer_resume(
+    existing: Option<&TransferLedgerRow>,
+    expected_transfer_id: &str,
+    expected_object_key: &str,
+    expected_block_count: u64,
+) -> (u64, Option<&'static str>) {
+    match existing {
+        Some(existing) if existing.transfer_id != expected_transfer_id => {
+            (0, Some("transfer_id_mismatch"))
+        }
+        Some(existing) if existing.object_key != expected_object_key => {
+            (0, Some("object_key_mismatch"))
+        }
+        Some(existing) if existing.block_count != expected_block_count => {
+            (0, Some("block_count_mismatch"))
+        }
+        Some(existing) if existing.state != TransferState::Staging => {
+            (0, Some("transfer_id_mismatch"))
+        }
+        Some(existing) => (existing.block_index.min(expected_block_count), None),
+        None => (0, None),
+    }
+}
+
+fn reconcile_upload_transfer_resume(
+    existing: Option<&TransferLedgerRow>,
+    expected_transfer_id: &str,
+    expected_object_key: &str,
+    expected_block_count: u64,
+) -> (u64, Option<&'static str>) {
+    match existing {
+        Some(existing) if existing.transfer_id != expected_transfer_id => {
+            (0, Some("transfer_id_mismatch"))
+        }
+        Some(existing) if existing.object_key != expected_object_key => {
+            (0, Some("object_key_mismatch"))
+        }
+        Some(existing) if existing.block_count != expected_block_count => {
+            (0, Some("block_count_mismatch"))
+        }
+        Some(existing) if existing.state != TransferState::Uploading => {
+            (0, Some("transfer_id_mismatch"))
+        }
+        Some(existing) => (existing.block_index.min(expected_block_count), None),
+        None => (0, None),
+    }
+}
+
+fn clear_upload_local_edit_failure_issue(
     db: &mut SqliteStateDb,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
 ) {
     let _ =
         db.clear_conflict_or_error_kind(namespace_id, inode_id, "upload_local_edit_upload_failed");
+}
+
+fn clear_upload_local_edit_issues(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) {
+    clear_upload_local_edit_failure_issue(db, namespace_id, inode_id);
+    let _ =
+        db.clear_conflict_or_error_kind(namespace_id, inode_id, "upload_local_edit_transfer_reset");
+}
+
+fn record_upload_local_edit_transfer_reset(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    reason: &'static str,
+    created_at_ms: u64,
+) {
+    let _ = db.record_conflict_or_error(
+        namespace_id,
+        inode_id,
+        "upload_local_edit_transfer_reset",
+        "upload_local_edit discarded stale transfer state and restarted from block 0",
+        &json!({
+            "reason": reason,
+        }),
+        created_at_ms,
+    );
 }
 
 fn record_upload_local_edit_issue(
@@ -598,6 +733,25 @@ fn record_upload_local_edit_issue(
             created_at_ms,
         );
     }
+}
+
+fn record_download_remote_edit_transfer_reset(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    reason: &'static str,
+    created_at_ms: u64,
+) {
+    let _ = db.record_conflict_or_error(
+        namespace_id,
+        inode_id,
+        "download_remote_edit_transfer_reset",
+        "download_remote_edit discarded stale staged transfer state and restarted from block 0",
+        &json!({
+            "reason": reason,
+        }),
+        created_at_ms,
+    );
 }
 
 pub(super) fn upload_error_detail_json(error: &crate::upload::UploadError) -> serde_json::Value {
