@@ -38,6 +38,39 @@ pub const NAMESPACE_CORE_CHECKPOINT_REPLAY_INVARIANTS: &[&str] = &[
     "checkpoint_plus_wal_tail_reproduces_metadata",
 ];
 
+pub const BACKGROUND_WORK_PROGRESS_INVARIANTS: &[&str] = &[
+    "progress_object_checksum_matches_payload",
+    "progress_object_key_matches_namespace_and_work_class",
+    "progress_through_seq_advances_monotonically",
+];
+
+pub const BACKGROUND_WORK_QUEUE_SHARD_OBJECT_INVARIANTS: &[&str] = &[
+    "queue_shard_checksum_matches_payload",
+    "queue_shard_key_matches_shard_id",
+    "queue_shard_cas_protects_updates",
+];
+
+pub const BACKGROUND_WORK_QUEUE_MUTATION_INVARIANTS: &[&str] = &[
+    "lost_enqueue_repair_enqueues_when_head_outpaces_progress",
+    "snapshot_repair_dedupe_key_is_namespace_scoped",
+    "snapshot_repair_claimed_job_gets_follow_up",
+    "broker_lease_takeover_increments_epoch",
+    "active_broker_lease_required_for_shard_mutation",
+    "claim_timeout_allows_steal",
+    "worker_heartbeat_requires_matching_claim_token",
+    "stale_claim_token_cannot_complete",
+    "stolen_job_completes_once",
+];
+
+pub const BACKGROUND_WORK_CHECKPOINT_HEAD_PUBLISH_INVARIANTS: &[&str] = &[
+    "checkpoint_publish_requires_verified_checkpoint",
+    "snapshot_hint_seq_advances_monotonically",
+    "retention_floor_seq_advances_monotonically",
+    "retention_floor_seq_requires_checkpoint_coverage",
+    "retention_floor_seq_requires_derived_progress",
+    "retention_floor_seq_respects_policy_gate",
+];
+
 pub const INVARIANTS: &[&str] = &[
     "no_orphaned_live_entry",
     "visible_revision_points_to_durable_content",

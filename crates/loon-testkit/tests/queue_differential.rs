@@ -16,6 +16,16 @@ use loon_queue::worker::{
     claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobCompleteOutcome,
     WorkerMutationError,
 };
+use loon_testkit::invariants::{
+    evaluate_progress_publish_invariants, evaluate_queue_broker_lease_invariants,
+    evaluate_queue_claim_invariants, evaluate_queue_complete_invariants,
+    evaluate_queue_heartbeat_invariants, evaluate_queue_repair_invariants,
+    BackgroundWorkInvariantReport, ProgressInvariantSnapshot, ProgressPublishInvariantInputs,
+    ProgressPublishOutcomeKind, QueueBrokerLeaseInvariantInputs, QueueBrokerLeaseOutcomeKind,
+    QueueClaimInvariantInputs, QueueClaimOutcomeKind, QueueCompleteInvariantInputs,
+    QueueCompleteOutcomeKind, QueueHeartbeatInvariantInputs, QueueHeartbeatOutcomeKind,
+    QueueRepairInvariantInputs, QueueRepairOutcomeKind,
+};
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ChangeSeq, HeadState, NamespaceId, ProgressState};
@@ -23,15 +33,32 @@ use serde::Deserialize;
 
 #[test]
 fn lost_enqueue_repair_fixture_matches_model_and_queue() {
-    run_queue_fixture("sim/lost_enqueue_repair_recreates_snapshot_job.yaml");
+    let report = run_queue_fixture_report("sim/lost_enqueue_repair_recreates_snapshot_job.yaml");
+    assert!(!report.rendered_trace.is_empty());
 }
 
 #[test]
 fn queue_claim_timeout_then_steal_fixture_matches_model_and_queue() {
-    run_queue_fixture("sim/queue_claim_timeout_then_steal.yaml");
+    let report = run_queue_fixture_report("sim/queue_claim_timeout_then_steal.yaml");
+    assert!(!report.rendered_trace.is_empty());
 }
 
-fn run_queue_fixture(relative_path: &str) {
+#[test]
+fn queue_claim_timeout_then_steal_snapshot_matches_checked_in_artifact() {
+    let report = run_queue_fixture_report("sim/queue_claim_timeout_then_steal.yaml");
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/queue-differential/sim/queue_claim_timeout_then_steal.txt"
+        )
+    );
+}
+
+struct QueueFixtureRunReport {
+    rendered_trace: String,
+}
+
+fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
     let scenario = load_fixture(relative_path);
     let initial: QueueFixtureInitial = scenario.decode_initial().expect("decode initial state");
     let actions: Vec<QueueActionEnvelope> = scenario.decode_actions().expect("decode actions");
@@ -63,16 +90,40 @@ fn run_queue_fixture(relative_path: &str) {
     let mut saw_stolen_claim = false;
 
     if initial.progress.is_some() {
-        add_invariant(
+        let progress = initial.progress.as_ref().expect("progress should exist");
+        let progress_report =
+            evaluate_progress_publish_invariants(ProgressPublishInvariantInputs {
+                expected_namespace: &progress.payload.namespace_id,
+                expected_work_class: &progress.payload.work_class,
+                before_through_seq: None,
+                requested_through_seq: progress.payload.through_seq,
+                outcome: ProgressPublishOutcomeKind::Created,
+                after_progress: &ProgressInvariantSnapshot {
+                    object_key: progress.key.clone(),
+                    namespace_id: progress.payload.namespace_id.clone(),
+                    work_class: progress.payload.work_class.clone(),
+                    through_seq: progress.payload.through_seq,
+                    payload_checksum_valid: true,
+                },
+            });
+        assert_background_report_passes(
+            &scenario,
+            &mut trace,
+            "queue-progress",
+            &progress_report,
+            0,
             &mut observed_invariants,
-            "progress_through_seq_advances_monotonically",
         );
     }
 
     assert_queue_states_match(&scenario, &trace, 0, &model_queue, &queue);
 
     for (index, action) in actions.iter().enumerate() {
-        let (model_outcome, queue_outcome) = match action.kind() {
+        let action_ref = action.kind();
+        let model_before = snapshot_from_model_queue(&model_queue);
+        let queue_before = snapshot_from_queue(&queue);
+        let prior_stolen_claim_seen = saw_stolen_claim;
+        let (model_outcome, queue_outcome) = match action_ref {
             QueueActionRef::RepairLostEnqueue(action) => {
                 let namespace = model_namespace
                     .as_ref()
@@ -98,13 +149,6 @@ fn run_queue_fixture(relative_path: &str) {
                 .map(QueueOutcome::from)
                 .unwrap_or_else(|err| QueueOutcome::Error(normalize_repair_error(err)));
 
-                observe_repair_invariants(
-                    &mut observed_invariants,
-                    &queue_result,
-                    &queue,
-                    &head.namespace_id,
-                );
-
                 (model_result, queue_result)
             }
             QueueActionRef::BrokerRenewLease(action) => {
@@ -125,16 +169,6 @@ fn run_queue_fixture(relative_path: &str) {
                 )
                 .map(QueueOutcome::from)
                 .unwrap_or_else(|err| QueueOutcome::Error(normalize_broker_error(err)));
-
-                if matches!(
-                    queue_result,
-                    QueueOutcome::BrokerLease(BrokerLeaseSnapshot::TakenOver { .. })
-                ) {
-                    add_invariant(
-                        &mut observed_invariants,
-                        "broker_lease_takeover_increments_epoch",
-                    );
-                }
 
                 (model_result, queue_result)
             }
@@ -169,17 +203,10 @@ fn run_queue_fixture(relative_path: &str) {
                 .map(QueueOutcome::from)
                 .unwrap_or_else(|err| QueueOutcome::Error(normalize_worker_error(err)));
 
-                if matches!(queue_result, QueueOutcome::Claim(_)) {
-                    add_invariant(
-                        &mut observed_invariants,
-                        "active_broker_lease_required_for_shard_mutation",
-                    );
-                }
                 if matches!(
                     queue_result,
                     QueueOutcome::Claim(ClaimSnapshot::Stolen { .. })
                 ) {
-                    add_invariant(&mut observed_invariants, "claim_timeout_allows_steal");
                     saw_stolen_claim = true;
                 }
 
@@ -224,17 +251,6 @@ fn run_queue_fixture(relative_path: &str) {
                 })
                 .unwrap_or_else(|err| QueueOutcome::Error(normalize_worker_error(err)));
 
-                if matches!(queue_result, QueueOutcome::Heartbeat(_)) {
-                    add_invariant(
-                        &mut observed_invariants,
-                        "active_broker_lease_required_for_shard_mutation",
-                    );
-                    add_invariant(
-                        &mut observed_invariants,
-                        "worker_heartbeat_requires_matching_claim_token",
-                    );
-                }
-
                 (model_result, queue_result)
             }
             QueueActionRef::WorkerComplete(action) => {
@@ -258,30 +274,6 @@ fn run_queue_fixture(relative_path: &str) {
                 )
                 .map(QueueOutcome::from)
                 .unwrap_or_else(|err| QueueOutcome::Error(normalize_worker_error(err)));
-
-                match &queue_result {
-                    QueueOutcome::Complete(_) => {
-                        add_invariant(
-                            &mut observed_invariants,
-                            "active_broker_lease_required_for_shard_mutation",
-                        );
-                        if saw_stolen_claim
-                            && matches!(
-                                queue_result,
-                                QueueOutcome::Complete(CompleteSnapshot::Removed)
-                            )
-                        {
-                            add_invariant(&mut observed_invariants, "stolen_job_completes_once");
-                        }
-                    }
-                    QueueOutcome::Error(QueueMutationError::ClaimTokenMismatch { .. }) => {
-                        add_invariant(
-                            &mut observed_invariants,
-                            "stale_claim_token_cannot_complete",
-                        );
-                    }
-                    _ => {}
-                }
 
                 (model_result, queue_result)
             }
@@ -312,6 +304,36 @@ fn run_queue_fixture(relative_path: &str) {
         }
 
         assert_queue_states_match(&scenario, &trace, index + 1, &model_queue, &queue);
+        let model_after = snapshot_from_model_queue(&model_queue);
+        let queue_after = snapshot_from_queue(&queue);
+        let model_report = evaluate_queue_step_invariants(
+            action_ref,
+            &initial,
+            now_ms,
+            &model_before,
+            &model_after,
+            &model_outcome,
+            prior_stolen_claim_seen,
+        );
+        let queue_report = evaluate_queue_step_invariants(
+            action_ref,
+            &initial,
+            now_ms,
+            &queue_before,
+            &queue_after,
+            &queue_outcome,
+            prior_stolen_claim_seen,
+        );
+        assert_background_reports_match_and_pass(
+            &scenario,
+            &mut trace,
+            "queue-model",
+            &model_report,
+            "queue-core",
+            &queue_report,
+            index + 1,
+            &mut observed_invariants,
+        );
     }
 
     if let Some(expected_queue) = &expect.queue {
@@ -330,6 +352,10 @@ fn run_queue_fixture(relative_path: &str) {
             "missing expected invariant `{invariant}`:\n{}",
             render_trace(&scenario, &trace)
         );
+    }
+
+    QueueFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
     }
 }
 
@@ -465,6 +491,7 @@ struct WorkerCompleteAction {
     job_id: String,
 }
 
+#[derive(Clone, Copy)]
 enum QueueActionRef<'a> {
     RepairLostEnqueue(&'a RepairLostEnqueueAction),
     BrokerRenewLease(&'a BrokerRenewLeaseAction),
@@ -1030,54 +1057,268 @@ impl From<JobCompleteOutcome> for QueueOutcome {
     }
 }
 
-fn observe_repair_invariants(
-    observed_invariants: &mut Vec<String>,
+fn evaluate_queue_step_invariants(
+    action: QueueActionRef<'_>,
+    initial: &QueueFixtureInitial,
+    now_ms: u64,
+    before: &QueueSnapshot,
+    after: &QueueSnapshot,
     outcome: &QueueOutcome,
-    queue: &QueueShardState,
-    namespace_id: &NamespaceId,
-) {
-    match outcome {
-        QueueOutcome::Repair(RepairSnapshot::Enqueued { .. }) => {
-            add_invariant(
-                observed_invariants,
-                "lost_enqueue_repair_enqueues_when_head_outpaces_progress",
-            );
-            if queue
-                .jobs
-                .iter()
-                .any(|job| job.dedupe_key == build_snapshot_dedupe_key(namespace_id))
-            {
-                add_invariant(
-                    observed_invariants,
-                    "snapshot_repair_dedupe_key_is_namespace_scoped",
-                );
-            }
+    prior_stolen_claim_seen: bool,
+) -> BackgroundWorkInvariantReport {
+    match action {
+        QueueActionRef::RepairLostEnqueue(action) => {
+            let head = initial
+                .head
+                .as_ref()
+                .expect("repair fixture should provide initial head state");
+            let dedupe_key = build_snapshot_dedupe_key(&action.namespace_id);
+            let after_job = after.jobs.iter().find(|job| job.dedupe_key == dedupe_key);
+            evaluate_queue_repair_invariants(QueueRepairInvariantInputs {
+                namespace_id: &action.namespace_id,
+                head_seq: head.seq,
+                progress_through_seq: initial
+                    .progress
+                    .as_ref()
+                    .map(|progress| progress.payload.through_seq),
+                outcome: queue_repair_outcome_kind(outcome),
+                has_namespace_scoped_job_after: after_job.is_some(),
+                ready_job_through_seq_after: after_job
+                    .filter(|job| job.state == "Ready")
+                    .map(|job| job.payload.through_seq),
+                follow_up_through_seq_after: after_job
+                    .and_then(|job| job.follow_up.as_ref().map(|payload| payload.through_seq)),
+            })
         }
-        QueueOutcome::Repair(RepairSnapshot::RaisedReadyJob { .. }) => {
-            if queue
-                .jobs
-                .iter()
-                .any(|job| job.dedupe_key == build_snapshot_dedupe_key(namespace_id))
-            {
-                add_invariant(
-                    observed_invariants,
-                    "snapshot_repair_dedupe_key_is_namespace_scoped",
-                );
-            }
+        QueueActionRef::BrokerRenewLease(action) => {
+            evaluate_queue_broker_lease_invariants(QueueBrokerLeaseInvariantInputs {
+                broker_id: &action.broker,
+                before_broker_id: before
+                    .broker
+                    .as_ref()
+                    .map(|broker| broker.broker_id.as_str()),
+                before_epoch: before.broker.as_ref().map(|broker| broker.epoch),
+                after_broker_id: after
+                    .broker
+                    .as_ref()
+                    .map(|broker| broker.broker_id.as_str()),
+                after_epoch: after.broker.as_ref().map(|broker| broker.epoch),
+                outcome: queue_broker_lease_outcome_kind(outcome),
+            })
         }
-        QueueOutcome::Repair(RepairSnapshot::AttachedFollowUp { .. }) => {
-            add_invariant(
-                observed_invariants,
-                "snapshot_repair_claimed_job_gets_follow_up",
-            );
+        QueueActionRef::WorkerClaim(action) => {
+            let before_job = before.jobs.iter().find(|job| job.job_id == action.job_id);
+            let after_job = after.jobs.iter().find(|job| job.job_id == action.job_id);
+            evaluate_queue_claim_invariants(QueueClaimInvariantInputs {
+                broker_id: &action.broker,
+                broker_epoch: action.broker_epoch,
+                now_ms,
+                claim_token: &action.claim_token,
+                before_timeout_at_ms: before_job
+                    .and_then(|job| job.claim.as_ref().map(|claim| claim.timeout_at_ms)),
+                after_broker_id: after
+                    .broker
+                    .as_ref()
+                    .map(|broker| broker.broker_id.as_str()),
+                after_broker_epoch: after.broker.as_ref().map(|broker| broker.epoch),
+                after_broker_lease_expires_at_ms: after
+                    .broker
+                    .as_ref()
+                    .map(|broker| broker.lease_expires_at_ms),
+                after_claim_token: after_job
+                    .and_then(|job| job.claim.as_ref().map(|claim| claim.claim_token.as_str())),
+                outcome: queue_claim_outcome_kind(outcome),
+            })
         }
-        _ => {}
+        QueueActionRef::WorkerHeartbeat(action) => {
+            let after_job = after.jobs.iter().find(|job| job.job_id == action.job_id);
+            evaluate_queue_heartbeat_invariants(QueueHeartbeatInvariantInputs {
+                broker_id: &action.broker,
+                broker_epoch: action.broker_epoch,
+                now_ms,
+                claim_token: &action.claim_token,
+                after_broker_id: after
+                    .broker
+                    .as_ref()
+                    .map(|broker| broker.broker_id.as_str()),
+                after_broker_epoch: after.broker.as_ref().map(|broker| broker.epoch),
+                after_broker_lease_expires_at_ms: after
+                    .broker
+                    .as_ref()
+                    .map(|broker| broker.lease_expires_at_ms),
+                after_claim_token: after_job
+                    .and_then(|job| job.claim.as_ref().map(|claim| claim.claim_token.as_str())),
+                after_timeout_at_ms: after_job
+                    .and_then(|job| job.claim.as_ref().map(|claim| claim.timeout_at_ms)),
+                outcome: queue_heartbeat_outcome_kind(outcome),
+            })
+        }
+        QueueActionRef::WorkerComplete(action) => {
+            let before_job = before.jobs.iter().find(|job| job.job_id == action.job_id);
+            let after_job_present = after.jobs.iter().any(|job| job.job_id == action.job_id);
+            evaluate_queue_complete_invariants(QueueCompleteInvariantInputs {
+                broker_id: &action.broker,
+                broker_epoch: action.broker_epoch,
+                now_ms,
+                provided_claim_token: &action.claim_token,
+                before_claim_token: before_job
+                    .and_then(|job| job.claim.as_ref().map(|claim| claim.claim_token.as_str())),
+                after_broker_id: after
+                    .broker
+                    .as_ref()
+                    .map(|broker| broker.broker_id.as_str()),
+                after_broker_epoch: after.broker.as_ref().map(|broker| broker.epoch),
+                after_broker_lease_expires_at_ms: after
+                    .broker
+                    .as_ref()
+                    .map(|broker| broker.lease_expires_at_ms),
+                after_job_present,
+                prior_stolen_claim_seen,
+                outcome: queue_complete_outcome_kind(outcome),
+            })
+        }
+        QueueActionRef::AdvanceTimeMs(_) => BackgroundWorkInvariantReport::default(),
     }
 }
 
-fn add_invariant(observed_invariants: &mut Vec<String>, invariant: &str) {
-    if !observed_invariants.iter().any(|value| value == invariant) {
-        observed_invariants.push(invariant.to_owned());
+fn queue_repair_outcome_kind(outcome: &QueueOutcome) -> QueueRepairOutcomeKind {
+    match outcome {
+        QueueOutcome::Repair(RepairSnapshot::NoRepairNeeded) => {
+            QueueRepairOutcomeKind::NoRepairNeeded
+        }
+        QueueOutcome::Repair(RepairSnapshot::Enqueued { through_seq }) => {
+            QueueRepairOutcomeKind::Enqueued {
+                through_seq: *through_seq,
+            }
+        }
+        QueueOutcome::Repair(RepairSnapshot::RaisedReadyJob { through_seq }) => {
+            QueueRepairOutcomeKind::RaisedReadyJob {
+                through_seq: *through_seq,
+            }
+        }
+        QueueOutcome::Repair(RepairSnapshot::AttachedFollowUp { through_seq }) => {
+            QueueRepairOutcomeKind::AttachedFollowUp {
+                through_seq: *through_seq,
+            }
+        }
+        other => panic!("expected repair outcome, got {other:?}"),
+    }
+}
+
+fn queue_broker_lease_outcome_kind(outcome: &QueueOutcome) -> QueueBrokerLeaseOutcomeKind {
+    match outcome {
+        QueueOutcome::BrokerLease(BrokerLeaseSnapshot::Acquired { epoch }) => {
+            QueueBrokerLeaseOutcomeKind::Acquired { epoch: *epoch }
+        }
+        QueueOutcome::BrokerLease(BrokerLeaseSnapshot::Renewed { epoch }) => {
+            QueueBrokerLeaseOutcomeKind::Renewed { epoch: *epoch }
+        }
+        QueueOutcome::BrokerLease(BrokerLeaseSnapshot::TakenOver { epoch }) => {
+            QueueBrokerLeaseOutcomeKind::TakenOver { epoch: *epoch }
+        }
+        other => panic!("expected broker lease outcome, got {other:?}"),
+    }
+}
+
+fn queue_claim_outcome_kind<'a>(outcome: &'a QueueOutcome) -> QueueClaimOutcomeKind<'a> {
+    match outcome {
+        QueueOutcome::Claim(ClaimSnapshot::Claimed { claim_token }) => {
+            QueueClaimOutcomeKind::Claimed { claim_token }
+        }
+        QueueOutcome::Claim(ClaimSnapshot::Stolen { claim_token }) => {
+            QueueClaimOutcomeKind::Stolen { claim_token }
+        }
+        QueueOutcome::Error(_) => QueueClaimOutcomeKind::Error,
+        other => panic!("expected claim outcome, got {other:?}"),
+    }
+}
+
+fn queue_heartbeat_outcome_kind<'a>(outcome: &'a QueueOutcome) -> QueueHeartbeatOutcomeKind<'a> {
+    match outcome {
+        QueueOutcome::Heartbeat(HeartbeatSnapshot {
+            claim_token,
+            timeout_at_ms,
+        }) => QueueHeartbeatOutcomeKind::Heartbeat {
+            claim_token,
+            timeout_at_ms: *timeout_at_ms,
+        },
+        QueueOutcome::Error(_) => QueueHeartbeatOutcomeKind::Error,
+        other => panic!("expected heartbeat outcome, got {other:?}"),
+    }
+}
+
+fn queue_complete_outcome_kind(outcome: &QueueOutcome) -> QueueCompleteOutcomeKind {
+    match outcome {
+        QueueOutcome::Complete(CompleteSnapshot::Removed) => QueueCompleteOutcomeKind::Removed,
+        QueueOutcome::Complete(CompleteSnapshot::PromotedFollowUp { through_seq }) => {
+            QueueCompleteOutcomeKind::PromotedFollowUp {
+                through_seq: *through_seq,
+            }
+        }
+        QueueOutcome::Error(QueueMutationError::ClaimTokenMismatch { .. }) => {
+            QueueCompleteOutcomeKind::ClaimTokenMismatch
+        }
+        QueueOutcome::Error(_) => QueueCompleteOutcomeKind::Error,
+        other => panic!("expected complete outcome, got {other:?}"),
+    }
+}
+
+fn assert_background_report_passes(
+    scenario: &Scenario,
+    trace: &mut Vec<String>,
+    label: &str,
+    report: &BackgroundWorkInvariantReport,
+    step: usize,
+    observed_invariants: &mut Vec<String>,
+) {
+    trace.extend(report.render_trace_lines(label));
+    for check in &report.checks {
+        if !check.passed {
+            panic!(
+                "background invariant failed at step {}: {}:\n{}",
+                step,
+                check.name,
+                render_trace(scenario, trace)
+            );
+        }
+        if !observed_invariants.iter().any(|value| value == &check.name) {
+            observed_invariants.push(check.name.clone());
+        }
+    }
+}
+
+fn assert_background_reports_match_and_pass(
+    scenario: &Scenario,
+    trace: &mut Vec<String>,
+    left_label: &str,
+    left: &BackgroundWorkInvariantReport,
+    right_label: &str,
+    right: &BackgroundWorkInvariantReport,
+    step: usize,
+    observed_invariants: &mut Vec<String>,
+) {
+    trace.extend(left.render_trace_lines(left_label));
+    trace.extend(right.render_trace_lines(right_label));
+
+    if left.checks != right.checks {
+        panic!(
+            "background invariant report mismatch at step {}:\n{}",
+            step,
+            render_trace(scenario, trace)
+        );
+    }
+    for check in &right.checks {
+        if !check.passed {
+            panic!(
+                "background invariant failed at step {}: {}:\n{}",
+                step,
+                check.name,
+                render_trace(scenario, trace)
+            );
+        }
+        if !observed_invariants.iter().any(|value| value == &check.name) {
+            observed_invariants.push(check.name.clone());
+        }
     }
 }
 

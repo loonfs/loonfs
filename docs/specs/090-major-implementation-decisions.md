@@ -495,13 +495,15 @@ surface immediately would create broad API churn.
 
 Start executable invariant checking in the harnesses first.
 
-For the first slice:
+Milestone 8 rollout order:
 
 - keep runtime `checked_invariants` strings unchanged
 - add structured pass/fail invariant reports in `loon-testkit`
 - treat fixture `expect.invariants` as “these names must evaluate true”
-- scope the first evaluator set to namespace-core commit/apply, WAL replay, and
-  checkpoint-plus-WAL replay
+- slice 1 covers namespace-core commit/apply, WAL replay, and checkpoint-plus-WAL replay
+- slice 2 covers background-work progress publication, queue shard mutation/repair, and verified
+  checkpoint head publish
+- later slices cover content objects and then client transfer/reconciliation invariants
 
 Only after the evaluator set is stable should structured invariant reports move into broader
 runtime APIs.

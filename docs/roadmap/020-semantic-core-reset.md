@@ -293,10 +293,10 @@ Exit criteria:
   migrations
 - scenario fixtures have explicit top-level kind/version metadata and batch validation tooling
 
-## Milestone 8: executable namespace-core invariants
+## Milestone 8: executable invariants
 
 Goal:
-turn the already-named namespace-core invariants into executable checks in the harnesses before
+turn the already-named invariants into executable checks in the harnesses before
 resuming broader feature work.
 
 Primary crates:
@@ -307,8 +307,11 @@ Primary crates:
 
 Deliverables:
 
-- harness-side executable evaluation for namespace commit/apply, WAL replay, and checkpoint-plus-WAL
-  replay invariants
+- ordered Milestone 8 rollout:
+  - slice 1: namespace-core commit/apply, WAL replay, and checkpoint-plus-WAL replay invariants
+  - slice 2: background-work progress publication, queue shard mutation/repair, broker-worker lease flow, and checkpoint head-publish invariants
+  - slice 3: content-object invariants
+  - slice 4: client transfer and reconciliation invariants
 - structured pass/fail invariant reports in rendered traces and checked-in snapshots
 - fixture `expect.invariants` semantics tightened so each listed name must evaluate `passed = true`
 - model-vs-core differential checks that compare invariant outcomes as well as final state
@@ -317,13 +320,12 @@ Required rules:
 
 - keep runtime `checked_invariants` strings unchanged for compatibility in this milestone
 - keep fixture schema unchanged; add executable meaning to existing `expect.invariants` lists
-- keep scope to namespace-core invariants only in the first slice; queue, content, and client
-  invariants come later
+- land invariant families in the rollout order above instead of widening all harnesses at once
 
 Exit criteria:
 
-- every native namespace-core commit/replay fixture that lists invariants is backed by executable
-  evaluation in the harnesses
+- every native namespace-core and background-work fixture that lists invariants is backed by
+  executable evaluation in the harnesses
 - traces and snapshots show invariant pass/fail details, not just string presence
 - model/core differential harnesses fail when invariant outcomes diverge even if final state still
   matches

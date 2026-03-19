@@ -75,13 +75,13 @@ For fixtures that use `expect.invariants`:
 - for differential harnesses, model and implementation must agree on the pass/fail outcome for the
   same invariant name, not only on the final state snapshot
 
-The first executable-invariant slice is namespace-core only:
+The current executable-invariant rollout is:
 
-- commit/apply invariants
-- WAL replay invariants
-- checkpoint-plus-WAL replay invariants
+- slice 1: namespace-core commit/apply, WAL replay, and checkpoint-plus-WAL replay invariants
+- slice 2: background-work progress publication, queue shard mutation/repair, broker-worker lease
+  flow, and checkpoint head-publish invariants
 
-Queue, content-object, and client invariants are deferred to later slices.
+Content-object and client invariants are deferred to later slices.
 
 ## Rule for PM-friendly tests
 

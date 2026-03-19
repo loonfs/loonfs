@@ -6,6 +6,10 @@ use loon_model::{ModelNamespace, ModelProgressObject};
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::derived_progress;
 use loon_objectstore::ObjectStore;
+use loon_testkit::invariants::{
+    evaluate_progress_publish_invariants, BackgroundWorkInvariantReport, ProgressInvariantSnapshot,
+    ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
+};
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId, ProgressState};
@@ -15,7 +19,27 @@ const TEST_WRITER_VERSION: &str = "loon-testkit-differential";
 
 #[test]
 fn progress_publish_fixture_matches_model_and_core() {
-    let scenario = load_fixture("native/progress_publish_advances_monotonically.yaml");
+    let report = run_fixture_report("native/progress_publish_advances_monotonically.yaml");
+    assert!(!report.rendered_trace.is_empty());
+}
+
+#[test]
+fn progress_publish_snapshot_matches_checked_in_artifact() {
+    let report = run_fixture_report("native/progress_publish_advances_monotonically.yaml");
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/progress-differential/native/progress_publish_advances_monotonically.txt"
+        )
+    );
+}
+
+struct ProgressFixtureRunReport {
+    rendered_trace: String,
+}
+
+fn run_fixture_report(relative_path: &str) -> ProgressFixtureRunReport {
+    let scenario = load_fixture(relative_path);
     let initial: ProgressFixtureState = scenario.decode_initial().expect("decode initial state");
     let actions: Vec<ProgressActionEnvelope> = scenario.decode_actions().expect("decode actions");
     let expect: ProgressFixtureExpect = scenario.decode_expect().expect("decode expectations");
@@ -33,9 +57,6 @@ fn progress_publish_fixture_matches_model_and_core() {
         seed_progress_object(&store, progress);
     }
     let mut observed_invariants = Vec::new();
-    if let Some(loaded) = read_progress_object(&store, &namespace_id, &work_class).ok() {
-        extend_invariants(&mut observed_invariants, &loaded.checked_invariants);
-    }
 
     let mut trace = vec![format!(
         "initial model={:?} core={:?}",
@@ -79,10 +100,6 @@ fn progress_publish_fixture_matches_model_and_core() {
             TEST_WRITER_VERSION,
         )
         .expect("core publish progress should succeed");
-        extend_invariants(
-            &mut observed_invariants,
-            core_outcome_invariants(&core_outcome),
-        );
         let actual_core_outcome = classify_core_outcome(&core_outcome);
         let after_model = model_progress.as_ref().map(snapshot_from_model_progress);
         let after_core = read_core_snapshot(&store, &namespace_id, &work_class)
@@ -109,6 +126,35 @@ fn progress_publish_fixture_matches_model_and_core() {
         }
 
         assert_states_match(&scenario, &trace, index + 1, after_model, after_core);
+
+        let model_report = evaluate_progress_publish_invariants(ProgressPublishInvariantInputs {
+            expected_namespace: &namespace_id,
+            expected_work_class: &work_class,
+            before_through_seq: before_model.as_ref().map(|snapshot| snapshot.through_seq),
+            requested_through_seq: action.through_seq,
+            outcome: progress_outcome_kind(&expected_model_outcome),
+            after_progress: &progress_snapshot_from_model(
+                model_progress
+                    .as_ref()
+                    .expect("model progress should exist after publish"),
+            ),
+        });
+        let core_report = evaluate_progress_publish_invariants(ProgressPublishInvariantInputs {
+            expected_namespace: &namespace_id,
+            expected_work_class: &work_class,
+            before_through_seq: before_model.as_ref().map(|snapshot| snapshot.through_seq),
+            requested_through_seq: action.through_seq,
+            outcome: progress_outcome_kind(&actual_core_outcome),
+            after_progress: &progress_snapshot_from_core_outcome(&core_outcome),
+        });
+        assert_reports_pass(
+            &scenario,
+            &mut trace,
+            &model_report,
+            &core_report,
+            index + 1,
+            &mut observed_invariants,
+        );
     }
 
     let expected_progress = expect.progress.as_ref().map(snapshot_from_fixture_progress);
@@ -136,6 +182,10 @@ fn progress_publish_fixture_matches_model_and_core() {
                 render_trace(&scenario, &trace)
             );
         }
+    }
+
+    ProgressFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
     }
 }
 
@@ -319,14 +369,6 @@ fn classify_core_outcome(outcome: &ProgressPublishOutcome) -> ProgressOutcome {
     }
 }
 
-fn core_outcome_invariants(outcome: &ProgressPublishOutcome) -> &[String] {
-    match outcome {
-        ProgressPublishOutcome::Created(published)
-        | ProgressPublishOutcome::Advanced(published) => &published.progress.checked_invariants,
-        ProgressPublishOutcome::NoChange(current) => &current.checked_invariants,
-    }
-}
-
 fn read_core_snapshot(
     store: &LocalFsStore,
     namespace_id: &NamespaceId,
@@ -336,6 +378,14 @@ fn read_core_snapshot(
         Ok(loaded) => Ok(Some(snapshot_from_loaded_progress(&loaded))),
         Err(ProgressLoadError::MissingObject { .. }) => Ok(None),
         Err(err) => Err(err),
+    }
+}
+
+fn progress_outcome_kind(outcome: &ProgressOutcome) -> ProgressPublishOutcomeKind {
+    match outcome {
+        ProgressOutcome::Created { .. } => ProgressPublishOutcomeKind::Created,
+        ProgressOutcome::Advanced { .. } => ProgressPublishOutcomeKind::Advanced,
+        ProgressOutcome::NoChange { .. } => ProgressPublishOutcomeKind::NoChange,
     }
 }
 
@@ -366,6 +416,38 @@ fn snapshot_from_loaded_progress(progress: &LoadedProgressObject) -> ProgressSna
     }
 }
 
+fn progress_snapshot_from_model(progress: &ModelProgressObject) -> ProgressInvariantSnapshot {
+    ProgressInvariantSnapshot {
+        object_key: derived_progress(progress.namespace_id.as_str(), &progress.work_class),
+        namespace_id: progress.namespace_id.clone(),
+        work_class: progress.work_class.clone(),
+        through_seq: progress.through_seq,
+        payload_checksum_valid: true,
+    }
+}
+
+fn progress_snapshot_from_core_outcome(
+    outcome: &ProgressPublishOutcome,
+) -> ProgressInvariantSnapshot {
+    match outcome {
+        ProgressPublishOutcome::Created(published)
+        | ProgressPublishOutcome::Advanced(published) => ProgressInvariantSnapshot {
+            object_key: published.progress.object_key.clone(),
+            namespace_id: published.progress.envelope.state.namespace_id.clone(),
+            work_class: published.progress.envelope.state.work_class.clone(),
+            through_seq: published.progress.envelope.state.through_seq,
+            payload_checksum_valid: true,
+        },
+        ProgressPublishOutcome::NoChange(current) => ProgressInvariantSnapshot {
+            object_key: current.object_key.clone(),
+            namespace_id: current.envelope.state.namespace_id.clone(),
+            work_class: current.envelope.state.work_class.clone(),
+            through_seq: current.envelope.state.through_seq,
+            payload_checksum_valid: true,
+        },
+    }
+}
+
 fn assert_states_match(
     scenario: &Scenario,
     trace: &[String],
@@ -382,10 +464,36 @@ fn assert_states_match(
     }
 }
 
-fn extend_invariants(checked_invariants: &mut Vec<String>, new_invariants: &[String]) {
-    for invariant in new_invariants {
-        if !checked_invariants.iter().any(|value| value == invariant) {
-            checked_invariants.push(invariant.clone());
+fn assert_reports_pass(
+    scenario: &Scenario,
+    trace: &mut Vec<String>,
+    model_report: &BackgroundWorkInvariantReport,
+    core_report: &BackgroundWorkInvariantReport,
+    step: usize,
+    observed_invariants: &mut Vec<String>,
+) {
+    trace.extend(model_report.render_trace_lines("progress-model"));
+    trace.extend(core_report.render_trace_lines("progress-core"));
+
+    if model_report.checks != core_report.checks {
+        panic!(
+            "progress invariant report mismatch at step {}:\n{}",
+            step,
+            render_trace(scenario, trace)
+        );
+    }
+
+    for check in &core_report.checks {
+        if !check.passed {
+            panic!(
+                "progress invariant failed at step {}: {}:\n{}",
+                step,
+                check.name,
+                render_trace(scenario, trace)
+            );
+        }
+        if !observed_invariants.iter().any(|value| value == &check.name) {
+            observed_invariants.push(check.name.clone());
         }
     }
 }

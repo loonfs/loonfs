@@ -277,3 +277,42 @@ Failure modes prevented:
 - duplicate snapshot jobs for the same namespace fighting each other
 - a claimed stale job losing visibility of newer required work
 - repair logic fabricating queue state without a durable CAS boundary
+
+## Executable invariant surface for Milestone 8 slice 2
+
+For background-work fixtures that list `expect.invariants`, each listed name is now an executable
+harness check, not just a string collected from runtime output.
+
+The first background-work executable families are:
+
+- progress publication:
+  - `progress_object_checksum_matches_payload`
+  - `progress_object_key_matches_namespace_and_work_class`
+  - `progress_through_seq_advances_monotonically`
+- durable queue shard objects:
+  - `queue_shard_checksum_matches_payload`
+  - `queue_shard_key_matches_shard_id`
+  - `queue_shard_cas_protects_updates`
+- queue repair / broker / worker flow:
+  - `lost_enqueue_repair_enqueues_when_head_outpaces_progress`
+  - `snapshot_repair_dedupe_key_is_namespace_scoped`
+  - `snapshot_repair_claimed_job_gets_follow_up`
+  - `broker_lease_takeover_increments_epoch`
+  - `active_broker_lease_required_for_shard_mutation`
+  - `claim_timeout_allows_steal`
+  - `worker_heartbeat_requires_matching_claim_token`
+  - `stale_claim_token_cannot_complete`
+  - `stolen_job_completes_once`
+- verified checkpoint head publish and retention gates:
+  - `checkpoint_publish_requires_verified_checkpoint`
+  - `snapshot_hint_seq_advances_monotonically`
+  - `retention_floor_seq_advances_monotonically`
+  - `retention_floor_seq_requires_checkpoint_coverage`
+  - `retention_floor_seq_requires_derived_progress`
+  - `retention_floor_seq_respects_policy_gate`
+
+Milestone 8 stays harness-first for now:
+
+- runtime `checked_invariants` strings remain unchanged
+- traces and snapshots must show structured pass/fail details
+- model/core differential harnesses must agree on invariant outcomes, not only final state

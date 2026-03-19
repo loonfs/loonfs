@@ -5,12 +5,12 @@ use loon_core::metadata::{
 };
 use loon_core::wal::PreparedWalCommit;
 use loon_core::wal::StoredWalObject;
-use loon_objectstore::keys::{snapshot_manifest, wal_commit};
+use loon_objectstore::keys::{derived_progress, queue_shard, snapshot_manifest, wal_commit};
 use loon_types::{
     checkpoint_page_checksum_sha256, decode_checkpoint_manifest_json,
     decode_checkpoint_segment_envelope_zstd, decode_wal_commit_envelope_zstd, ChangeSeq,
     CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointTableFamily,
-    HeadState, InodeId, InodeKind, LeaseState, RevisionNo, WalCommitEnvelope, WalOp,
+    HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo, WalCommitEnvelope, WalOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -52,6 +52,197 @@ impl NamespaceCoreInvariantReport {
             })
             .collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BackgroundWorkInvariantReport {
+    pub checks: Vec<InvariantCheck>,
+}
+
+impl BackgroundWorkInvariantReport {
+    pub fn check(&self, name: &str) -> Option<&InvariantCheck> {
+        self.checks.iter().find(|check| check.name == name)
+    }
+
+    pub fn passed_names(&self) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|check| check.passed)
+            .map(|check| check.name.clone())
+            .collect()
+    }
+
+    pub fn render_trace_lines(&self, label: &str) -> Vec<String> {
+        self.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "invariants[{label}] {}={} detail={}",
+                    check.name,
+                    if check.passed { "pass" } else { "fail" },
+                    check.detail
+                )
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressPublishOutcomeKind {
+    Created,
+    Advanced,
+    NoChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressInvariantSnapshot {
+    pub object_key: String,
+    pub namespace_id: NamespaceId,
+    pub work_class: String,
+    pub through_seq: ChangeSeq,
+    pub payload_checksum_valid: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProgressPublishInvariantInputs<'a> {
+    pub expected_namespace: &'a NamespaceId,
+    pub expected_work_class: &'a str,
+    pub before_through_seq: Option<ChangeSeq>,
+    pub requested_through_seq: ChangeSeq,
+    pub outcome: ProgressPublishOutcomeKind,
+    pub after_progress: &'a ProgressInvariantSnapshot,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueShardObjectInvariantInputs<'a> {
+    pub shard_index: u32,
+    pub payload_checksum_valid: bool,
+    pub object_key: &'a str,
+    pub actual_shard_id: u32,
+    pub cas_protected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueRepairOutcomeKind {
+    NoRepairNeeded,
+    Enqueued { through_seq: ChangeSeq },
+    RaisedReadyJob { through_seq: ChangeSeq },
+    AttachedFollowUp { through_seq: ChangeSeq },
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueRepairInvariantInputs<'a> {
+    pub namespace_id: &'a NamespaceId,
+    pub head_seq: ChangeSeq,
+    pub progress_through_seq: Option<ChangeSeq>,
+    pub outcome: QueueRepairOutcomeKind,
+    pub has_namespace_scoped_job_after: bool,
+    pub ready_job_through_seq_after: Option<ChangeSeq>,
+    pub follow_up_through_seq_after: Option<ChangeSeq>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueBrokerLeaseOutcomeKind {
+    Acquired { epoch: u64 },
+    Renewed { epoch: u64 },
+    TakenOver { epoch: u64 },
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueBrokerLeaseInvariantInputs<'a> {
+    pub broker_id: &'a str,
+    pub before_broker_id: Option<&'a str>,
+    pub before_epoch: Option<u64>,
+    pub after_broker_id: Option<&'a str>,
+    pub after_epoch: Option<u64>,
+    pub outcome: QueueBrokerLeaseOutcomeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueClaimOutcomeKind<'a> {
+    Claimed { claim_token: &'a str },
+    Stolen { claim_token: &'a str },
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueClaimInvariantInputs<'a> {
+    pub broker_id: &'a str,
+    pub broker_epoch: u64,
+    pub now_ms: u64,
+    pub claim_token: &'a str,
+    pub before_timeout_at_ms: Option<u64>,
+    pub after_broker_id: Option<&'a str>,
+    pub after_broker_epoch: Option<u64>,
+    pub after_broker_lease_expires_at_ms: Option<u64>,
+    pub after_claim_token: Option<&'a str>,
+    pub outcome: QueueClaimOutcomeKind<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueHeartbeatOutcomeKind<'a> {
+    Heartbeat {
+        claim_token: &'a str,
+        timeout_at_ms: u64,
+    },
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueHeartbeatInvariantInputs<'a> {
+    pub broker_id: &'a str,
+    pub broker_epoch: u64,
+    pub now_ms: u64,
+    pub claim_token: &'a str,
+    pub after_broker_id: Option<&'a str>,
+    pub after_broker_epoch: Option<u64>,
+    pub after_broker_lease_expires_at_ms: Option<u64>,
+    pub after_claim_token: Option<&'a str>,
+    pub after_timeout_at_ms: Option<u64>,
+    pub outcome: QueueHeartbeatOutcomeKind<'a>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueCompleteOutcomeKind {
+    Removed,
+    PromotedFollowUp { through_seq: ChangeSeq },
+    ClaimTokenMismatch,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueCompleteInvariantInputs<'a> {
+    pub broker_id: &'a str,
+    pub broker_epoch: u64,
+    pub now_ms: u64,
+    pub provided_claim_token: &'a str,
+    pub before_claim_token: Option<&'a str>,
+    pub after_broker_id: Option<&'a str>,
+    pub after_broker_epoch: Option<u64>,
+    pub after_broker_lease_expires_at_ms: Option<u64>,
+    pub after_job_present: bool,
+    pub prior_stolen_claim_seen: bool,
+    pub outcome: QueueCompleteOutcomeKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointProgressAuthorizer<'a> {
+    pub namespace_id: &'a NamespaceId,
+    pub work_class: &'a str,
+    pub through_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckpointHeadPublishInvariantInputs<'a> {
+    pub current_head: &'a HeadState,
+    pub checkpoint_namespace: &'a NamespaceId,
+    pub checkpoint_seq: ChangeSeq,
+    pub checkpoint_verified: bool,
+    pub checkpoint_segments_verified: bool,
+    pub requested_retention_floor_seq: Option<ChangeSeq>,
+    pub required_progress: &'a [CheckpointProgressAuthorizer<'a>],
+    pub retention_policy: Option<CheckpointProgressAuthorizer<'a>>,
+    pub resulting_head: &'a HeadState,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -289,6 +480,439 @@ pub fn evaluate_namespace_checkpoint_replay_invariants(
     checks.extend(replay_report.checks);
 
     NamespaceCoreInvariantReport { checks }
+}
+
+pub fn evaluate_progress_publish_invariants(
+    inputs: ProgressPublishInvariantInputs<'_>,
+) -> BackgroundWorkInvariantReport {
+    let expected_key = derived_progress(
+        inputs.expected_namespace.as_str(),
+        inputs.expected_work_class,
+    );
+    let key_matches = inputs.after_progress.object_key == expected_key
+        && inputs.after_progress.namespace_id == *inputs.expected_namespace
+        && inputs.after_progress.work_class == inputs.expected_work_class;
+    let before = inputs.before_through_seq;
+    let monotonic = match before {
+        None => {
+            inputs.outcome == ProgressPublishOutcomeKind::Created
+                && inputs.after_progress.through_seq == inputs.requested_through_seq
+        }
+        Some(before_through_seq) if before_through_seq >= inputs.requested_through_seq => {
+            inputs.outcome == ProgressPublishOutcomeKind::NoChange
+                && inputs.after_progress.through_seq == before_through_seq
+        }
+        Some(before_through_seq) => {
+            inputs.after_progress.through_seq >= before_through_seq
+                && matches!(
+                    inputs.outcome,
+                    ProgressPublishOutcomeKind::Advanced | ProgressPublishOutcomeKind::Created
+                )
+                && inputs.after_progress.through_seq == inputs.requested_through_seq
+        }
+    };
+
+    BackgroundWorkInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "progress_object_checksum_matches_payload".to_owned(),
+                passed: inputs.after_progress.payload_checksum_valid,
+                detail: format!(
+                    "object_key={} through_seq={}",
+                    inputs.after_progress.object_key, inputs.after_progress.through_seq.0
+                ),
+            },
+            InvariantCheck {
+                name: "progress_object_key_matches_namespace_and_work_class".to_owned(),
+                passed: key_matches,
+                detail: format!(
+                    "expected_key={} actual_key={} expected_namespace={} actual_namespace={} expected_work_class={} actual_work_class={}",
+                    expected_key,
+                    inputs.after_progress.object_key,
+                    inputs.expected_namespace,
+                    inputs.after_progress.namespace_id,
+                    inputs.expected_work_class,
+                    inputs.after_progress.work_class
+                ),
+            },
+            InvariantCheck {
+                name: "progress_through_seq_advances_monotonically".to_owned(),
+                passed: monotonic,
+                detail: format!(
+                    "before={:?} requested={} outcome={:?} after={}",
+                    before.map(|seq| seq.0),
+                    inputs.requested_through_seq.0,
+                    inputs.outcome,
+                    inputs.after_progress.through_seq.0
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_queue_shard_object_invariants(
+    inputs: QueueShardObjectInvariantInputs<'_>,
+) -> BackgroundWorkInvariantReport {
+    BackgroundWorkInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "queue_shard_checksum_matches_payload".to_owned(),
+                passed: inputs.payload_checksum_valid,
+                detail: format!(
+                    "object_key={} shard_id={}",
+                    inputs.object_key, inputs.actual_shard_id
+                ),
+            },
+            InvariantCheck {
+                name: "queue_shard_key_matches_shard_id".to_owned(),
+                passed: inputs.object_key == queue_shard(inputs.shard_index)
+                    && inputs.actual_shard_id == inputs.shard_index,
+                detail: format!(
+                    "expected_key={} actual_key={} expected_shard_id={} actual_shard_id={}",
+                    queue_shard(inputs.shard_index),
+                    inputs.object_key,
+                    inputs.shard_index,
+                    inputs.actual_shard_id
+                ),
+            },
+            InvariantCheck {
+                name: "queue_shard_cas_protects_updates".to_owned(),
+                passed: inputs.cas_protected,
+                detail: format!(
+                    "object_key={} cas_protected={}",
+                    inputs.object_key, inputs.cas_protected
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_queue_repair_invariants(
+    inputs: QueueRepairInvariantInputs<'_>,
+) -> BackgroundWorkInvariantReport {
+    let progress_covers_head = inputs
+        .progress_through_seq
+        .is_some_and(|through_seq| through_seq >= inputs.head_seq);
+    let through_seq_after = inputs
+        .ready_job_through_seq_after
+        .or(inputs.follow_up_through_seq_after);
+    let mut checks = Vec::new();
+
+    if !matches!(inputs.outcome, QueueRepairOutcomeKind::NoRepairNeeded) {
+        checks.push(InvariantCheck {
+            name: "lost_enqueue_repair_enqueues_when_head_outpaces_progress".to_owned(),
+            passed: !progress_covers_head
+                && inputs.head_seq > ChangeSeq(0)
+                && inputs.has_namespace_scoped_job_after
+                && through_seq_after == Some(inputs.head_seq),
+            detail: format!(
+                "namespace={} head_seq={} progress_through_seq={:?} outcome={:?} through_seq_after={:?}",
+                inputs.namespace_id,
+                inputs.head_seq.0,
+                inputs.progress_through_seq.map(|seq| seq.0),
+                inputs.outcome,
+                through_seq_after.map(|seq| seq.0)
+            ),
+        });
+        checks.push(InvariantCheck {
+            name: "snapshot_repair_dedupe_key_is_namespace_scoped".to_owned(),
+            passed: inputs.has_namespace_scoped_job_after,
+            detail: format!(
+                "namespace={} has_namespace_scoped_job_after={}",
+                inputs.namespace_id, inputs.has_namespace_scoped_job_after
+            ),
+        });
+    }
+
+    if matches!(
+        inputs.outcome,
+        QueueRepairOutcomeKind::AttachedFollowUp { .. }
+    ) {
+        checks.push(InvariantCheck {
+            name: "snapshot_repair_claimed_job_gets_follow_up".to_owned(),
+            passed: inputs.follow_up_through_seq_after == Some(inputs.head_seq),
+            detail: format!(
+                "namespace={} expected_follow_up={} actual_follow_up={:?}",
+                inputs.namespace_id,
+                inputs.head_seq.0,
+                inputs.follow_up_through_seq_after.map(|seq| seq.0)
+            ),
+        });
+    }
+
+    BackgroundWorkInvariantReport { checks }
+}
+
+pub fn evaluate_queue_broker_lease_invariants(
+    inputs: QueueBrokerLeaseInvariantInputs<'_>,
+) -> BackgroundWorkInvariantReport {
+    let mut checks = Vec::new();
+    if let QueueBrokerLeaseOutcomeKind::TakenOver { epoch } = inputs.outcome {
+        checks.push(InvariantCheck {
+            name: "broker_lease_takeover_increments_epoch".to_owned(),
+            passed: inputs.before_epoch.is_some()
+                && inputs.after_epoch == Some(epoch)
+                && inputs.before_epoch.map(|value| value.saturating_add(1)) == Some(epoch)
+                && inputs.after_broker_id == Some(inputs.broker_id)
+                && inputs.before_broker_id != inputs.after_broker_id,
+            detail: format!(
+                "broker={} before_broker={:?} after_broker={:?} before_epoch={:?} after_epoch={:?}",
+                inputs.broker_id,
+                inputs.before_broker_id,
+                inputs.after_broker_id,
+                inputs.before_epoch,
+                inputs.after_epoch
+            ),
+        });
+    }
+
+    BackgroundWorkInvariantReport { checks }
+}
+
+pub fn evaluate_queue_claim_invariants(
+    inputs: QueueClaimInvariantInputs<'_>,
+) -> BackgroundWorkInvariantReport {
+    let mut checks = Vec::new();
+    if matches!(
+        inputs.outcome,
+        QueueClaimOutcomeKind::Claimed { .. } | QueueClaimOutcomeKind::Stolen { .. }
+    ) {
+        checks.push(InvariantCheck {
+            name: "active_broker_lease_required_for_shard_mutation".to_owned(),
+            passed: inputs.after_broker_id == Some(inputs.broker_id)
+                && inputs.after_broker_epoch == Some(inputs.broker_epoch)
+                && inputs
+                    .after_broker_lease_expires_at_ms
+                    .is_some_and(|lease_expires_at_ms| lease_expires_at_ms > inputs.now_ms),
+            detail: format!(
+                "broker={} epoch={} now_ms={} after_broker={:?} after_epoch={:?} lease_expires_at={:?}",
+                inputs.broker_id,
+                inputs.broker_epoch,
+                inputs.now_ms,
+                inputs.after_broker_id,
+                inputs.after_broker_epoch,
+                inputs.after_broker_lease_expires_at_ms
+            ),
+        });
+    }
+
+    if let QueueClaimOutcomeKind::Stolen { claim_token } = inputs.outcome {
+        checks.push(InvariantCheck {
+            name: "claim_timeout_allows_steal".to_owned(),
+            passed: inputs
+                .before_timeout_at_ms
+                .is_some_and(|timeout_at_ms| timeout_at_ms <= inputs.now_ms)
+                && inputs.after_claim_token == Some(claim_token),
+            detail: format!(
+                "claim_token={} before_timeout_at={:?} now_ms={} after_claim_token={:?}",
+                claim_token, inputs.before_timeout_at_ms, inputs.now_ms, inputs.after_claim_token
+            ),
+        });
+    }
+
+    BackgroundWorkInvariantReport { checks }
+}
+
+pub fn evaluate_queue_heartbeat_invariants(
+    inputs: QueueHeartbeatInvariantInputs<'_>,
+) -> BackgroundWorkInvariantReport {
+    let mut checks = Vec::new();
+    if let QueueHeartbeatOutcomeKind::Heartbeat {
+        claim_token,
+        timeout_at_ms,
+    } = inputs.outcome
+    {
+        checks.push(InvariantCheck {
+            name: "active_broker_lease_required_for_shard_mutation".to_owned(),
+            passed: inputs.after_broker_id == Some(inputs.broker_id)
+                && inputs.after_broker_epoch == Some(inputs.broker_epoch)
+                && inputs
+                    .after_broker_lease_expires_at_ms
+                    .is_some_and(|lease_expires_at_ms| lease_expires_at_ms > inputs.now_ms),
+            detail: format!(
+                "broker={} epoch={} now_ms={} after_broker={:?} after_epoch={:?} lease_expires_at={:?}",
+                inputs.broker_id,
+                inputs.broker_epoch,
+                inputs.now_ms,
+                inputs.after_broker_id,
+                inputs.after_broker_epoch,
+                inputs.after_broker_lease_expires_at_ms
+            ),
+        });
+        checks.push(InvariantCheck {
+            name: "worker_heartbeat_requires_matching_claim_token".to_owned(),
+            passed: inputs.after_claim_token == Some(claim_token)
+                && inputs.after_timeout_at_ms == Some(timeout_at_ms)
+                && inputs.claim_token == claim_token,
+            detail: format!(
+                "provided_claim_token={} outcome_claim_token={} after_claim_token={:?} after_timeout_at={:?} expected_timeout_at={}",
+                inputs.claim_token,
+                claim_token,
+                inputs.after_claim_token,
+                inputs.after_timeout_at_ms,
+                timeout_at_ms
+            ),
+        });
+    }
+
+    BackgroundWorkInvariantReport { checks }
+}
+
+pub fn evaluate_queue_complete_invariants(
+    inputs: QueueCompleteInvariantInputs<'_>,
+) -> BackgroundWorkInvariantReport {
+    let mut checks = Vec::new();
+    if matches!(
+        inputs.outcome,
+        QueueCompleteOutcomeKind::Removed | QueueCompleteOutcomeKind::PromotedFollowUp { .. }
+    ) {
+        checks.push(InvariantCheck {
+            name: "active_broker_lease_required_for_shard_mutation".to_owned(),
+            passed: inputs.after_broker_id == Some(inputs.broker_id)
+                && inputs.after_broker_epoch == Some(inputs.broker_epoch)
+                && inputs
+                    .after_broker_lease_expires_at_ms
+                    .is_some_and(|lease_expires_at_ms| lease_expires_at_ms > inputs.now_ms),
+            detail: format!(
+                "broker={} epoch={} now_ms={} after_broker={:?} after_epoch={:?} lease_expires_at={:?}",
+                inputs.broker_id,
+                inputs.broker_epoch,
+                inputs.now_ms,
+                inputs.after_broker_id,
+                inputs.after_broker_epoch,
+                inputs.after_broker_lease_expires_at_ms
+            ),
+        });
+    }
+    if matches!(inputs.outcome, QueueCompleteOutcomeKind::ClaimTokenMismatch) {
+        checks.push(InvariantCheck {
+            name: "stale_claim_token_cannot_complete".to_owned(),
+            passed: inputs.before_claim_token.is_some()
+                && inputs.before_claim_token != Some(inputs.provided_claim_token),
+            detail: format!(
+                "before_claim_token={:?} provided_claim_token={}",
+                inputs.before_claim_token, inputs.provided_claim_token
+            ),
+        });
+    }
+    if inputs.prior_stolen_claim_seen && matches!(inputs.outcome, QueueCompleteOutcomeKind::Removed)
+    {
+        checks.push(InvariantCheck {
+            name: "stolen_job_completes_once".to_owned(),
+            passed: !inputs.after_job_present,
+            detail: format!(
+                "prior_stolen_claim_seen={} after_job_present={}",
+                inputs.prior_stolen_claim_seen, inputs.after_job_present
+            ),
+        });
+    }
+
+    BackgroundWorkInvariantReport { checks }
+}
+
+pub fn evaluate_checkpoint_head_publish_invariants(
+    inputs: CheckpointHeadPublishInvariantInputs<'_>,
+) -> BackgroundWorkInvariantReport {
+    let requested_retention_floor_seq = inputs.requested_retention_floor_seq;
+    let required_progress_satisfied = requested_retention_floor_seq.is_none_or(|requested| {
+        inputs.required_progress.iter().all(|progress| {
+            progress.namespace_id == &inputs.current_head.namespace_id
+                && progress.through_seq >= requested
+        })
+    });
+    let retention_policy_satisfied = requested_retention_floor_seq.is_none_or(|requested| {
+        inputs.retention_policy.is_some_and(|progress| {
+            progress.namespace_id == &inputs.current_head.namespace_id
+                && progress.through_seq >= requested
+        })
+    });
+
+    BackgroundWorkInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "checkpoint_publish_requires_verified_checkpoint".to_owned(),
+                passed: inputs.checkpoint_verified
+                    && inputs.checkpoint_segments_verified
+                    && inputs.current_head.namespace_id == *inputs.checkpoint_namespace
+                    && inputs.checkpoint_seq <= inputs.current_head.seq,
+                detail: format!(
+                    "head_namespace={} checkpoint_namespace={} checkpoint_seq={} head_seq={} checkpoint_verified={} checkpoint_segments_verified={}",
+                    inputs.current_head.namespace_id,
+                    inputs.checkpoint_namespace,
+                    inputs.checkpoint_seq.0,
+                    inputs.current_head.seq.0,
+                    inputs.checkpoint_verified,
+                    inputs.checkpoint_segments_verified
+                ),
+            },
+            InvariantCheck {
+                name: "snapshot_hint_seq_advances_monotonically".to_owned(),
+                passed: inputs.resulting_head.snapshot_hint_seq.unwrap_or(ChangeSeq(0))
+                    >= inputs.current_head.snapshot_hint_seq.unwrap_or(ChangeSeq(0))
+                    && inputs.resulting_head.snapshot_hint_seq.unwrap_or(ChangeSeq(0))
+                        >= inputs.checkpoint_seq,
+                detail: format!(
+                    "before_snapshot_hint={:?} checkpoint_seq={} after_snapshot_hint={:?}",
+                    inputs.current_head.snapshot_hint_seq.map(|seq| seq.0),
+                    inputs.checkpoint_seq.0,
+                    inputs.resulting_head.snapshot_hint_seq.map(|seq| seq.0)
+                ),
+            },
+            InvariantCheck {
+                name: "retention_floor_seq_advances_monotonically".to_owned(),
+                passed: requested_retention_floor_seq.is_none_or(|requested| {
+                    inputs.resulting_head.retention_floor_seq >= inputs.current_head.retention_floor_seq
+                        && inputs.resulting_head.retention_floor_seq == requested
+                }),
+                detail: format!(
+                    "before_retention_floor={} requested_retention_floor={:?} after_retention_floor={}",
+                    inputs.current_head.retention_floor_seq.0,
+                    requested_retention_floor_seq.map(|seq| seq.0),
+                    inputs.resulting_head.retention_floor_seq.0
+                ),
+            },
+            InvariantCheck {
+                name: "retention_floor_seq_requires_checkpoint_coverage".to_owned(),
+                passed: requested_retention_floor_seq
+                    .is_none_or(|requested| requested <= inputs.checkpoint_seq),
+                detail: format!(
+                    "requested_retention_floor={:?} checkpoint_seq={}",
+                    requested_retention_floor_seq.map(|seq| seq.0),
+                    inputs.checkpoint_seq.0
+                ),
+            },
+            InvariantCheck {
+                name: "retention_floor_seq_requires_derived_progress".to_owned(),
+                passed: required_progress_satisfied,
+                detail: format!(
+                    "requested_retention_floor={:?} required_progress={:?}",
+                    requested_retention_floor_seq.map(|seq| seq.0),
+                    inputs
+                        .required_progress
+                        .iter()
+                        .map(|progress| (
+                            progress.namespace_id.as_str().to_owned(),
+                            progress.work_class.to_owned(),
+                            progress.through_seq.0
+                        ))
+                        .collect::<Vec<_>>()
+                ),
+            },
+            InvariantCheck {
+                name: "retention_floor_seq_respects_policy_gate".to_owned(),
+                passed: retention_policy_satisfied,
+                detail: format!(
+                    "requested_retention_floor={:?} retention_policy={:?}",
+                    requested_retention_floor_seq.map(|seq| seq.0),
+                    inputs.retention_policy.map(|progress| (
+                        progress.namespace_id.as_str().to_owned(),
+                        progress.work_class.to_owned(),
+                        progress.through_seq.0
+                    ))
+                ),
+            },
+        ],
+    }
 }
 
 fn metadata_apply_checks_decode_failure(error: &str) -> Vec<InvariantCheck> {
@@ -1463,9 +2087,13 @@ impl AggregateCheck {
 #[cfg(test)]
 mod tests {
     use super::{
+        evaluate_checkpoint_head_publish_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
-        evaluate_namespace_wal_replay_invariants, CheckpointReplayInvariantInputs,
-        CommitInvariantInputs, WalReplayInvariantInputs,
+        evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
+        evaluate_queue_complete_invariants, CheckpointHeadPublishInvariantInputs,
+        CheckpointProgressAuthorizer, CheckpointReplayInvariantInputs, CommitInvariantInputs,
+        ProgressInvariantSnapshot, ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
+        QueueCompleteInvariantInputs, QueueCompleteOutcomeKind, WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
     use loon_core::commit::{
@@ -1474,7 +2102,9 @@ mod tests {
     };
     use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
     use loon_core::wal::{prepare_wal_commit, StoredWalObject};
-    use loon_objectstore::keys::{snapshot_manifest, snapshot_table, SnapshotTableFamily};
+    use loon_objectstore::keys::{
+        derived_progress, snapshot_manifest, snapshot_table, SnapshotTableFamily,
+    };
     use loon_types::{
         checkpoint_page_checksum_sha256, encode_checkpoint_manifest_json,
         encode_checkpoint_segment_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,
@@ -1820,6 +2450,209 @@ mod tests {
         assert!(
             !report
                 .check("checkpoint_segment_rows_restore_basis_metadata")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn progress_invariant_report_marks_monotonic_advance_as_passed() {
+        let namespace_id = NamespaceId::new("ns-progress");
+        let report = evaluate_progress_publish_invariants(ProgressPublishInvariantInputs {
+            expected_namespace: &namespace_id,
+            expected_work_class: "BuildSnapshot",
+            before_through_seq: Some(ChangeSeq(40)),
+            requested_through_seq: ChangeSeq(42),
+            outcome: ProgressPublishOutcomeKind::Advanced,
+            after_progress: &ProgressInvariantSnapshot {
+                object_key: derived_progress(namespace_id.as_str(), "BuildSnapshot"),
+                namespace_id: namespace_id.clone(),
+                work_class: "BuildSnapshot".to_owned(),
+                through_seq: ChangeSeq(42),
+                payload_checksum_valid: true,
+            },
+        });
+
+        assert!(
+            report
+                .check("progress_through_seq_advances_monotonically")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn progress_invariant_report_marks_monotonic_advance_as_failed_when_seq_regresses() {
+        let namespace_id = NamespaceId::new("ns-progress");
+        let report = evaluate_progress_publish_invariants(ProgressPublishInvariantInputs {
+            expected_namespace: &namespace_id,
+            expected_work_class: "BuildSnapshot",
+            before_through_seq: Some(ChangeSeq(40)),
+            requested_through_seq: ChangeSeq(42),
+            outcome: ProgressPublishOutcomeKind::Advanced,
+            after_progress: &ProgressInvariantSnapshot {
+                object_key: derived_progress(namespace_id.as_str(), "BuildSnapshot"),
+                namespace_id: namespace_id.clone(),
+                work_class: "BuildSnapshot".to_owned(),
+                through_seq: ChangeSeq(39),
+                payload_checksum_valid: true,
+            },
+        });
+
+        assert!(
+            !report
+                .check("progress_through_seq_advances_monotonically")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn queue_complete_invariant_report_marks_stale_claim_rejection_as_passed() {
+        let report = evaluate_queue_complete_invariants(QueueCompleteInvariantInputs {
+            broker_id: "broker-b",
+            broker_epoch: 2,
+            now_ms: 30_000,
+            provided_claim_token: "claim-a",
+            before_claim_token: Some("claim-b"),
+            after_broker_id: Some("broker-b"),
+            after_broker_epoch: Some(2),
+            after_broker_lease_expires_at_ms: Some(40_000),
+            after_job_present: true,
+            prior_stolen_claim_seen: false,
+            outcome: QueueCompleteOutcomeKind::ClaimTokenMismatch,
+        });
+
+        assert!(
+            report
+                .check("stale_claim_token_cannot_complete")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn queue_complete_invariant_report_marks_stale_claim_rejection_as_failed_when_token_matches() {
+        let report = evaluate_queue_complete_invariants(QueueCompleteInvariantInputs {
+            broker_id: "broker-b",
+            broker_epoch: 2,
+            now_ms: 30_000,
+            provided_claim_token: "claim-b",
+            before_claim_token: Some("claim-b"),
+            after_broker_id: Some("broker-b"),
+            after_broker_epoch: Some(2),
+            after_broker_lease_expires_at_ms: Some(40_000),
+            after_job_present: true,
+            prior_stolen_claim_seen: false,
+            outcome: QueueCompleteOutcomeKind::ClaimTokenMismatch,
+        });
+
+        assert!(
+            !report
+                .check("stale_claim_token_cannot_complete")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn checkpoint_publish_invariant_report_marks_required_progress_gate_as_passed() {
+        let namespace_id = NamespaceId::new("ns-checkpoint-publish");
+        let current_head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(42),
+            active_fence_token: FenceToken(9),
+            next_inode_id: InodeId(777),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let resulting_head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(42),
+            active_fence_token: FenceToken(9),
+            next_inode_id: InodeId(777),
+            snapshot_hint_seq: Some(ChangeSeq(42)),
+            retention_floor_seq: ChangeSeq(42),
+        };
+        let required_progress = [CheckpointProgressAuthorizer {
+            namespace_id: &namespace_id,
+            work_class: "BuildListingIndex",
+            through_seq: ChangeSeq(42),
+        }];
+        let retention_policy = CheckpointProgressAuthorizer {
+            namespace_id: &namespace_id,
+            work_class: "RetentionPolicy",
+            through_seq: ChangeSeq(42),
+        };
+
+        let report =
+            evaluate_checkpoint_head_publish_invariants(CheckpointHeadPublishInvariantInputs {
+                current_head: &current_head,
+                checkpoint_namespace: &namespace_id,
+                checkpoint_seq: ChangeSeq(42),
+                checkpoint_verified: true,
+                checkpoint_segments_verified: true,
+                requested_retention_floor_seq: Some(ChangeSeq(42)),
+                required_progress: &required_progress,
+                retention_policy: Some(retention_policy),
+                resulting_head: &resulting_head,
+            });
+
+        assert!(
+            report
+                .check("retention_floor_seq_requires_derived_progress")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn checkpoint_publish_invariant_report_marks_required_progress_gate_as_failed_when_progress_lags(
+    ) {
+        let namespace_id = NamespaceId::new("ns-checkpoint-publish");
+        let current_head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(42),
+            active_fence_token: FenceToken(9),
+            next_inode_id: InodeId(777),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let resulting_head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(42),
+            active_fence_token: FenceToken(9),
+            next_inode_id: InodeId(777),
+            snapshot_hint_seq: Some(ChangeSeq(42)),
+            retention_floor_seq: ChangeSeq(42),
+        };
+        let required_progress = [CheckpointProgressAuthorizer {
+            namespace_id: &namespace_id,
+            work_class: "BuildListingIndex",
+            through_seq: ChangeSeq(41),
+        }];
+        let retention_policy = CheckpointProgressAuthorizer {
+            namespace_id: &namespace_id,
+            work_class: "RetentionPolicy",
+            through_seq: ChangeSeq(42),
+        };
+
+        let report =
+            evaluate_checkpoint_head_publish_invariants(CheckpointHeadPublishInvariantInputs {
+                current_head: &current_head,
+                checkpoint_namespace: &namespace_id,
+                checkpoint_seq: ChangeSeq(42),
+                checkpoint_verified: true,
+                checkpoint_segments_verified: true,
+                requested_retention_floor_seq: Some(ChangeSeq(42)),
+                required_progress: &required_progress,
+                retention_policy: Some(retention_policy),
+                resulting_head: &resulting_head,
+            });
+
+        assert!(
+            !report
+                .check("retention_floor_seq_requires_derived_progress")
                 .expect("check")
                 .passed
         );
