@@ -503,7 +503,8 @@ Milestone 8 rollout order:
 - slice 1 covers namespace-core commit/apply, WAL replay, and checkpoint-plus-WAL replay
 - slice 2 covers background-work progress publication, queue shard mutation/repair, and verified
   checkpoint head publish
-- later slices cover content objects and then client transfer/reconciliation invariants
+- slice 3 covers file content objects
+- later slices cover checkpoint immutable objects and then client transfer/reconciliation invariants
 
 Only after the evaluator set is stable should structured invariant reports move into broader
 runtime APIs.

@@ -310,7 +310,7 @@ Deliverables:
 - ordered Milestone 8 rollout:
   - slice 1: namespace-core commit/apply, WAL replay, and checkpoint-plus-WAL replay invariants
   - slice 2: background-work progress publication, queue shard mutation/repair, broker-worker lease flow, and checkpoint head-publish invariants
-  - slice 3: content-object invariants
+  - slice 3: file content-object invariants
   - slice 4: client transfer and reconciliation invariants
 - structured pass/fail invariant reports in rendered traces and checked-in snapshots
 - fixture `expect.invariants` semantics tightened so each listed name must evaluate `passed = true`
@@ -324,8 +324,8 @@ Required rules:
 
 Exit criteria:
 
-- every native namespace-core and background-work fixture that lists invariants is backed by
-  executable evaluation in the harnesses
+- every native namespace-core, background-work, and file-content fixture that lists invariants is
+  backed by executable evaluation in the harnesses
 - traces and snapshots show invariant pass/fail details, not just string presence
 - model/core differential harnesses fail when invariant outcomes diverge even if final state still
   matches

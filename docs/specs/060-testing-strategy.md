@@ -80,8 +80,9 @@ The current executable-invariant rollout is:
 - slice 1: namespace-core commit/apply, WAL replay, and checkpoint-plus-WAL replay invariants
 - slice 2: background-work progress publication, queue shard mutation/repair, broker-worker lease
   flow, and checkpoint head-publish invariants
+- slice 3: file content-object invariants across immutable upload and durable-content validation
 
-Content-object and client invariants are deferred to later slices.
+Checkpoint immutable-object and client invariants are deferred to later slices.
 
 ## Rule for PM-friendly tests
 

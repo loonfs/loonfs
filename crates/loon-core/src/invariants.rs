@@ -71,6 +71,14 @@ pub const BACKGROUND_WORK_CHECKPOINT_HEAD_PUBLISH_INVARIANTS: &[&str] = &[
     "retention_floor_seq_respects_policy_gate",
 ];
 
+pub const CONTENT_OBJECT_FILE_INVARIANTS: &[&str] = &[
+    "content_manifest_checksum_matches_payload",
+    "content_manifest_digest_matches_object",
+    "content_manifest_namespace_matches_request",
+    "content_manifest_blocks_match_descriptors",
+    "content_manifest_file_digest_matches_blocks",
+];
+
 pub const INVARIANTS: &[&str] = &[
     "no_orphaned_live_entry",
     "visible_revision_points_to_durable_content",

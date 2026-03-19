@@ -86,7 +86,7 @@ Rules for the first executable-invariant slice:
 - a fixture-listed invariant now means “this named invariant must evaluate `passed = true` for the
   resulting commit/apply, WAL replay, or checkpoint-plus-WAL replay state”
 - the first slice covers namespace commit/apply, WAL replay, and checkpoint replay only; queue,
-  content-object, and client invariants are deferred
+  checkpoint immutable-object, and client invariants are deferred from this section's harnesses
 
 Why it exists:
 string presence alone is not strong enough proof once the repo already has a semantic core worth

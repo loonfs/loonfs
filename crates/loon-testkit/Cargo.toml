@@ -17,3 +17,5 @@ loon-types = { path = "../loon-types" }
 
 [dev-dependencies]
 loon-queue = { path = "../loon-queue" }
+loon-client = { path = "../loon-client" }
+loon-server = { path = "../loon-server" }

@@ -188,6 +188,18 @@ Failure modes prevented:
 - two uploaders writing different bytes under the same content-addressed key
 - content manifests becoming uploader-version-specific even when file content is identical
 
+Milestone 8 executable-invariant rollout now evaluates the file-content object IDs for this family
+directly in the harnesses:
+
+- `content_manifest_checksum_matches_payload`
+- `content_manifest_digest_matches_object`
+- `content_manifest_namespace_matches_request`
+- `content_manifest_blocks_match_descriptors`
+- `content_manifest_file_digest_matches_blocks`
+
+Checkpoint manifest/segment immutable-object invariant IDs remain deferred to a later Milestone 8
+slice.
+
 ## Initial durable key layout
 
 The first object-store key builders should encode these stable families:

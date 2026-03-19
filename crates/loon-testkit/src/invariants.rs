@@ -5,12 +5,14 @@ use loon_core::metadata::{
 };
 use loon_core::wal::PreparedWalCommit;
 use loon_core::wal::StoredWalObject;
-use loon_objectstore::keys::{derived_progress, queue_shard, snapshot_manifest, wal_commit};
+use loon_objectstore::keys::{blob, derived_progress, queue_shard, snapshot_manifest, wal_commit};
 use loon_types::{
-    checkpoint_page_checksum_sha256, decode_checkpoint_manifest_json,
-    decode_checkpoint_segment_envelope_zstd, decode_wal_commit_envelope_zstd, ChangeSeq,
-    CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointTableFamily,
-    HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo, WalCommitEnvelope, WalOp,
+    checkpoint_page_checksum_sha256, content_manifest_payload_checksum_sha256,
+    decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
+    decode_wal_commit_envelope_zstd, sha256_digest, ChangeSeq, CheckpointRow,
+    CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointTableFamily,
+    ContentManifestEnvelope, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
+    WalCommitEnvelope, WalOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -85,6 +87,60 @@ impl BackgroundWorkInvariantReport {
             })
             .collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ContentObjectInvariantReport {
+    pub checks: Vec<InvariantCheck>,
+}
+
+impl ContentObjectInvariantReport {
+    pub fn check(&self, name: &str) -> Option<&InvariantCheck> {
+        self.checks.iter().find(|check| check.name == name)
+    }
+
+    pub fn passed_names(&self) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|check| check.passed)
+            .map(|check| check.name.clone())
+            .collect()
+    }
+
+    pub fn render_trace_lines(&self, label: &str) -> Vec<String> {
+        self.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "invariants[{label}] {}={} detail={}",
+                    check.name,
+                    if check.passed { "pass" } else { "fail" },
+                    check.detail
+                )
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredContentBlockSnapshot {
+    pub object_key: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentObjectInvariantSnapshot {
+    pub content_manifest_digest: String,
+    pub manifest_object_key: String,
+    pub manifest_envelope: ContentManifestEnvelope,
+    pub manifest_bytes: Vec<u8>,
+    pub available_blocks: BTreeMap<String, StoredContentBlockSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ContentObjectInvariantInputs<'a> {
+    pub expected_namespace: &'a NamespaceId,
+    pub content: &'a ContentObjectInvariantSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -544,6 +600,115 @@ pub fn evaluate_progress_publish_invariants(
                     inputs.requested_through_seq.0,
                     inputs.outcome,
                     inputs.after_progress.through_seq.0
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_content_object_invariants(
+    inputs: ContentObjectInvariantInputs<'_>,
+) -> ContentObjectInvariantReport {
+    let payload_checksum_valid =
+        content_manifest_payload_checksum_sha256(&inputs.content.manifest_envelope.payload)
+            .map(|actual| actual == inputs.content.manifest_envelope.payload_checksum_sha256)
+            .unwrap_or(false);
+    let actual_manifest_digest = sha256_digest(&inputs.content.manifest_bytes);
+    let digest_matches = actual_manifest_digest == inputs.content.content_manifest_digest;
+    let namespace_matches =
+        inputs.content.manifest_envelope.payload.namespace_id == *inputs.expected_namespace;
+
+    let mut reconstructed = Vec::new();
+    let mut block_details = Vec::new();
+    let mut blocks_match = true;
+    for descriptor in &inputs.content.manifest_envelope.payload.blocks {
+        match inputs
+            .content
+            .available_blocks
+            .get(&descriptor.content_digest_sha256)
+        {
+            Some(block) => {
+                let actual_size = block.bytes.len() as u64;
+                let actual_digest = sha256_digest(&block.bytes);
+                let size_matches = actual_size == descriptor.plaintext_size_bytes;
+                let digest_ok = actual_digest == descriptor.content_digest_sha256;
+                if !(size_matches && digest_ok) {
+                    blocks_match = false;
+                }
+                reconstructed.extend_from_slice(&block.bytes);
+                block_details.push(format!(
+                    "{} size={} expected_size={} digest_ok={} object_key={}",
+                    descriptor.content_digest_sha256,
+                    actual_size,
+                    descriptor.plaintext_size_bytes,
+                    digest_ok,
+                    block.object_key
+                ));
+            }
+            None => {
+                blocks_match = false;
+                block_details.push(format!(
+                    "{} missing expected_key={}",
+                    descriptor.content_digest_sha256,
+                    blob(
+                        inputs.expected_namespace.as_str(),
+                        &descriptor.content_digest_sha256
+                    )
+                ));
+            }
+        }
+    }
+
+    let actual_file_size = reconstructed.len() as u64;
+    let actual_file_digest = sha256_digest(&reconstructed);
+    let file_digest_matches = actual_file_size
+        == inputs.content.manifest_envelope.payload.file_size_bytes
+        && actual_file_digest == inputs.content.manifest_envelope.payload.file_digest_sha256;
+
+    ContentObjectInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "content_manifest_checksum_matches_payload".to_owned(),
+                passed: payload_checksum_valid,
+                detail: format!(
+                    "manifest_object_key={} payload_checksum={}",
+                    inputs.content.manifest_object_key,
+                    inputs.content.manifest_envelope.payload_checksum_sha256
+                ),
+            },
+            InvariantCheck {
+                name: "content_manifest_digest_matches_object".to_owned(),
+                passed: digest_matches,
+                detail: format!(
+                    "manifest_object_key={} expected_digest={} actual_digest={}",
+                    inputs.content.manifest_object_key,
+                    inputs.content.content_manifest_digest,
+                    actual_manifest_digest
+                ),
+            },
+            InvariantCheck {
+                name: "content_manifest_namespace_matches_request".to_owned(),
+                passed: namespace_matches,
+                detail: format!(
+                    "expected_namespace={} actual_namespace={}",
+                    inputs.expected_namespace,
+                    inputs.content.manifest_envelope.payload.namespace_id
+                ),
+            },
+            InvariantCheck {
+                name: "content_manifest_blocks_match_descriptors".to_owned(),
+                passed: blocks_match,
+                detail: format!("blocks=[{}]", block_details.join("; ")),
+            },
+            InvariantCheck {
+                name: "content_manifest_file_digest_matches_blocks".to_owned(),
+                passed: file_digest_matches,
+                detail: format!(
+                    "expected_size={} actual_size={} expected_digest={} actual_digest={}",
+                    inputs.content.manifest_envelope.payload.file_size_bytes,
+                    actual_file_size,
+                    inputs.content.manifest_envelope.payload.file_digest_sha256,
+                    actual_file_digest
                 ),
             },
         ],
@@ -2087,13 +2252,14 @@ impl AggregateCheck {
 #[cfg(test)]
 mod tests {
     use super::{
-        evaluate_checkpoint_head_publish_invariants,
+        evaluate_checkpoint_head_publish_invariants, evaluate_content_object_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
         evaluate_queue_complete_invariants, CheckpointHeadPublishInvariantInputs,
         CheckpointProgressAuthorizer, CheckpointReplayInvariantInputs, CommitInvariantInputs,
-        ProgressInvariantSnapshot, ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
-        QueueCompleteInvariantInputs, QueueCompleteOutcomeKind, WalReplayInvariantInputs,
+        ContentObjectInvariantInputs, ContentObjectInvariantSnapshot, ProgressInvariantSnapshot,
+        ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
+        QueueCompleteOutcomeKind, StoredContentBlockSnapshot, WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
     use loon_core::commit::{
@@ -2103,16 +2269,20 @@ mod tests {
     use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
     use loon_core::wal::{prepare_wal_commit, StoredWalObject};
     use loon_objectstore::keys::{
-        derived_progress, snapshot_manifest, snapshot_table, SnapshotTableFamily,
+        blob, content_manifest, derived_progress, snapshot_manifest, snapshot_table,
+        SnapshotTableFamily,
     };
     use loon_types::{
         checkpoint_page_checksum_sha256, encode_checkpoint_manifest_json,
-        encode_checkpoint_segment_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,
-        CheckpointManifestPayload, CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor,
-        CheckpointSegmentEnvelope, CheckpointSegmentPayload, CheckpointTableFamily,
-        CheckpointTableManifest, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
-        NamespaceId, RevisionNo,
+        encode_checkpoint_segment_envelope_zstd, encode_content_manifest_json, sha256_digest,
+        ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage,
+        CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
+        CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest,
+        ContentBlockDescriptor, ContentManifestEnvelope, ContentManifestPayload, FenceToken,
+        HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
+        CONTENT_BLOCK_SIZE_BYTES,
     };
+    use std::collections::BTreeMap;
 
     const NOW_MS: u64 = 1_500;
     const TEST_WRITER_VERSION: &str = "loon-testkit-invariants";
@@ -2658,6 +2828,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn content_invariant_report_marks_all_file_content_checks_as_passed() {
+        let namespace_id = NamespaceId::new("ns-content");
+        let content_bytes = b"hello from loon\n";
+        let snapshot = content_snapshot(&namespace_id, content_bytes, content_bytes);
+
+        let report = evaluate_content_object_invariants(ContentObjectInvariantInputs {
+            expected_namespace: &namespace_id,
+            content: &snapshot,
+        });
+
+        assert!(
+            report
+                .check("content_manifest_file_digest_matches_blocks")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn content_invariant_report_marks_namespace_mismatch_as_failed() {
+        let namespace_id = NamespaceId::new("ns-content");
+        let other_namespace = NamespaceId::new("ns-other");
+        let content_bytes = b"hello from loon\n";
+        let snapshot = content_snapshot(&namespace_id, content_bytes, content_bytes);
+
+        let report = evaluate_content_object_invariants(ContentObjectInvariantInputs {
+            expected_namespace: &other_namespace,
+            content: &snapshot,
+        });
+
+        assert!(
+            !report
+                .check("content_manifest_namespace_matches_request")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn content_invariant_report_marks_file_digest_mismatch_as_failed_when_block_bytes_drift() {
+        let namespace_id = NamespaceId::new("ns-content");
+        let content_bytes = b"hello from loon\n";
+        let drifted_bytes = b"hello from moon\n";
+        let snapshot = content_snapshot(&namespace_id, content_bytes, drifted_bytes);
+
+        let report = evaluate_content_object_invariants(ContentObjectInvariantInputs {
+            expected_namespace: &namespace_id,
+            content: &snapshot,
+        });
+
+        assert!(
+            !report
+                .check("content_manifest_file_digest_matches_blocks")
+                .expect("check")
+                .passed
+        );
+    }
+
     fn simple_replace_wal_object(
         namespace_id: &NamespaceId,
         base_head_seq: ChangeSeq,
@@ -2835,5 +3064,41 @@ mod tests {
 
         let _ = basis_metadata;
         (stored_manifest, segments)
+    }
+
+    fn content_snapshot(
+        namespace_id: &NamespaceId,
+        content_bytes: &[u8],
+        stored_block_bytes: &[u8],
+    ) -> ContentObjectInvariantSnapshot {
+        let block_digest = sha256_digest(content_bytes);
+        let manifest_envelope = ContentManifestEnvelope::from_payload(ContentManifestPayload {
+            namespace_id: namespace_id.clone(),
+            file_size_bytes: content_bytes.len() as u64,
+            file_digest_sha256: sha256_digest(content_bytes),
+            block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
+            blocks: vec![ContentBlockDescriptor {
+                content_digest_sha256: block_digest.clone(),
+                plaintext_size_bytes: content_bytes.len() as u64,
+            }],
+        })
+        .expect("build content manifest envelope");
+        let manifest_bytes =
+            encode_content_manifest_json(&manifest_envelope).expect("encode manifest");
+        let content_manifest_digest = sha256_digest(&manifest_bytes);
+
+        ContentObjectInvariantSnapshot {
+            content_manifest_digest: content_manifest_digest.clone(),
+            manifest_object_key: content_manifest(namespace_id.as_str(), &content_manifest_digest),
+            manifest_envelope,
+            manifest_bytes,
+            available_blocks: BTreeMap::from([(
+                block_digest.clone(),
+                StoredContentBlockSnapshot {
+                    object_key: blob(namespace_id.as_str(), &block_digest),
+                    bytes: stored_block_bytes.to_vec(),
+                },
+            )]),
+        }
     }
 }
