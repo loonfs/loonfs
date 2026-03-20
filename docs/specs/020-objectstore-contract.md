@@ -197,8 +197,16 @@ directly in the harnesses:
 - `content_manifest_blocks_match_descriptors`
 - `content_manifest_file_digest_matches_blocks`
 
-Checkpoint manifest/segment immutable-object invariant IDs remain deferred to a later Milestone 8
-slice.
+Milestone 8 slice 4 now evaluates the checkpoint immutable-object IDs for this family directly in
+the harnesses:
+
+- `checkpoint_segment_payload_checksum_matches_payload`
+- `checkpoint_segment_key_matches_family_and_index`
+- `verified_checkpoint_manifest_requires_durable_segments`
+- `checkpoint_manifest_preserves_head_summary`
+- `checkpoint_manifest_preserves_basis_metadata`
+
+The first client-side invariant slice still remains later and file-transfer-only.
 
 ## Initial durable key layout
 

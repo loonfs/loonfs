@@ -81,8 +81,8 @@ The current executable-invariant rollout is:
 - slice 2: background-work progress publication, queue shard mutation/repair, broker-worker lease
   flow, and checkpoint head-publish invariants
 - slice 3: file content-object invariants across immutable upload and durable-content validation
-
-Checkpoint immutable-object and client invariants are deferred to later slices.
+- slice 4: checkpoint immutable-object invariants for checkpoint builder manifest/segment outputs
+- slice 5: client transfer invariants, starting with file download/upload flows only
 
 ## Rule for PM-friendly tests
 

@@ -16,6 +16,11 @@ use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
+use loon_testkit::invariants::{
+    evaluate_local_only_upload_transfer_invariants, LocalOnlyUploadTransferInvariantInputs,
+    LocalOnlyUploadTransferOutcomeKind,
+};
+use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind,
@@ -188,6 +193,178 @@ fn upload_local_create_from_path_stale_transfer_resets_and_records_temp_issue() 
 }
 
 #[test]
+fn upload_local_create_progress_invariant_trace_matches_checked_in_artifact() {
+    let report = run_progress_upload_local_create_invariant_report();
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-transfer-invariants/client/upload_local_create_from_path_progresses_one_block_per_tick.txt"
+        )
+    );
+}
+
+#[test]
+fn upload_local_create_bind_cleanup_invariant_passes() {
+    let scenario =
+        load_fixture("client/upload_local_create_from_path_binds_and_restarts_converged.yaml");
+    let mut initial: InitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
+    let mut expect: ExpectedState = scenario.decode_expect().expect("decode expectations");
+    let temp_dir = TestDir::new("client-upload-local-create-bind-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    let execute = actions[0].execute().expect("execute action first");
+    let source_path = write_source_file(&source_root, &initial.local_file);
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.local_only_state.namespace_id,
+        &source_path,
+    )
+    .expect("build expected upload");
+    fill_upload_expectations(&mut initial, &mut expect, &expected_upload);
+    seed_client_state(&db_path, &initial, None);
+
+    let executed = run_execute(
+        &db_path,
+        &store,
+        &initial.local_only_state.client_file_id,
+        &source_path,
+        &execute,
+    );
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after bind");
+    let report =
+        evaluate_local_only_upload_transfer_invariants(LocalOnlyUploadTransferInvariantInputs {
+            before_block_index: None,
+            after_transfer_block_index: None,
+            block_count: 1,
+            ensured_upload_present: executed.ensured_upload.is_some(),
+            upload_reused: executed.upload_reused,
+            before_pending_request_id: None,
+            after_pending_request_id: None,
+            reset_issue_kind: None,
+            reset_issue_reason: None,
+            local_only_file_present_after: db
+                .load_local_only_file(&initial.local_only_state.client_file_id)
+                .expect("load local-only file after bind")
+                .is_some(),
+            local_only_issue_count_after: db
+                .load_local_only_conflicts_and_errors(&initial.local_only_state.client_file_id)
+                .expect("load local-only issues after bind")
+                .len(),
+            outcome: LocalOnlyUploadTransferOutcomeKind::Completed,
+        });
+
+    assert!(
+        report
+            .check("local_only_upload_bind_clears_temp_issue_and_transfer_ledger")
+            .expect("bind cleanup check")
+            .passed,
+        "{}",
+        render_trace(&scenario, &report.render_trace_lines("local-only-bind"))
+    );
+}
+
+#[test]
+fn stale_local_only_upload_reset_records_transfer_reset_invariant() {
+    let scenario = load_fixture(
+        "client/upload_local_create_from_path_stale_transfer_resets_and_records_temp_issue.yaml",
+    );
+    let initial: InitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
+    let temp_dir = TestDir::new("client-upload-local-create-reset-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch local object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    let execute = actions[0].execute().expect("execute action first");
+    let source_path = write_source_file(&source_root, &initial.local_file);
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.local_only_state.namespace_id,
+        &source_path,
+    )
+    .expect("build expected upload");
+    let transfer_row = initial
+        .local_only_transfer_ledger
+        .as_ref()
+        .map(|seed| seed_transfer_ledger_row(&initial, seed, &expected_upload));
+    seed_client_state(&db_path, &initial, transfer_row.as_ref());
+    if let Some(seed) = &initial.local_only_transfer_ledger {
+        seed_uploaded_prefix_for_transfer(&store, &source_path, &expected_upload, seed.block_index);
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    let executed = execute_upload_local_create_from_path(
+        &mut db,
+        &store,
+        &initial.local_only_state.client_file_id,
+        &source_path,
+        execute.uploaded_at_ms,
+        execute.created_at_ms,
+        |_request| unreachable!("progress tick should not dispatch"),
+    )
+    .expect("reset tick should succeed");
+    let transfer = match executed {
+        UploadLocalCreateExecution::Progressed(progress) => progress.transfer,
+        other => panic!("expected progressed upload_local_create after reset, got {other:?}"),
+    };
+    drop(db);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after reset");
+    let issue = db
+        .load_local_only_conflicts_and_errors(&initial.local_only_state.client_file_id)
+        .expect("load local-only reset issue")
+        .into_iter()
+        .next()
+        .expect("expected local-only reset issue");
+    let report =
+        evaluate_local_only_upload_transfer_invariants(LocalOnlyUploadTransferInvariantInputs {
+            before_block_index: initial
+                .local_only_transfer_ledger
+                .as_ref()
+                .map(|seed| seed.block_index),
+            after_transfer_block_index: Some(transfer.block_index),
+            block_count: transfer.block_count,
+            ensured_upload_present: false,
+            upload_reused: false,
+            before_pending_request_id: None,
+            after_pending_request_id: None,
+            reset_issue_kind: Some(issue.kind.as_str()),
+            reset_issue_reason: issue.detail_json["reason"].as_str(),
+            local_only_file_present_after: true,
+            local_only_issue_count_after: 1,
+            outcome: LocalOnlyUploadTransferOutcomeKind::ResetProgressed,
+        });
+
+    assert!(
+        report
+            .check("local_only_upload_transfer_reset_records_durable_issue")
+            .expect("reset check")
+            .passed,
+        "{}",
+        render_trace(&scenario, &report.render_trace_lines("local-only-reset"))
+    );
+}
+
+#[test]
 fn upload_local_create_retry_reuses_pending_request_without_rereading_source_path() {
     let scenario =
         load_fixture("client/upload_local_create_from_path_binds_and_restarts_converged.yaml");
@@ -262,6 +439,27 @@ fn upload_local_create_retry_reuses_pending_request_without_rereading_source_pat
         )
         .expect("load temp upload transfer ledger"),
         None
+    );
+    let report =
+        evaluate_local_only_upload_transfer_invariants(LocalOnlyUploadTransferInvariantInputs {
+            before_block_index: None,
+            after_transfer_block_index: None,
+            block_count: 0,
+            ensured_upload_present: executed.ensured_upload.is_some(),
+            upload_reused: executed.upload_reused,
+            before_pending_request_id: Some(expect.pending_request_id.as_str()),
+            after_pending_request_id: Some(executed.dispatched.pending.client_request_id.as_str()),
+            reset_issue_kind: None,
+            reset_issue_reason: None,
+            local_only_file_present_after: true,
+            local_only_issue_count_after: 0,
+            outcome: LocalOnlyUploadTransferOutcomeKind::RetryReusedPending,
+        });
+    assert!(
+        report
+            .check("local_only_upload_retry_reuses_pending_client_mutation")
+            .expect("retry check")
+            .passed
     );
 }
 
@@ -522,6 +720,87 @@ fn run_upload_local_create_fixture(relative_path: &str, temp_label: &str) {
         error,
         ExecuteUploadLocalCreateError::StateDb(StateDbError::LocalOnlyFileMissing { .. })
     ));
+}
+
+struct LocalOnlyUploadInvariantFixtureRunReport {
+    rendered_trace: String,
+}
+
+fn run_progress_upload_local_create_invariant_report() -> LocalOnlyUploadInvariantFixtureRunReport {
+    let scenario =
+        load_fixture("client/upload_local_create_from_path_progresses_one_block_per_tick.yaml");
+    let initial: InitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<FixtureAction> = scenario.decode_actions().expect("decode actions");
+    let temp_dir = TestDir::new("client-upload-local-create-progress-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    seed_client_state(&db_path, &initial, None);
+    let execute = actions[0].execute().expect("execute action first");
+    let source_path = write_source_file(&source_root, &initial.local_file);
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    let executed = execute_upload_local_create_from_path(
+        &mut db,
+        &store,
+        &initial.local_only_state.client_file_id,
+        &source_path,
+        execute.uploaded_at_ms,
+        execute.created_at_ms,
+        |_request| unreachable!("progress tick should not dispatch"),
+    )
+    .expect("progress tick should succeed");
+    let transfer = match executed {
+        UploadLocalCreateExecution::Progressed(progress) => progress.transfer,
+        other => panic!("expected progressed upload_local_create, got {other:?}"),
+    };
+    drop(db);
+
+    let report =
+        evaluate_local_only_upload_transfer_invariants(LocalOnlyUploadTransferInvariantInputs {
+            before_block_index: None,
+            after_transfer_block_index: Some(transfer.block_index),
+            block_count: transfer.block_count,
+            ensured_upload_present: false,
+            upload_reused: false,
+            before_pending_request_id: None,
+            after_pending_request_id: None,
+            reset_issue_kind: None,
+            reset_issue_reason: None,
+            local_only_file_present_after: true,
+            local_only_issue_count_after: 0,
+            outcome: LocalOnlyUploadTransferOutcomeKind::Progressed,
+        });
+
+    assert!(
+        report
+            .check("local_only_upload_block_index_advances_monotonically")
+            .expect("progress check")
+            .passed
+    );
+    assert!(
+        report
+            .check("local_only_upload_dispatch_waits_for_terminal_block")
+            .expect("dispatch check")
+            .passed
+    );
+
+    let trace = vec![format!(
+        "transfer block_index={} block_count={}",
+        transfer.block_index, transfer.block_count
+    )]
+    .into_iter()
+    .chain(report.render_trace_lines("local-only-upload-progress"))
+    .collect::<Vec<_>>();
+
+    LocalOnlyUploadInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
 }
 
 fn run_execute(

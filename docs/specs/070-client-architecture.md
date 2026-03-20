@@ -1536,6 +1536,37 @@ Rules:
   - `upload_local_create_upload_failed`
   - `upload_local_create_transfer_reset`
 
+## Executable invariant surface for Milestone 8 slice 5
+
+The first client-side executable invariant slice is file-transfer-only.
+
+Runtime `checked_invariants` strings remain unchanged for compatibility. The executable proof
+surface lives in harness-side reports first.
+
+The file-transfer invariant IDs for this slice are:
+
+- download flow:
+  - `download_transfer_block_index_advances_monotonically`
+  - `download_transfer_reset_records_durable_issue`
+  - `download_completion_clears_transfer_ledger`
+  - `download_materialization_updates_local_state_and_sync_anchor`
+- inode-keyed upload flow:
+  - `inode_upload_block_index_advances_monotonically`
+  - `inode_upload_dispatch_waits_for_terminal_block`
+  - `inode_upload_retry_reuses_pending_inode_mutation`
+  - `inode_upload_completion_clears_transfer_ledger`
+  - `inode_upload_transfer_reset_records_durable_issue`
+- temp-identity upload flow:
+  - `local_only_upload_block_index_advances_monotonically`
+  - `local_only_upload_dispatch_waits_for_terminal_block`
+  - `local_only_upload_retry_reuses_pending_client_mutation`
+  - `local_only_upload_completion_clears_temp_transfer_ledger`
+  - `local_only_upload_bind_clears_temp_issue_and_transfer_ledger`
+  - `local_only_upload_transfer_reset_records_durable_issue`
+
+Remote rename/delete reconciliation and directory-specific client invariants remain out of scope
+for this first client slice.
+
 ## SQLite hardening boundary (schema v11)
 
 The next schema version does not add new client-truth tables. It hardens the existing durable

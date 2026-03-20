@@ -10,6 +10,11 @@ use loon_client::upload::{upload_small_file_from_path, UploadedContent};
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{blob, content_manifest};
 use loon_objectstore::ObjectStore;
+use loon_testkit::invariants::{
+    evaluate_download_transfer_invariants, DownloadTransferInvariantInputs,
+    DownloadTransferOutcomeKind,
+};
+use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{
     content_manifest_digest_sha256, encode_content_manifest_json, sha256_digest,
@@ -237,6 +242,322 @@ fn execute_next_client_action_stale_download_stage_resets_and_records_issue() {
         !target_path.exists(),
         "target file should still be absent after non-terminal tick"
     );
+}
+
+#[test]
+fn download_remote_only_multitick_invariant_trace_matches_checked_in_artifact() {
+    let report = run_multitick_download_invariant_report();
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-transfer-invariants/client/execute_next_client_action_multitick_remote_only_file_download_survives_restart.txt"
+        )
+    );
+}
+
+#[test]
+fn stale_download_stage_reset_records_transfer_reset_invariant() {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_stale_download_stage_resets_and_records_issue.yaml",
+    );
+    let initial: MaterializeInitialState = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<MaterializeFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let expect: MaterializeProgressExpectedState = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-only-materialization-reset-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let local_root = temp_dir.path().join("local");
+    let remote_seed_root = temp_dir.path().join("remote-seed");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&local_root).expect("create local root");
+    fs::create_dir_all(&remote_seed_root).expect("create remote seed root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let execute = actions[0].execute().expect("execute action first");
+    let target_relative = execute
+        .source_path_relative
+        .as_deref()
+        .expect("fixture should include target path");
+    let target_path = local_root.join(target_relative);
+    fs::create_dir_all(target_path.parent().expect("target parent")).expect("create target parent");
+
+    let seeded_remote = seed_remote_content(
+        &store,
+        &initial.remote_state.namespace_id,
+        &initial.remote_file,
+        &remote_seed_root,
+    );
+    let mut seeded_remote_state = initial.remote_state.clone();
+    fill_remote_state_digests(&mut seeded_remote_state, &seeded_remote);
+    seed_remote_only_state(
+        &db_path,
+        &seeded_remote_state,
+        &initial.local_state,
+        &initial.planned_actions,
+        initial.transfer_ledger.as_ref(),
+        &seeded_remote,
+        &initial.remote_file,
+        &target_path,
+        initial.stale_stage_bytes_utf8.as_deref(),
+    );
+
+    let before_transfer = initial
+        .transfer_ledger
+        .as_ref()
+        .expect("reset fixture should seed transfer ledger")
+        .block_index;
+    let executed =
+        run_execute_next_client_action(&db_path, &store, Some(target_path.as_path()), &execute)
+            .expect("one action should be scheduled");
+    let transfer = match executed {
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Progressed(
+            progressed,
+        )) => progressed.transfer,
+        other => panic!("expected progressed download after reset, got {other:?}"),
+    };
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after reset");
+    let issues = db
+        .load_conflicts_and_errors(
+            &seeded_remote_state.namespace_id,
+            seeded_remote_state.inode_id,
+        )
+        .expect("load transfer reset issue");
+    let issue = issues.first().expect("expected reset issue");
+    let report = evaluate_download_transfer_invariants(DownloadTransferInvariantInputs {
+        before_block_index: Some(before_transfer),
+        after_transfer_block_index: Some(transfer.block_index),
+        block_count: transfer.block_count,
+        reset_issue_kind: Some(issue.kind.as_str()),
+        reset_issue_reason: issue.detail_json["reason"].as_str(),
+        remote_synced_seq: seeded_remote_state.observed_seq,
+        remote_revision_no: seeded_remote_state.revision_no,
+        remote_content_digest: seeded_remote_state.content_digest.as_deref(),
+        remote_content_manifest_digest: seeded_remote_state.content_manifest_digest.as_deref(),
+        local_exists_on_disk: false,
+        local_dirty: initial.local_state.dirty,
+        local_content_digest: initial.local_state.content_digest.as_deref(),
+        sync_anchor_seq: None,
+        sync_anchor_revision_no: None,
+        sync_anchor_content_digest: None,
+        sync_anchor_content_manifest_digest: None,
+        outcome: DownloadTransferOutcomeKind::ResetProgressed,
+    });
+
+    assert!(
+        report
+            .check("download_transfer_reset_records_durable_issue")
+            .expect("check")
+            .passed,
+        "{}",
+        render_trace(&scenario, &report.render_trace_lines("download-reset"))
+    );
+    assert_eq!(transfer.block_index, expect.transfer_ledger.block_index);
+}
+
+struct DownloadInvariantFixtureRunReport {
+    rendered_trace: String,
+}
+
+fn run_multitick_download_invariant_report() -> DownloadInvariantFixtureRunReport {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_multitick_remote_only_file_download_survives_restart.yaml",
+    );
+    let mut initial: MaterializeInitialState = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<MaterializeFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let mut expect: MaterializeExpectedState = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-only-materialization-multitick-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let local_root = temp_dir.path().join("local");
+    let remote_seed_root = temp_dir.path().join("remote-seed");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&local_root).expect("create local root");
+    fs::create_dir_all(&remote_seed_root).expect("create remote seed root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let first_execute = actions[0].execute().expect("first execute action");
+    let second_execute = actions[2].execute().expect("second execute action");
+    let planner_tick = actions[4].planner().expect("planner action fifth");
+
+    let target_relative = first_execute
+        .source_path_relative
+        .as_deref()
+        .expect("fixture should include target path");
+    let target_path = local_root.join(target_relative);
+    fs::create_dir_all(target_path.parent().expect("target parent")).expect("create target parent");
+
+    let seeded_remote = seed_remote_content(
+        &store,
+        &initial.remote_state.namespace_id,
+        &initial.remote_file,
+        &remote_seed_root,
+    );
+    fill_materialization_expectations(&mut initial, &mut expect, &seeded_remote);
+    seed_remote_only_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.planned_actions,
+        initial.transfer_ledger.as_ref(),
+        &seeded_remote,
+        &initial.remote_file,
+        &target_path,
+        initial.stale_stage_bytes_utf8.as_deref(),
+    );
+
+    let first = run_execute_next_client_action(
+        &db_path,
+        &store,
+        Some(target_path.as_path()),
+        &first_execute,
+    )
+    .expect("first action should be scheduled");
+    let first_transfer = match first {
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Progressed(
+            progressed,
+        )) => progressed.transfer,
+        other => panic!("expected progressed download on first tick, got {other:?}"),
+    };
+    let progress_report = evaluate_download_transfer_invariants(DownloadTransferInvariantInputs {
+        before_block_index: None,
+        after_transfer_block_index: Some(first_transfer.block_index),
+        block_count: first_transfer.block_count,
+        reset_issue_kind: None,
+        reset_issue_reason: None,
+        remote_synced_seq: initial.remote_state.observed_seq,
+        remote_revision_no: initial.remote_state.revision_no,
+        remote_content_digest: initial.remote_state.content_digest.as_deref(),
+        remote_content_manifest_digest: initial.remote_state.content_manifest_digest.as_deref(),
+        local_exists_on_disk: false,
+        local_dirty: initial.local_state.dirty,
+        local_content_digest: initial.local_state.content_digest.as_deref(),
+        sync_anchor_seq: None,
+        sync_anchor_revision_no: None,
+        sync_anchor_content_digest: None,
+        sync_anchor_content_manifest_digest: None,
+        outcome: DownloadTransferOutcomeKind::Progressed,
+    });
+
+    let second = run_execute_next_client_action(
+        &db_path,
+        &store,
+        Some(target_path.as_path()),
+        &second_execute,
+    )
+    .expect("second action should be scheduled");
+    match second {
+        NextClientAction::ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution::Completed(
+            _download,
+        )) => {}
+        other => panic!("expected completed download on second tick, got {other:?}"),
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen client state DB after second tick");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan converged inode after restart");
+    let views = db
+        .load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+        .expect("load converged views");
+    let completion_report =
+        evaluate_download_transfer_invariants(DownloadTransferInvariantInputs {
+            before_block_index: Some(first_transfer.block_index),
+            after_transfer_block_index: None,
+            block_count: first_transfer.block_count,
+            reset_issue_kind: None,
+            reset_issue_reason: None,
+            remote_synced_seq: views
+                .remote
+                .as_ref()
+                .expect("remote state should exist")
+                .observed_seq,
+            remote_revision_no: views
+                .remote
+                .as_ref()
+                .expect("remote state should exist")
+                .revision_no,
+            remote_content_digest: views
+                .remote
+                .as_ref()
+                .expect("remote state should exist")
+                .content_digest
+                .as_deref(),
+            remote_content_manifest_digest: views
+                .remote
+                .as_ref()
+                .expect("remote state should exist")
+                .content_manifest_digest
+                .as_deref(),
+            local_exists_on_disk: views
+                .local
+                .as_ref()
+                .expect("local state should exist")
+                .exists_on_disk,
+            local_dirty: views
+                .local
+                .as_ref()
+                .expect("local state should exist")
+                .dirty,
+            local_content_digest: views
+                .local
+                .as_ref()
+                .expect("local state should exist")
+                .content_digest
+                .as_deref(),
+            sync_anchor_seq: views.sync_anchor.as_ref().map(|anchor| anchor.synced_seq),
+            sync_anchor_revision_no: views.sync_anchor.as_ref().map(|anchor| anchor.revision_no),
+            sync_anchor_content_digest: views
+                .sync_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.content_digest.as_deref()),
+            sync_anchor_content_manifest_digest: views
+                .sync_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.content_manifest_digest.as_deref()),
+            outcome: DownloadTransferOutcomeKind::Completed,
+        });
+
+    assert!(
+        progress_report
+            .check("download_transfer_block_index_advances_monotonically")
+            .expect("progress check")
+            .passed
+    );
+    assert!(
+        completion_report
+            .check("download_completion_clears_transfer_ledger")
+            .expect("completion check")
+            .passed
+    );
+    assert!(
+        completion_report
+            .check("download_materialization_updates_local_state_and_sync_anchor")
+            .expect("materialization check")
+            .passed
+    );
+
+    let trace = vec![
+        format!(
+            "planner_result={:?} remote={:?} local={:?} sync_anchor={:?}",
+            planner_result, views.remote, views.local, views.sync_anchor
+        ),
+        format!(
+            "first_transfer block_index={} block_count={}",
+            first_transfer.block_index, first_transfer.block_count
+        ),
+    ]
+    .into_iter()
+    .chain(progress_report.render_trace_lines("download-progress"))
+    .chain(completion_report.render_trace_lines("download-complete"))
+    .collect::<Vec<_>>();
+
+    DownloadInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
 }
 
 fn run_remote_only_materialization_fixture(relative_path: &str, temp_label: &str) {

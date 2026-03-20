@@ -1,0 +1,8 @@
+scenario=upload_local_create_from_path_progresses_one_block_per_tick kind=client schema_version=1 seed=None actions=1 faults=0 expect_keys=5
+  1. transfer block_index=1 block_count=2
+  2. invariants[local-only-upload-progress] local_only_upload_block_index_advances_monotonically=pass detail=before_block_index=None after_block_index=Some(1) block_count=2 outcome=Progressed
+  3. invariants[local-only-upload-progress] local_only_upload_dispatch_waits_for_terminal_block=pass detail=outcome=Progressed ensured_upload_present=false after_pending_request_id=None
+  4. invariants[local-only-upload-progress] local_only_upload_retry_reuses_pending_client_mutation=fail detail=outcome=Progressed upload_reused=false before_pending=None after_pending=None
+  5. invariants[local-only-upload-progress] local_only_upload_completion_clears_temp_transfer_ledger=fail detail=outcome=Progressed after_transfer_block_index=Some(1)
+  6. invariants[local-only-upload-progress] local_only_upload_bind_clears_temp_issue_and_transfer_ledger=fail detail=outcome=Progressed after_transfer_block_index=Some(1) local_only_file_present_after=true issue_count_after=0
+  7. invariants[local-only-upload-progress] local_only_upload_transfer_reset_records_durable_issue=fail detail=outcome=Progressed issue_kind=None issue_reason=None

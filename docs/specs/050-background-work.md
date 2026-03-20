@@ -316,3 +316,6 @@ Milestone 8 stays harness-first for now:
 - runtime `checked_invariants` strings remain unchanged
 - traces and snapshots must show structured pass/fail details
 - model/core differential harnesses must agree on invariant outcomes, not only final state
+
+The next Milestone 8 slice after this one is checkpoint immutable objects, followed by the first
+client slice for file transfer flows only.

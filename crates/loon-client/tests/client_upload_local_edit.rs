@@ -16,6 +16,11 @@ use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
+use loon_testkit::invariants::{
+    evaluate_inode_upload_transfer_invariants, InodeUploadTransferInvariantInputs,
+    InodeUploadTransferOutcomeKind,
+};
+use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind,
@@ -256,6 +261,118 @@ fn execute_next_client_action_stale_upload_local_edit_transfer_resets_and_record
 }
 
 #[test]
+fn upload_local_edit_multitick_invariant_trace_matches_checked_in_artifact() {
+    let report = run_multitick_upload_local_edit_invariant_report();
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-transfer-invariants/client/execute_next_client_action_multitick_upload_local_edit_survives_restart.txt"
+        )
+    );
+}
+
+#[test]
+fn stale_upload_local_edit_reset_records_transfer_reset_invariant() {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_stale_upload_local_edit_transfer_resets_and_records_issue.yaml",
+    );
+    let initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<EditFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let temp_dir = TestDir::new("client-upload-local-edit-reset-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    let execute = actions[0].execute().expect("execute action first");
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    let source_path = write_source_file(
+        &source_root,
+        execute
+            .source_path_relative
+            .as_ref()
+            .expect("fixture should include source path"),
+        &initial.local_file,
+    );
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.remote_state.namespace_id,
+        &source_path,
+    )
+    .expect("plan expected uploaded content");
+    let transfer_row = initial
+        .transfer_ledger
+        .as_ref()
+        .map(|seed| seed_transfer_ledger_row(&initial, seed, &expected_upload));
+    seed_bound_edit_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.sync_anchor,
+        &initial.planned_action,
+        transfer_row.as_ref(),
+    );
+    if let Some(seed) = &initial.transfer_ledger {
+        seed_uploaded_prefix_for_transfer(&store, &source_path, &expected_upload, seed.block_index);
+    }
+
+    let before_transfer = transfer_row
+        .as_ref()
+        .expect("reset fixture should seed transfer row")
+        .block_index;
+    let executed = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(source_path.as_path()),
+        execute,
+    )
+    .expect("one action should execute")
+    .expect("one action should be scheduled");
+    let transfer = match executed {
+        NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Progressed(
+            progressed,
+        )) => progressed.transfer,
+        other => panic!("expected progressed upload_local_edit after reset, got {other:?}"),
+    };
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after reset");
+    let issues = db
+        .load_conflicts_and_errors(
+            &initial.remote_state.namespace_id,
+            initial.remote_state.inode_id,
+        )
+        .expect("load transfer reset issue");
+    let issue = issues.first().expect("expected reset issue");
+    let report = evaluate_inode_upload_transfer_invariants(InodeUploadTransferInvariantInputs {
+        before_block_index: Some(before_transfer),
+        after_transfer_block_index: Some(transfer.block_index),
+        block_count: transfer.block_count,
+        ensured_upload_present: false,
+        upload_reused: false,
+        before_pending_request_id: None,
+        after_pending_request_id: None,
+        reset_issue_kind: Some(issue.kind.as_str()),
+        reset_issue_reason: issue.detail_json["reason"].as_str(),
+        outcome: InodeUploadTransferOutcomeKind::ResetProgressed,
+    });
+
+    assert!(
+        report
+            .check("inode_upload_transfer_reset_records_durable_issue")
+            .expect("check")
+            .passed,
+        "{}",
+        render_trace(&scenario, &report.render_trace_lines("inode-upload-reset"))
+    );
+}
+
+#[test]
 fn execute_next_client_action_retries_upload_local_edit_without_source_path_once_pending() {
     let scenario = load_fixture(
         "client/execute_next_client_action_upload_local_edit_updates_bound_inode.yaml",
@@ -419,6 +536,31 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
     );
     assert!(edit.upload_reused, "retry should reuse uploaded content");
     assert_eq!(edit.ensured_upload, Some(expect.inode_upload.into_row()));
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after retry");
+    let report = evaluate_inode_upload_transfer_invariants(InodeUploadTransferInvariantInputs {
+        before_block_index: None,
+        after_transfer_block_index: None,
+        block_count: 0,
+        ensured_upload_present: edit.ensured_upload.is_some(),
+        upload_reused: edit.upload_reused,
+        before_pending_request_id: Some(pending.client_request_id.as_str()),
+        after_pending_request_id: Some(edit.dispatched.pending.client_request_id.as_str()),
+        reset_issue_kind: None,
+        reset_issue_reason: None,
+        outcome: InodeUploadTransferOutcomeKind::RetryReusedPending,
+    });
+    assert!(
+        report
+            .check("inode_upload_retry_reuses_pending_inode_mutation")
+            .expect("retry check")
+            .passed
+    );
+    assert_eq!(
+        db.load_pending_inode_mutation(edit.dispatched.pending.client_request_id.as_str())
+            .expect("load pending inode mutation after retry"),
+        None
+    );
 }
 
 #[test]
@@ -749,6 +891,170 @@ fn run_upload_local_edit_fixture(relative_path: &str, temp_label: &str) {
             .expect("load upload transfer ledger after success"),
             None
         );
+    }
+}
+
+struct InodeUploadInvariantFixtureRunReport {
+    rendered_trace: String,
+}
+
+fn run_multitick_upload_local_edit_invariant_report() -> InodeUploadInvariantFixtureRunReport {
+    let scenario = load_fixture(
+        "client/execute_next_client_action_multitick_upload_local_edit_survives_restart.yaml",
+    );
+    let mut initial: EditInitialState = scenario.decode_initial().expect("decode initial state");
+    let actions: Vec<EditFixtureAction> = scenario.decode_actions().expect("decode actions");
+    let mut expect: EditExpectedState = scenario.decode_expect().expect("decode expectations");
+    let temp_dir = TestDir::new("client-upload-local-edit-multitick-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let scratch_store_root = temp_dir.path().join("scratch-objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&scratch_store_root).expect("create scratch object store root");
+    fs::create_dir_all(&source_root).expect("create local source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let scratch_store =
+        LocalFsStore::new(&scratch_store_root).expect("create scratch local object store");
+
+    let first_execute = actions[0].execute().expect("first execute");
+    let second_execute = actions[2].execute().expect("second execute");
+    let planner_tick = actions[4].planner().expect("planner tick fifth");
+
+    seed_head_and_lease(&store, &initial.head, &initial.lease);
+    let source_path = write_source_file(
+        &source_root,
+        first_execute
+            .source_path_relative
+            .as_ref()
+            .expect("fixture should include source path"),
+        &initial.local_file,
+    );
+    let expected_upload = upload_small_file_from_path(
+        &scratch_store,
+        &initial.remote_state.namespace_id,
+        &source_path,
+    )
+    .expect("plan expected uploaded content");
+    fill_upload_expectations(&mut initial, &mut expect, &expected_upload);
+    seed_bound_edit_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.sync_anchor,
+        &initial.planned_action,
+        None,
+    );
+
+    let first = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(source_path.as_path()),
+        &first_execute,
+    )
+    .expect("first action should execute")
+    .expect("first action should be scheduled");
+    let first_transfer = match first {
+        NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Progressed(
+            progressed,
+        )) => progressed.transfer,
+        other => panic!("expected progressed upload_local_edit on first tick, got {other:?}"),
+    };
+    let progress_report =
+        evaluate_inode_upload_transfer_invariants(InodeUploadTransferInvariantInputs {
+            before_block_index: None,
+            after_transfer_block_index: Some(first_transfer.block_index),
+            block_count: first_transfer.block_count,
+            ensured_upload_present: false,
+            upload_reused: false,
+            before_pending_request_id: None,
+            after_pending_request_id: None,
+            reset_issue_kind: None,
+            reset_issue_reason: None,
+            outcome: InodeUploadTransferOutcomeKind::Progressed,
+        });
+
+    let second = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        Some(source_path.as_path()),
+        &second_execute,
+    )
+    .expect("second action should execute")
+    .expect("second action should be scheduled");
+    let completed = match second {
+        NextClientAction::ExecutedUploadLocalEdit(UploadLocalEditExecution::Completed(edit)) => {
+            edit
+        }
+        other => panic!("expected completed upload_local_edit on second tick, got {other:?}"),
+    };
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after second tick");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan converged inode after restart");
+    let after_pending = expect.pending_request_id.as_deref().and_then(|request_id| {
+        db.load_pending_inode_mutation(request_id)
+            .expect("load pending")
+    });
+    let completion_report =
+        evaluate_inode_upload_transfer_invariants(InodeUploadTransferInvariantInputs {
+            before_block_index: Some(first_transfer.block_index),
+            after_transfer_block_index: None,
+            block_count: first_transfer.block_count,
+            ensured_upload_present: completed.ensured_upload.is_some(),
+            upload_reused: completed.upload_reused,
+            before_pending_request_id: None,
+            after_pending_request_id: after_pending
+                .as_ref()
+                .map(|pending| pending.client_request_id.as_str()),
+            reset_issue_kind: None,
+            reset_issue_reason: None,
+            outcome: InodeUploadTransferOutcomeKind::Completed,
+        });
+
+    assert!(
+        progress_report
+            .check("inode_upload_block_index_advances_monotonically")
+            .expect("progress check")
+            .passed
+    );
+    assert!(
+        progress_report
+            .check("inode_upload_dispatch_waits_for_terminal_block")
+            .expect("dispatch check")
+            .passed
+    );
+    assert!(
+        completion_report
+            .check("inode_upload_completion_clears_transfer_ledger")
+            .expect("completion check")
+            .passed
+    );
+
+    let trace = vec![
+        format!(
+            "planner_result={:?} ensured_upload={:?} upload_reused={} after_pending={:?}",
+            planner_result, completed.ensured_upload, completed.upload_reused, after_pending
+        ),
+        format!(
+            "first_transfer block_index={} block_count={}",
+            first_transfer.block_index, first_transfer.block_count
+        ),
+    ]
+    .into_iter()
+    .chain(progress_report.render_trace_lines("inode-upload-progress"))
+    .chain(completion_report.render_trace_lines("inode-upload-complete"))
+    .collect::<Vec<_>>();
+
+    InodeUploadInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
     }
 }
 

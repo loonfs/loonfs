@@ -9,6 +9,27 @@ initial:
     next_inode_id: 777
     snapshot_hint_seq: 40
     retention_floor_seq: 40
+  metadata_state:
+    inodes:
+      - inode_id: 2
+        inode_kind: dir
+        created_seq: 1
+      - inode_id: 9
+        inode_kind: file
+        created_seq: 42
+    direntries:
+      - parent_inode_id: 2
+        name_key: report.txt
+        display_name: report.txt
+        child_inode_id: 9
+        bind_seq: 42
+        bind_op_index: 0
+    revisions:
+      - inode_id: 9
+        revision_no: 1
+        committed_seq: 42
+        revision_op_index: 0
+        content_manifest_digest: sha256:checkpoint
 actions:
   - build_checkpoint: true
 expect:
@@ -28,21 +49,21 @@ expect:
         checkpoint_seq: 42
         family: inodes
         segment_index: 0
-        row_count: 0
+        row_count: 2
     - key: namespaces/ns-1/snapshots/00000000000000000042/tables/direntries-00000.sst.zst
       payload:
         namespace_id: ns-1
         checkpoint_seq: 42
         family: direntries
         segment_index: 0
-        row_count: 0
+        row_count: 1
     - key: namespaces/ns-1/snapshots/00000000000000000042/tables/revisions-00000.sst.zst
       payload:
         namespace_id: ns-1
         checkpoint_seq: 42
         family: revisions
         segment_index: 0
-        row_count: 0
+        row_count: 1
     - key: namespaces/ns-1/snapshots/00000000000000000042/tables/tombstones-00000.sst.zst
       payload:
         namespace_id: ns-1
@@ -55,3 +76,4 @@ expect:
     - checkpoint_segment_key_matches_family_and_index
     - verified_checkpoint_manifest_requires_durable_segments
     - checkpoint_manifest_preserves_head_summary
+    - checkpoint_manifest_preserves_basis_metadata

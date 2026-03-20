@@ -504,7 +504,8 @@ Milestone 8 rollout order:
 - slice 2 covers background-work progress publication, queue shard mutation/repair, and verified
   checkpoint head publish
 - slice 3 covers file content objects
-- later slices cover checkpoint immutable objects and then client transfer/reconciliation invariants
+- slice 4 covers checkpoint immutable objects
+- slice 5 starts client transfer/reconciliation invariants with file transfers only
 
 Only after the evaluator set is stable should structured invariant reports move into broader
 runtime APIs.

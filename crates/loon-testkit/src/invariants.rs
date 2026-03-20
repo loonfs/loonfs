@@ -5,12 +5,15 @@ use loon_core::metadata::{
 };
 use loon_core::wal::PreparedWalCommit;
 use loon_core::wal::StoredWalObject;
-use loon_objectstore::keys::{blob, derived_progress, queue_shard, snapshot_manifest, wal_commit};
+use loon_objectstore::keys::{
+    blob, derived_progress, queue_shard, snapshot_manifest, snapshot_table, wal_commit,
+    SnapshotTableFamily,
+};
 use loon_types::{
     checkpoint_page_checksum_sha256, content_manifest_payload_checksum_sha256,
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
-    decode_wal_commit_envelope_zstd, sha256_digest, ChangeSeq, CheckpointRow,
-    CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointTableFamily,
+    decode_wal_commit_envelope_zstd, sha256_digest, ChangeSeq, CheckpointManifestEnvelope,
+    CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointTableFamily,
     ContentManifestEnvelope, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
     WalCommitEnvelope, WalOp,
 };
@@ -122,6 +125,72 @@ impl ContentObjectInvariantReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CheckpointObjectInvariantReport {
+    pub checks: Vec<InvariantCheck>,
+}
+
+impl CheckpointObjectInvariantReport {
+    pub fn check(&self, name: &str) -> Option<&InvariantCheck> {
+        self.checks.iter().find(|check| check.name == name)
+    }
+
+    pub fn passed_names(&self) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|check| check.passed)
+            .map(|check| check.name.clone())
+            .collect()
+    }
+
+    pub fn render_trace_lines(&self, label: &str) -> Vec<String> {
+        self.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "invariants[{label}] {}={} detail={}",
+                    check.name,
+                    if check.passed { "pass" } else { "fail" },
+                    check.detail
+                )
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClientTransferInvariantReport {
+    pub checks: Vec<InvariantCheck>,
+}
+
+impl ClientTransferInvariantReport {
+    pub fn check(&self, name: &str) -> Option<&InvariantCheck> {
+        self.checks.iter().find(|check| check.name == name)
+    }
+
+    pub fn passed_names(&self) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|check| check.passed)
+            .map(|check| check.name.clone())
+            .collect()
+    }
+
+    pub fn render_trace_lines(&self, label: &str) -> Vec<String> {
+        self.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "invariants[{label}] {}={} detail={}",
+                    check.name,
+                    if check.passed { "pass" } else { "fail" },
+                    check.detail
+                )
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContentBlockSnapshot {
     pub object_key: String,
@@ -141,6 +210,102 @@ pub struct ContentObjectInvariantSnapshot {
 pub struct ContentObjectInvariantInputs<'a> {
     pub expected_namespace: &'a NamespaceId,
     pub content: &'a ContentObjectInvariantSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCheckpointSegmentSnapshot {
+    pub object_key: String,
+    pub encoded_bytes: Vec<u8>,
+    pub envelope: CheckpointSegmentEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointObjectInvariantSnapshot {
+    pub source_head: HeadState,
+    pub source_basis_metadata: MetadataState,
+    pub manifest_object_key: String,
+    pub manifest_bytes: Vec<u8>,
+    pub manifest_envelope: CheckpointManifestEnvelope,
+    pub segments: Vec<StoredCheckpointSegmentSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointObjectInvariantInputs<'a> {
+    pub checkpoint: &'a CheckpointObjectInvariantSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadTransferOutcomeKind {
+    Progressed,
+    ResetProgressed,
+    Completed,
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadTransferInvariantInputs<'a> {
+    pub before_block_index: Option<u64>,
+    pub after_transfer_block_index: Option<u64>,
+    pub block_count: u64,
+    pub reset_issue_kind: Option<&'a str>,
+    pub reset_issue_reason: Option<&'a str>,
+    pub remote_synced_seq: ChangeSeq,
+    pub remote_revision_no: RevisionNo,
+    pub remote_content_digest: Option<&'a str>,
+    pub remote_content_manifest_digest: Option<&'a str>,
+    pub local_exists_on_disk: bool,
+    pub local_dirty: bool,
+    pub local_content_digest: Option<&'a str>,
+    pub sync_anchor_seq: Option<ChangeSeq>,
+    pub sync_anchor_revision_no: Option<RevisionNo>,
+    pub sync_anchor_content_digest: Option<&'a str>,
+    pub sync_anchor_content_manifest_digest: Option<&'a str>,
+    pub outcome: DownloadTransferOutcomeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InodeUploadTransferOutcomeKind {
+    Progressed,
+    ResetProgressed,
+    Completed,
+    RetryReusedPending,
+}
+
+#[derive(Debug, Clone)]
+pub struct InodeUploadTransferInvariantInputs<'a> {
+    pub before_block_index: Option<u64>,
+    pub after_transfer_block_index: Option<u64>,
+    pub block_count: u64,
+    pub ensured_upload_present: bool,
+    pub upload_reused: bool,
+    pub before_pending_request_id: Option<&'a str>,
+    pub after_pending_request_id: Option<&'a str>,
+    pub reset_issue_kind: Option<&'a str>,
+    pub reset_issue_reason: Option<&'a str>,
+    pub outcome: InodeUploadTransferOutcomeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalOnlyUploadTransferOutcomeKind {
+    Progressed,
+    ResetProgressed,
+    Completed,
+    RetryReusedPending,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalOnlyUploadTransferInvariantInputs<'a> {
+    pub before_block_index: Option<u64>,
+    pub after_transfer_block_index: Option<u64>,
+    pub block_count: u64,
+    pub ensured_upload_present: bool,
+    pub upload_reused: bool,
+    pub before_pending_request_id: Option<&'a str>,
+    pub after_pending_request_id: Option<&'a str>,
+    pub reset_issue_kind: Option<&'a str>,
+    pub reset_issue_reason: Option<&'a str>,
+    pub local_only_file_present_after: bool,
+    pub local_only_issue_count_after: usize,
+    pub outcome: LocalOnlyUploadTransferOutcomeKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -709,6 +874,463 @@ pub fn evaluate_content_object_invariants(
                     actual_file_size,
                     inputs.content.manifest_envelope.payload.file_digest_sha256,
                     actual_file_digest
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_checkpoint_object_invariants(
+    inputs: CheckpointObjectInvariantInputs<'_>,
+) -> CheckpointObjectInvariantReport {
+    let manifest_from_bytes = decode_checkpoint_manifest_json(&inputs.checkpoint.manifest_bytes)
+        .map_err(|err| err.to_string());
+    let manifest = manifest_from_bytes
+        .as_ref()
+        .unwrap_or(&inputs.checkpoint.manifest_envelope);
+    let stored_segments = inputs
+        .checkpoint
+        .segments
+        .iter()
+        .map(|segment| StoredCheckpointSegment {
+            object_key: segment.object_key.clone(),
+            encoded_bytes: segment.encoded_bytes.clone(),
+        })
+        .collect::<Vec<_>>();
+    let decoded_segments = decode_checkpoint_segments(&stored_segments);
+    let reconstructed_basis =
+        reconstruct_checkpoint_metadata(&stored_segments, manifest_from_bytes.as_ref().ok());
+
+    let segment_checksum_pass = match decoded_segments.as_ref() {
+        Ok(decoded) => decoded.iter().all(|segment| {
+            segment
+                .envelope
+                .has_valid_payload_checksum()
+                .unwrap_or(false)
+        }),
+        Err(_) => false,
+    };
+    let segment_checksum_detail = match decoded_segments.as_ref() {
+        Ok(decoded) => format!("validated_segments={}", decoded.len()),
+        Err(error) => format!("segment_decode_failed error={error}"),
+    };
+
+    let key_matches = match decoded_segments.as_ref() {
+        Ok(decoded) => {
+            let mismatches = decoded
+                .iter()
+                .filter_map(|segment| {
+                    let expected = snapshot_table(
+                        manifest.payload.namespace_id.as_str(),
+                        manifest.payload.checkpoint_seq.0,
+                        snapshot_table_family_from_checkpoint(segment.envelope.payload.family),
+                        segment.envelope.payload.segment_index,
+                    );
+                    (segment.object_key != expected)
+                        .then(|| format!("expected={} actual={}", expected, segment.object_key))
+                })
+                .collect::<Vec<_>>();
+            (
+                mismatches.is_empty(),
+                if mismatches.is_empty() {
+                    format!("validated_segments={}", decoded.len())
+                } else {
+                    mismatches.join("; ")
+                },
+            )
+        }
+        Err(error) => (false, format!("segment_decode_failed error={error}")),
+    };
+
+    let durable_segments = match decoded_segments.as_ref() {
+        Ok(decoded) => {
+            let actual_descriptors = decoded
+                .iter()
+                .map(|segment| {
+                    checkpoint_segment_descriptor_from_payload(
+                        &segment.object_key,
+                        &segment.envelope,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match actual_descriptors {
+                Ok(actual_descriptors) => {
+                    let expected = manifest
+                        .payload
+                        .tables
+                        .iter()
+                        .flat_map(|table| table.segments.iter().cloned())
+                        .collect::<Vec<_>>();
+                    (
+                        manifest.payload.verified && expected == actual_descriptors,
+                        format!(
+                            "verified={} expected_segments={} actual_segments={}",
+                            manifest.payload.verified,
+                            expected.len(),
+                            actual_descriptors.len()
+                        ),
+                    )
+                }
+                Err(error) => (false, format!("descriptor_build_failed error={error}")),
+            }
+        }
+        Err(error) => (false, format!("segment_decode_failed error={error}")),
+    };
+
+    let preserves_head_summary = manifest.payload.namespace_id
+        == inputs.checkpoint.source_head.namespace_id
+        && manifest.payload.checkpoint_seq == inputs.checkpoint.source_head.seq
+        && manifest.payload.active_fence_token == inputs.checkpoint.source_head.active_fence_token
+        && manifest.payload.next_inode_id == inputs.checkpoint.source_head.next_inode_id
+        && manifest.payload.retention_floor_seq
+            == inputs.checkpoint.source_head.retention_floor_seq;
+
+    let preserves_basis_metadata = match reconstructed_basis.as_ref() {
+        Ok(metadata) => (
+            metadata == &inputs.checkpoint.source_basis_metadata,
+            format!(
+                "reconstructed_matches_expected={} rows=(inodes={}, direntries={}, revisions={}, tombstones={})",
+                metadata == &inputs.checkpoint.source_basis_metadata,
+                metadata.inodes.len(),
+                metadata.direntries.len(),
+                metadata.revisions.len(),
+                metadata.subtree_tombstones.len()
+            ),
+        ),
+        Err(error) => (false, format!("basis_reconstruction_failed error={error}")),
+    };
+
+    CheckpointObjectInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "checkpoint_segment_payload_checksum_matches_payload".to_owned(),
+                passed: segment_checksum_pass,
+                detail: segment_checksum_detail,
+            },
+            InvariantCheck {
+                name: "checkpoint_segment_key_matches_family_and_index".to_owned(),
+                passed: key_matches.0,
+                detail: key_matches.1,
+            },
+            InvariantCheck {
+                name: "verified_checkpoint_manifest_requires_durable_segments".to_owned(),
+                passed: durable_segments.0,
+                detail: durable_segments.1,
+            },
+            InvariantCheck {
+                name: "checkpoint_manifest_preserves_head_summary".to_owned(),
+                passed: preserves_head_summary,
+                detail: format!(
+                    "source=(namespace={}, seq={}, fence={}, next_inode={}, retention_floor={}) manifest=(namespace={}, seq={}, fence={}, next_inode={}, retention_floor={})",
+                    inputs.checkpoint.source_head.namespace_id,
+                    inputs.checkpoint.source_head.seq.0,
+                    inputs.checkpoint.source_head.active_fence_token.0,
+                    inputs.checkpoint.source_head.next_inode_id.0,
+                    inputs.checkpoint.source_head.retention_floor_seq.0,
+                    manifest.payload.namespace_id,
+                    manifest.payload.checkpoint_seq.0,
+                    manifest.payload.active_fence_token.0,
+                    manifest.payload.next_inode_id.0,
+                    manifest.payload.retention_floor_seq.0
+                ),
+            },
+            InvariantCheck {
+                name: "checkpoint_manifest_preserves_basis_metadata".to_owned(),
+                passed: preserves_basis_metadata.0,
+                detail: preserves_basis_metadata.1,
+            },
+        ],
+    }
+}
+
+pub fn evaluate_download_transfer_invariants(
+    inputs: DownloadTransferInvariantInputs<'_>,
+) -> ClientTransferInvariantReport {
+    let monotonic = match inputs.outcome {
+        DownloadTransferOutcomeKind::Progressed | DownloadTransferOutcomeKind::ResetProgressed => {
+            inputs.after_transfer_block_index.is_some_and(|after| {
+                after > inputs.before_block_index.unwrap_or(0) && after <= inputs.block_count
+            })
+        }
+        DownloadTransferOutcomeKind::Completed => {
+            inputs
+                .before_block_index
+                .is_some_and(|before| before < inputs.block_count)
+                && inputs.after_transfer_block_index.is_none()
+        }
+    };
+    let reset_issue = matches!(inputs.outcome, DownloadTransferOutcomeKind::ResetProgressed)
+        && inputs.reset_issue_kind == Some("download_remote_edit_transfer_reset")
+        && inputs.reset_issue_reason.is_some();
+    let completion_clears = matches!(inputs.outcome, DownloadTransferOutcomeKind::Completed)
+        && inputs.after_transfer_block_index.is_none();
+    let materialized = matches!(inputs.outcome, DownloadTransferOutcomeKind::Completed)
+        && inputs.local_exists_on_disk
+        && !inputs.local_dirty
+        && inputs.local_content_digest == inputs.remote_content_digest
+        && inputs.sync_anchor_seq == Some(inputs.remote_synced_seq)
+        && inputs.sync_anchor_revision_no == Some(inputs.remote_revision_no)
+        && inputs.sync_anchor_content_digest == inputs.remote_content_digest
+        && inputs.sync_anchor_content_manifest_digest == inputs.remote_content_manifest_digest;
+
+    ClientTransferInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "download_transfer_block_index_advances_monotonically".to_owned(),
+                passed: monotonic,
+                detail: format!(
+                    "before_block_index={:?} after_block_index={:?} block_count={} outcome={:?}",
+                    inputs.before_block_index,
+                    inputs.after_transfer_block_index,
+                    inputs.block_count,
+                    inputs.outcome
+                ),
+            },
+            InvariantCheck {
+                name: "download_transfer_reset_records_durable_issue".to_owned(),
+                passed: reset_issue,
+                detail: format!(
+                    "outcome={:?} issue_kind={:?} issue_reason={:?}",
+                    inputs.outcome, inputs.reset_issue_kind, inputs.reset_issue_reason
+                ),
+            },
+            InvariantCheck {
+                name: "download_completion_clears_transfer_ledger".to_owned(),
+                passed: completion_clears,
+                detail: format!(
+                    "outcome={:?} after_transfer_block_index={:?}",
+                    inputs.outcome, inputs.after_transfer_block_index
+                ),
+            },
+            InvariantCheck {
+                name: "download_materialization_updates_local_state_and_sync_anchor".to_owned(),
+                passed: materialized,
+                detail: format!(
+                    "outcome={:?} local_exists={} local_dirty={} local_digest={:?} remote_digest={:?} sync_anchor_seq={:?} sync_anchor_revision={:?}",
+                    inputs.outcome,
+                    inputs.local_exists_on_disk,
+                    inputs.local_dirty,
+                    inputs.local_content_digest,
+                    inputs.remote_content_digest,
+                    inputs.sync_anchor_seq.map(|seq| seq.0),
+                    inputs.sync_anchor_revision_no.map(|revision| revision.0)
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_inode_upload_transfer_invariants(
+    inputs: InodeUploadTransferInvariantInputs<'_>,
+) -> ClientTransferInvariantReport {
+    let monotonic = match inputs.outcome {
+        InodeUploadTransferOutcomeKind::Progressed
+        | InodeUploadTransferOutcomeKind::ResetProgressed => {
+            inputs.after_transfer_block_index.is_some_and(|after| {
+                after > inputs.before_block_index.unwrap_or(0) && after <= inputs.block_count
+            })
+        }
+        InodeUploadTransferOutcomeKind::Completed => {
+            inputs
+                .before_block_index
+                .is_some_and(|before| before < inputs.block_count)
+                && inputs.after_transfer_block_index.is_none()
+        }
+        InodeUploadTransferOutcomeKind::RetryReusedPending => false,
+    };
+    let dispatch_waits = match inputs.outcome {
+        InodeUploadTransferOutcomeKind::Progressed
+        | InodeUploadTransferOutcomeKind::ResetProgressed => {
+            !inputs.ensured_upload_present && inputs.after_pending_request_id.is_none()
+        }
+        InodeUploadTransferOutcomeKind::Completed => {
+            inputs.ensured_upload_present && inputs.after_transfer_block_index.is_none()
+        }
+        InodeUploadTransferOutcomeKind::RetryReusedPending => {
+            inputs.upload_reused && inputs.after_pending_request_id.is_some()
+        }
+    };
+    let retry_reused = matches!(
+        inputs.outcome,
+        InodeUploadTransferOutcomeKind::RetryReusedPending
+    ) && inputs.upload_reused
+        && inputs.before_pending_request_id.is_some()
+        && inputs.before_pending_request_id == inputs.after_pending_request_id;
+    let completion_clears = matches!(
+        inputs.outcome,
+        InodeUploadTransferOutcomeKind::Completed
+            | InodeUploadTransferOutcomeKind::RetryReusedPending
+    ) && inputs.after_transfer_block_index.is_none();
+    let reset_issue = matches!(
+        inputs.outcome,
+        InodeUploadTransferOutcomeKind::ResetProgressed
+    ) && inputs.reset_issue_kind == Some("upload_local_edit_transfer_reset")
+        && inputs.reset_issue_reason.is_some();
+
+    ClientTransferInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "inode_upload_block_index_advances_monotonically".to_owned(),
+                passed: monotonic,
+                detail: format!(
+                    "before_block_index={:?} after_block_index={:?} block_count={} outcome={:?}",
+                    inputs.before_block_index,
+                    inputs.after_transfer_block_index,
+                    inputs.block_count,
+                    inputs.outcome
+                ),
+            },
+            InvariantCheck {
+                name: "inode_upload_dispatch_waits_for_terminal_block".to_owned(),
+                passed: dispatch_waits,
+                detail: format!(
+                    "outcome={:?} ensured_upload_present={} after_pending_request_id={:?}",
+                    inputs.outcome, inputs.ensured_upload_present, inputs.after_pending_request_id
+                ),
+            },
+            InvariantCheck {
+                name: "inode_upload_retry_reuses_pending_inode_mutation".to_owned(),
+                passed: retry_reused,
+                detail: format!(
+                    "outcome={:?} upload_reused={} before_pending={:?} after_pending={:?}",
+                    inputs.outcome,
+                    inputs.upload_reused,
+                    inputs.before_pending_request_id,
+                    inputs.after_pending_request_id
+                ),
+            },
+            InvariantCheck {
+                name: "inode_upload_completion_clears_transfer_ledger".to_owned(),
+                passed: completion_clears,
+                detail: format!(
+                    "outcome={:?} after_transfer_block_index={:?}",
+                    inputs.outcome, inputs.after_transfer_block_index
+                ),
+            },
+            InvariantCheck {
+                name: "inode_upload_transfer_reset_records_durable_issue".to_owned(),
+                passed: reset_issue,
+                detail: format!(
+                    "outcome={:?} issue_kind={:?} issue_reason={:?}",
+                    inputs.outcome, inputs.reset_issue_kind, inputs.reset_issue_reason
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_local_only_upload_transfer_invariants(
+    inputs: LocalOnlyUploadTransferInvariantInputs<'_>,
+) -> ClientTransferInvariantReport {
+    let monotonic = match inputs.outcome {
+        LocalOnlyUploadTransferOutcomeKind::Progressed
+        | LocalOnlyUploadTransferOutcomeKind::ResetProgressed => {
+            inputs.after_transfer_block_index.is_some_and(|after| {
+                after > inputs.before_block_index.unwrap_or(0) && after <= inputs.block_count
+            })
+        }
+        LocalOnlyUploadTransferOutcomeKind::Completed => {
+            inputs
+                .before_block_index
+                .is_some_and(|before| before < inputs.block_count)
+                && inputs.after_transfer_block_index.is_none()
+        }
+        LocalOnlyUploadTransferOutcomeKind::RetryReusedPending => false,
+    };
+    let dispatch_waits = match inputs.outcome {
+        LocalOnlyUploadTransferOutcomeKind::Progressed
+        | LocalOnlyUploadTransferOutcomeKind::ResetProgressed => {
+            !inputs.ensured_upload_present && inputs.after_pending_request_id.is_none()
+        }
+        LocalOnlyUploadTransferOutcomeKind::Completed => {
+            inputs.ensured_upload_present && inputs.after_transfer_block_index.is_none()
+        }
+        LocalOnlyUploadTransferOutcomeKind::RetryReusedPending => {
+            inputs.upload_reused && inputs.after_pending_request_id.is_some()
+        }
+    };
+    let retry_reused = matches!(
+        inputs.outcome,
+        LocalOnlyUploadTransferOutcomeKind::RetryReusedPending
+    ) && inputs.upload_reused
+        && inputs.before_pending_request_id.is_some()
+        && inputs.before_pending_request_id == inputs.after_pending_request_id;
+    let completion_clears = matches!(
+        inputs.outcome,
+        LocalOnlyUploadTransferOutcomeKind::Completed
+            | LocalOnlyUploadTransferOutcomeKind::RetryReusedPending
+    ) && inputs.after_transfer_block_index.is_none();
+    let bind_clears = matches!(
+        inputs.outcome,
+        LocalOnlyUploadTransferOutcomeKind::Completed
+    ) && inputs.after_transfer_block_index.is_none()
+        && !inputs.local_only_file_present_after
+        && inputs.local_only_issue_count_after == 0;
+    let reset_issue = matches!(
+        inputs.outcome,
+        LocalOnlyUploadTransferOutcomeKind::ResetProgressed
+    ) && inputs.reset_issue_kind == Some("upload_local_create_transfer_reset")
+        && inputs.reset_issue_reason.is_some();
+
+    ClientTransferInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "local_only_upload_block_index_advances_monotonically".to_owned(),
+                passed: monotonic,
+                detail: format!(
+                    "before_block_index={:?} after_block_index={:?} block_count={} outcome={:?}",
+                    inputs.before_block_index,
+                    inputs.after_transfer_block_index,
+                    inputs.block_count,
+                    inputs.outcome
+                ),
+            },
+            InvariantCheck {
+                name: "local_only_upload_dispatch_waits_for_terminal_block".to_owned(),
+                passed: dispatch_waits,
+                detail: format!(
+                    "outcome={:?} ensured_upload_present={} after_pending_request_id={:?}",
+                    inputs.outcome,
+                    inputs.ensured_upload_present,
+                    inputs.after_pending_request_id
+                ),
+            },
+            InvariantCheck {
+                name: "local_only_upload_retry_reuses_pending_client_mutation".to_owned(),
+                passed: retry_reused,
+                detail: format!(
+                    "outcome={:?} upload_reused={} before_pending={:?} after_pending={:?}",
+                    inputs.outcome,
+                    inputs.upload_reused,
+                    inputs.before_pending_request_id,
+                    inputs.after_pending_request_id
+                ),
+            },
+            InvariantCheck {
+                name: "local_only_upload_completion_clears_temp_transfer_ledger".to_owned(),
+                passed: completion_clears,
+                detail: format!(
+                    "outcome={:?} after_transfer_block_index={:?}",
+                    inputs.outcome, inputs.after_transfer_block_index
+                ),
+            },
+            InvariantCheck {
+                name: "local_only_upload_bind_clears_temp_issue_and_transfer_ledger".to_owned(),
+                passed: bind_clears,
+                detail: format!(
+                    "outcome={:?} after_transfer_block_index={:?} local_only_file_present_after={} issue_count_after={}",
+                    inputs.outcome,
+                    inputs.after_transfer_block_index,
+                    inputs.local_only_file_present_after,
+                    inputs.local_only_issue_count_after
+                ),
+            },
+            InvariantCheck {
+                name: "local_only_upload_transfer_reset_records_durable_issue".to_owned(),
+                passed: reset_issue,
+                detail: format!(
+                    "outcome={:?} issue_kind={:?} issue_reason={:?}",
+                    inputs.outcome, inputs.reset_issue_kind, inputs.reset_issue_reason
                 ),
             },
         ],
@@ -2194,6 +2816,15 @@ fn checkpoint_segment_descriptor_from_payload(
     })
 }
 
+fn snapshot_table_family_from_checkpoint(family: CheckpointTableFamily) -> SnapshotTableFamily {
+    match family {
+        CheckpointTableFamily::Inodes => SnapshotTableFamily::Inodes,
+        CheckpointTableFamily::Direntries => SnapshotTableFamily::Direntries,
+        CheckpointTableFamily::Revisions => SnapshotTableFamily::Revisions,
+        CheckpointTableFamily::Tombstones => SnapshotTableFamily::Tombstones,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SequencedWalOp<'a> {
     seq: ChangeSeq,
@@ -2252,14 +2883,21 @@ impl AggregateCheck {
 #[cfg(test)]
 mod tests {
     use super::{
-        evaluate_checkpoint_head_publish_invariants, evaluate_content_object_invariants,
+        evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
+        evaluate_content_object_invariants, evaluate_download_transfer_invariants,
+        evaluate_inode_upload_transfer_invariants, evaluate_local_only_upload_transfer_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
         evaluate_queue_complete_invariants, CheckpointHeadPublishInvariantInputs,
+        CheckpointObjectInvariantInputs, CheckpointObjectInvariantSnapshot,
         CheckpointProgressAuthorizer, CheckpointReplayInvariantInputs, CommitInvariantInputs,
-        ContentObjectInvariantInputs, ContentObjectInvariantSnapshot, ProgressInvariantSnapshot,
-        ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
-        QueueCompleteOutcomeKind, StoredContentBlockSnapshot, WalReplayInvariantInputs,
+        ContentObjectInvariantInputs, ContentObjectInvariantSnapshot,
+        DownloadTransferInvariantInputs, DownloadTransferOutcomeKind,
+        InodeUploadTransferInvariantInputs, InodeUploadTransferOutcomeKind,
+        LocalOnlyUploadTransferInvariantInputs, LocalOnlyUploadTransferOutcomeKind,
+        ProgressInvariantSnapshot, ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
+        QueueCompleteInvariantInputs, QueueCompleteOutcomeKind, StoredCheckpointSegmentSnapshot,
+        StoredContentBlockSnapshot, WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
     use loon_core::commit::{
@@ -2273,7 +2911,8 @@ mod tests {
         SnapshotTableFamily,
     };
     use loon_types::{
-        checkpoint_page_checksum_sha256, encode_checkpoint_manifest_json,
+        checkpoint_page_checksum_sha256, decode_checkpoint_manifest_json,
+        decode_checkpoint_segment_envelope_zstd, encode_checkpoint_manifest_json,
         encode_checkpoint_segment_envelope_zstd, encode_content_manifest_json, sha256_digest,
         ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage,
         CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
@@ -2829,6 +3468,252 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_object_invariant_report_marks_basis_preservation_as_passed() {
+        let namespace_id = NamespaceId::new("ns-checkpoint-object");
+        let source_head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(42),
+            active_fence_token: FenceToken(9),
+            next_inode_id: InodeId(777),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let source_metadata = MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(9),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(42),
+                },
+            ],
+            direntries: vec![DirentryRecord {
+                parent_inode_id: InodeId(2),
+                name_key: "report.txt".to_owned(),
+                display_name: "report.txt".to_owned(),
+                child_inode_id: InodeId(9),
+                bind_seq: ChangeSeq(42),
+                bind_op_index: 0,
+            }],
+            revisions: vec![RevisionRecord {
+                inode_id: InodeId(9),
+                revision_no: RevisionNo(1),
+                committed_seq: ChangeSeq(42),
+                revision_op_index: 0,
+                content_manifest_digest: "sha256:checkpoint".to_owned(),
+            }],
+            subtree_tombstones: Vec::new(),
+        };
+        let snapshot = checkpoint_object_snapshot(&source_head, &source_metadata);
+
+        let report = evaluate_checkpoint_object_invariants(CheckpointObjectInvariantInputs {
+            checkpoint: &snapshot,
+        });
+
+        assert!(
+            report
+                .check("checkpoint_manifest_preserves_basis_metadata")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn checkpoint_object_invariant_report_marks_head_summary_drift_as_failed() {
+        let namespace_id = NamespaceId::new("ns-checkpoint-object");
+        let source_head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(42),
+            active_fence_token: FenceToken(9),
+            next_inode_id: InodeId(777),
+            snapshot_hint_seq: Some(ChangeSeq(40)),
+            retention_floor_seq: ChangeSeq(40),
+        };
+        let source_metadata = MetadataState::default();
+        let mut snapshot = checkpoint_object_snapshot(&source_head, &source_metadata);
+        snapshot.manifest_envelope.payload.next_inode_id = InodeId(999);
+        snapshot.manifest_bytes = encode_checkpoint_manifest_json(&snapshot.manifest_envelope)
+            .expect("re-encode drifted manifest");
+
+        let report = evaluate_checkpoint_object_invariants(CheckpointObjectInvariantInputs {
+            checkpoint: &snapshot,
+        });
+
+        assert!(
+            !report
+                .check("checkpoint_manifest_preserves_head_summary")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn download_transfer_invariant_report_marks_completion_as_passed() {
+        let report = evaluate_download_transfer_invariants(DownloadTransferInvariantInputs {
+            before_block_index: Some(1),
+            after_transfer_block_index: None,
+            block_count: 2,
+            reset_issue_kind: None,
+            reset_issue_reason: None,
+            remote_synced_seq: ChangeSeq(42),
+            remote_revision_no: RevisionNo(1),
+            remote_content_digest: Some("sha256:file"),
+            remote_content_manifest_digest: Some("sha256:manifest"),
+            local_exists_on_disk: true,
+            local_dirty: false,
+            local_content_digest: Some("sha256:file"),
+            sync_anchor_seq: Some(ChangeSeq(42)),
+            sync_anchor_revision_no: Some(RevisionNo(1)),
+            sync_anchor_content_digest: Some("sha256:file"),
+            sync_anchor_content_manifest_digest: Some("sha256:manifest"),
+            outcome: DownloadTransferOutcomeKind::Completed,
+        });
+
+        assert!(
+            report
+                .check("download_materialization_updates_local_state_and_sync_anchor")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn download_transfer_invariant_report_marks_missing_reset_issue_as_failed() {
+        let report = evaluate_download_transfer_invariants(DownloadTransferInvariantInputs {
+            before_block_index: Some(1),
+            after_transfer_block_index: Some(1),
+            block_count: 2,
+            reset_issue_kind: None,
+            reset_issue_reason: None,
+            remote_synced_seq: ChangeSeq(42),
+            remote_revision_no: RevisionNo(1),
+            remote_content_digest: Some("sha256:file"),
+            remote_content_manifest_digest: Some("sha256:manifest"),
+            local_exists_on_disk: false,
+            local_dirty: false,
+            local_content_digest: None,
+            sync_anchor_seq: None,
+            sync_anchor_revision_no: None,
+            sync_anchor_content_digest: None,
+            sync_anchor_content_manifest_digest: None,
+            outcome: DownloadTransferOutcomeKind::ResetProgressed,
+        });
+
+        assert!(
+            !report
+                .check("download_transfer_reset_records_durable_issue")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn inode_upload_transfer_invariant_report_marks_retry_reuse_as_passed() {
+        let report =
+            evaluate_inode_upload_transfer_invariants(InodeUploadTransferInvariantInputs {
+                before_block_index: None,
+                after_transfer_block_index: None,
+                block_count: 2,
+                ensured_upload_present: false,
+                upload_reused: true,
+                before_pending_request_id: Some("client-req-1"),
+                after_pending_request_id: Some("client-req-1"),
+                reset_issue_kind: None,
+                reset_issue_reason: None,
+                outcome: InodeUploadTransferOutcomeKind::RetryReusedPending,
+            });
+
+        assert!(
+            report
+                .check("inode_upload_retry_reuses_pending_inode_mutation")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn inode_upload_transfer_invariant_report_marks_missing_reset_issue_as_failed() {
+        let report =
+            evaluate_inode_upload_transfer_invariants(InodeUploadTransferInvariantInputs {
+                before_block_index: Some(1),
+                after_transfer_block_index: Some(1),
+                block_count: 2,
+                ensured_upload_present: false,
+                upload_reused: false,
+                before_pending_request_id: None,
+                after_pending_request_id: None,
+                reset_issue_kind: None,
+                reset_issue_reason: None,
+                outcome: InodeUploadTransferOutcomeKind::ResetProgressed,
+            });
+
+        assert!(
+            !report
+                .check("inode_upload_transfer_reset_records_durable_issue")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn local_only_upload_transfer_invariant_report_marks_bind_cleanup_as_passed() {
+        let report = evaluate_local_only_upload_transfer_invariants(
+            LocalOnlyUploadTransferInvariantInputs {
+                before_block_index: Some(1),
+                after_transfer_block_index: None,
+                block_count: 2,
+                ensured_upload_present: true,
+                upload_reused: false,
+                before_pending_request_id: None,
+                after_pending_request_id: None,
+                reset_issue_kind: None,
+                reset_issue_reason: None,
+                local_only_file_present_after: false,
+                local_only_issue_count_after: 0,
+                outcome: LocalOnlyUploadTransferOutcomeKind::Completed,
+            },
+        );
+
+        assert!(
+            report
+                .check("local_only_upload_bind_clears_temp_issue_and_transfer_ledger")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn local_only_upload_transfer_invariant_report_marks_missing_retry_reuse_as_failed() {
+        let report = evaluate_local_only_upload_transfer_invariants(
+            LocalOnlyUploadTransferInvariantInputs {
+                before_block_index: None,
+                after_transfer_block_index: None,
+                block_count: 2,
+                ensured_upload_present: false,
+                upload_reused: false,
+                before_pending_request_id: Some("client-req-1"),
+                after_pending_request_id: Some("client-req-2"),
+                reset_issue_kind: None,
+                reset_issue_reason: None,
+                local_only_file_present_after: true,
+                local_only_issue_count_after: 1,
+                outcome: LocalOnlyUploadTransferOutcomeKind::RetryReusedPending,
+            },
+        );
+
+        assert!(
+            !report
+                .check("local_only_upload_retry_reuses_pending_client_mutation")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
     fn content_invariant_report_marks_all_file_content_checks_as_passed() {
         let namespace_id = NamespaceId::new("ns-content");
         let content_bytes = b"hello from loon\n";
@@ -2957,34 +3842,62 @@ mod tests {
         basis_head: &HeadState,
         basis_metadata: &MetadataState,
     ) -> (StoredCheckpointManifest, Vec<StoredCheckpointSegment>) {
-        let rows = vec![
-            CheckpointRow::Inode {
-                inode_id: InodeId(2),
-                inode_kind: InodeKind::Dir,
-                created_seq: ChangeSeq(1),
-            },
-            CheckpointRow::Direntry {
-                parent_inode_id: InodeId(2),
-                name_key: "report.txt".to_owned(),
-                display_name: "report.txt".to_owned(),
-                child_inode_id: InodeId(9),
-                bind_seq: ChangeSeq(30),
-                bind_op_index: 0,
-            },
-            CheckpointRow::Revision {
-                inode_id: InodeId(9),
-                revision_no: RevisionNo(1),
-                committed_seq: ChangeSeq(30),
-                revision_op_index: 0,
-                content_manifest_digest: "sha256:checkpoint".to_owned(),
-            },
-        ];
         let mut segments = Vec::new();
         let mut descriptors = Vec::new();
-        for (family, row) in [
-            (CheckpointTableFamily::Inodes, rows[0].clone()),
-            (CheckpointTableFamily::Direntries, rows[1].clone()),
-            (CheckpointTableFamily::Revisions, rows[2].clone()),
+        for (family, rows) in [
+            (
+                CheckpointTableFamily::Inodes,
+                basis_metadata
+                    .inodes
+                    .iter()
+                    .map(|inode| CheckpointRow::Inode {
+                        inode_id: inode.inode_id,
+                        inode_kind: inode.inode_kind.clone(),
+                        created_seq: inode.created_seq,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                CheckpointTableFamily::Direntries,
+                basis_metadata
+                    .direntries
+                    .iter()
+                    .map(|direntry| CheckpointRow::Direntry {
+                        parent_inode_id: direntry.parent_inode_id,
+                        name_key: direntry.name_key.clone(),
+                        display_name: direntry.display_name.clone(),
+                        child_inode_id: direntry.child_inode_id,
+                        bind_seq: direntry.bind_seq,
+                        bind_op_index: direntry.bind_op_index,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                CheckpointTableFamily::Revisions,
+                basis_metadata
+                    .revisions
+                    .iter()
+                    .map(|revision| CheckpointRow::Revision {
+                        inode_id: revision.inode_id,
+                        revision_no: revision.revision_no,
+                        committed_seq: revision.committed_seq,
+                        revision_op_index: revision.revision_op_index,
+                        content_manifest_digest: revision.content_manifest_digest.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                CheckpointTableFamily::Tombstones,
+                basis_metadata
+                    .subtree_tombstones
+                    .iter()
+                    .map(|tombstone| CheckpointRow::Tombstone {
+                        root_inode_id: tombstone.root_inode_id,
+                        tombstone_seq: tombstone.tombstone_seq,
+                        tombstone_op_index: tombstone.tombstone_op_index,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         ] {
             let key = snapshot_table(
                 namespace_id.as_str(),
@@ -2997,19 +3910,21 @@ mod tests {
                 },
                 0,
             );
+            let min_key = rows.first().map(CheckpointRow::row_key).unwrap_or_default();
+            let max_key = rows.last().map(CheckpointRow::row_key).unwrap_or_default();
             let page = CheckpointPage {
                 page_index: 0,
-                min_key: row.row_key(),
-                max_key: row.row_key(),
-                row_keys: vec![row.row_key()],
-                rows: vec![row],
+                min_key: min_key.clone(),
+                max_key: max_key.clone(),
+                row_keys: rows.iter().map(CheckpointRow::row_key).collect(),
+                rows,
             };
             let payload = CheckpointSegmentPayload {
                 namespace_id: namespace_id.clone(),
                 checkpoint_seq: basis_head.seq,
                 family,
                 segment_index: 0,
-                row_count: 1,
+                row_count: page.rows.len() as u64,
                 min_key: page.min_key.clone(),
                 max_key: page.max_key.clone(),
                 pages: vec![page],
@@ -3061,9 +3976,35 @@ mod tests {
             object_key: snapshot_manifest(namespace_id.as_str(), basis_head.seq.0),
             encoded_bytes: encode_checkpoint_manifest_json(&manifest).expect("encode manifest"),
         };
-
-        let _ = basis_metadata;
         (stored_manifest, segments)
+    }
+
+    fn checkpoint_object_snapshot(
+        source_head: &HeadState,
+        source_metadata: &MetadataState,
+    ) -> CheckpointObjectInvariantSnapshot {
+        let (stored_manifest, stored_segments) =
+            checkpoint_fixture(&source_head.namespace_id, source_head, source_metadata);
+        let manifest_envelope = decode_checkpoint_manifest_json(&stored_manifest.encoded_bytes)
+            .expect("decode manifest");
+        let segments = stored_segments
+            .iter()
+            .map(|segment| StoredCheckpointSegmentSnapshot {
+                object_key: segment.object_key.clone(),
+                encoded_bytes: segment.encoded_bytes.clone(),
+                envelope: decode_checkpoint_segment_envelope_zstd(&segment.encoded_bytes)
+                    .expect("decode segment"),
+            })
+            .collect();
+
+        CheckpointObjectInvariantSnapshot {
+            source_head: source_head.clone(),
+            source_basis_metadata: source_metadata.clone(),
+            manifest_object_key: stored_manifest.object_key,
+            manifest_bytes: stored_manifest.encoded_bytes,
+            manifest_envelope,
+            segments,
+        }
     }
 
     fn content_snapshot(

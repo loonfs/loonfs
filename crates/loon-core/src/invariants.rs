@@ -79,6 +79,38 @@ pub const CONTENT_OBJECT_FILE_INVARIANTS: &[&str] = &[
     "content_manifest_file_digest_matches_blocks",
 ];
 
+pub const CHECKPOINT_OBJECT_IMMUTABLE_INVARIANTS: &[&str] = &[
+    "checkpoint_segment_payload_checksum_matches_payload",
+    "checkpoint_segment_key_matches_family_and_index",
+    "verified_checkpoint_manifest_requires_durable_segments",
+    "checkpoint_manifest_preserves_head_summary",
+    "checkpoint_manifest_preserves_basis_metadata",
+];
+
+pub const CLIENT_TRANSFER_DOWNLOAD_INVARIANTS: &[&str] = &[
+    "download_transfer_block_index_advances_monotonically",
+    "download_transfer_reset_records_durable_issue",
+    "download_completion_clears_transfer_ledger",
+    "download_materialization_updates_local_state_and_sync_anchor",
+];
+
+pub const CLIENT_TRANSFER_INODE_UPLOAD_INVARIANTS: &[&str] = &[
+    "inode_upload_block_index_advances_monotonically",
+    "inode_upload_dispatch_waits_for_terminal_block",
+    "inode_upload_retry_reuses_pending_inode_mutation",
+    "inode_upload_completion_clears_transfer_ledger",
+    "inode_upload_transfer_reset_records_durable_issue",
+];
+
+pub const CLIENT_TRANSFER_LOCAL_ONLY_UPLOAD_INVARIANTS: &[&str] = &[
+    "local_only_upload_block_index_advances_monotonically",
+    "local_only_upload_dispatch_waits_for_terminal_block",
+    "local_only_upload_retry_reuses_pending_client_mutation",
+    "local_only_upload_completion_clears_temp_transfer_ledger",
+    "local_only_upload_bind_clears_temp_issue_and_transfer_ledger",
+    "local_only_upload_transfer_reset_records_durable_issue",
+];
+
 pub const INVARIANTS: &[&str] = &[
     "no_orphaned_live_entry",
     "visible_revision_points_to_durable_content",
@@ -139,6 +171,21 @@ pub const INVARIANTS: &[&str] = &[
     "worker_heartbeat_requires_matching_claim_token",
     "stale_claim_token_cannot_complete",
     "stolen_job_completes_once",
+    "download_transfer_block_index_advances_monotonically",
+    "download_transfer_reset_records_durable_issue",
+    "download_completion_clears_transfer_ledger",
+    "download_materialization_updates_local_state_and_sync_anchor",
+    "inode_upload_block_index_advances_monotonically",
+    "inode_upload_dispatch_waits_for_terminal_block",
+    "inode_upload_retry_reuses_pending_inode_mutation",
+    "inode_upload_completion_clears_transfer_ledger",
+    "inode_upload_transfer_reset_records_durable_issue",
+    "local_only_upload_block_index_advances_monotonically",
+    "local_only_upload_dispatch_waits_for_terminal_block",
+    "local_only_upload_retry_reuses_pending_client_mutation",
+    "local_only_upload_completion_clears_temp_transfer_ledger",
+    "local_only_upload_bind_clears_temp_issue_and_transfer_ledger",
+    "local_only_upload_transfer_reset_records_durable_issue",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];
