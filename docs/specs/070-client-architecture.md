@@ -979,6 +979,27 @@ On receipt of that response, one SQLite transaction must:
 4. delete the matching `pending_client_mutations` row
 5. delete the temporary `local_only_state` and `planned_local_only_actions` rows
 
+For `create_file` only, the apply step must also accept one idempotent late-response case:
+
+- if an earlier authoritative observation already bound the temp identity and therefore removed the
+  temporary `local_only_state` row, `apply_client_mutation_response` may still succeed
+- that idempotent success is valid only when the current inode-keyed `remote_state`, `local_state`,
+  and `sync_anchor` already match the committed file result on:
+  - `namespace_id`
+  - `inode_id`
+  - `inode_kind`
+  - `committed_seq`
+  - `revision_no`
+  - `content_digest`
+  - `parent_inode_id`
+  - `display_name`
+  - `local.exists_on_disk = true`
+  - `local.dirty = false`
+- on that idempotent success, the client must still delete the matching
+  `pending_client_mutations(client_request_id)` row
+- otherwise the apply step must fail closed as `pending_client_mutation_missing` or
+  `local_only_file_missing`
+
 ## First apply-after-publish loop for bound-file edit
 
 After a successful `replace_file`, the authoritative side returns one committed edit summary:
@@ -1112,8 +1133,9 @@ Rules:
   planner to decide between later download or conflict handling
 - if there is no bound inode yet, the client may bind exactly one matching `local_only_state` row
   when all of the strict local-only bind preconditions still hold
-- after a late bind succeeds, the client must also clear any matching
-  `pending_client_mutations(client_file_id)` row
+- after a late bind succeeds, the client must retain any matching
+  `pending_client_mutations(client_request_id)` row until the corresponding create response
+  arrives
 - if more than one `local_only_state` row matches the same observation, the apply step must:
   - avoid partial migration of `remote_state`, `local_state`, or `sync_anchor`
   - record or replace one durable `conflicts_and_errors` row with

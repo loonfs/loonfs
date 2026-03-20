@@ -1280,23 +1280,50 @@ impl PlannerTxn<'_> {
             Err(StateDbError::LocalOnlyFileMissing { .. }) => {
                 let views =
                     self.load_file_sync_views(&response.namespace_id, created_inode.inode_id)?;
-                match (views.remote, views.local, views.sync_anchor) {
-                    (Some(bound_remote), Some(_bound_local), Some(_bound_anchor))
-                        if bound_remote.inode_kind == created_inode.inode_kind
-                            && bound_remote.revision_no == created_inode.revision_no
-                            && bound_remote.content_digest == created_inode.content_digest
-                            && bound_remote.parent_inode_id
-                                == Some(created_inode.parent_inode_id)
-                            && bound_remote.display_name == created_inode.display_name
-                            && !bound_remote.is_deleted =>
-                    {
-                        BoundLocalOnlyFile {
-                            client_file_id: pending.client_file_id.clone(),
-                            namespace_id: response.namespace_id.clone(),
-                            inode_id: created_inode.inode_id,
+                match &pending.request.op {
+                    ClientMutationOp::CreateFile { .. } => {
+                        if create_file_response_matches_current_state(
+                            response,
+                            created_inode,
+                            &views,
+                        ) {
+                            BoundLocalOnlyFile {
+                                client_file_id: pending.client_file_id.clone(),
+                                namespace_id: response.namespace_id.clone(),
+                                inode_id: created_inode.inode_id,
+                            }
+                        } else {
+                            return Err(StateDbError::LocalOnlyFileMissing {
+                                client_file_id: pending.client_file_id.as_str().to_owned(),
+                            });
                         }
                     }
-                    _ => {
+                    ClientMutationOp::CreateDir { .. } => {
+                        match (views.remote, views.local, views.sync_anchor) {
+                            (Some(bound_remote), Some(_bound_local), Some(_bound_anchor))
+                                if bound_remote.inode_kind == created_inode.inode_kind
+                                    && bound_remote.revision_no == created_inode.revision_no
+                                    && bound_remote.content_digest
+                                        == created_inode.content_digest
+                                    && bound_remote.parent_inode_id
+                                        == Some(created_inode.parent_inode_id)
+                                    && bound_remote.display_name == created_inode.display_name
+                                    && !bound_remote.is_deleted =>
+                            {
+                                BoundLocalOnlyFile {
+                                    client_file_id: pending.client_file_id.clone(),
+                                    namespace_id: response.namespace_id.clone(),
+                                    inode_id: created_inode.inode_id,
+                                }
+                            }
+                            _ => {
+                                return Err(StateDbError::LocalOnlyFileMissing {
+                                    client_file_id: pending.client_file_id.as_str().to_owned(),
+                                })
+                            }
+                        }
+                    }
+                    ClientMutationOp::ReplaceFile { .. } => {
                         return Err(StateDbError::LocalOnlyFileMissing {
                             client_file_id: pending.client_file_id.as_str().to_owned(),
                         })
@@ -2161,4 +2188,44 @@ fn replace_response_matches_current_state(
         && anchor.content_digest.as_deref() == Some(replaced.content_digest.as_str())
         && anchor.parent_inode_id == remote.parent_inode_id
         && anchor.display_name == remote.display_name
+}
+
+fn create_file_response_matches_current_state(
+    response: &ClientMutationResponse,
+    created: &loon_types::CreatedRemoteInode,
+    views: &FileSyncViews,
+) -> bool {
+    let (Some(remote), Some(local), Some(anchor)) = (
+        views.remote.as_ref(),
+        views.local.as_ref(),
+        views.sync_anchor.as_ref(),
+    ) else {
+        return false;
+    };
+
+    remote.namespace_id == response.namespace_id
+        && remote.inode_id == created.inode_id
+        && remote.inode_kind == created.inode_kind
+        && remote.observed_seq == response.committed_seq
+        && remote.revision_no == created.revision_no
+        && remote.content_digest == created.content_digest
+        && remote.parent_inode_id == Some(created.parent_inode_id)
+        && remote.display_name == created.display_name
+        && !remote.is_deleted
+        && local.namespace_id == response.namespace_id
+        && local.inode_id == created.inode_id
+        && local.inode_kind == created.inode_kind
+        && local.content_digest == created.content_digest
+        && local.parent_inode_id == Some(created.parent_inode_id)
+        && local.display_name == created.display_name
+        && local.exists_on_disk
+        && !local.dirty
+        && anchor.namespace_id == response.namespace_id
+        && anchor.inode_id == created.inode_id
+        && anchor.inode_kind == created.inode_kind
+        && anchor.synced_seq == response.committed_seq
+        && anchor.revision_no == created.revision_no
+        && anchor.content_digest == created.content_digest
+        && anchor.parent_inode_id == Some(created.parent_inode_id)
+        && anchor.display_name == created.display_name
 }

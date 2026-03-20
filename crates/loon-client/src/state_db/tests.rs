@@ -1358,6 +1358,146 @@ fn apply_client_mutation_response_binds_and_clears_pending_row() {
 }
 
 #[test]
+fn apply_client_mutation_response_is_idempotent_when_bound_state_already_matches() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let request = sample_client_create_file_request();
+    let response = sample_client_create_file_response();
+    let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+    let remote = RemoteFileStateRow {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(501),
+        inode_kind: InodeKind::File,
+        observed_seq: ChangeSeq(42),
+        revision_no: RevisionNo(1),
+        content_digest: Some("sha256:new-local-file".to_owned()),
+        content_manifest_digest: Some("sha256:new-local-file".to_owned()),
+        parent_inode_id: Some(InodeId(2)),
+        display_name: "draft.txt".to_owned(),
+        is_deleted: false,
+    };
+
+    db.planner_transaction("seed-local-only-for-late-create-response", |tx| {
+        tx.upsert_local_only_file(&sample_local_only())?;
+        tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            decision: "upload_local_create".to_owned(),
+            reason: "local_only_file_without_remote_identity".to_owned(),
+            created_at_ms: 1_700_000_105_000,
+        })?;
+        tx.record_local_only_upload(
+            &client_file_id,
+            &sample_uploaded_content(),
+            1_700_000_104_000,
+        )?;
+        tx.record_pending_client_mutation(&client_file_id, &request, 1_700_000_106_000)?;
+        Ok(())
+    })
+    .expect("seed local-only state and pending mutation");
+
+    let bound = db
+        .bind_local_only_file_to_remote(&client_file_id, &remote)
+        .expect("late bind local-only file");
+    assert_eq!(
+        bound,
+        BoundLocalOnlyFile {
+            client_file_id: client_file_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(501),
+        }
+    );
+    assert!(db
+        .load_pending_client_mutation("client-req-0001")
+        .expect("load pending mutation after late bind")
+        .is_some());
+
+    let applied = db
+        .apply_client_mutation_response(&response)
+        .expect("matching late create response should be idempotent");
+
+    assert_eq!(
+        applied,
+        BoundLocalOnlyFile {
+            client_file_id: client_file_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(501),
+        }
+    );
+    assert_eq!(
+        db.load_pending_client_mutation("client-req-0001")
+            .expect("load pending mutation after idempotent response"),
+        None
+    );
+}
+
+#[test]
+fn apply_client_mutation_response_rejects_idempotent_fallback_when_bound_state_diverges() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let request = sample_client_create_file_request();
+    let response = sample_client_create_file_response();
+    let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+    let remote = RemoteFileStateRow {
+        namespace_id: NamespaceId::from("ns-1"),
+        inode_id: InodeId(501),
+        inode_kind: InodeKind::File,
+        observed_seq: ChangeSeq(42),
+        revision_no: RevisionNo(1),
+        content_digest: Some("sha256:new-local-file".to_owned()),
+        content_manifest_digest: Some("sha256:new-local-file".to_owned()),
+        parent_inode_id: Some(InodeId(2)),
+        display_name: "draft.txt".to_owned(),
+        is_deleted: false,
+    };
+
+    db.planner_transaction("seed-diverged-bound-state-for-late-create-response", |tx| {
+        tx.upsert_local_only_file(&sample_local_only())?;
+        tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            decision: "upload_local_create".to_owned(),
+            reason: "local_only_file_without_remote_identity".to_owned(),
+            created_at_ms: 1_700_000_105_000,
+        })?;
+        tx.record_local_only_upload(
+            &client_file_id,
+            &sample_uploaded_content(),
+            1_700_000_104_000,
+        )?;
+        tx.record_pending_client_mutation(&client_file_id, &request, 1_700_000_106_000)?;
+        Ok(())
+    })
+    .expect("seed local-only state and pending mutation");
+
+    db.bind_local_only_file_to_remote(&client_file_id, &remote)
+        .expect("late bind local-only file");
+    db.planner_transaction("diverge-bound-local-state", |tx| {
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(501),
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:diverged-local".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "draft.txt".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_108_000,
+        })?;
+        Ok(())
+    })
+    .expect("diverge bound local state");
+
+    let error = db
+        .apply_client_mutation_response(&response)
+        .expect_err("diverged late create response should fail closed");
+
+    assert!(matches!(error, StateDbError::LocalOnlyFileMissing { .. }));
+    assert!(db
+        .load_pending_client_mutation("client-req-0001")
+        .expect("load pending mutation after failed fallback")
+        .is_some());
+}
+
+#[test]
 fn apply_inode_mutation_response_is_idempotent_when_bound_state_already_matches() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
     let namespace_id = NamespaceId::from("ns-1");

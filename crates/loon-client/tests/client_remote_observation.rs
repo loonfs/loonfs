@@ -1,9 +1,9 @@
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
-    AppliedRemoteObservation, LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    ObservedRemoteInode, PendingClientMutationRow, PendingInodeMutationRow, PlannedActionRow,
-    RemoteFileStateRow, SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow,
-    TransferState,
+    AppliedRemoteObservation, BoundLocalOnlyFile, LocalFileStateRow, LocalOnlyFileStateRow,
+    LocalOnlyPlannedActionRow, ObservedRemoteInode, PendingClientMutationRow,
+    PendingInodeMutationRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
+    TransferDirection, TransferLedgerRow, TransferState,
 };
 use loon_client::upload::upload_small_file_from_path;
 use loon_objectstore::fs::LocalFsStore;
@@ -743,6 +743,100 @@ fn remote_observation_converged_inode_late_response_is_idempotent() {
     );
 }
 
+#[test]
+fn remote_observation_bound_local_only_late_create_response_is_idempotent() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_bound_local_only_late_create_response_is_idempotent.yaml",
+    );
+    let initial: LateCreateResponseObservationInitial =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<LateCreateResponseObservationAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: LateCreateResponseObservationExpect =
+        scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-late-create-response");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create objectstore root");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let source_path = write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+    seed_create_observation_state(
+        &db_path,
+        &CreateObservationInitial {
+            local_only_state: initial.local_only_state.clone(),
+            local_file: initial.local_file.clone(),
+            planned_local_only_action: initial.planned_local_only_action.clone(),
+            pending_client_mutation: initial.pending_client_mutation.clone(),
+        },
+        &store,
+        &source_path,
+    );
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let response = actions[2]
+        .apply_client_mutation_response()
+        .expect("late create response should be third");
+    assert!(actions[3].is_restart(), "restart should be fourth");
+    let planner_tick = actions[4].planner().expect("planner should be fifth");
+
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation");
+    }
+
+    let applied = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB before late response");
+        db.apply_client_mutation_response(&response.response)
+            .expect("late create response should be idempotent")
+    };
+
+    assert_eq!(applied, expect.bound_identity);
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after late response");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan inode after late response");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_eq!(
+        db.load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load converged views after late create response"),
+        loon_client::state_db::FileSyncViews {
+            namespace_id: planner_tick.namespace_id.clone(),
+            inode_id: planner_tick.inode_id,
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: Some(expect.sync_anchor.clone()),
+        }
+    );
+    assert_eq!(
+        db.load_pending_client_mutation(&initial.pending_client_mutation.client_request_id)
+            .expect("load pending client mutation after late create response"),
+        if expect.pending_client_mutation_cleared {
+            None
+        } else {
+            Some(initial.pending_client_mutation.clone().into_row())
+        }
+    );
+    assert_eq!(
+        fs::read_to_string(&source_path).expect("read local file after late create response"),
+        initial.local_file.content_utf8
+    );
+}
+
 fn seed_create_observation_state(
     db_path: &Path,
     initial: &CreateObservationInitial,
@@ -1344,6 +1438,11 @@ struct ApplyInodeMutationResponseAction {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct ApplyClientMutationResponseAction {
+    response: ClientMutationResponse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct RawPendingClientMutationRow {
     client_request_id: String,
     namespace_id: NamespaceId,
@@ -1556,6 +1655,24 @@ struct LateResponseObservationExpect {
 }
 
 #[derive(Debug, Deserialize)]
+struct LateCreateResponseObservationInitial {
+    local_only_state: LocalOnlyFileStateRow,
+    local_file: FixtureLocalFile,
+    planned_local_only_action: LocalOnlyPlannedActionRow,
+    pending_client_mutation: RawPendingClientMutationRow,
+}
+
+#[derive(Debug, Deserialize)]
+struct LateCreateResponseObservationExpect {
+    bound_identity: BoundLocalOnlyFile,
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: SyncAnchorRow,
+    pending_client_mutation_cleared: bool,
+    planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum LateResponseObservationAction {
     ApplyRemoteObservation {
@@ -1596,6 +1713,59 @@ impl LateResponseObservationAction {
             Self::ApplyInodeMutationResponse {
                 apply_inode_mutation_response,
             } => Some(apply_inode_mutation_response.clone()),
+            _ => None,
+        }
+    }
+
+    fn planner(&self) -> Option<PlannerTickAction> {
+        match self {
+            Self::PlannerTick { planner_tick } => Some(planner_tick.clone()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LateCreateResponseObservationAction {
+    ApplyRemoteObservation {
+        apply_remote_observation: ApplyRemoteObservationAction,
+    },
+    RestartClientStateDb {
+        restart_client_state_db: bool,
+    },
+    ApplyClientMutationResponse {
+        apply_client_mutation_response: ApplyClientMutationResponseAction,
+    },
+    PlannerTick {
+        planner_tick: PlannerTickAction,
+    },
+}
+
+impl LateCreateResponseObservationAction {
+    fn apply(&self) -> Option<ApplyRemoteObservationAction> {
+        match self {
+            Self::ApplyRemoteObservation {
+                apply_remote_observation,
+            } => Some(apply_remote_observation.clone()),
+            _ => None,
+        }
+    }
+
+    fn is_restart(&self) -> bool {
+        matches!(
+            self,
+            Self::RestartClientStateDb {
+                restart_client_state_db: true
+            }
+        )
+    }
+
+    fn apply_client_mutation_response(&self) -> Option<ApplyClientMutationResponseAction> {
+        match self {
+            Self::ApplyClientMutationResponse {
+                apply_client_mutation_response,
+            } => Some(apply_client_mutation_response.clone()),
             _ => None,
         }
     }
