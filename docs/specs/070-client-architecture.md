@@ -1536,7 +1536,7 @@ Rules:
   - `upload_local_create_upload_failed`
   - `upload_local_create_transfer_reset`
 
-## Executable invariant surface for Milestone 8 slice 5
+## Executable invariant surface for Milestone 8 slice 5a
 
 The first client-side executable invariant slice is file-transfer-only.
 
@@ -1564,8 +1564,39 @@ The file-transfer invariant IDs for this slice are:
   - `local_only_upload_bind_clears_temp_issue_and_transfer_ledger`
   - `local_only_upload_transfer_reset_records_durable_issue`
 
-Remote rename/delete reconciliation and directory-specific client invariants remain out of scope
-for this first client slice.
+Remote rename/delete reconciliation remains out of scope for this first client slice.
+
+## Executable invariant surface for Milestone 8 slice 5b
+
+The next client executable-invariant slice broadens from file transfers into observation-driven
+reconciliation, still without widening to remote rename/delete.
+
+Runtime `checked_invariants` strings remain unchanged for compatibility. The proof surface stays in
+harness-side reports first.
+
+The client reconciliation invariant IDs for this slice are:
+
+- bound-file convergence:
+  - `remote_observation_convergence_clears_dirty_and_planned_action`
+  - `remote_observation_convergence_clears_pending_inode_mutation`
+  - `remote_observation_convergence_advances_sync_anchor`
+- late local-only bind:
+  - `remote_observation_late_bind_establishes_remote_local_and_anchor`
+  - `remote_observation_late_bind_clears_temp_local_state`
+  - `remote_observation_late_bind_clears_temp_transfer_and_issue_rows`
+  - `remote_observation_late_bind_retains_pending_client_mutation_until_response`
+- ambiguous bind:
+  - `remote_observation_ambiguous_bind_records_durable_issue`
+  - `remote_observation_ambiguous_bind_avoids_partial_migration`
+- late observations while file transfers are active:
+  - `remote_observation_active_upload_preserves_transfer_and_pending_inode_mutation`
+  - `remote_observation_active_download_preserves_transfer_ledger`
+- remote-only discovery/materialization:
+  - `remote_only_file_discovery_creates_placeholder_without_anchor`
+  - `remote_only_directory_discovery_creates_placeholder_without_anchor`
+  - `remote_only_directory_materialization_updates_local_state_and_sync_anchor`
+  - `remote_only_directory_materialization_clears_planned_action`
+  - `remote_only_directory_materialization_failure_records_durable_issue`
 
 ## SQLite hardening boundary (schema v11)
 
@@ -1616,8 +1647,14 @@ Rules:
   arrives, but it must not silently delete the frozen `pending_client_mutations` row for that
   request
 - if a bound inode already converges to a later authoritative observation while a matching
-  `pending_inode_mutations` row still exists, the client may advance `sync_anchor` but must not
-  silently delete that pending row; later response application remains responsible for clearing it
+  `pending_inode_mutations` row still exists, the client must clear that matching pending row as
+  part of authoritative convergence
+- if a later `replace_file` success response arrives after that authoritative convergence already
+  cleared the pending inode mutation, response application must accept it as an idempotent no-op
+  only when `remote_state`, `local_state`, and `sync_anchor` already match the committed
+  replacement state; otherwise missing-pending remains an error
+- late local-only bind intentionally does not clear `pending_client_mutations` in this slice;
+  create-response cleanup remains deferred until the create-response API is widened
 
 Why this rule exists:
 

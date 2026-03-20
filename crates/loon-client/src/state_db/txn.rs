@@ -1330,10 +1330,21 @@ impl PlannerTxn<'_> {
                 client_request_id: response.client_request_id.clone(),
             }
         })?;
-        let pending = load_pending_inode_mutation(&self.tx, &response.client_request_id)?
-            .ok_or_else(|| StateDbError::PendingInodeMutationMissing {
-                client_request_id: response.client_request_id.clone(),
-            })?;
+        let pending = match load_pending_inode_mutation(&self.tx, &response.client_request_id)? {
+            Some(pending) => pending,
+            None => {
+                let views = self.load_file_sync_views(&response.namespace_id, replaced.inode_id)?;
+                if replace_response_matches_current_state(response, replaced, &views) {
+                    return Ok(AppliedInodeMutation {
+                        namespace_id: response.namespace_id.clone(),
+                        inode_id: replaced.inode_id,
+                    });
+                }
+                return Err(StateDbError::PendingInodeMutationMissing {
+                    client_request_id: response.client_request_id.clone(),
+                });
+            }
+        };
 
         if pending.namespace_id != response.namespace_id {
             return Err(StateDbError::PendingInodeMutationNamespaceMismatch {
@@ -1699,6 +1710,13 @@ impl PlannerTxn<'_> {
                 self.upsert_local_file(&next_local)?;
                 self.upsert_sync_anchor(&next_anchor)?;
                 self.delete_planned_action(&observed.namespace_id, observed.inode_id)?;
+                if let Some(pending) = load_pending_inode_mutation_for_inode(
+                    &self.tx,
+                    &observed.namespace_id,
+                    observed.inode_id,
+                )? {
+                    self.delete_pending_inode_mutation(&pending.client_request_id)?;
+                }
                 self.delete_conflict_or_error_kind(
                     &observed.namespace_id,
                     observed.inode_id,
@@ -2105,4 +2123,42 @@ impl PlannerTxn<'_> {
     ) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
         load_bound_upload_local_edit_views_from_conn(&self.tx, namespace_id, inode_id)
     }
+}
+
+fn replace_response_matches_current_state(
+    response: &ClientMutationResponse,
+    replaced: &loon_types::ReplacedRemoteFile,
+    views: &FileSyncViews,
+) -> bool {
+    let (Some(remote), Some(local), Some(anchor)) = (
+        views.remote.as_ref(),
+        views.local.as_ref(),
+        views.sync_anchor.as_ref(),
+    ) else {
+        return false;
+    };
+
+    remote.namespace_id == response.namespace_id
+        && remote.inode_id == replaced.inode_id
+        && remote.inode_kind == replaced.inode_kind
+        && remote.observed_seq == response.committed_seq
+        && remote.revision_no == replaced.revision_no
+        && remote.content_digest.as_deref() == Some(replaced.content_digest.as_str())
+        && !remote.is_deleted
+        && local.namespace_id == response.namespace_id
+        && local.inode_id == replaced.inode_id
+        && local.inode_kind == replaced.inode_kind
+        && local.content_digest.as_deref() == Some(replaced.content_digest.as_str())
+        && local.exists_on_disk
+        && !local.dirty
+        && local.parent_inode_id == remote.parent_inode_id
+        && local.display_name == remote.display_name
+        && anchor.namespace_id == response.namespace_id
+        && anchor.inode_id == replaced.inode_id
+        && anchor.inode_kind == replaced.inode_kind
+        && anchor.synced_seq == response.committed_seq
+        && anchor.revision_no == replaced.revision_no
+        && anchor.content_digest.as_deref() == Some(replaced.content_digest.as_str())
+        && anchor.parent_inode_id == remote.parent_inode_id
+        && anchor.display_name == remote.display_name
 }

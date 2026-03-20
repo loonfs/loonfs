@@ -57,3 +57,6 @@ expect:
         parent_inode_id: 2
         display_name: welcome.txt
   local_only_state_count: 2
+  invariants:
+    - remote_observation_ambiguous_bind_records_durable_issue
+    - remote_observation_ambiguous_bind_avoids_partial_migration

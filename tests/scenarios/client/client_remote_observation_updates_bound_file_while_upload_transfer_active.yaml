@@ -119,6 +119,8 @@ expect:
     display_name: report.txt
   planned_action_cleared: false
   pending_inode_mutation_cleared: false
+  invariants:
+    - remote_observation_active_upload_preserves_transfer_and_pending_inode_mutation
   planner_result:
     namespace_id: ns-1
     inode_id: 42

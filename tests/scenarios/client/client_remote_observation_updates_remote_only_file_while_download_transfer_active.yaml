@@ -81,6 +81,8 @@ expect:
     dirty: false
     last_local_change_ms: 1700000612000
   planned_action_cleared: false
+  invariants:
+    - remote_observation_active_download_preserves_transfer_ledger
   planner_result:
     namespace_id: ns-1
     inode_id: 601

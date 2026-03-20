@@ -1,0 +1,5 @@
+scenario=client_remote_observation_ambiguous_bind_records_issue kind=client schema_version=1 seed=None actions=2 faults=0 expect_keys=7
+  1. outcome=RecordedConflictOrError { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(601), kind: "remote_observation_bind_ambiguous" }
+  2. issues_after=[ConflictOrErrorRow { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(601), record_id: 1, kind: "remote_observation_bind_ambiguous", summary: "ambiguous remote observation bind matched 2 local-only candidates", detail_json: Object {"display_name": String("welcome.txt"), "inode_kind": String("file"), "matches": Number(2), "observed_seq": Number(42), "parent_inode_id": Number(2), "revision_no": Number(1)}, created_at_ms: 1700000708000 }]
+  3. invariants[ambiguous-bind] remote_observation_ambiguous_bind_records_durable_issue=pass detail=issue_kind_after=Some("remote_observation_bind_ambiguous") issue_matches_after=Some(2)
+  4. invariants[ambiguous-bind] remote_observation_ambiguous_bind_avoids_partial_migration=pass detail=remote_present_after=false local_present_after=false sync_anchor_present_after=false surviving_local_only_count_after=2 initial_local_only_count=2

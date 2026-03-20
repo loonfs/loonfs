@@ -95,6 +95,11 @@ expect:
   local_only_upload_cleared: true
   planned_local_only_action_cleared: true
   pending_client_mutation_cleared: false
+  invariants:
+    - remote_observation_late_bind_establishes_remote_local_and_anchor
+    - remote_observation_late_bind_clears_temp_local_state
+    - remote_observation_late_bind_clears_temp_transfer_and_issue_rows
+    - remote_observation_late_bind_retains_pending_client_mutation_until_response
   planner_result:
     namespace_id: ns-1
     inode_id: 501

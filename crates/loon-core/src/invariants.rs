@@ -111,6 +111,25 @@ pub const CLIENT_TRANSFER_LOCAL_ONLY_UPLOAD_INVARIANTS: &[&str] = &[
     "local_only_upload_transfer_reset_records_durable_issue",
 ];
 
+pub const CLIENT_RECONCILIATION_INVARIANTS: &[&str] = &[
+    "remote_observation_convergence_clears_dirty_and_planned_action",
+    "remote_observation_convergence_clears_pending_inode_mutation",
+    "remote_observation_convergence_advances_sync_anchor",
+    "remote_observation_late_bind_establishes_remote_local_and_anchor",
+    "remote_observation_late_bind_clears_temp_local_state",
+    "remote_observation_late_bind_clears_temp_transfer_and_issue_rows",
+    "remote_observation_late_bind_retains_pending_client_mutation_until_response",
+    "remote_observation_ambiguous_bind_records_durable_issue",
+    "remote_observation_ambiguous_bind_avoids_partial_migration",
+    "remote_observation_active_upload_preserves_transfer_and_pending_inode_mutation",
+    "remote_observation_active_download_preserves_transfer_ledger",
+    "remote_only_file_discovery_creates_placeholder_without_anchor",
+    "remote_only_directory_discovery_creates_placeholder_without_anchor",
+    "remote_only_directory_materialization_updates_local_state_and_sync_anchor",
+    "remote_only_directory_materialization_clears_planned_action",
+    "remote_only_directory_materialization_failure_records_durable_issue",
+];
+
 pub const INVARIANTS: &[&str] = &[
     "no_orphaned_live_entry",
     "visible_revision_points_to_durable_content",
@@ -186,6 +205,22 @@ pub const INVARIANTS: &[&str] = &[
     "local_only_upload_completion_clears_temp_transfer_ledger",
     "local_only_upload_bind_clears_temp_issue_and_transfer_ledger",
     "local_only_upload_transfer_reset_records_durable_issue",
+    "remote_observation_convergence_clears_dirty_and_planned_action",
+    "remote_observation_convergence_clears_pending_inode_mutation",
+    "remote_observation_convergence_advances_sync_anchor",
+    "remote_observation_late_bind_establishes_remote_local_and_anchor",
+    "remote_observation_late_bind_clears_temp_local_state",
+    "remote_observation_late_bind_clears_temp_transfer_and_issue_rows",
+    "remote_observation_late_bind_retains_pending_client_mutation_until_response",
+    "remote_observation_ambiguous_bind_records_durable_issue",
+    "remote_observation_ambiguous_bind_avoids_partial_migration",
+    "remote_observation_active_upload_preserves_transfer_and_pending_inode_mutation",
+    "remote_observation_active_download_preserves_transfer_ledger",
+    "remote_only_file_discovery_creates_placeholder_without_anchor",
+    "remote_only_directory_discovery_creates_placeholder_without_anchor",
+    "remote_only_directory_materialization_updates_local_state_and_sync_anchor",
+    "remote_only_directory_materialization_clears_planned_action",
+    "remote_only_directory_materialization_failure_records_durable_issue",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

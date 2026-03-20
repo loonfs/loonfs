@@ -73,3 +73,5 @@ expect:
     decision: materialize_remote_dir
     reason: remote_observed_without_anchor
     created_at_ms: 1700000710000
+  invariants:
+    - remote_only_directory_materialization_failure_records_durable_issue

@@ -82,7 +82,9 @@ The current executable-invariant rollout is:
   flow, and checkpoint head-publish invariants
 - slice 3: file content-object invariants across immutable upload and durable-content validation
 - slice 4: checkpoint immutable-object invariants for checkpoint builder manifest/segment outputs
-- slice 5: client transfer invariants, starting with file download/upload flows only
+- slice 5a: client transfer invariants for file download/upload flows
+- slice 5b: client reconciliation invariants for late authoritative observation, remote-only
+  discovery, and remote-only directory materialization
 
 ## Rule for PM-friendly tests
 

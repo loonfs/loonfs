@@ -312,7 +312,8 @@ Deliverables:
   - slice 2: background-work progress publication, queue shard mutation/repair, broker-worker lease flow, and checkpoint head-publish invariants
   - slice 3: file content-object invariants
   - slice 4: checkpoint immutable-object invariants
-  - slice 5: client transfer and reconciliation invariants, starting with file transfers only
+  - slice 5a: client file-transfer invariants
+  - slice 5b: client reconciliation invariants for file observations and remote-only directory materialization
 - structured pass/fail invariant reports in rendered traces and checked-in snapshots
 - fixture `expect.invariants` semantics tightened so each listed name must evaluate `passed = true`
 - model-vs-core differential checks that compare invariant outcomes as well as final state

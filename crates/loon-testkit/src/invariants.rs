@@ -191,6 +191,39 @@ impl ClientTransferInvariantReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClientReconciliationInvariantReport {
+    pub checks: Vec<InvariantCheck>,
+}
+
+impl ClientReconciliationInvariantReport {
+    pub fn check(&self, name: &str) -> Option<&InvariantCheck> {
+        self.checks.iter().find(|check| check.name == name)
+    }
+
+    pub fn passed_names(&self) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|check| check.passed)
+            .map(|check| check.name.clone())
+            .collect()
+    }
+
+    pub fn render_trace_lines(&self, label: &str) -> Vec<String> {
+        self.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "invariants[{label}] {}={} detail={}",
+                    check.name,
+                    if check.passed { "pass" } else { "fail" },
+                    check.detail
+                )
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContentBlockSnapshot {
     pub object_key: String,
@@ -306,6 +339,88 @@ pub struct LocalOnlyUploadTransferInvariantInputs<'a> {
     pub local_only_file_present_after: bool,
     pub local_only_issue_count_after: usize,
     pub outcome: LocalOnlyUploadTransferOutcomeKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteObservationLateBindInvariantInputs<'a> {
+    pub remote_present_after: bool,
+    pub local_present_after: bool,
+    pub sync_anchor_present_after: bool,
+    pub local_dirty_after: bool,
+    pub remote_content_digest_after: Option<&'a str>,
+    pub local_content_digest_after: Option<&'a str>,
+    pub sync_anchor_content_digest_after: Option<&'a str>,
+    pub local_only_file_present_after: bool,
+    pub planned_local_only_action_present_after: bool,
+    pub local_only_upload_present_after: bool,
+    pub local_only_transfer_present_after: bool,
+    pub local_only_issue_count_after: usize,
+    pub pending_client_mutation_present_after: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteObservationConvergenceInvariantInputs<'a> {
+    pub planned_action_present_after: bool,
+    pub pending_inode_mutation_present_after: bool,
+    pub local_dirty_after: bool,
+    pub local_content_digest_after: Option<&'a str>,
+    pub remote_synced_seq_after: ChangeSeq,
+    pub remote_revision_no_after: RevisionNo,
+    pub remote_content_digest_after: Option<&'a str>,
+    pub sync_anchor_seq_after: Option<ChangeSeq>,
+    pub sync_anchor_revision_no_after: Option<RevisionNo>,
+    pub sync_anchor_content_digest_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteObservationAmbiguousBindInvariantInputs<'a> {
+    pub issue_kind_after: Option<&'a str>,
+    pub issue_matches_after: Option<usize>,
+    pub remote_present_after: bool,
+    pub local_present_after: bool,
+    pub sync_anchor_present_after: bool,
+    pub surviving_local_only_count_after: usize,
+    pub initial_local_only_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteObservationActiveUploadInvariantInputs {
+    pub transfer_present_after: bool,
+    pub pending_inode_mutation_present_after: bool,
+    pub remote_synced_seq_after: ChangeSeq,
+    pub expected_remote_synced_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteObservationActiveDownloadInvariantInputs {
+    pub transfer_present_after: bool,
+    pub remote_synced_seq_after: ChangeSeq,
+    pub expected_remote_synced_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteOnlyDiscoveryInvariantInputs<'a> {
+    pub inode_kind: InodeKind,
+    pub local_exists_on_disk_after: bool,
+    pub local_dirty_after: bool,
+    pub sync_anchor_present_after: bool,
+    pub planned_action_decision_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteOnlyDirectoryMaterializationOutcomeKind {
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteOnlyDirectoryMaterializationInvariantInputs<'a> {
+    pub outcome: RemoteOnlyDirectoryMaterializationOutcomeKind,
+    pub local_exists_on_disk_after: bool,
+    pub local_dirty_after: bool,
+    pub sync_anchor_present_after: bool,
+    pub planned_action_present_after: bool,
+    pub issue_kind_after: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1334,6 +1449,280 @@ pub fn evaluate_local_only_upload_transfer_invariants(
                 ),
             },
         ],
+    }
+}
+
+pub fn evaluate_remote_observation_late_bind_invariants(
+    inputs: RemoteObservationLateBindInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    let establishes = inputs.remote_present_after
+        && inputs.local_present_after
+        && inputs.sync_anchor_present_after
+        && !inputs.local_dirty_after
+        && inputs.local_content_digest_after == inputs.remote_content_digest_after
+        && inputs.sync_anchor_content_digest_after == inputs.remote_content_digest_after;
+    let clears_temp_state =
+        !inputs.local_only_file_present_after && !inputs.planned_local_only_action_present_after;
+    let clears_temp_transfer_and_issue_rows = !inputs.local_only_upload_present_after
+        && !inputs.local_only_transfer_present_after
+        && inputs.local_only_issue_count_after == 0;
+    let retains_pending = inputs.pending_client_mutation_present_after;
+
+    ClientReconciliationInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "remote_observation_late_bind_establishes_remote_local_and_anchor"
+                    .to_owned(),
+                passed: establishes,
+                detail: format!(
+                    "remote_present={} local_present={} sync_anchor_present={} local_dirty={} remote_digest={:?} local_digest={:?} anchor_digest={:?}",
+                    inputs.remote_present_after,
+                    inputs.local_present_after,
+                    inputs.sync_anchor_present_after,
+                    inputs.local_dirty_after,
+                    inputs.remote_content_digest_after,
+                    inputs.local_content_digest_after,
+                    inputs.sync_anchor_content_digest_after
+                ),
+            },
+            InvariantCheck {
+                name: "remote_observation_late_bind_clears_temp_local_state".to_owned(),
+                passed: clears_temp_state,
+                detail: format!(
+                    "local_only_file_present_after={} planned_local_only_action_present_after={}",
+                    inputs.local_only_file_present_after,
+                    inputs.planned_local_only_action_present_after
+                ),
+            },
+            InvariantCheck {
+                name: "remote_observation_late_bind_clears_temp_transfer_and_issue_rows"
+                    .to_owned(),
+                passed: clears_temp_transfer_and_issue_rows,
+                detail: format!(
+                    "local_only_upload_present_after={} local_only_transfer_present_after={} local_only_issue_count_after={}",
+                    inputs.local_only_upload_present_after,
+                    inputs.local_only_transfer_present_after,
+                    inputs.local_only_issue_count_after
+                ),
+            },
+            InvariantCheck {
+                name: "remote_observation_late_bind_retains_pending_client_mutation_until_response"
+                    .to_owned(),
+                passed: retains_pending,
+                detail: format!(
+                    "pending_client_mutation_present_after={}",
+                    inputs.pending_client_mutation_present_after
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_remote_observation_convergence_invariants(
+    inputs: RemoteObservationConvergenceInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    let clears_dirty_and_planned_action =
+        !inputs.local_dirty_after && !inputs.planned_action_present_after;
+    let clears_pending_inode_mutation = !inputs.pending_inode_mutation_present_after;
+    let advances_sync_anchor = inputs.sync_anchor_seq_after == Some(inputs.remote_synced_seq_after)
+        && inputs.sync_anchor_revision_no_after == Some(inputs.remote_revision_no_after)
+        && inputs.sync_anchor_content_digest_after == inputs.remote_content_digest_after
+        && inputs.local_content_digest_after == inputs.remote_content_digest_after;
+
+    ClientReconciliationInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "remote_observation_convergence_clears_dirty_and_planned_action"
+                    .to_owned(),
+                passed: clears_dirty_and_planned_action,
+                detail: format!(
+                    "local_dirty_after={} planned_action_present_after={}",
+                    inputs.local_dirty_after, inputs.planned_action_present_after
+                ),
+            },
+            InvariantCheck {
+                name: "remote_observation_convergence_clears_pending_inode_mutation".to_owned(),
+                passed: clears_pending_inode_mutation,
+                detail: format!(
+                    "pending_inode_mutation_present_after={}",
+                    inputs.pending_inode_mutation_present_after
+                ),
+            },
+            InvariantCheck {
+                name: "remote_observation_convergence_advances_sync_anchor".to_owned(),
+                passed: advances_sync_anchor,
+                detail: format!(
+                    "remote_seq={} remote_revision={} remote_digest={:?} local_digest={:?} sync_anchor_seq={:?} sync_anchor_revision={:?} sync_anchor_digest={:?}",
+                    inputs.remote_synced_seq_after.0,
+                    inputs.remote_revision_no_after.0,
+                    inputs.remote_content_digest_after,
+                    inputs.local_content_digest_after,
+                    inputs.sync_anchor_seq_after.map(|seq| seq.0),
+                    inputs.sync_anchor_revision_no_after.map(|revision| revision.0),
+                    inputs.sync_anchor_content_digest_after
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_remote_observation_ambiguous_bind_invariants(
+    inputs: RemoteObservationAmbiguousBindInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    let records_issue = inputs.issue_kind_after == Some("remote_observation_bind_ambiguous")
+        && inputs
+            .issue_matches_after
+            .is_some_and(|matches| matches > 1);
+    let avoids_partial = !inputs.remote_present_after
+        && !inputs.local_present_after
+        && !inputs.sync_anchor_present_after
+        && inputs.surviving_local_only_count_after == inputs.initial_local_only_count;
+
+    ClientReconciliationInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "remote_observation_ambiguous_bind_records_durable_issue".to_owned(),
+                passed: records_issue,
+                detail: format!(
+                    "issue_kind_after={:?} issue_matches_after={:?}",
+                    inputs.issue_kind_after, inputs.issue_matches_after
+                ),
+            },
+            InvariantCheck {
+                name: "remote_observation_ambiguous_bind_avoids_partial_migration".to_owned(),
+                passed: avoids_partial,
+                detail: format!(
+                    "remote_present_after={} local_present_after={} sync_anchor_present_after={} surviving_local_only_count_after={} initial_local_only_count={}",
+                    inputs.remote_present_after,
+                    inputs.local_present_after,
+                    inputs.sync_anchor_present_after,
+                    inputs.surviving_local_only_count_after,
+                    inputs.initial_local_only_count
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_remote_observation_active_upload_invariants(
+    inputs: RemoteObservationActiveUploadInvariantInputs,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "remote_observation_active_upload_preserves_transfer_and_pending_inode_mutation"
+                .to_owned(),
+            passed: inputs.transfer_present_after
+                && inputs.pending_inode_mutation_present_after
+                && inputs.remote_synced_seq_after == inputs.expected_remote_synced_seq,
+            detail: format!(
+                "transfer_present_after={} pending_inode_mutation_present_after={} remote_seq_after={} expected_remote_seq={}",
+                inputs.transfer_present_after,
+                inputs.pending_inode_mutation_present_after,
+                inputs.remote_synced_seq_after.0,
+                inputs.expected_remote_synced_seq.0
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_remote_observation_active_download_invariants(
+    inputs: RemoteObservationActiveDownloadInvariantInputs,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "remote_observation_active_download_preserves_transfer_ledger".to_owned(),
+            passed: inputs.transfer_present_after
+                && inputs.remote_synced_seq_after == inputs.expected_remote_synced_seq,
+            detail: format!(
+                "transfer_present_after={} remote_seq_after={} expected_remote_seq={}",
+                inputs.transfer_present_after,
+                inputs.remote_synced_seq_after.0,
+                inputs.expected_remote_synced_seq.0
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_remote_only_discovery_invariants(
+    inputs: RemoteOnlyDiscoveryInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    let (name, expected_decision) = match inputs.inode_kind {
+        InodeKind::File => (
+            "remote_only_file_discovery_creates_placeholder_without_anchor",
+            Some("download_remote_edit"),
+        ),
+        InodeKind::Dir => (
+            "remote_only_directory_discovery_creates_placeholder_without_anchor",
+            Some("materialize_remote_dir"),
+        ),
+        InodeKind::Symlink | InodeKind::Mount => (
+            "remote_only_file_discovery_creates_placeholder_without_anchor",
+            None,
+        ),
+    };
+
+    ClientReconciliationInvariantReport {
+        checks: vec![InvariantCheck {
+            name: name.to_owned(),
+            passed: !inputs.local_exists_on_disk_after
+                && !inputs.local_dirty_after
+                && !inputs.sync_anchor_present_after
+                && inputs.planned_action_decision_after == expected_decision,
+            detail: format!(
+                "inode_kind={:?} local_exists_on_disk_after={} local_dirty_after={} sync_anchor_present_after={} planned_action_decision_after={:?}",
+                inputs.inode_kind,
+                inputs.local_exists_on_disk_after,
+                inputs.local_dirty_after,
+                inputs.sync_anchor_present_after,
+                inputs.planned_action_decision_after
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_remote_only_directory_materialization_invariants(
+    inputs: RemoteOnlyDirectoryMaterializationInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    match inputs.outcome {
+        RemoteOnlyDirectoryMaterializationOutcomeKind::Completed => {
+            ClientReconciliationInvariantReport {
+                checks: vec![
+                    InvariantCheck {
+                        name: "remote_only_directory_materialization_updates_local_state_and_sync_anchor"
+                            .to_owned(),
+                        passed: inputs.local_exists_on_disk_after
+                            && !inputs.local_dirty_after
+                            && inputs.sync_anchor_present_after,
+                        detail: format!(
+                            "local_exists_on_disk_after={} local_dirty_after={} sync_anchor_present_after={}",
+                            inputs.local_exists_on_disk_after,
+                            inputs.local_dirty_after,
+                            inputs.sync_anchor_present_after
+                        ),
+                    },
+                    InvariantCheck {
+                        name: "remote_only_directory_materialization_clears_planned_action"
+                            .to_owned(),
+                        passed: !inputs.planned_action_present_after,
+                        detail: format!(
+                            "planned_action_present_after={}",
+                            inputs.planned_action_present_after
+                        ),
+                    },
+                ],
+            }
+        }
+        RemoteOnlyDirectoryMaterializationOutcomeKind::Failed => {
+            ClientReconciliationInvariantReport {
+                checks: vec![InvariantCheck {
+                    name: "remote_only_directory_materialization_failure_records_durable_issue"
+                        .to_owned(),
+                    passed: inputs.issue_kind_after
+                        == Some("materialize_remote_dir_local_apply_failed"),
+                    detail: format!("issue_kind_after={:?}", inputs.issue_kind_after),
+                }],
+            }
+        }
     }
 }
 
@@ -2888,15 +3277,21 @@ mod tests {
         evaluate_inode_upload_transfer_invariants, evaluate_local_only_upload_transfer_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
-        evaluate_queue_complete_invariants, CheckpointHeadPublishInvariantInputs,
-        CheckpointObjectInvariantInputs, CheckpointObjectInvariantSnapshot,
-        CheckpointProgressAuthorizer, CheckpointReplayInvariantInputs, CommitInvariantInputs,
-        ContentObjectInvariantInputs, ContentObjectInvariantSnapshot,
-        DownloadTransferInvariantInputs, DownloadTransferOutcomeKind,
-        InodeUploadTransferInvariantInputs, InodeUploadTransferOutcomeKind,
-        LocalOnlyUploadTransferInvariantInputs, LocalOnlyUploadTransferOutcomeKind,
-        ProgressInvariantSnapshot, ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
-        QueueCompleteInvariantInputs, QueueCompleteOutcomeKind, StoredCheckpointSegmentSnapshot,
+        evaluate_queue_complete_invariants, evaluate_remote_observation_ambiguous_bind_invariants,
+        evaluate_remote_observation_convergence_invariants,
+        evaluate_remote_only_directory_materialization_invariants,
+        CheckpointHeadPublishInvariantInputs, CheckpointObjectInvariantInputs,
+        CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
+        CheckpointReplayInvariantInputs, CommitInvariantInputs, ContentObjectInvariantInputs,
+        ContentObjectInvariantSnapshot, DownloadTransferInvariantInputs,
+        DownloadTransferOutcomeKind, InodeUploadTransferInvariantInputs,
+        InodeUploadTransferOutcomeKind, LocalOnlyUploadTransferInvariantInputs,
+        LocalOnlyUploadTransferOutcomeKind, ProgressInvariantSnapshot,
+        ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
+        QueueCompleteOutcomeKind, RemoteObservationAmbiguousBindInvariantInputs,
+        RemoteObservationConvergenceInvariantInputs,
+        RemoteOnlyDirectoryMaterializationInvariantInputs,
+        RemoteOnlyDirectoryMaterializationOutcomeKind, StoredCheckpointSegmentSnapshot,
         StoredContentBlockSnapshot, WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
@@ -3708,6 +4103,143 @@ mod tests {
         assert!(
             !report
                 .check("local_only_upload_retry_reuses_pending_client_mutation")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_bound_convergence_as_passed() {
+        let report = evaluate_remote_observation_convergence_invariants(
+            RemoteObservationConvergenceInvariantInputs {
+                planned_action_present_after: false,
+                pending_inode_mutation_present_after: false,
+                local_dirty_after: false,
+                local_content_digest_after: Some("sha256:file"),
+                remote_synced_seq_after: ChangeSeq(42),
+                remote_revision_no_after: RevisionNo(18),
+                remote_content_digest_after: Some("sha256:file"),
+                sync_anchor_seq_after: Some(ChangeSeq(42)),
+                sync_anchor_revision_no_after: Some(RevisionNo(18)),
+                sync_anchor_content_digest_after: Some("sha256:file"),
+            },
+        );
+
+        assert!(
+            report
+                .check("remote_observation_convergence_clears_pending_inode_mutation")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_bound_convergence_as_failed_when_pending_survives() {
+        let report = evaluate_remote_observation_convergence_invariants(
+            RemoteObservationConvergenceInvariantInputs {
+                planned_action_present_after: false,
+                pending_inode_mutation_present_after: true,
+                local_dirty_after: false,
+                local_content_digest_after: Some("sha256:file"),
+                remote_synced_seq_after: ChangeSeq(42),
+                remote_revision_no_after: RevisionNo(18),
+                remote_content_digest_after: Some("sha256:file"),
+                sync_anchor_seq_after: Some(ChangeSeq(42)),
+                sync_anchor_revision_no_after: Some(RevisionNo(18)),
+                sync_anchor_content_digest_after: Some("sha256:file"),
+            },
+        );
+
+        assert!(
+            !report
+                .check("remote_observation_convergence_clears_pending_inode_mutation")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_ambiguous_bind_as_passed() {
+        let report = evaluate_remote_observation_ambiguous_bind_invariants(
+            RemoteObservationAmbiguousBindInvariantInputs {
+                issue_kind_after: Some("remote_observation_bind_ambiguous"),
+                issue_matches_after: Some(2),
+                remote_present_after: false,
+                local_present_after: false,
+                sync_anchor_present_after: false,
+                surviving_local_only_count_after: 2,
+                initial_local_only_count: 2,
+            },
+        );
+
+        assert!(
+            report
+                .check("remote_observation_ambiguous_bind_records_durable_issue")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_ambiguous_bind_as_failed_when_partial_rows_exist() {
+        let report = evaluate_remote_observation_ambiguous_bind_invariants(
+            RemoteObservationAmbiguousBindInvariantInputs {
+                issue_kind_after: Some("remote_observation_bind_ambiguous"),
+                issue_matches_after: Some(2),
+                remote_present_after: true,
+                local_present_after: false,
+                sync_anchor_present_after: false,
+                surviving_local_only_count_after: 1,
+                initial_local_only_count: 2,
+            },
+        );
+
+        assert!(
+            !report
+                .check("remote_observation_ambiguous_bind_avoids_partial_migration")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_only_directory_materialization_as_passed() {
+        let report = evaluate_remote_only_directory_materialization_invariants(
+            RemoteOnlyDirectoryMaterializationInvariantInputs {
+                outcome: RemoteOnlyDirectoryMaterializationOutcomeKind::Completed,
+                local_exists_on_disk_after: true,
+                local_dirty_after: false,
+                sync_anchor_present_after: true,
+                planned_action_present_after: false,
+                issue_kind_after: None,
+            },
+        );
+
+        assert!(
+            report
+                .check("remote_only_directory_materialization_clears_planned_action")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_only_directory_failure_as_failed_without_issue()
+    {
+        let report = evaluate_remote_only_directory_materialization_invariants(
+            RemoteOnlyDirectoryMaterializationInvariantInputs {
+                outcome: RemoteOnlyDirectoryMaterializationOutcomeKind::Failed,
+                local_exists_on_disk_after: false,
+                local_dirty_after: false,
+                sync_anchor_present_after: false,
+                planned_action_present_after: true,
+                issue_kind_after: None,
+            },
+        );
+
+        assert!(
+            !report
+                .check("remote_only_directory_materialization_failure_records_durable_issue")
                 .expect("check")
                 .passed
         );

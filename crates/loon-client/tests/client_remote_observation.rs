@@ -8,8 +8,22 @@ use loon_client::state_db::{
 use loon_client::upload::upload_small_file_from_path;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::content_manifest;
+use loon_testkit::invariants::{
+    evaluate_remote_observation_active_download_invariants,
+    evaluate_remote_observation_active_upload_invariants,
+    evaluate_remote_observation_ambiguous_bind_invariants,
+    evaluate_remote_observation_convergence_invariants,
+    evaluate_remote_observation_late_bind_invariants, ClientReconciliationInvariantReport,
+    RemoteObservationActiveDownloadInvariantInputs, RemoteObservationActiveUploadInvariantInputs,
+    RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
+    RemoteObservationLateBindInvariantInputs,
+};
+use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
-use loon_types::{ClientMutationOp, ClientMutationRequest, InodeId, NamespaceId, RevisionNo};
+use loon_types::{
+    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId, NamespaceId,
+    RevisionNo,
+};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -106,6 +120,58 @@ fn remote_observation_binds_local_only_create_and_restarts_converged() {
             Some(expected_pending_client_mutation)
         }
     );
+
+    let views = db
+        .load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+        .expect("load converged views for invariants");
+    let report = evaluate_remote_observation_late_bind_invariants(
+        RemoteObservationLateBindInvariantInputs {
+            remote_present_after: views.remote.is_some(),
+            local_present_after: views.local.is_some(),
+            sync_anchor_present_after: views.sync_anchor.is_some(),
+            local_dirty_after: views.local.as_ref().is_some_and(|local| local.dirty),
+            remote_content_digest_after: views
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.content_digest.as_deref()),
+            local_content_digest_after: views
+                .local
+                .as_ref()
+                .and_then(|local| local.content_digest.as_deref()),
+            sync_anchor_content_digest_after: views
+                .sync_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.content_digest.as_deref()),
+            local_only_file_present_after: db
+                .load_local_only_file(&initial.local_only_state.client_file_id)
+                .expect("load local-only file after bind")
+                .is_some(),
+            planned_local_only_action_present_after: db
+                .load_planned_local_only_action(&initial.local_only_state.client_file_id)
+                .expect("load local-only plan after bind")
+                .is_some(),
+            local_only_upload_present_after: db
+                .load_local_only_upload(&initial.local_only_state.client_file_id)
+                .expect("load local-only upload after bind")
+                .is_some(),
+            local_only_transfer_present_after: db
+                .load_local_only_transfer_ledger(
+                    &initial.local_only_state.client_file_id,
+                    TransferDirection::Upload,
+                )
+                .expect("load local-only transfer ledger after bind")
+                .is_some(),
+            local_only_issue_count_after: db
+                .load_local_only_conflicts_and_errors(&initial.local_only_state.client_file_id)
+                .expect("load local-only issues after bind")
+                .len(),
+            pending_client_mutation_present_after: db
+                .load_pending_client_mutation(&initial.pending_client_mutation.client_request_id)
+                .expect("load pending client mutation after bind")
+                .is_some(),
+        },
+    );
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
 }
 
 #[test]
@@ -183,6 +249,51 @@ fn remote_observation_converges_bound_file_edit_and_restarts_clean() {
         fs::read_to_string(&local_path).expect("read local file after observation"),
         initial.local_file.content_utf8
     );
+
+    let views = db
+        .load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+        .expect("load converged views for invariants");
+    let report = evaluate_remote_observation_convergence_invariants(
+        RemoteObservationConvergenceInvariantInputs {
+            planned_action_present_after: db
+                .load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
+                .expect("load planned action after convergence")
+                .is_some(),
+            pending_inode_mutation_present_after: db
+                .load_pending_inode_mutation(&initial.pending_inode_mutation.client_request_id)
+                .expect("load pending inode mutation after convergence")
+                .is_some(),
+            local_dirty_after: views.local.as_ref().is_some_and(|local| local.dirty),
+            local_content_digest_after: views
+                .local
+                .as_ref()
+                .and_then(|local| local.content_digest.as_deref()),
+            remote_synced_seq_after: views
+                .remote
+                .as_ref()
+                .expect("converged remote after observation")
+                .observed_seq,
+            remote_revision_no_after: views
+                .remote
+                .as_ref()
+                .expect("converged remote after observation")
+                .revision_no,
+            remote_content_digest_after: views
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.content_digest.as_deref()),
+            sync_anchor_seq_after: views.sync_anchor.as_ref().map(|anchor| anchor.synced_seq),
+            sync_anchor_revision_no_after: views
+                .sync_anchor
+                .as_ref()
+                .map(|anchor| anchor.revision_no),
+            sync_anchor_content_digest_after: views
+                .sync_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.content_digest.as_deref()),
+        },
+    );
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
 }
 
 #[test]
@@ -238,6 +349,25 @@ fn remote_observation_ambiguous_bind_records_issue_and_preserves_local_only_stat
         })
         .count();
     assert_eq!(surviving_local_only, expect.local_only_state_count);
+
+    let views = db
+        .load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(601))
+        .expect("load views after ambiguous observation");
+    let report = evaluate_remote_observation_ambiguous_bind_invariants(
+        RemoteObservationAmbiguousBindInvariantInputs {
+            issue_kind_after: actual_issues.first().map(|issue| issue.kind.as_str()),
+            issue_matches_after: actual_issues
+                .first()
+                .and_then(|issue| issue.detail_json["matches"].as_u64())
+                .map(|matches| matches as usize),
+            remote_present_after: views.remote.is_some(),
+            local_present_after: views.local.is_some(),
+            sync_anchor_present_after: views.sync_anchor.is_some(),
+            surviving_local_only_count_after: surviving_local_only,
+            initial_local_only_count: initial.local_only_state.len(),
+        },
+    );
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
 }
 
 #[test]
@@ -363,6 +493,28 @@ fn remote_observation_updates_remote_only_file_while_download_transfer_active() 
             sync_anchor: None,
         }
     );
+    let actual_planned_action = db
+        .load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
+        .expect("load planned action after late download observation");
+    if expect.planned_action_cleared {
+        assert_eq!(actual_planned_action, None);
+    } else {
+        let actual_planned_action =
+            actual_planned_action.expect("planned action should remain after observation");
+        assert_eq!(
+            actual_planned_action.decision,
+            initial.planned_action.decision
+        );
+        assert_eq!(actual_planned_action.reason, initial.planned_action.reason);
+        assert_eq!(
+            actual_planned_action.namespace_id,
+            initial.planned_action.namespace_id
+        );
+        assert_eq!(
+            actual_planned_action.inode_id,
+            initial.planned_action.inode_id
+        );
+    }
     assert!(
         db.load_transfer_ledger_for_inode(
             &planner_tick.namespace_id,
@@ -372,6 +524,222 @@ fn remote_observation_updates_remote_only_file_while_download_transfer_active() 
         .expect("load download transfer ledger")
         .is_some(),
         "active download transfer should survive late observation",
+    );
+}
+
+#[test]
+fn remote_observation_late_bind_invariant_trace_matches_checked_in_artifact() {
+    let report = run_late_bind_invariant_report();
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_binds_local_only_create.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_convergence_invariant_trace_matches_checked_in_artifact() {
+    let report = run_convergence_invariant_report();
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_converges_bound_file_edit.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_ambiguous_bind_invariant_trace_matches_checked_in_artifact() {
+    let report = run_ambiguous_bind_invariant_report();
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_ambiguous_bind_records_issue.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_active_upload_invariant_passes() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_updates_bound_file_while_upload_transfer_active.yaml",
+    );
+    let initial: EditObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: EditObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-active-upload-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let local_path = write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+
+    seed_edit_observation_state(&db_path, &initial);
+    let observe = actions[0].apply().expect("apply action first");
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation");
+    }
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let report = evaluate_remote_observation_active_upload_invariants(
+        RemoteObservationActiveUploadInvariantInputs {
+            transfer_present_after: db
+                .load_transfer_ledger_for_inode(
+                    &initial.remote_state.namespace_id,
+                    initial.remote_state.inode_id,
+                    TransferDirection::Upload,
+                )
+                .expect("load upload transfer ledger after observation")
+                .is_some(),
+            pending_inode_mutation_present_after: db
+                .load_pending_inode_mutation(&initial.pending_inode_mutation.client_request_id)
+                .expect("load pending inode mutation after observation")
+                .is_some(),
+            remote_synced_seq_after: expect.remote_state.observed_seq,
+            expected_remote_synced_seq: observe.remote_observation.observed_seq,
+        },
+    );
+
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+    assert_eq!(
+        fs::read_to_string(&local_path).expect("read local file after observation"),
+        initial.local_file.content_utf8
+    );
+}
+
+#[test]
+fn remote_observation_active_download_invariant_passes() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_updates_remote_only_file_while_download_transfer_active.yaml",
+    );
+    let initial: DownloadObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: DownloadObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-active-download-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+
+    seed_remote_only_observation_state(&db_path, &initial);
+    let observe = actions[0].apply().expect("apply action first");
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation");
+    }
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let report = evaluate_remote_observation_active_download_invariants(
+        RemoteObservationActiveDownloadInvariantInputs {
+            transfer_present_after: db
+                .load_transfer_ledger_for_inode(
+                    &initial.remote_state.namespace_id,
+                    initial.remote_state.inode_id,
+                    TransferDirection::Download,
+                )
+                .expect("load download transfer ledger after observation")
+                .is_some(),
+            remote_synced_seq_after: expect.remote_state.observed_seq,
+            expected_remote_synced_seq: observe.remote_observation.observed_seq,
+        },
+    );
+
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+}
+
+#[test]
+fn remote_observation_converged_inode_late_response_is_idempotent() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_converged_inode_late_response_is_idempotent.yaml",
+    );
+    let initial: LateResponseObservationInitial =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<LateResponseObservationAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: LateResponseObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-late-response");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let local_path = write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+
+    seed_edit_observation_state(
+        &db_path,
+        &EditObservationInitial {
+            remote_state: initial.remote_state.clone(),
+            local_state: initial.local_state.clone(),
+            sync_anchor: initial.sync_anchor.clone(),
+            local_file: initial.local_file.clone(),
+            planned_action: initial.planned_action.clone(),
+            pending_inode_mutation: initial.pending_inode_mutation.clone(),
+            transfer_ledger: None,
+        },
+    );
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let response = actions[2]
+        .apply_inode_mutation_response()
+        .expect("late response should be third");
+    assert!(actions[3].is_restart(), "restart should be fourth");
+    let planner_tick = actions[4].planner().expect("planner should be fifth");
+
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation");
+    }
+
+    let applied = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB before late response");
+        db.apply_inode_mutation_response(&response.response)
+            .expect("late response should be idempotent")
+    };
+
+    assert_eq!(applied, expect.applied_inode_mutation);
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after late response");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan inode after late response");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_eq!(
+        db.load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load converged views after late response"),
+        loon_client::state_db::FileSyncViews {
+            namespace_id: planner_tick.namespace_id.clone(),
+            inode_id: planner_tick.inode_id,
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: Some(expect.sync_anchor.clone()),
+        }
+    );
+    assert_eq!(
+        db.load_pending_inode_mutation(&initial.pending_inode_mutation.client_request_id)
+            .expect("load pending inode mutation after late response"),
+        None
+    );
+    assert_eq!(
+        fs::read_to_string(&local_path).expect("read local file after late response"),
+        initial.local_file.content_utf8
     );
 }
 
@@ -519,6 +887,295 @@ fn write_source_file(source_root: &Path, relative_path: &Path, content_utf8: &st
     source_path
 }
 
+fn run_late_bind_invariant_report() -> ReconciliationInvariantFixtureRunReport {
+    let scenario = load_fixture("client/client_remote_observation_binds_local_only_create.yaml");
+    let initial: CreateObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: CreateObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-late-bind-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create objectstore root");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let source_path = write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+    seed_create_observation_state(&db_path, &initial, &store, &source_path);
+    let observe = actions[0].apply().expect("apply action first");
+    let planner_tick = actions[2].planner().expect("planner action third");
+
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation");
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let views = db
+        .load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+        .expect("load converged views");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan bound inode after restart");
+    let report = evaluate_remote_observation_late_bind_invariants(
+        RemoteObservationLateBindInvariantInputs {
+            remote_present_after: views.remote.is_some(),
+            local_present_after: views.local.is_some(),
+            sync_anchor_present_after: views.sync_anchor.is_some(),
+            local_dirty_after: views.local.as_ref().is_some_and(|local| local.dirty),
+            remote_content_digest_after: views
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.content_digest.as_deref()),
+            local_content_digest_after: views
+                .local
+                .as_ref()
+                .and_then(|local| local.content_digest.as_deref()),
+            sync_anchor_content_digest_after: views
+                .sync_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.content_digest.as_deref()),
+            local_only_file_present_after: db
+                .load_local_only_file(&initial.local_only_state.client_file_id)
+                .expect("load local-only file after bind")
+                .is_some(),
+            planned_local_only_action_present_after: db
+                .load_planned_local_only_action(&initial.local_only_state.client_file_id)
+                .expect("load local-only plan after bind")
+                .is_some(),
+            local_only_upload_present_after: db
+                .load_local_only_upload(&initial.local_only_state.client_file_id)
+                .expect("load local-only upload after bind")
+                .is_some(),
+            local_only_transfer_present_after: db
+                .load_local_only_transfer_ledger(
+                    &initial.local_only_state.client_file_id,
+                    TransferDirection::Upload,
+                )
+                .expect("load local-only transfer ledger after bind")
+                .is_some(),
+            local_only_issue_count_after: db
+                .load_local_only_conflicts_and_errors(&initial.local_only_state.client_file_id)
+                .expect("load local-only issues after bind")
+                .len(),
+            pending_client_mutation_present_after: db
+                .load_pending_client_mutation(&initial.pending_client_mutation.client_request_id)
+                .expect("load pending client mutation after bind")
+                .is_some(),
+        },
+    );
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("planner_result={planner_result:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("late-bind"))
+    .collect::<Vec<_>>();
+
+    ReconciliationInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
+}
+
+fn run_convergence_invariant_report() -> ReconciliationInvariantFixtureRunReport {
+    let scenario = load_fixture("client/client_remote_observation_converges_bound_file_edit.yaml");
+    let initial: EditObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: EditObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-convergence-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+    write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+
+    seed_edit_observation_state(&db_path, &initial);
+    let observe = actions[0].apply().expect("apply action first");
+    let planner_tick = actions[2].planner().expect("planner action third");
+
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation");
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let views = db
+        .load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+        .expect("load converged views");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan bound inode after restart");
+    let report = evaluate_remote_observation_convergence_invariants(
+        RemoteObservationConvergenceInvariantInputs {
+            planned_action_present_after: db
+                .load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
+                .expect("load planned action after convergence")
+                .is_some(),
+            pending_inode_mutation_present_after: db
+                .load_pending_inode_mutation(&initial.pending_inode_mutation.client_request_id)
+                .expect("load pending inode mutation after convergence")
+                .is_some(),
+            local_dirty_after: views.local.as_ref().is_some_and(|local| local.dirty),
+            local_content_digest_after: views
+                .local
+                .as_ref()
+                .and_then(|local| local.content_digest.as_deref()),
+            remote_synced_seq_after: views
+                .remote
+                .as_ref()
+                .expect("converged remote after observation")
+                .observed_seq,
+            remote_revision_no_after: views
+                .remote
+                .as_ref()
+                .expect("converged remote after observation")
+                .revision_no,
+            remote_content_digest_after: views
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.content_digest.as_deref()),
+            sync_anchor_seq_after: views.sync_anchor.as_ref().map(|anchor| anchor.synced_seq),
+            sync_anchor_revision_no_after: views
+                .sync_anchor
+                .as_ref()
+                .map(|anchor| anchor.revision_no),
+            sync_anchor_content_digest_after: views
+                .sync_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.content_digest.as_deref()),
+        },
+    );
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("planner_result={planner_result:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("bound-convergence"))
+    .collect::<Vec<_>>();
+
+    ReconciliationInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
+}
+
+fn run_ambiguous_bind_invariant_report() -> ReconciliationInvariantFixtureRunReport {
+    let scenario =
+        load_fixture("client/client_remote_observation_ambiguous_bind_records_issue.yaml");
+    let initial: AmbiguousObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: AmbiguousObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-ambiguous-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+
+    seed_ambiguous_observation_state(&db_path, &initial.local_only_state);
+    let observe = actions[0].apply().expect("apply action first");
+
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation");
+    }
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let issues = db
+        .load_conflicts_and_errors(&NamespaceId::from("ns-1"), InodeId(601))
+        .expect("load ambiguous issue rows");
+    let report = evaluate_remote_observation_ambiguous_bind_invariants(
+        RemoteObservationAmbiguousBindInvariantInputs {
+            issue_kind_after: issues.first().map(|issue| issue.kind.as_str()),
+            issue_matches_after: issues
+                .first()
+                .and_then(|issue| issue.detail_json["matches"].as_u64())
+                .map(|matches| matches as usize),
+            remote_present_after: db
+                .load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(601))
+                .expect("load file sync views after ambiguous observation")
+                .remote
+                .is_some(),
+            local_present_after: db
+                .load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(601))
+                .expect("load file sync views after ambiguous observation")
+                .local
+                .is_some(),
+            sync_anchor_present_after: db
+                .load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(601))
+                .expect("load file sync views after ambiguous observation")
+                .sync_anchor
+                .is_some(),
+            surviving_local_only_count_after: initial
+                .local_only_state
+                .iter()
+                .filter(|row| {
+                    db.load_local_only_file(&row.client_file_id)
+                        .expect("load local-only row after ambiguous observation")
+                        .is_some()
+                })
+                .count(),
+            initial_local_only_count: initial.local_only_state.len(),
+        },
+    );
+
+    assert_eq!(issues.len(), expect.conflicts_and_errors.len());
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("issues_after={issues:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("ambiguous-bind"))
+    .collect::<Vec<_>>();
+
+    ReconciliationInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
+}
+
+fn assert_expected_reconciliation_invariants(
+    scenario: &Scenario,
+    report: &ClientReconciliationInvariantReport,
+    expected: &[String],
+) {
+    for name in expected {
+        let check = report
+            .check(name)
+            .unwrap_or_else(|| panic!("{} missing invariant `{name}`", scenario.name));
+        assert!(
+            check.passed,
+            "{} invariant `{name}` failed: {}",
+            scenario.name, check.detail
+        );
+    }
+}
+
 fn load_fixture(relative_path: &str) -> Scenario {
     loon_testkit::fixtures::load_fixture(relative_path)
 }
@@ -542,6 +1199,8 @@ struct CreateObservationExpect {
     planned_local_only_action_cleared: bool,
     pending_client_mutation_cleared: bool,
     planner_result: PlannedActionRecord,
+    #[serde(default)]
+    invariants: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -565,6 +1224,8 @@ struct EditObservationExpect {
     planned_action_cleared: bool,
     pending_inode_mutation_cleared: bool,
     planner_result: PlannedActionRecord,
+    #[serde(default)]
+    invariants: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -582,6 +1243,8 @@ struct DownloadObservationExpect {
     local_state: LocalFileStateRow,
     planned_action_cleared: bool,
     planner_result: PlannedActionRecord,
+    #[serde(default)]
+    invariants: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -606,12 +1269,19 @@ struct AmbiguousObservationExpect {
     sync_anchor: Option<SyncAnchorRow>,
     conflicts_and_errors: Vec<RawConflictOrErrorExpect>,
     local_only_state_count: usize,
+    #[serde(default)]
+    invariants: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct FixtureLocalFile {
     relative_path: PathBuf,
     content_utf8: String,
+}
+
+#[derive(Debug)]
+struct ReconciliationInvariantFixtureRunReport {
+    rendered_trace: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -666,6 +1336,11 @@ struct PlannerTickAction {
     namespace_id: NamespaceId,
     inode_id: InodeId,
     now_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApplyInodeMutationResponseAction {
+    response: ClientMutationResponse,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -859,6 +1534,78 @@ struct RawReplaceFileOp {
     inode_id: InodeId,
     base_revision_no: RevisionNo,
     content_manifest_digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LateResponseObservationInitial {
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: SyncAnchorRow,
+    local_file: FixtureLocalFile,
+    planned_action: PlannedActionRow,
+    pending_inode_mutation: RawPendingInodeMutationRow,
+}
+
+#[derive(Debug, Deserialize)]
+struct LateResponseObservationExpect {
+    applied_inode_mutation: loon_client::state_db::AppliedInodeMutation,
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: SyncAnchorRow,
+    planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LateResponseObservationAction {
+    ApplyRemoteObservation {
+        apply_remote_observation: ApplyRemoteObservationAction,
+    },
+    RestartClientStateDb {
+        restart_client_state_db: bool,
+    },
+    ApplyInodeMutationResponse {
+        apply_inode_mutation_response: ApplyInodeMutationResponseAction,
+    },
+    PlannerTick {
+        planner_tick: PlannerTickAction,
+    },
+}
+
+impl LateResponseObservationAction {
+    fn apply(&self) -> Option<ApplyRemoteObservationAction> {
+        match self {
+            Self::ApplyRemoteObservation {
+                apply_remote_observation,
+            } => Some(apply_remote_observation.clone()),
+            _ => None,
+        }
+    }
+
+    fn is_restart(&self) -> bool {
+        matches!(
+            self,
+            Self::RestartClientStateDb {
+                restart_client_state_db: true
+            }
+        )
+    }
+
+    fn apply_inode_mutation_response(&self) -> Option<ApplyInodeMutationResponseAction> {
+        match self {
+            Self::ApplyInodeMutationResponse {
+                apply_inode_mutation_response,
+            } => Some(apply_inode_mutation_response.clone()),
+            _ => None,
+        }
+    }
+
+    fn planner(&self) -> Option<PlannerTickAction> {
+        match self {
+            Self::PlannerTick { planner_tick } => Some(planner_tick.clone()),
+            _ => None,
+        }
+    }
 }
 
 type TestDir = loon_testkit::tempdir::TestDir;

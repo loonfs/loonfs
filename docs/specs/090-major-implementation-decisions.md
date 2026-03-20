@@ -505,7 +505,9 @@ Milestone 8 rollout order:
   checkpoint head publish
 - slice 3 covers file content objects
 - slice 4 covers checkpoint immutable objects
-- slice 5 starts client transfer/reconciliation invariants with file transfers only
+- slice 5a covers client file-transfer invariants
+- slice 5b broadens to client reconciliation invariants for late authoritative observation and
+  remote-only directory materialization
 
 Only after the evaluator set is stable should structured invariant reports move into broader
 runtime APIs.

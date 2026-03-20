@@ -1,6 +1,6 @@
 schema_version: 1
 scenario_kind: client
-name: client_remote_observation_converges_bound_file_edit
+name: client_remote_observation_converged_inode_late_response_is_idempotent
 initial:
   remote_state:
     namespace_id: ns-1
@@ -69,15 +69,25 @@ actions:
         display_name: report.txt
         is_deleted: false
   - restart_client_state_db: true
+  - apply_inode_mutation_response:
+      response:
+        namespace_id: ns-1
+        client_request_id: client-req-00000000000000000001
+        committed_seq: 42
+        replaced_file:
+          inode_id: 42
+          inode_kind: file
+          revision_no: 18
+          content_digest: sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9
+  - restart_client_state_db: true
   - planner_tick:
       namespace_id: ns-1
       inode_id: 42
       now_ms: 1700000410000
 expect:
-  outcome:
-    converged_bound_inode:
-      namespace_id: ns-1
-      inode_id: 42
+  applied_inode_mutation:
+    namespace_id: ns-1
+    inode_id: 42
   remote_state:
     namespace_id: ns-1
     inode_id: 42
@@ -109,12 +119,6 @@ expect:
     content_manifest_digest: sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6
     parent_inode_id: 2
     display_name: report.txt
-  planned_action_cleared: true
-  pending_inode_mutation_cleared: true
-  invariants:
-    - remote_observation_convergence_clears_dirty_and_planned_action
-    - remote_observation_convergence_clears_pending_inode_mutation
-    - remote_observation_convergence_advances_sync_anchor
   planner_result:
     namespace_id: ns-1
     inode_id: 42

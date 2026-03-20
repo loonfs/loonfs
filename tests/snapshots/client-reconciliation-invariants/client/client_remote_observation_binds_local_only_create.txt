@@ -1,0 +1,7 @@
+scenario=client_remote_observation_binds_local_only_create kind=client schema_version=1 seed=None actions=3 faults=0 expect_keys=10
+  1. outcome=BoundLocalOnly(BoundLocalOnlyFile { client_file_id: ClientFileId("tmp:ns-1:00000000000000000001"), namespace_id: NamespaceId("ns-1"), inode_id: InodeId(501) })
+  2. planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(501), decision: NoOp, reason: AlreadyConverged, created_at_ms: 1700000110000 }
+  3. invariants[late-bind] remote_observation_late_bind_establishes_remote_local_and_anchor=pass detail=remote_present=true local_present=true sync_anchor_present=true local_dirty=false remote_digest=Some("sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9") local_digest=Some("sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9") anchor_digest=Some("sha256:9c5a4fd8b568931d08d0cde5b7980661c74239df0454b4c2f177ce8518aab2c9")
+  4. invariants[late-bind] remote_observation_late_bind_clears_temp_local_state=pass detail=local_only_file_present_after=false planned_local_only_action_present_after=false
+  5. invariants[late-bind] remote_observation_late_bind_clears_temp_transfer_and_issue_rows=pass detail=local_only_upload_present_after=false local_only_transfer_present_after=false local_only_issue_count_after=0
+  6. invariants[late-bind] remote_observation_late_bind_retains_pending_client_mutation_until_response=pass detail=pending_client_mutation_present_after=true

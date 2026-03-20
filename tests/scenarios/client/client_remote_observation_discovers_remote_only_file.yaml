@@ -54,6 +54,8 @@ expect:
     decision: download_remote_edit
     reason: remote_observed_without_anchor
     created_at_ms: 1700000610000
+  invariants:
+    - remote_only_file_discovery_creates_placeholder_without_anchor
   planner_result:
     namespace_id: ns-1
     inode_id: 601

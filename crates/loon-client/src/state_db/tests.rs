@@ -9,7 +9,7 @@ use crate::upload::UploadedContent;
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
     ContentManifestEnvelope, ContentManifestPayload, CreatedRemoteInode, InodeId, InodeKind,
-    NamespaceId, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
+    NamespaceId, ReplacedRemoteFile, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde_json::json;
 
@@ -1353,6 +1353,81 @@ fn apply_client_mutation_response_binds_and_clears_pending_row() {
     assert_eq!(
         db.load_local_only_upload(&client_file_id)
             .expect("load temp upload row after bind"),
+        None
+    );
+}
+
+#[test]
+fn apply_inode_mutation_response_is_idempotent_when_bound_state_already_matches() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let inode_id = InodeId(42);
+    let response = ClientMutationResponse {
+        namespace_id: namespace_id.clone(),
+        client_request_id: "client-req-0002".to_owned(),
+        committed_seq: ChangeSeq(42),
+        created_inode: None,
+        replaced_file: Some(ReplacedRemoteFile {
+            inode_id,
+            inode_kind: InodeKind::File,
+            revision_no: RevisionNo(18),
+            content_digest: "sha256:replaced-18".to_owned(),
+        }),
+    };
+
+    db.planner_transaction("seed-matching-bound-state", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(42),
+            revision_no: RevisionNo(18),
+            content_digest: Some("sha256:replaced-18".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-replaced-18".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "report.txt".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:replaced-18".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "report.txt".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_408_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            synced_seq: ChangeSeq(42),
+            revision_no: RevisionNo(18),
+            content_digest: Some("sha256:replaced-18".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-replaced-18".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "report.txt".to_owned(),
+        })?;
+        Ok(())
+    })
+    .expect("seed matching bound state");
+
+    let applied = db
+        .apply_inode_mutation_response(&response)
+        .expect("matching late response should be idempotent");
+
+    assert_eq!(
+        applied,
+        super::AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        }
+    );
+    assert_eq!(
+        db.load_pending_inode_mutation(&response.client_request_id)
+            .expect("load pending inode mutation after idempotent response"),
         None
     );
 }

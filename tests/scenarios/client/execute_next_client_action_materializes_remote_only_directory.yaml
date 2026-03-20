@@ -81,6 +81,9 @@ expect:
   local_parent_entries:
     - incoming
   created_dir_entries: []
+  invariants:
+    - remote_only_directory_materialization_updates_local_state_and_sync_anchor
+    - remote_only_directory_materialization_clears_planned_action
   planner_result:
     namespace_id: ns-1
     inode_id: 701

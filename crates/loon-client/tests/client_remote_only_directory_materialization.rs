@@ -8,6 +8,12 @@ use loon_client::state_db::{
     SqliteStateDb, SyncAnchorRow,
 };
 use loon_objectstore::fs::LocalFsStore;
+use loon_testkit::invariants::{
+    evaluate_remote_only_directory_materialization_invariants, ClientReconciliationInvariantReport,
+    RemoteOnlyDirectoryMaterializationInvariantInputs,
+    RemoteOnlyDirectoryMaterializationOutcomeKind,
+};
+use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{InodeId, NamespaceId};
 use serde::Deserialize;
@@ -111,6 +117,18 @@ fn execute_next_client_action_materializes_remote_only_directory() {
         read_directory_entries(&target_path),
         expect.created_dir_entries,
     );
+
+    let report = evaluate_remote_only_directory_materialization_invariants(
+        RemoteOnlyDirectoryMaterializationInvariantInputs {
+            outcome: RemoteOnlyDirectoryMaterializationOutcomeKind::Completed,
+            local_exists_on_disk_after: expect.local_state.exists_on_disk,
+            local_dirty_after: expect.local_state.dirty,
+            sync_anchor_present_after: true,
+            planned_action_present_after: !expect.planned_action_cleared,
+            issue_kind_after: None,
+        },
+    );
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
 }
 
 #[test]
@@ -202,6 +220,30 @@ fn execute_next_client_action_materialize_remote_only_directory_local_apply_fail
         target_path.is_file(),
         "blocking file should remain in place"
     );
+
+    let report = evaluate_remote_only_directory_materialization_invariants(
+        RemoteOnlyDirectoryMaterializationInvariantInputs {
+            outcome: RemoteOnlyDirectoryMaterializationOutcomeKind::Failed,
+            local_exists_on_disk_after: expect.local_state.exists_on_disk,
+            local_dirty_after: expect.local_state.dirty,
+            sync_anchor_present_after: expect.sync_anchor.is_some(),
+            planned_action_present_after: true,
+            issue_kind_after: Some(issue.kind.as_str()),
+        },
+    );
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+}
+
+#[test]
+fn remote_only_directory_materialization_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_only_directory_materialization_invariant_report();
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/execute_next_client_action_materializes_remote_only_directory.txt"
+        )
+    );
 }
 
 fn run_execute_next_client_action(
@@ -259,6 +301,84 @@ fn load_fixture(relative_path: &str) -> Scenario {
     loon_testkit::fixtures::load_fixture(relative_path)
 }
 
+fn run_remote_only_directory_materialization_invariant_report(
+) -> ReconciliationInvariantFixtureRunReport {
+    let scenario =
+        load_fixture("client/execute_next_client_action_materializes_remote_only_directory.yaml");
+    let initial: MaterializeDirectoryInitialState =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<MaterializeDirectoryFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: MaterializeDirectoryExpectedState =
+        scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-only-dir-materialization-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let local_root = temp_dir.path().join("local");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&local_root).expect("create local root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let execute = actions[0].execute().expect("execute action first");
+    let planner_tick = actions[2].planner().expect("planner action third");
+    let target_relative = execute
+        .source_path_relative
+        .as_deref()
+        .expect("materialization fixture should include target path");
+    let target_path = local_root.join(target_relative);
+    fs::create_dir_all(target_path.parent().expect("target parent")).expect("create target parent");
+
+    seed_remote_only_directory_state(
+        &db_path,
+        &initial.remote_state,
+        &initial.local_state,
+        &initial.planned_actions,
+    );
+
+    let executed =
+        run_execute_next_client_action(&db_path, &store, Some(target_path.as_path()), &execute)
+            .expect("execute next client action")
+            .expect("one action should be scheduled");
+    let materialized = match executed {
+        NextClientAction::ExecutedMaterializeRemoteDir(result) => result,
+        other => panic!("expected executed materialize_remote_dir, got {other:?}"),
+    };
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen client state DB after execute");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan materialized directory after restart");
+    let report = evaluate_remote_only_directory_materialization_invariants(
+        RemoteOnlyDirectoryMaterializationInvariantInputs {
+            outcome: RemoteOnlyDirectoryMaterializationOutcomeKind::Completed,
+            local_exists_on_disk_after: expect.local_state.exists_on_disk,
+            local_dirty_after: expect.local_state.dirty,
+            sync_anchor_present_after: true,
+            planned_action_present_after: !expect.planned_action_cleared,
+            issue_kind_after: None,
+        },
+    );
+
+    assert_eq!(materialized.applied, expect.applied_inode_mutation);
+    assert_eq!(planner_result, expect.planner_result);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("applied={:?}", materialized.applied),
+        format!("planner_result={planner_result:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("remote-only-dir-materialization"))
+    .collect::<Vec<_>>();
+
+    ReconciliationInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct MaterializeDirectoryInitialState {
     remote_state: RemoteFileStateRow,
@@ -278,6 +398,8 @@ struct MaterializeDirectoryExpectedState {
     #[serde(default)]
     created_dir_entries: Vec<String>,
     planner_result: PlannedActionRecord,
+    #[serde(default)]
+    invariants: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,6 +409,8 @@ struct MaterializeDirectoryFailureExpect {
     local_state: LocalFileStateRow,
     sync_anchor: Option<SyncAnchorRow>,
     planned_action: PlannedActionRow,
+    #[serde(default)]
+    invariants: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,6 +475,28 @@ struct RawMaterializeDirectoryIssueExpect {
     created_at_ms: u64,
     detail_operation: String,
     detail_path_suffix: String,
+}
+
+fn assert_expected_reconciliation_invariants(
+    scenario: &Scenario,
+    report: &ClientReconciliationInvariantReport,
+    expected: &[String],
+) {
+    for name in expected {
+        let check = report
+            .check(name)
+            .unwrap_or_else(|| panic!("{} missing invariant `{name}`", scenario.name));
+        assert!(
+            check.passed,
+            "{} invariant `{name}` failed: {}",
+            scenario.name, check.detail
+        );
+    }
+}
+
+#[derive(Debug)]
+struct ReconciliationInvariantFixtureRunReport {
+    rendered_trace: String,
 }
 
 type TestDir = loon_testkit::tempdir::TestDir;
