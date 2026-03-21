@@ -14,6 +14,11 @@ pub enum PlannerDecision {
     UploadLocalCreate,
     UploadLocalEdit,
     DownloadRemoteEdit,
+    ResolveSameInodeConflict,
+    ResolveDeleteVsEditConflict,
+    ResolveRenameVsEditConflict,
+    ResolvePathBindingCollision,
+    ApplyRemoteRenameAndReplace,
     ApplyRemoteDelete,
     ApplyRemoteSubtreeDelete,
     ApplyRemoteSubtreeRename,
@@ -51,6 +56,7 @@ pub enum PlannerReason {
     RemotePathWaitingForTargetParentMaterialization,
     RemotePathTargetParentUnusable,
     RemotePathAndContentDifferFromAnchor,
+    LocalOnlyPathBindingCollision,
     LocalAndRemoteDifferFromAnchor,
     LocalObservedWithoutAnchor,
     RemoteObservedWithoutAnchor,
@@ -113,6 +119,10 @@ pub(crate) fn plan_file_in_tx(
     {
         action
     } else if let Some(action) =
+        decide_path_binding_collision_action(tx, namespace_id, inode_id, &views, now_ms)?
+    {
+        action
+    } else if let Some(action) =
         decide_remote_only_materialization_wait_action(tx, namespace_id, inode_id, &views, now_ms)?
     {
         action
@@ -124,7 +134,7 @@ pub(crate) fn plan_file_in_tx(
         decide_file_action(&views, now_ms)
     };
     if let Some(preserved) =
-        preserve_in_flight_action_for_remote_delete(tx, namespace_id, inode_id, &views, now_ms)?
+        preserve_in_flight_file_action(tx, namespace_id, inode_id, &views, now_ms)?
     {
         action = preserved;
     }
@@ -136,6 +146,53 @@ pub(crate) fn plan_file_in_tx(
     }
 
     Ok(action)
+}
+
+fn decide_path_binding_collision_action(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    views: &FileSyncViews,
+    now_ms: u64,
+) -> Result<Option<PlannedActionRecord>, StateDbError> {
+    let Some(remote) = views.remote.as_ref() else {
+        return Ok(None);
+    };
+    if views.sync_anchor.is_some() || remote.is_deleted || remote.inode_kind != InodeKind::File {
+        return Ok(None);
+    }
+    if let Some(local) = views.local.as_ref() {
+        if !remote_only_placeholder_matches_remote(local, remote) {
+            return Ok(None);
+        }
+    }
+    if !matches!(views.local.as_ref(), Some(_)) {
+        return Ok(None);
+    }
+
+    let collisions = tx
+        .load_local_only_candidates_for_namespace(namespace_id)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.exists_on_disk
+                && candidate.inode_kind == InodeKind::File
+                && candidate.parent_inode_id == remote.parent_inode_id
+                && candidate.display_name == remote.display_name
+                && candidate.content_digest != remote.content_digest
+        })
+        .collect::<Vec<_>>();
+
+    let [collision] = collisions.as_slice() else {
+        return Ok(None);
+    };
+    tx.delete_planned_local_only_action(&collision.client_file_id)?;
+    Ok(Some(PlannedActionRecord {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        decision: PlannerDecision::ResolvePathBindingCollision,
+        reason: PlannerReason::LocalOnlyPathBindingCollision,
+        created_at_ms: now_ms,
+    }))
 }
 
 pub fn plan_local_only_file(
@@ -183,7 +240,7 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
                 )
             }
             (_, Some(_)) if remote.inode_kind == InodeKind::File => (
-                PlannerDecision::CreateConflictCopy,
+                PlannerDecision::ResolveDeleteVsEditConflict,
                 PlannerReason::RemoteDeletedWhileLocalDiffersFromAnchor,
             ),
             _ => (
@@ -216,15 +273,23 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
                     )
                 }
                 (true, false) if !remote_content_matches_anchor && !remote_path_matches_anchor => (
-                    PlannerDecision::CreateConflictCopy,
+                    PlannerDecision::ApplyRemoteRenameAndReplace,
                     PlannerReason::RemotePathAndContentDifferFromAnchor,
                 ),
                 (true, false) => (
                     PlannerDecision::DownloadRemoteEdit,
                     PlannerReason::RemoteDiffersFromAnchor,
                 ),
+                (false, false)
+                    if remote_path_matches_anchor && local_path_matches_anchor(local, anchor) =>
+                {
+                    (
+                        PlannerDecision::ResolveSameInodeConflict,
+                        PlannerReason::LocalAndRemoteDifferFromAnchor,
+                    )
+                }
                 (false, false) => (
-                    PlannerDecision::CreateConflictCopy,
+                    PlannerDecision::ResolveRenameVsEditConflict,
                     PlannerReason::LocalAndRemoteDifferFromAnchor,
                 ),
             }
@@ -395,6 +460,11 @@ impl PlannerDecision {
             Self::UploadLocalCreate => "upload_local_create",
             Self::UploadLocalEdit => "upload_local_edit",
             Self::DownloadRemoteEdit => "download_remote_edit",
+            Self::ResolveSameInodeConflict => "resolve_same_inode_conflict",
+            Self::ResolveDeleteVsEditConflict => "resolve_delete_vs_edit_conflict",
+            Self::ResolveRenameVsEditConflict => "resolve_rename_vs_edit_conflict",
+            Self::ResolvePathBindingCollision => "resolve_path_binding_collision",
+            Self::ApplyRemoteRenameAndReplace => "apply_remote_rename_and_replace",
             Self::ApplyRemoteDelete => "apply_remote_delete",
             Self::ApplyRemoteSubtreeDelete => "apply_remote_subtree_delete",
             Self::ApplyRemoteSubtreeRename => "apply_remote_subtree_rename",
@@ -411,6 +481,11 @@ impl PlannerDecision {
             "upload_local_create" => Ok(Self::UploadLocalCreate),
             "upload_local_edit" => Ok(Self::UploadLocalEdit),
             "download_remote_edit" => Ok(Self::DownloadRemoteEdit),
+            "resolve_same_inode_conflict" => Ok(Self::ResolveSameInodeConflict),
+            "resolve_delete_vs_edit_conflict" => Ok(Self::ResolveDeleteVsEditConflict),
+            "resolve_rename_vs_edit_conflict" => Ok(Self::ResolveRenameVsEditConflict),
+            "resolve_path_binding_collision" => Ok(Self::ResolvePathBindingCollision),
+            "apply_remote_rename_and_replace" => Ok(Self::ApplyRemoteRenameAndReplace),
             "apply_remote_delete" => Ok(Self::ApplyRemoteDelete),
             "apply_remote_subtree_delete" => Ok(Self::ApplyRemoteSubtreeDelete),
             "apply_remote_subtree_rename" => Ok(Self::ApplyRemoteSubtreeRename),
@@ -477,6 +552,7 @@ impl PlannerReason {
             Self::RemotePathAndContentDifferFromAnchor => {
                 "remote_path_and_content_differ_from_anchor"
             }
+            Self::LocalOnlyPathBindingCollision => "local_only_path_binding_collision",
             Self::LocalAndRemoteDifferFromAnchor => "local_and_remote_differ_from_anchor",
             Self::LocalObservedWithoutAnchor => "local_observed_without_anchor",
             Self::RemoteObservedWithoutAnchor => "remote_observed_without_anchor",
@@ -541,6 +617,7 @@ impl PlannerReason {
             "remote_path_and_content_differ_from_anchor" => {
                 Ok(Self::RemotePathAndContentDifferFromAnchor)
             }
+            "local_only_path_binding_collision" => Ok(Self::LocalOnlyPathBindingCollision),
             "local_and_remote_differ_from_anchor" => Ok(Self::LocalAndRemoteDifferFromAnchor),
             "local_observed_without_anchor" => Ok(Self::LocalObservedWithoutAnchor),
             "remote_observed_without_anchor" => Ok(Self::RemoteObservedWithoutAnchor),
@@ -585,6 +662,15 @@ fn local_matches_anchor(
         && !local.dirty
         && local.inode_kind == anchor.inode_kind
         && local.content_digest == anchor.content_digest
+        && local.parent_inode_id == anchor.parent_inode_id
+        && local.display_name == anchor.display_name
+}
+
+fn local_path_matches_anchor(
+    local: &crate::state_db::LocalFileStateRow,
+    anchor: &SyncAnchorRow,
+) -> bool {
+    local.exists_on_disk
         && local.parent_inode_id == anchor.parent_inode_id
         && local.display_name == anchor.display_name
 }
@@ -697,7 +783,7 @@ fn decide_remote_file_rename_action(
     }))
 }
 
-fn preserve_in_flight_action_for_remote_delete(
+fn preserve_in_flight_file_action(
     tx: &mut crate::state_db::PlannerTxn<'_>,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
@@ -707,7 +793,7 @@ fn preserve_in_flight_action_for_remote_delete(
     let Some(remote) = views.remote.as_ref() else {
         return Ok(None);
     };
-    if !remote.is_deleted || remote.inode_kind != InodeKind::File {
+    if remote.inode_kind != InodeKind::File || views.sync_anchor.is_none() {
         return Ok(None);
     }
 
@@ -883,7 +969,7 @@ mod tests {
     use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 
     #[test]
-    fn planner_prefers_conflict_copy_when_local_and_remote_both_diverge() {
+    fn planner_marks_same_inode_stale_base_edit_for_explicit_resolution() {
         let views = FileSyncViews {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(42),
@@ -925,7 +1011,7 @@ mod tests {
 
         let planned = decide_file_action(&views, 1_700_000_002_000);
 
-        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(planned.decision, PlannerDecision::ResolveSameInodeConflict);
         assert_eq!(
             planned.reason,
             PlannerReason::LocalAndRemoteDifferFromAnchor
@@ -980,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_prefers_conflict_copy_for_remote_path_and_content_change() {
+    fn planner_marks_remote_path_and_content_change_for_direct_apply() {
         let views = FileSyncViews {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(42),
@@ -1022,7 +1108,10 @@ mod tests {
 
         let planned = decide_file_action(&views, 1_700_000_002_000);
 
-        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.decision,
+            PlannerDecision::ApplyRemoteRenameAndReplace
+        );
         assert_eq!(
             planned.reason,
             PlannerReason::RemotePathAndContentDifferFromAnchor
@@ -1077,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_prefers_conflict_copy_for_remote_delete_when_local_diverges() {
+    fn planner_marks_remote_delete_vs_local_edit_for_explicit_resolution() {
         let views = FileSyncViews {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(42),
@@ -1119,7 +1208,10 @@ mod tests {
 
         let planned = decide_file_action(&views, 1_700_000_002_000);
 
-        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.decision,
+            PlannerDecision::ResolveDeleteVsEditConflict
+        );
         assert_eq!(
             planned.reason,
             PlannerReason::RemoteDeletedWhileLocalDiffersFromAnchor

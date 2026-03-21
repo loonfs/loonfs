@@ -116,6 +116,27 @@ they make races observable and reviewable.
 Failure mode prevented:
 silent last-writer-wins corruption.
 
+## Conflict write contract
+
+Authoritative namespace commit keeps the strict CAS-style stale-base contract in v1.
+
+Rules:
+
+- a stale-base `replace_file` request still fails its authoritative precondition
+- same-inode stale-base conflict resolution is a client reconciliation path, not a namespace
+  commit-side implicit merge
+- the v1 default policy is `stable_paths`: keep the canonical winner path stable and preserve the
+  loser as a durable conflict artifact
+
+Why it exists:
+the commit protocol should stay small and explicit even while client reconciliation grows richer
+conflict preservation.
+
+Failure modes prevented:
+
+- silently accepting stale-base authoritative writes as if they were fresh
+- mixing client conflict policy with authoritative namespace mutation preconditions
+
 ## Create mutations
 
 The initial mutation set adds two authoritative create operations:

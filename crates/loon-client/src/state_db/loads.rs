@@ -255,6 +255,105 @@ pub(super) fn load_conflicts_and_errors(
     Ok(issues)
 }
 
+pub(super) fn load_conflict_artifact(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+) -> Result<Option<ConflictArtifactRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT object_key, conflict_class, artifact_json, created_at_ms
+            FROM conflict_artifacts
+            WHERE namespace_id = ?1 AND conflict_id = ?2",
+            params![namespace_id.as_str(), conflict_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(object_key, conflict_class, artifact_json, created_at_ms)| {
+            let conflict_class = match conflict_class.as_str() {
+                "same_inode_stale_base_edit" => ConflictClass::SameInodeStaleBaseEdit,
+                "path_binding_collision" => ConflictClass::PathBindingCollision,
+                "delete_vs_edit" => ConflictClass::DeleteVsEdit,
+                "rename_vs_edit" => ConflictClass::RenameVsEdit,
+                _ => {
+                    return Err(StateDbError::ConflictArtifactCodec(serde_json::Error::io(
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("unknown conflict class `{conflict_class}`"),
+                        ),
+                    )))
+                }
+            };
+            let envelope = serde_json::from_str(&artifact_json)
+                .map_err(StateDbError::ConflictArtifactCodec)?;
+            Ok(ConflictArtifactRow {
+                namespace_id: namespace_id.clone(),
+                conflict_id: conflict_id.to_owned(),
+                object_key,
+                conflict_class,
+                envelope,
+                created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
+pub(super) fn load_conflict_artifacts_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<ConflictArtifactRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT conflict_id, object_key, conflict_class, artifact_json, created_at_ms
+        FROM conflict_artifacts
+        WHERE namespace_id = ?1
+        ORDER BY created_at_ms ASC, conflict_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut artifacts = Vec::new();
+    while let Some(row) = rows.next()? {
+        let conflict_id = row.get::<_, String>(0)?;
+        let object_key = row.get::<_, String>(1)?;
+        let conflict_class_text = row.get::<_, String>(2)?;
+        let artifact_json = row.get::<_, String>(3)?;
+        let created_at_ms = row.get::<_, i64>(4)?;
+        let conflict_class = match conflict_class_text.as_str() {
+            "same_inode_stale_base_edit" => ConflictClass::SameInodeStaleBaseEdit,
+            "path_binding_collision" => ConflictClass::PathBindingCollision,
+            "delete_vs_edit" => ConflictClass::DeleteVsEdit,
+            "rename_vs_edit" => ConflictClass::RenameVsEdit,
+            _ => {
+                return Err(StateDbError::ConflictArtifactCodec(serde_json::Error::io(
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unknown conflict class `{conflict_class_text}`"),
+                    ),
+                )))
+            }
+        };
+        let envelope =
+            serde_json::from_str(&artifact_json).map_err(StateDbError::ConflictArtifactCodec)?;
+        artifacts.push(ConflictArtifactRow {
+            namespace_id: namespace_id.clone(),
+            conflict_id,
+            object_key,
+            conflict_class,
+            envelope,
+            created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+        });
+    }
+    Ok(artifacts)
+}
+
 pub(super) fn load_local_only_conflicts_and_errors(
     conn: &Connection,
     client_file_id: &ClientFileId,
@@ -420,7 +519,7 @@ pub(super) fn load_next_executable_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
+        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'resolve_same_inode_conflict', 'resolve_delete_vs_edit_conflict', 'resolve_rename_vs_edit_conflict', 'resolve_path_binding_collision', 'apply_remote_rename_and_replace', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -433,7 +532,7 @@ pub(super) fn load_next_deferred_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
+        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'resolve_same_inode_conflict', 'resolve_delete_vs_edit_conflict', 'resolve_rename_vs_edit_conflict', 'resolve_path_binding_collision', 'apply_remote_rename_and_replace', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )

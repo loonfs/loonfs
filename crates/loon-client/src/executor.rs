@@ -1,3 +1,4 @@
+use crate::conflict::ConflictArtifactError;
 use crate::download::DownloadError;
 use crate::local_apply::LocalApplyError;
 use crate::planner::{PlannerDecision, PlannerError};
@@ -189,8 +190,37 @@ pub struct ExecutedApplyRemoteRename {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedApplyRemoteRenameAndReplace {
+    pub applied: AppliedInodeMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutedApplyRemoteDelete {
     pub applied: AppliedInodeMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedResolveSameInodeConflict {
+    pub applied: AppliedInodeMutation,
+    pub conflict_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedResolveDeleteVsEditConflict {
+    pub applied: AppliedInodeMutation,
+    pub conflict_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedResolveRenameVsEditConflict {
+    pub applied: AppliedInodeMutation,
+    pub conflict_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedResolvePathBindingCollision {
+    pub applied: AppliedInodeMutation,
+    pub conflict_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,6 +441,61 @@ impl From<LocalApplyError> for ExecuteApplyRemoteRenameError {
 }
 
 #[derive(Debug, Error)]
+pub enum ExecuteApplyRemoteRenameAndReplaceError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Planner(#[from] PlannerError),
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+    #[error(
+        "apply_remote_rename_and_replace_decision_missing: namespace `{namespace_id}` inode `{inode_id}` decision `{decision:?}`"
+    )]
+    DecisionMissing {
+        namespace_id: String,
+        inode_id: u64,
+        decision: PlannerDecision,
+    },
+    #[error(
+        "apply_remote_rename_and_replace_current_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    CurrentPathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "apply_remote_rename_and_replace_target_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    TargetPathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "apply_remote_rename_and_replace_destination_occupied: namespace `{namespace_id}` inode `{inode_id}` path `{path}`"
+    )]
+    DestinationOccupied {
+        namespace_id: String,
+        inode_id: u64,
+        path: String,
+    },
+    #[error(
+        "apply_remote_rename_and_replace_local_apply_failed: operation `{operation}` path `{path}` {source}"
+    )]
+    LocalApplyFailed {
+        operation: &'static str,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl From<LocalApplyError> for ExecuteApplyRemoteRenameAndReplaceError {
+    fn from(error: LocalApplyError) -> Self {
+        Self::LocalApplyFailed {
+            operation: error.operation,
+            path: error.path,
+            source: error.source,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
 pub enum ExecuteApplyRemoteDeleteError {
     #[error(transparent)]
     StateDb(#[from] StateDbError),
@@ -442,6 +527,71 @@ pub enum ExecuteApplyRemoteDeleteError {
 }
 
 impl From<LocalApplyError> for ExecuteApplyRemoteDeleteError {
+    fn from(error: LocalApplyError) -> Self {
+        Self::LocalApplyFailed {
+            operation: error.operation,
+            path: error.path,
+            source: error.source,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ExecuteResolveFileConflictError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Planner(#[from] PlannerError),
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+    #[error(transparent)]
+    ConflictArtifact(#[from] ConflictArtifactError),
+    #[error(
+        "resolve_file_conflict_decision_missing: namespace `{namespace_id}` inode `{inode_id}` decision `{decision:?}`"
+    )]
+    DecisionMissing {
+        namespace_id: String,
+        inode_id: u64,
+        decision: PlannerDecision,
+    },
+    #[error(
+        "resolve_file_conflict_current_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    CurrentPathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "resolve_file_conflict_target_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    TargetPathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "resolve_file_conflict_destination_occupied: namespace `{namespace_id}` inode `{inode_id}` path `{path}`"
+    )]
+    DestinationOccupied {
+        namespace_id: String,
+        inode_id: u64,
+        path: String,
+    },
+    #[error(
+        "resolve_file_conflict_local_apply_failed: operation `{operation}` path `{path}` {source}"
+    )]
+    LocalApplyFailed {
+        operation: &'static str,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "resolve_path_binding_collision_source_path_missing: namespace `{namespace_id}` inode `{inode_id}` temp `{client_file_id}`"
+    )]
+    PathBindingSourcePathMissing {
+        namespace_id: String,
+        inode_id: u64,
+        client_file_id: String,
+    },
+}
+
+impl From<LocalApplyError> for ExecuteResolveFileConflictError {
     fn from(error: LocalApplyError) -> Self {
         Self::LocalApplyFailed {
             operation: error.operation,
@@ -605,6 +755,11 @@ pub enum NextClientAction {
     ExecutedLocalOnlyCreate(ExecutedNextLocalOnlyCreate),
     ExecutedUploadLocalEdit(UploadLocalEditExecution),
     ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution),
+    ExecutedResolveSameInodeConflict(ExecutedResolveSameInodeConflict),
+    ExecutedResolveDeleteVsEditConflict(ExecutedResolveDeleteVsEditConflict),
+    ExecutedResolveRenameVsEditConflict(ExecutedResolveRenameVsEditConflict),
+    ExecutedResolvePathBindingCollision(ExecutedResolvePathBindingCollision),
+    ExecutedApplyRemoteRenameAndReplace(ExecutedApplyRemoteRenameAndReplace),
     ExecutedApplyRemoteDelete(ExecutedApplyRemoteDelete),
     ExecutedApplyRemoteSubtreeDelete(ExecutedApplyRemoteSubtreeDelete),
     ExecutedApplyRemoteSubtreeRename(ExecutedApplyRemoteSubtreeRename),
@@ -623,6 +778,10 @@ pub enum ExecuteNextClientActionError {
     UploadLocalEdit(#[from] ExecuteUploadLocalEditError),
     #[error(transparent)]
     DownloadRemoteEdit(#[from] ExecuteDownloadRemoteEditError),
+    #[error(transparent)]
+    ResolveFileConflict(#[from] ExecuteResolveFileConflictError),
+    #[error(transparent)]
+    ApplyRemoteRenameAndReplace(#[from] ExecuteApplyRemoteRenameAndReplaceError),
     #[error(transparent)]
     ApplyRemoteDelete(#[from] ExecuteApplyRemoteDeleteError),
     #[error(transparent)]

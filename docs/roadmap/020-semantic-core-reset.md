@@ -531,6 +531,28 @@ Exit criteria:
 - subtree delete clears remote-only descendant placeholder rows instead of deferring on them
   automatically
 
+## Milestone 11: conflict taxonomy and stable-path artifact resolution
+
+Deliverables:
+
+- explicit file conflict classes for same-inode stale-base edit, path binding collision,
+  delete-vs-edit, and rename-vs-edit
+- canonical immutable conflict artifact objects under the namespace keyspace
+- executable client decisions for file conflict resolution and direct remote
+  rename-and-replace apply
+- durable client cache/indexing for created conflict artifacts
+- readable fixtures and executable invariants proving loser preservation and canonical-path
+  stability
+
+Required rules:
+
+- `stable_paths` is the v1 default policy
+- authoritative namespace commit remains strict CAS for stale-base writes
+- file conflict resolution preserves the loser as an artifact instead of renaming the canonical
+  winner
+- `create_conflict_copy` remains only for unsupported directory and subtree conflict classes after
+  the file taxonomy cleanup
+
 ## Historical slice order
 
 Milestones 1 through 7 were executed through the following ordered slices.

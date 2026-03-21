@@ -6,8 +6,8 @@ use loon_core::metadata::{
 use loon_core::wal::PreparedWalCommit;
 use loon_core::wal::StoredWalObject;
 use loon_objectstore::keys::{
-    blob, derived_progress, queue_shard, snapshot_manifest, snapshot_table, wal_commit,
-    SnapshotTableFamily,
+    blob, conflict_artifact, derived_progress, queue_shard, snapshot_manifest, snapshot_table,
+    wal_commit, SnapshotTableFamily,
 };
 use loon_types::{
     checkpoint_page_checksum_sha256, content_manifest_payload_checksum_sha256,
@@ -222,6 +222,37 @@ impl ClientReconciliationInvariantReport {
             })
             .collect()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileConflictResolutionKind {
+    SameInode,
+    DeleteVsEdit,
+    RenameVsEdit,
+    PathBindingCollision,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileConflictResolutionInvariantInputs<'a> {
+    pub conflict_kind: FileConflictResolutionKind,
+    pub namespace_id: &'a NamespaceId,
+    pub artifact_conflict_id: Option<&'a str>,
+    pub artifact_object_key: Option<&'a str>,
+    pub artifact_loser_manifest_digest: Option<&'a str>,
+    pub artifact_loser_content_durable: bool,
+    pub local_present_after: bool,
+    pub sync_anchor_present_after: bool,
+    pub final_canonical_path_exists: bool,
+    pub final_visible_sibling_exists: bool,
+    pub local_content_digest_after: Option<&'a str>,
+    pub remote_content_digest_after: Option<&'a str>,
+    pub sync_anchor_content_digest_after: Option<&'a str>,
+    pub local_parent_inode_after: Option<InodeId>,
+    pub remote_parent_inode_after: Option<InodeId>,
+    pub sync_anchor_parent_inode_after: Option<InodeId>,
+    pub local_display_name_after: Option<&'a str>,
+    pub remote_display_name_after: Option<&'a str>,
+    pub sync_anchor_display_name_after: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2163,6 +2194,142 @@ pub fn evaluate_apply_remote_rename_invariants(
     }
 }
 
+pub fn evaluate_file_conflict_resolution_invariants(
+    inputs: FileConflictResolutionInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    let artifact_present = inputs.artifact_conflict_id.is_some()
+        && inputs.artifact_object_key.is_some()
+        && inputs.artifact_loser_manifest_digest.is_some();
+    let artifact_key_matches = match (inputs.artifact_conflict_id, inputs.artifact_object_key) {
+        (Some(conflict_id), Some(object_key)) => {
+            object_key == conflict_artifact(inputs.namespace_id.as_str(), conflict_id)
+        }
+        _ => false,
+    };
+    let canonical_matches_remote = inputs.final_canonical_path_exists
+        && inputs.local_present_after
+        && inputs.sync_anchor_present_after
+        && inputs.local_content_digest_after == inputs.remote_content_digest_after
+        && inputs.sync_anchor_content_digest_after == inputs.remote_content_digest_after
+        && inputs.local_parent_inode_after == inputs.remote_parent_inode_after
+        && inputs.sync_anchor_parent_inode_after == inputs.remote_parent_inode_after
+        && inputs.local_display_name_after == inputs.remote_display_name_after
+        && inputs.sync_anchor_display_name_after == inputs.remote_display_name_after;
+    let removes_canonical_path = !inputs.final_canonical_path_exists
+        && !inputs.local_present_after
+        && !inputs.sync_anchor_present_after;
+
+    let mut checks = vec![
+        InvariantCheck {
+            name: "stable_paths_default_does_not_materialize_visible_sibling".to_owned(),
+            passed: !inputs.final_visible_sibling_exists,
+            detail: format!(
+                "final_visible_sibling_exists={}",
+                inputs.final_visible_sibling_exists
+            ),
+        },
+        InvariantCheck {
+            name: "conflict_artifact_key_matches_namespace_and_id".to_owned(),
+            passed: artifact_key_matches,
+            detail: format!(
+                "conflict_id={:?} object_key={:?}",
+                inputs.artifact_conflict_id, inputs.artifact_object_key
+            ),
+        },
+        InvariantCheck {
+            name: "conflict_artifact_loser_content_is_durable".to_owned(),
+            passed: artifact_present && inputs.artifact_loser_content_durable,
+            detail: format!(
+                "artifact_present={} loser_content_durable={} loser_manifest_digest={:?}",
+                artifact_present,
+                inputs.artifact_loser_content_durable,
+                inputs.artifact_loser_manifest_digest
+            ),
+        },
+    ];
+
+    match inputs.conflict_kind {
+        FileConflictResolutionKind::SameInode => {
+            checks.push(InvariantCheck {
+                name: "same_inode_conflict_preserves_loser_artifact".to_owned(),
+                passed: artifact_present,
+                detail: format!("artifact_present={artifact_present}"),
+            });
+            checks.push(InvariantCheck {
+                name: "same_inode_conflict_keeps_canonical_path".to_owned(),
+                passed: canonical_matches_remote,
+                detail: format!(
+                    "canonical_path_exists={} local_present_after={} sync_anchor_present_after={} local_digest={:?} remote_digest={:?} anchor_digest={:?}",
+                    inputs.final_canonical_path_exists,
+                    inputs.local_present_after,
+                    inputs.sync_anchor_present_after,
+                    inputs.local_content_digest_after,
+                    inputs.remote_content_digest_after,
+                    inputs.sync_anchor_content_digest_after
+                ),
+            });
+        }
+        FileConflictResolutionKind::DeleteVsEdit => {
+            checks.push(InvariantCheck {
+                name: "delete_vs_edit_conflict_preserves_loser_artifact".to_owned(),
+                passed: artifact_present,
+                detail: format!("artifact_present={artifact_present}"),
+            });
+            checks.push(InvariantCheck {
+                name: "delete_vs_edit_conflict_removes_canonical_path".to_owned(),
+                passed: removes_canonical_path,
+                detail: format!(
+                    "canonical_path_exists={} local_present_after={} sync_anchor_present_after={}",
+                    inputs.final_canonical_path_exists,
+                    inputs.local_present_after,
+                    inputs.sync_anchor_present_after
+                ),
+            });
+        }
+        FileConflictResolutionKind::RenameVsEdit => {
+            checks.push(InvariantCheck {
+                name: "rename_vs_edit_conflict_preserves_loser_artifact".to_owned(),
+                passed: artifact_present,
+                detail: format!("artifact_present={artifact_present}"),
+            });
+            checks.push(InvariantCheck {
+                name: "rename_vs_edit_conflict_converges_remote_winner".to_owned(),
+                passed: canonical_matches_remote,
+                detail: format!(
+                    "canonical_path_exists={} local_digest={:?} remote_digest={:?} anchor_digest={:?} local_parent={:?} remote_parent={:?} anchor_parent={:?}",
+                    inputs.final_canonical_path_exists,
+                    inputs.local_content_digest_after,
+                    inputs.remote_content_digest_after,
+                    inputs.sync_anchor_content_digest_after,
+                    inputs.local_parent_inode_after,
+                    inputs.remote_parent_inode_after,
+                    inputs.sync_anchor_parent_inode_after
+                ),
+            });
+        }
+        FileConflictResolutionKind::PathBindingCollision => {
+            checks.push(InvariantCheck {
+                name: "path_binding_collision_preserves_loser_artifact".to_owned(),
+                passed: artifact_present,
+                detail: format!("artifact_present={artifact_present}"),
+            });
+            checks.push(InvariantCheck {
+                name: "path_binding_collision_keeps_winner_canonical_path".to_owned(),
+                passed: canonical_matches_remote,
+                detail: format!(
+                    "canonical_path_exists={} local_digest={:?} remote_digest={:?} anchor_digest={:?}",
+                    inputs.final_canonical_path_exists,
+                    inputs.local_content_digest_after,
+                    inputs.remote_content_digest_after,
+                    inputs.sync_anchor_content_digest_after
+                ),
+            });
+        }
+    }
+
+    ClientReconciliationInvariantReport { checks }
+}
+
 pub fn evaluate_queue_shard_object_invariants(
     inputs: QueueShardObjectInvariantInputs<'_>,
 ) -> BackgroundWorkInvariantReport {
@@ -3713,7 +3880,8 @@ mod tests {
         evaluate_apply_remote_subtree_rename_invariants,
         evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
         evaluate_content_object_invariants, evaluate_download_transfer_invariants,
-        evaluate_inode_upload_transfer_invariants, evaluate_local_only_upload_transfer_invariants,
+        evaluate_file_conflict_resolution_invariants, evaluate_inode_upload_transfer_invariants,
+        evaluate_local_only_upload_transfer_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
         evaluate_queue_complete_invariants, evaluate_remote_delete_planning_invariants,
@@ -3729,7 +3897,8 @@ mod tests {
         CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
         CheckpointReplayInvariantInputs, CommitInvariantInputs, ContentObjectInvariantInputs,
         ContentObjectInvariantSnapshot, DownloadTransferInvariantInputs,
-        DownloadTransferOutcomeKind, InodeUploadTransferInvariantInputs,
+        DownloadTransferOutcomeKind, FileConflictResolutionInvariantInputs,
+        FileConflictResolutionKind, InodeUploadTransferInvariantInputs,
         InodeUploadTransferOutcomeKind, LocalOnlyUploadTransferInvariantInputs,
         LocalOnlyUploadTransferOutcomeKind, ProgressInvariantSnapshot,
         ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
@@ -3750,8 +3919,8 @@ mod tests {
     use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
     use loon_core::wal::{prepare_wal_commit, StoredWalObject};
     use loon_objectstore::keys::{
-        blob, content_manifest, derived_progress, snapshot_manifest, snapshot_table,
-        SnapshotTableFamily,
+        blob, conflict_artifact, content_manifest, derived_progress, snapshot_manifest,
+        snapshot_table, SnapshotTableFamily,
     };
     use loon_types::{
         checkpoint_page_checksum_sha256, decode_checkpoint_manifest_json,
@@ -5281,6 +5450,86 @@ mod tests {
                     bytes: stored_block_bytes.to_vec(),
                 },
             )]),
+        }
+    }
+
+    #[test]
+    fn file_conflict_resolution_invariants_pass_for_same_inode_case() {
+        let namespace_id = NamespaceId::new("ns-1");
+        let object_key = conflict_artifact(namespace_id.as_str(), "conflict-1");
+        let report =
+            evaluate_file_conflict_resolution_invariants(FileConflictResolutionInvariantInputs {
+                conflict_kind: FileConflictResolutionKind::SameInode,
+                namespace_id: &namespace_id,
+                artifact_conflict_id: Some("conflict-1"),
+                artifact_object_key: Some(object_key.as_str()),
+                artifact_loser_manifest_digest: Some("sha256:loser-manifest"),
+                artifact_loser_content_durable: true,
+                local_present_after: true,
+                sync_anchor_present_after: true,
+                final_canonical_path_exists: true,
+                final_visible_sibling_exists: false,
+                local_content_digest_after: Some("sha256:winner"),
+                remote_content_digest_after: Some("sha256:winner"),
+                sync_anchor_content_digest_after: Some("sha256:winner"),
+                local_parent_inode_after: Some(InodeId(2)),
+                remote_parent_inode_after: Some(InodeId(2)),
+                sync_anchor_parent_inode_after: Some(InodeId(2)),
+                local_display_name_after: Some("report.txt"),
+                remote_display_name_after: Some("report.txt"),
+                sync_anchor_display_name_after: Some("report.txt"),
+            });
+
+        for name in [
+            "same_inode_conflict_preserves_loser_artifact",
+            "same_inode_conflict_keeps_canonical_path",
+            "stable_paths_default_does_not_materialize_visible_sibling",
+            "conflict_artifact_key_matches_namespace_and_id",
+            "conflict_artifact_loser_content_is_durable",
+        ] {
+            assert!(
+                report.check(name).expect("check should exist").passed,
+                "{name} should pass"
+            );
+        }
+    }
+
+    #[test]
+    fn file_conflict_resolution_invariants_fail_when_delete_case_leaves_visible_state() {
+        let namespace_id = NamespaceId::new("ns-1");
+        let report =
+            evaluate_file_conflict_resolution_invariants(FileConflictResolutionInvariantInputs {
+                conflict_kind: FileConflictResolutionKind::DeleteVsEdit,
+                namespace_id: &namespace_id,
+                artifact_conflict_id: Some("conflict-2"),
+                artifact_object_key: Some("namespaces/ns-1/conflicts/wrong.json"),
+                artifact_loser_manifest_digest: Some("sha256:loser-manifest"),
+                artifact_loser_content_durable: false,
+                local_present_after: true,
+                sync_anchor_present_after: true,
+                final_canonical_path_exists: true,
+                final_visible_sibling_exists: true,
+                local_content_digest_after: Some("sha256:winner"),
+                remote_content_digest_after: Some("sha256:winner"),
+                sync_anchor_content_digest_after: Some("sha256:winner"),
+                local_parent_inode_after: Some(InodeId(2)),
+                remote_parent_inode_after: Some(InodeId(2)),
+                sync_anchor_parent_inode_after: Some(InodeId(2)),
+                local_display_name_after: Some("report.txt"),
+                remote_display_name_after: Some("report.txt"),
+                sync_anchor_display_name_after: Some("report.txt"),
+            });
+
+        for name in [
+            "delete_vs_edit_conflict_removes_canonical_path",
+            "stable_paths_default_does_not_materialize_visible_sibling",
+            "conflict_artifact_key_matches_namespace_and_id",
+            "conflict_artifact_loser_content_is_durable",
+        ] {
+            assert!(
+                !report.check(name).expect("check should exist").passed,
+                "{name} should fail"
+            );
         }
     }
 }

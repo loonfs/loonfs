@@ -176,10 +176,55 @@ The first deterministic planner rule compares the three durable views for one kn
 
 - if local observed state differs from the sync anchor while remote still matches the sync anchor, plan `upload_local_edit`
 - if remote observed state differs from the sync anchor while local still matches the sync anchor, plan `download_remote_edit`
-- if both local and remote differ from the sync anchor, plan `create_conflict_copy`
+- if both local and remote differ from the sync anchor, classify the file conflict explicitly:
+  - same-inode path-stable edit divergence plans `resolve_same_inode_conflict`
+  - same-inode remote delete vs local edit plans `resolve_delete_vs_edit_conflict`
+  - same-inode remote path+content divergence with local divergence plans
+    `resolve_rename_vs_edit_conflict`
 - if both still match the sync anchor, clear any pending action and return `no_op`
 
-This first rule is intentionally narrow. It is enough to prove that restart-safe planner state can drive one hot-file case before the client grows broader sync semantics.
+When local still matches the anchor and authoritative remote state changes on both path and
+content, that is not a preserved conflict in v1. The planner must use
+`apply_remote_rename_and_replace`.
+
+This first rule started intentionally narrow. The current client now keeps the stable-path v1
+contract while classifying file conflicts explicitly instead of using one undifferentiated defer
+bucket.
+
+## File conflict taxonomy and stable-path policy
+
+The file-first conflict taxonomy is:
+
+- `same_inode_stale_base_edit`
+- `path_binding_collision`
+- `delete_vs_edit`
+- `rename_vs_edit`
+
+The hardcoded v1 policy is `stable_paths`.
+
+Rules:
+
+- the authoritative winner keeps the canonical path
+- the loser is preserved as a deterministic immutable conflict artifact object
+- visible suffixed conflict files are not canonical storage semantics
+- `create_conflict_copy` remains only for unsupported directory/subtree conflict classes after the
+  file taxonomy cleanup
+
+Canonical conflict artifacts are stored under:
+
+- `namespaces/{namespace_id}/conflicts/{conflict_id}.json`
+
+Each artifact records:
+
+- deterministic `conflict_id`
+- `conflict_class`
+- `policy_applied`
+- `detected_seq`
+- winner identity/path summary
+- loser identity summary
+- preserved loser `content_manifest_digest`
+- contested parent/name hints
+- creation timestamp
 
 ## First local-only create rule
 
@@ -1672,8 +1717,8 @@ Rules:
     - `parent_inode_id`
     - `display_name`
 - if `remote_state` differs from `sync_anchor` on both path view and content identity while
-  `local_state` still matches the anchor, the planner must fall back to deferred
-  `create_conflict_copy` with reason `remote_path_and_content_differ_from_anchor`
+  `local_state` still matches the anchor, the planner must schedule
+  `apply_remote_rename_and_replace`
 - the first slice covers:
   - same-parent rename
   - moves between already-bound directories

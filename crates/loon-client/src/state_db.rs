@@ -1,6 +1,6 @@
 use loon_types::{
-    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind,
-    NamespaceId, RevisionNo,
+    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
+    ConflictArtifactEnvelope, ConflictClass, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ pub enum StateDbError {
     ClientMutationRequestCodec(#[from] serde_json::Error),
     #[error("conflict/error detail JSON codec error: {0}")]
     ConflictOrErrorDetailCodec(serde_json::Error),
+    #[error("conflict artifact JSON codec error: {0}")]
+    ConflictArtifactCodec(serde_json::Error),
     #[error("SQLite integer out of range for {field}: {value}")]
     IntegerOutOfRange { field: &'static str, value: i64 },
     #[error("value out of range for SQLite {field}: {value}")]
@@ -710,6 +712,16 @@ pub struct ConflictOrErrorRow {
     pub kind: String,
     pub summary: String,
     pub detail_json: Value,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictArtifactRow {
+    pub namespace_id: NamespaceId,
+    pub conflict_id: String,
+    pub object_key: String,
+    pub conflict_class: ConflictClass,
+    pub envelope: ConflictArtifactEnvelope,
     pub created_at_ms: u64,
 }
 

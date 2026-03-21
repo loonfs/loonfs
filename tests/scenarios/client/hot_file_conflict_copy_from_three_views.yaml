@@ -40,5 +40,5 @@ expect:
   planner_action:
     namespace_id: ns-1
     inode_id: 42
-    decision: create_conflict_copy
+    decision: resolve_same_inode_conflict
     reason: local_and_remote_differ_from_anchor

@@ -122,6 +122,6 @@ expect:
   planner_result:
     namespace_id: ns-1
     inode_id: 42
-    decision: create_conflict_copy
-    reason: local_and_remote_differ_from_anchor
-    created_at_ms: 1700000410000
+    decision: upload_local_edit
+    reason: local_differs_from_anchor
+    created_at_ms: 1700000405000

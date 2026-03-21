@@ -551,6 +551,30 @@ Milestone 10 rules:
 - `materialize_remote_dir` operates one directory at a time for hierarchy convergence; it must not
   recursively create missing authoritative ancestors
 - waiting for parent materialization is a named `no_op` planner state, not deferred conflict work
+
+## Decision 12: stable paths are the default file-conflict policy
+
+Problem:
+the old `create_conflict_copy` bucket collapses different file-conflict classes into one deferred
+label and makes canonical-path behavior harder to reason about.
+
+Recommendation:
+
+- split file conflict handling into:
+  - `same_inode_stale_base_edit`
+  - `path_binding_collision`
+  - `delete_vs_edit`
+  - `rename_vs_edit`
+- keep `stable_paths` as the hardcoded v1 default
+- preserve losing content as immutable conflict artifacts
+- keep visible suffixed conflict files as optional presentation, not canonical storage
+- keep strict authoritative CAS behavior in namespace commit
+
+Why:
+
+- canonical winner paths stay stable
+- inode identity stays honest
+- loser content remains recoverable without merging different identities together
 - remote-only descendants are allowed during subtree rename/delete when they remain clean
   placeholders with no anchor, transfer state, or pending mutation state
 - dirty, temp/local-only, or busy descendants still block subtree rename/delete

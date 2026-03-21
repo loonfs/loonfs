@@ -5,10 +5,10 @@ use super::loads::{
     load_bound_apply_remote_subtree_delete_views_from_conn,
     load_bound_apply_remote_subtree_rename_views_from_conn,
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
-    load_conflicts_and_errors, load_inode_upload, load_local_file,
-    load_local_only_candidates_for_namespace, load_local_only_conflicts_and_errors,
-    load_local_only_file, load_local_only_transfer_ledger, load_local_only_upload,
-    load_next_deferred_planned_action, load_next_executable_planned_action,
+    load_conflict_artifact, load_conflict_artifacts_for_namespace, load_conflicts_and_errors,
+    load_inode_upload, load_local_file, load_local_only_candidates_for_namespace,
+    load_local_only_conflicts_and_errors, load_local_only_file, load_local_only_transfer_ledger,
+    load_local_only_upload, load_next_deferred_planned_action, load_next_executable_planned_action,
     load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
     load_pending_client_mutation_for_client_file, load_pending_inode_mutation,
     load_pending_inode_mutation_for_inode, load_planned_action, load_planned_local_only_action,
@@ -200,6 +200,13 @@ impl SqliteStateDb {
         load_local_only_file(&self.conn, client_file_id)
     }
 
+    pub fn load_local_only_candidates_for_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+        load_local_only_candidates_for_namespace(&self.conn, namespace_id)
+    }
+
     pub fn load_planned_local_only_action(
         &self,
         client_file_id: &ClientFileId,
@@ -271,6 +278,21 @@ impl SqliteStateDb {
         inode_id: InodeId,
     ) -> Result<Vec<ConflictOrErrorRow>, StateDbError> {
         load_conflicts_and_errors(&self.conn, namespace_id, inode_id)
+    }
+
+    pub fn load_conflict_artifact(
+        &self,
+        namespace_id: &NamespaceId,
+        conflict_id: &str,
+    ) -> Result<Option<ConflictArtifactRow>, StateDbError> {
+        load_conflict_artifact(&self.conn, namespace_id, conflict_id)
+    }
+
+    pub fn load_conflict_artifacts_for_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Vec<ConflictArtifactRow>, StateDbError> {
+        load_conflict_artifacts_for_namespace(&self.conn, namespace_id)
     }
 
     pub fn load_local_only_conflicts_and_errors(
@@ -437,6 +459,67 @@ impl SqliteStateDb {
     ) -> Result<AppliedInodeMutation, StateDbError> {
         self.planner_transaction("apply_remote_rename", |tx| {
             tx.apply_remote_rename(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_same_inode_conflict_resolution(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_same_inode_conflict_resolution", |tx| {
+            tx.apply_same_inode_conflict_resolution(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_delete_vs_edit_conflict_resolution(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_delete_vs_edit_conflict_resolution", |tx| {
+            tx.apply_delete_vs_edit_conflict_resolution(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_rename_vs_edit_conflict_resolution(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_rename_vs_edit_conflict_resolution", |tx| {
+            tx.apply_rename_vs_edit_conflict_resolution(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_remote_rename_and_replace(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_remote_rename_and_replace", |tx| {
+            tx.apply_remote_rename_and_replace(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_path_binding_collision_resolution(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        client_file_id: &ClientFileId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_path_binding_collision_resolution", |tx| {
+            tx.apply_path_binding_collision_resolution(
+                namespace_id,
+                inode_id,
+                client_file_id,
+                applied_at_ms,
+            )
         })
     }
 
@@ -1861,6 +1944,267 @@ impl PlannerTxn<'_> {
         })
     }
 
+    pub fn apply_same_inode_conflict_resolution(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = self.load_file_sync_views(namespace_id, inode_id)?;
+        let remote = views
+            .remote
+            .ok_or_else(|| StateDbError::UploadLocalEditStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+
+        let next_local = LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            content_digest: remote.content_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name.clone(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: applied_at_ms,
+        };
+        let next_anchor = SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            synced_seq: remote.observed_seq,
+            revision_no: remote.revision_no,
+            content_digest: remote.content_digest.clone(),
+            content_manifest_digest: remote.content_manifest_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name,
+        };
+
+        self.upsert_local_file(&next_local)?;
+        self.upsert_sync_anchor(&next_anchor)?;
+        self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_inode_upload(namespace_id, inode_id)?;
+        self.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
+        if let Some(pending) =
+            load_pending_inode_mutation_for_inode(&self.tx, namespace_id, inode_id)?
+        {
+            self.delete_pending_inode_mutation(&pending.client_request_id)?;
+        }
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "resolve_same_inode_conflict_local_apply_failed",
+        )?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
+    pub fn apply_delete_vs_edit_conflict_resolution(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        _applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_inode_upload(namespace_id, inode_id)?;
+        self.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
+        if let Some(pending) =
+            load_pending_inode_mutation_for_inode(&self.tx, namespace_id, inode_id)?
+        {
+            self.delete_pending_inode_mutation(&pending.client_request_id)?;
+        }
+        self.delete_local_file(namespace_id, inode_id)?;
+        self.delete_sync_anchor(namespace_id, inode_id)?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "resolve_delete_vs_edit_conflict_local_apply_failed",
+        )?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
+    pub fn apply_rename_vs_edit_conflict_resolution(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = self.load_file_sync_views(namespace_id, inode_id)?;
+        let remote = views
+            .remote
+            .ok_or_else(|| StateDbError::ApplyRemoteRenameStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+
+        let next_local = LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            content_digest: remote.content_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name.clone(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: applied_at_ms,
+        };
+        let next_anchor = SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            synced_seq: remote.observed_seq,
+            revision_no: remote.revision_no,
+            content_digest: remote.content_digest.clone(),
+            content_manifest_digest: remote.content_manifest_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name,
+        };
+
+        self.upsert_local_file(&next_local)?;
+        self.upsert_sync_anchor(&next_anchor)?;
+        self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_inode_upload(namespace_id, inode_id)?;
+        self.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
+        if let Some(pending) =
+            load_pending_inode_mutation_for_inode(&self.tx, namespace_id, inode_id)?
+        {
+            self.delete_pending_inode_mutation(&pending.client_request_id)?;
+        }
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "resolve_rename_vs_edit_conflict_local_apply_failed",
+        )?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
+    pub fn apply_remote_rename_and_replace(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = self.load_file_sync_views(namespace_id, inode_id)?;
+        let remote = views
+            .remote
+            .ok_or_else(|| StateDbError::ApplyRemoteRenameStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+
+        let next_local = LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            content_digest: remote.content_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name.clone(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: applied_at_ms,
+        };
+        let next_anchor = SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            synced_seq: remote.observed_seq,
+            revision_no: remote.revision_no,
+            content_digest: remote.content_digest.clone(),
+            content_manifest_digest: remote.content_manifest_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name,
+        };
+
+        self.upsert_local_file(&next_local)?;
+        self.upsert_sync_anchor(&next_anchor)?;
+        self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "apply_remote_rename_and_replace_local_apply_failed",
+        )?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
+    pub fn apply_path_binding_collision_resolution(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        client_file_id: &ClientFileId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = self.load_file_sync_views(namespace_id, inode_id)?;
+        let remote = views
+            .remote
+            .ok_or_else(|| StateDbError::DownloadRemoteEditStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+
+        let next_local = LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            content_digest: remote.content_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name.clone(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: applied_at_ms,
+        };
+        let next_anchor = SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: remote.inode_kind.clone(),
+            synced_seq: remote.observed_seq,
+            revision_no: remote.revision_no,
+            content_digest: remote.content_digest.clone(),
+            content_manifest_digest: remote.content_manifest_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name,
+        };
+
+        self.upsert_local_file(&next_local)?;
+        self.upsert_sync_anchor(&next_anchor)?;
+        self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_planned_local_only_action(client_file_id)?;
+        self.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
+        self.delete_local_only_upload(client_file_id)?;
+        if let Some(pending) =
+            load_pending_client_mutation_for_client_file(&self.tx, client_file_id)?
+        {
+            self.delete_pending_client_mutation(&pending.client_request_id)?;
+        }
+        self.delete_local_only_conflicts_and_errors(client_file_id)?;
+        self.delete_local_only_file(client_file_id)?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "resolve_path_binding_collision_local_apply_failed",
+        )?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
     pub fn apply_remote_delete(
         &mut self,
         namespace_id: &NamespaceId,
@@ -2340,6 +2684,13 @@ impl PlannerTxn<'_> {
         load_local_only_file(&self.tx, client_file_id)
     }
 
+    pub fn load_local_only_candidates_for_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+        load_local_only_candidates_for_namespace(&self.tx, namespace_id)
+    }
+
     pub fn upsert_planned_action(&mut self, row: &PlannedActionRow) -> Result<(), StateDbError> {
         self.tx.execute(
             "INSERT INTO planned_actions (
@@ -2530,6 +2881,37 @@ impl PlannerTxn<'_> {
                 params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
             )?;
         }
+        Ok(())
+    }
+
+    pub fn upsert_conflict_artifact(
+        &mut self,
+        row: &ConflictArtifactRow,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "INSERT INTO conflict_artifacts (
+                namespace_id,
+                conflict_id,
+                object_key,
+                conflict_class,
+                artifact_json,
+                created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(namespace_id, conflict_id) DO UPDATE SET
+                object_key = excluded.object_key,
+                conflict_class = excluded.conflict_class,
+                artifact_json = excluded.artifact_json,
+                created_at_ms = excluded.created_at_ms",
+            params![
+                row.namespace_id.as_str(),
+                &row.conflict_id,
+                &row.object_key,
+                row.conflict_class.as_str(),
+                serde_json::to_string(&row.envelope)
+                    .map_err(StateDbError::ConflictArtifactCodec)?,
+                to_sql_u64(row.created_at_ms, "created_at_ms")?,
+            ],
+        )?;
         Ok(())
     }
 

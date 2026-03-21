@@ -1,7 +1,10 @@
 use super::inode::{
-    execute_apply_remote_delete, execute_apply_remote_rename, execute_apply_remote_subtree_delete,
+    execute_apply_remote_delete, execute_apply_remote_rename,
+    execute_apply_remote_rename_and_replace, execute_apply_remote_subtree_delete,
     execute_apply_remote_subtree_rename, execute_download_remote_edit,
-    execute_materialize_remote_dir, execute_upload_local_edit,
+    execute_materialize_remote_dir, execute_resolve_delete_vs_edit_conflict,
+    execute_resolve_path_binding_collision, execute_resolve_rename_vs_edit_conflict,
+    execute_resolve_same_inode_conflict, execute_upload_local_edit,
 };
 use super::local_only::execute_local_only_create;
 use super::*;
@@ -160,6 +163,124 @@ where
                         created_at_ms,
                     )?;
                     Ok(Some(NextClientAction::ExecutedApplyRemoteRename(executed)))
+                }
+                value if value == PlannerDecision::ApplyRemoteRenameAndReplace.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let views = db.load_file_sync_views(&namespace_id, inode_id)?;
+                    let remote = views.remote.ok_or_else(|| {
+                        StateDbError::ApplyRemoteRenameStateMissing {
+                            namespace_id: namespace_id.as_str().to_owned(),
+                            inode_id: inode_id.0,
+                        }
+                    })?;
+                    let target_path = resolve_inode_target_path(
+                        &namespace_id,
+                        inode_id,
+                        remote.parent_inode_id,
+                        &remote.display_name,
+                    );
+                    let executed = execute_apply_remote_rename_and_replace(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        target_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedApplyRemoteRenameAndReplace(
+                        executed,
+                    )))
+                }
+                value if value == PlannerDecision::ResolveSameInodeConflict.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let executed = execute_resolve_same_inode_conflict(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedResolveSameInodeConflict(
+                        executed,
+                    )))
+                }
+                value if value == PlannerDecision::ResolveDeleteVsEditConflict.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let executed = execute_resolve_delete_vs_edit_conflict(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedResolveDeleteVsEditConflict(
+                        executed,
+                    )))
+                }
+                value if value == PlannerDecision::ResolveRenameVsEditConflict.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let views = db.load_file_sync_views(&namespace_id, inode_id)?;
+                    let remote = views.remote.ok_or_else(|| {
+                        StateDbError::ApplyRemoteRenameStateMissing {
+                            namespace_id: namespace_id.as_str().to_owned(),
+                            inode_id: inode_id.0,
+                        }
+                    })?;
+                    let target_path = resolve_inode_target_path(
+                        &namespace_id,
+                        inode_id,
+                        remote.parent_inode_id,
+                        &remote.display_name,
+                    );
+                    let executed = execute_resolve_rename_vs_edit_conflict(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        target_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedResolveRenameVsEditConflict(
+                        executed,
+                    )))
+                }
+                value if value == PlannerDecision::ResolvePathBindingCollision.as_str() => {
+                    let views = db.load_file_sync_views(&namespace_id, inode_id)?;
+                    let remote = views.remote.ok_or_else(|| {
+                        StateDbError::DownloadRemoteEditStateMissing {
+                            namespace_id: namespace_id.as_str().to_owned(),
+                            inode_id: inode_id.0,
+                        }
+                    })?;
+                    let candidates = db.load_local_only_candidates_for_namespace(&namespace_id)?;
+                    let collision = candidates
+                        .into_iter()
+                        .filter(|candidate| {
+                            candidate.exists_on_disk
+                                && candidate.parent_inode_id == remote.parent_inode_id
+                                && candidate.display_name == remote.display_name
+                                && candidate.content_digest != remote.content_digest
+                        })
+                        .collect::<Vec<_>>();
+                    let source_path = match collision.as_slice() {
+                        [candidate] => resolve_local_only_source_path(&candidate.client_file_id),
+                        _ => None,
+                    };
+                    let executed = execute_resolve_path_binding_collision(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        source_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedResolvePathBindingCollision(
+                        executed,
+                    )))
                 }
                 value if value == PlannerDecision::MaterializeRemoteDir.as_str() => {
                     let target_path = resolve_inode_source_path(&namespace_id, inode_id);

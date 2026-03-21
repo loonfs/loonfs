@@ -1,7 +1,7 @@
 use super::{SqliteStateDb, StateDbError};
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const SCHEMA_VERSION: i32 = 16;
+pub(crate) const SCHEMA_VERSION: i32 = 17;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
@@ -1034,6 +1034,32 @@ fn schema_v16_create_sql() -> String {
     )
 }
 
+const SCHEMA_V17_RENAME_SQL: &str = SCHEMA_V16_RENAME_SQL;
+
+const SCHEMA_V17_COPY_SQL: &str = SCHEMA_V16_COPY_SQL;
+
+const SCHEMA_V17_DROP_OLD_SQL: &str = SCHEMA_V16_DROP_OLD_SQL;
+
+fn schema_v17_create_sql() -> String {
+    schema_v16_create_sql()
+        .replace(
+            "CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir', 'create_conflict_copy', 'no_op'))",
+            "CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'download_remote_edit', 'resolve_same_inode_conflict', 'resolve_delete_vs_edit_conflict', 'resolve_rename_vs_edit_conflict', 'resolve_path_binding_collision', 'apply_remote_rename_and_replace', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir', 'create_conflict_copy', 'no_op'))",
+        )
+        .replace(
+            "CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'remote_deleted_from_anchor', 'remote_deleted_while_local_differs_from_anchor', 'remote_deleted_without_anchor', 'remote_subtree_deleted_from_anchor', 'remote_subtree_deleted_while_local_differs_from_anchor', 'remote_subtree_deleted_while_descendants_differ_from_anchor', 'remote_subtree_deleted_while_descendants_busy', 'remote_subtree_deleted_without_anchor', 'remote_subtree_path_differs_from_anchor', 'remote_subtree_path_differs_while_local_differs_from_anchor', 'remote_subtree_path_differs_while_descendants_differ_from_anchor', 'remote_subtree_path_differs_while_descendants_busy', 'remote_subtree_path_waiting_for_target_parent_materialization', 'remote_subtree_path_target_parent_unusable', 'remote_parent_waiting_for_materialization', 'remote_path_differs_from_anchor', 'remote_path_waiting_for_target_parent_materialization', 'remote_path_target_parent_unusable', 'remote_path_and_content_differ_from_anchor', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))",
+            "CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'remote_deleted_from_anchor', 'remote_deleted_while_local_differs_from_anchor', 'remote_deleted_without_anchor', 'remote_subtree_deleted_from_anchor', 'remote_subtree_deleted_while_local_differs_from_anchor', 'remote_subtree_deleted_while_descendants_differ_from_anchor', 'remote_subtree_deleted_while_descendants_busy', 'remote_subtree_deleted_without_anchor', 'remote_subtree_path_differs_from_anchor', 'remote_subtree_path_differs_while_local_differs_from_anchor', 'remote_subtree_path_differs_while_descendants_differ_from_anchor', 'remote_subtree_path_differs_while_descendants_busy', 'remote_subtree_path_waiting_for_target_parent_materialization', 'remote_subtree_path_target_parent_unusable', 'remote_parent_waiting_for_materialization', 'remote_path_differs_from_anchor', 'remote_path_waiting_for_target_parent_materialization', 'remote_path_target_parent_unusable', 'remote_path_and_content_differ_from_anchor', 'local_only_path_binding_collision', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))",
+        )
+        .replace(
+            "CHECK (kind IN ('remote_observation_bind_ambiguous', 'download_remote_edit_remote_digest_mismatch', 'download_remote_edit_local_apply_failed', 'download_remote_edit_transfer_reset', 'materialize_remote_dir_local_apply_failed', 'apply_remote_rename_local_apply_failed', 'apply_remote_delete_local_apply_failed', 'apply_remote_subtree_delete_local_apply_failed', 'apply_remote_subtree_rename_local_apply_failed', 'upload_local_edit_upload_failed', 'upload_local_edit_transfer_reset'))",
+            "CHECK (kind IN ('remote_observation_bind_ambiguous', 'download_remote_edit_remote_digest_mismatch', 'download_remote_edit_local_apply_failed', 'download_remote_edit_transfer_reset', 'materialize_remote_dir_local_apply_failed', 'apply_remote_rename_local_apply_failed', 'apply_remote_rename_and_replace_local_apply_failed', 'apply_remote_delete_local_apply_failed', 'apply_remote_subtree_delete_local_apply_failed', 'apply_remote_subtree_rename_local_apply_failed', 'resolve_same_inode_conflict_local_apply_failed', 'resolve_delete_vs_edit_conflict_local_apply_failed', 'resolve_rename_vs_edit_conflict_local_apply_failed', 'resolve_path_binding_collision_local_apply_failed', 'upload_local_edit_upload_failed', 'upload_local_edit_transfer_reset'))",
+        )
+        .replace(
+            "CREATE INDEX idx_conflicts_and_errors_inode_created_at\n    ON conflicts_and_errors(namespace_id, inode_id, created_at_ms, record_id);\nCREATE INDEX idx_local_only_conflicts_and_errors_client_created_at\n    ON local_only_conflicts_and_errors(client_file_id, created_at_ms, record_id);\n",
+            "CREATE TABLE conflict_artifacts (\n    namespace_id TEXT NOT NULL,\n    conflict_id TEXT NOT NULL,\n    object_key TEXT NOT NULL,\n    conflict_class TEXT NOT NULL,\n    artifact_json TEXT NOT NULL,\n    created_at_ms INTEGER NOT NULL,\n    PRIMARY KEY (namespace_id, conflict_id),\n    CHECK (conflict_class IN ('same_inode_stale_base_edit', 'path_binding_collision', 'delete_vs_edit', 'rename_vs_edit'))\n);\nCREATE INDEX idx_conflicts_and_errors_inode_created_at\n    ON conflicts_and_errors(namespace_id, inode_id, created_at_ms, record_id);\nCREATE INDEX idx_local_only_conflicts_and_errors_client_created_at\n    ON local_only_conflicts_and_errors(client_file_id, created_at_ms, record_id);\nCREATE INDEX idx_conflict_artifacts_namespace_created_at\n    ON conflict_artifacts(namespace_id, created_at_ms, conflict_id);\n",
+        )
+}
+
 pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -1224,6 +1250,11 @@ impl SqliteStateDb {
 
         if current_version == 15 {
             apply_v16_hardening(&mut self.conn)?;
+            current_version = 16;
+        }
+
+        if current_version == 16 {
+            apply_v17_hardening(&mut self.conn)?;
         }
 
         Ok(())
@@ -1335,6 +1366,62 @@ fn apply_v16_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     result?;
     ensure_no_foreign_key_violations(conn)?;
+    Ok(())
+}
+
+fn apply_v17_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result: Result<(), StateDbError> = (|| {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA_V17_RENAME_SQL)?;
+        tx.execute_batch(&schema_v17_create_sql())?;
+        tx.execute_batch(SCHEMA_V17_COPY_SQL)?;
+        tx.execute_batch(SCHEMA_V17_DROP_OLD_SQL)?;
+        migrate_v17_conflict_actions(&tx)?;
+        tx.pragma_update(None, "user_version", 17)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    result?;
+    ensure_no_foreign_key_violations(conn)?;
+    Ok(())
+}
+
+fn migrate_v17_conflict_actions(tx: &rusqlite::Transaction<'_>) -> Result<(), StateDbError> {
+    tx.execute(
+        "UPDATE planned_actions
+        SET decision = 'resolve_delete_vs_edit_conflict'
+        WHERE decision = 'create_conflict_copy'
+          AND reason = 'remote_deleted_while_local_differs_from_anchor'",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE planned_actions
+        SET decision = 'apply_remote_rename_and_replace'
+        WHERE decision = 'create_conflict_copy'
+          AND reason = 'remote_path_and_content_differ_from_anchor'",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE planned_actions
+        SET decision = CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM remote_state AS r
+                JOIN sync_anchor AS a
+                  ON a.namespace_id = r.namespace_id
+                 AND a.inode_id = r.inode_id
+                WHERE r.namespace_id = planned_actions.namespace_id
+                  AND r.inode_id = planned_actions.inode_id
+                  AND (r.parent_inode_id != a.parent_inode_id OR r.display_name != a.display_name)
+            ) THEN 'resolve_rename_vs_edit_conflict'
+            ELSE 'resolve_same_inode_conflict'
+        END
+        WHERE decision = 'create_conflict_copy'
+          AND reason = 'local_and_remote_differ_from_anchor'",
+        [],
+    )?;
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod conflict;
 mod local_apply;
 
 pub mod download;
