@@ -29,6 +29,8 @@ Rules:
 - artifact discovery and restore are library-first and out of band
 - restore always targets an explicit caller-supplied destination and never mutates sync planner
   state
+- the first operator-facing shell is `xtask` against explicit local DB/store paths; acknowledge,
+  archive, and delete lifecycle controls remain deferred
 
 ## Consequences
 
@@ -39,5 +41,7 @@ Rules:
 - loser content stays recoverable through immutable content plus a deterministic conflict artifact
 - conflict artifacts can be rediscovered from object storage and restored later without rebinding
   them into canonical sync state
+- operators have a narrow `xtask` shell for list/show/restore before any server-admin or public
+  CLI surface exists
 - `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree rename,
   and still-unsupported future hierarchy classes

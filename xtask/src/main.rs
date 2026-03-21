@@ -1,4 +1,6 @@
 use anyhow::{bail, Result};
+mod conflicts;
+
 use loon_testkit::fixtures::{fixture_path, fixture_paths};
 use loon_testkit::minimize::minimize_replay_scenario;
 use loon_testkit::render::{render_case, render_yaml};
@@ -8,7 +10,14 @@ use loon_testkit::seed::Seed;
 use loon_testkit::snapshots::{fixture_key_from_path, write_snapshot, SnapshotKind};
 use std::path::{Path, PathBuf};
 
-fn main() -> Result<()> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("render-case") => {
@@ -160,10 +169,25 @@ fn main() -> Result<()> {
             )?;
             Ok(())
         }
+        Some("conflict-list") => {
+            let conflict_args = conflicts::parse_conflict_list_args(args)?;
+            print!("{}", conflicts::run_conflict_list(conflict_args)?);
+            Ok(())
+        }
+        Some("conflict-show") => {
+            let conflict_args = conflicts::parse_conflict_show_args(args)?;
+            print!("{}", conflicts::run_conflict_show(conflict_args)?);
+            Ok(())
+        }
+        Some("conflict-restore") => {
+            let conflict_args = conflicts::parse_conflict_restore_args(args)?;
+            print!("{}", conflicts::run_conflict_restore(conflict_args)?);
+            Ok(())
+        }
         Some(other) => bail!("unknown xtask command: {other}"),
         None => {
             println!(
-                "xtask commands: render-case | render-kind | validate-fixtures | replay-seed | minimize-case"
+                "xtask commands: render-case | render-kind | validate-fixtures | replay-seed | minimize-case | conflict-list | conflict-show | conflict-restore"
             );
             Ok(())
         }

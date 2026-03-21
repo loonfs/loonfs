@@ -546,6 +546,8 @@ Deliverables:
   the authoritative winner
 - durable client cache/indexing for created conflict artifacts
 - library-first discovery and explicit restore APIs for file and subtree conflict artifacts
+- `xtask` operator commands for conflict artifact list/show/restore against explicit local client
+  DB and local-fs object-store roots
 - readable fixtures and executable invariants proving loser preservation and canonical-path
   stability
 
@@ -559,6 +561,8 @@ Required rules:
   of creating a visible sibling tree
 - conflict artifact restore is out-of-band recovery into an explicit caller destination and does
   not mutate sync planner state
+- the first operator-facing shell is `xtask`, using explicit `--db` and `--store-root` paths and
+  no acknowledge/archive/delete lifecycle yet
 - `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree rename,
   and still-unsupported future hierarchy classes after the stable-path taxonomy cleanup
 

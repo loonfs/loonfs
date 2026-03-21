@@ -1,0 +1,33 @@
+namespace=ns-xtask-conflicts conflict_id=conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2 artifact_kind=subtree conflict_class=subtree_rename_vs_local_changes created_at_ms=1700000000002 object_key=namespaces/ns-xtask-conflicts/conflicts/conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2.json
+[artifact]
+conflict_id: conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2
+namespace_id: ns-xtask-conflicts
+conflict_class: subtree_rename_vs_local_changes
+policy_applied: stable_paths
+detected_seq: 42
+winner:
+  inode_id: 10
+  parent_inode_id: 2
+  display_name: reports
+  revision_no: 9
+  content_manifest_digest: null
+loser_root:
+  inode_id: 10
+  parent_inode_id: 2
+  display_name: reports
+  revision_no: 8
+entries:
+- relative_path: docs
+  inode_kind: dir
+  inode_id: 100
+  parent_inode_id: 10
+  display_name: docs
+- relative_path: docs/report.txt
+  inode_kind: file
+  inode_id: 101
+  base_revision_no: 1
+  content_manifest_digest: sha256:4b5fe066a4b2e6b48ee46729c1f55917f14d26d4699ca24140d2c1d8ee9096ba
+  content_digest: sha256:a6b756bed29926b8af6c750132eb3c2c57436592c054243c130ca7a2209ca0ea
+  parent_inode_id: 10
+  display_name: report.txt
+created_at_ms: 1700000000002

@@ -40,6 +40,19 @@ Current real delivery surfaces:
 - `loon-testkit`
 - `xtask`
 
+Current operator-facing recovery shell:
+
+- `xtask conflict-list <namespace_id> --db <path> --store-root <path>`
+- `xtask conflict-show <namespace_id> <conflict_id> --db <path> --store-root <path>`
+- `xtask conflict-restore <namespace_id> <conflict_id> --db <path> --store-root <path> --to <path>`
+
+Constraints for that shell:
+
+- it requires an existing client SQLite DB path and an existing local-fs object-store root
+- it may refresh only the local `conflict_artifacts` cache during discovery
+- restore is out-of-band and does not rebind recovered content into sync state
+- there is no acknowledge/archive/delete lifecycle yet
+
 Current quarantined delivery surfaces:
 
 - `loon-cli`
