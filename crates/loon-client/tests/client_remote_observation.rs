@@ -1,7 +1,8 @@
 use loon_client::executor::{
     execute_next_client_action, ExecuteApplyRemoteDeleteError, ExecuteApplyRemoteRenameError,
-    ExecuteApplyRemoteSubtreeDeleteError, ExecuteNextClientActionError, ExecutedApplyRemoteDelete,
-    ExecutedApplyRemoteRename, ExecutedApplyRemoteSubtreeDelete, NextClientAction,
+    ExecuteApplyRemoteSubtreeDeleteError, ExecuteApplyRemoteSubtreeRenameError,
+    ExecuteNextClientActionError, ExecutedApplyRemoteDelete, ExecutedApplyRemoteRename,
+    ExecutedApplyRemoteSubtreeDelete, ExecutedApplyRemoteSubtreeRename, NextClientAction,
 };
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
@@ -15,20 +16,23 @@ use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::content_manifest;
 use loon_testkit::invariants::{
     evaluate_apply_remote_delete_invariants, evaluate_apply_remote_rename_invariants,
-    evaluate_apply_remote_subtree_delete_invariants, evaluate_remote_delete_planning_invariants,
+    evaluate_apply_remote_subtree_delete_invariants,
+    evaluate_apply_remote_subtree_rename_invariants, evaluate_remote_delete_planning_invariants,
     evaluate_remote_observation_active_download_invariants,
     evaluate_remote_observation_active_upload_invariants,
     evaluate_remote_observation_ambiguous_bind_invariants,
     evaluate_remote_observation_convergence_invariants,
     evaluate_remote_observation_late_bind_invariants,
     evaluate_remote_path_change_planning_invariants,
-    evaluate_remote_subtree_delete_planning_invariants, ApplyRemoteDeleteInvariantInputs,
+    evaluate_remote_subtree_delete_planning_invariants,
+    evaluate_remote_subtree_rename_planning_invariants, ApplyRemoteDeleteInvariantInputs,
     ApplyRemoteRenameInvariantInputs, ApplyRemoteSubtreeDeleteInvariantInputs,
-    ClientReconciliationInvariantReport, RemoteDeletePlanningInvariantInputs,
-    RemoteObservationActiveDownloadInvariantInputs, RemoteObservationActiveUploadInvariantInputs,
-    RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
-    RemoteObservationLateBindInvariantInputs, RemotePathChangePlanningInvariantInputs,
-    RemoteSubtreeDeletePlanningInvariantInputs,
+    ApplyRemoteSubtreeRenameInvariantInputs, ClientReconciliationInvariantReport,
+    RemoteDeletePlanningInvariantInputs, RemoteObservationActiveDownloadInvariantInputs,
+    RemoteObservationActiveUploadInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
+    RemoteObservationConvergenceInvariantInputs, RemoteObservationLateBindInvariantInputs,
+    RemotePathChangePlanningInvariantInputs, RemoteSubtreeDeletePlanningInvariantInputs,
+    RemoteSubtreeRenamePlanningInvariantInputs,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -661,6 +665,91 @@ fn remote_observation_remote_subtree_delete_while_descendant_busy_defers_conflic
 }
 
 #[test]
+fn remote_observation_bound_directory_remote_subtree_rename_applies_locally() {
+    let report = run_remote_subtree_rename_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_rename_applies_locally.yaml",
+        false,
+    );
+
+    assert!(report.final_target_exists, "renamed root path should exist");
+    assert!(
+        !report.final_root_exists,
+        "old subtree root path should be removed after rename"
+    );
+}
+
+#[test]
+fn remote_observation_bound_directory_remote_subtree_move_applies_locally() {
+    let report = run_remote_subtree_rename_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_move_applies_locally.yaml",
+        false,
+    );
+
+    assert!(
+        report.final_target_exists,
+        "moved subtree target path should exist"
+    );
+    assert!(
+        !report.final_root_exists,
+        "old subtree root path should be removed after move"
+    );
+}
+
+#[test]
+fn remote_observation_bound_directory_remote_subtree_rename_destination_occupied_records_issue_and_retries(
+) {
+    let report = run_remote_subtree_rename_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_rename_destination_occupied_records_issue.yaml",
+        true,
+    );
+
+    assert!(
+        report.final_target_exists,
+        "target subtree path should exist after retry"
+    );
+    assert!(
+        !report.final_root_exists,
+        "old subtree root path should be removed after retry"
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_rename_into_unusable_parent_defers_conflict_copy() {
+    let report = run_remote_subtree_rename_conflict_report(
+        "client/client_remote_observation_renames_bound_directory_into_unusable_parent_defers_conflict_copy.yaml",
+    );
+
+    assert!(
+        report.final_root_exists,
+        "remote subtree rename should not eagerly move into an unusable parent"
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_rename_while_descendant_differs_defers_conflict_copy() {
+    let report = run_remote_subtree_rename_conflict_report(
+        "client/client_remote_observation_renames_bound_directory_while_descendant_differs_from_anchor.yaml",
+    );
+
+    assert!(
+        report.final_root_exists,
+        "remote subtree rename should not eagerly move a subtree with diverged descendants"
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_rename_while_descendant_busy_defers_conflict_copy() {
+    let report = run_remote_subtree_rename_conflict_report(
+        "client/client_remote_observation_renames_bound_directory_while_descendant_upload_active.yaml",
+    );
+
+    assert!(
+        report.final_root_exists,
+        "remote subtree rename should not eagerly move a busy subtree"
+    );
+}
+
+#[test]
 fn remote_observation_remote_delete_while_local_differs_from_anchor_defers_conflict_copy() {
     let scenario = load_fixture(
         "client/client_remote_observation_deletes_bound_file_while_local_differs_from_anchor.yaml",
@@ -1107,6 +1196,51 @@ fn remote_observation_remote_subtree_delete_deferred_conflict_trace_matches_chec
         report.rendered_trace,
         include_str!(
             "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_deletes_bound_directory_while_descendant_differs_from_anchor.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_rename_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_subtree_rename_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_rename_applies_locally.yaml",
+        false,
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_rename_applies_locally.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_move_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_subtree_rename_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_move_applies_locally.yaml",
+        false,
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_move_applies_locally.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_rename_failure_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_subtree_rename_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_rename_destination_occupied_records_issue.yaml",
+        false,
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_rename_destination_occupied_records_issue.txt"
         )
     );
 }
@@ -2375,11 +2509,8 @@ fn run_remote_subtree_delete_invariant_report(
         .filter(|row| row.inode_id != second_planner_tick.inode_id)
         .map(|row| row.inode_id)
         .collect::<BTreeSet<_>>();
-    let subtree_inode_ids = initial
-        .local_state
-        .iter()
-        .map(|row| row.inode_id)
-        .collect::<BTreeSet<_>>();
+    let subtree_inode_ids =
+        rooted_subtree_inode_ids(&initial.local_state, second_planner_tick.inode_id);
     let descendant_remote_count_after = descendant_inode_ids
         .iter()
         .filter(|inode_id| {
@@ -2516,6 +2647,343 @@ fn run_remote_subtree_delete_conflict_report(
     SubtreeDeleteInvariantFixtureRunReport {
         rendered_trace: render_trace(&scenario, &trace),
         final_root_exists: root_path.exists(),
+    }
+}
+
+fn run_remote_subtree_rename_invariant_report(
+    fixture_path: &str,
+    retry_after_failure: bool,
+) -> SubtreeRenameInvariantFixtureRunReport {
+    let scenario = load_fixture(fixture_path);
+    let initial: SubtreeRenameObservationInitial =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteRenameFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: SubtreeRenameObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-remote-subtree-rename");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create objectstore root");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    materialize_local_tree(&source_root, &initial.local_entries);
+    let root_path = source_root.join(&initial.root_relative_path);
+    let target_path = source_root.join(&initial.target_relative_path);
+    fs::create_dir_all(target_path.parent().expect("target parent")).expect("create target parent");
+    seed_remote_subtree_rename_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let first_planner_tick = actions[2].planner().expect("planner action third");
+    let execute = actions[3]
+        .execute_next_client_action()
+        .expect("execute action fourth");
+    assert!(actions[4].is_restart(), "restart should be fifth");
+    let second_planner_tick = actions[5].planner().expect("planner action sixth");
+
+    let observation_outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(observation_outcome, expect.outcome.clone().into_outcome());
+
+    let first_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+        plan_file(
+            &mut db,
+            &first_planner_tick.namespace_id,
+            first_planner_tick.inode_id,
+            first_planner_tick.now_ms,
+        )
+        .expect("plan bound subtree root after observation")
+    };
+    assert_eq!(first_planner_result, expect.first_planner_result);
+
+    let executed = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for subtree rename execute");
+        execute_next_client_action(
+            &mut db,
+            &store,
+            |_client_file_id| None,
+            |_namespace_id, _inode_id| Some(root_path.clone()),
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| Some(target_path.clone()),
+            execute.uploaded_at_ms,
+            execute.created_at_ms,
+            |_request| panic!("apply_remote_subtree_rename should not dispatch a mutation request"),
+        )
+    };
+    assert_subtree_rename_execution_matches_expectation(executed, &expect.execution);
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after subtree rename execute");
+    let second_planner_result = plan_file(
+        &mut db,
+        &second_planner_tick.namespace_id,
+        second_planner_tick.inode_id,
+        second_planner_tick.now_ms,
+    )
+    .expect("plan bound subtree root after execute");
+    assert_eq!(second_planner_result, expect.second_planner_result);
+
+    assert_subtree_rename_states_match(&db, &initial, &expect);
+
+    let issues = db
+        .load_conflicts_and_errors(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
+        .expect("load subtree rename issues after execute")
+        .into_iter()
+        .map(RawConflictOrErrorExpect::from_row)
+        .collect::<Vec<_>>();
+    assert_eq!(issues, expect.conflicts_and_errors);
+
+    for path_expectation in &expect.path_expectations {
+        assert_eq!(
+            source_root.join(&path_expectation.relative_path).exists(),
+            path_expectation.exists,
+            "unexpected path existence for {}",
+            path_expectation.relative_path.display()
+        );
+    }
+
+    let subtree_inode_ids =
+        rooted_subtree_inode_ids(&initial.local_state, second_planner_tick.inode_id);
+    let descendant_inode_ids = subtree_inode_ids
+        .iter()
+        .copied()
+        .filter(|inode_id| *inode_id != second_planner_tick.inode_id)
+        .collect::<BTreeSet<_>>();
+    let descendant_remote_count_after = descendant_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&second_planner_tick.namespace_id, **inode_id)
+                .expect("load descendant remote views")
+                .remote
+                .is_some()
+        })
+        .count();
+    let descendant_local_state_count_after = descendant_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&second_planner_tick.namespace_id, **inode_id)
+                .expect("load descendant local views")
+                .local
+                .is_some()
+        })
+        .count();
+    let descendant_sync_anchor_count_after = descendant_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&second_planner_tick.namespace_id, **inode_id)
+                .expect("load descendant anchor views")
+                .sync_anchor
+                .is_some()
+        })
+        .count();
+    let expected_descendant_remote_count = expect
+        .remote_state_after
+        .iter()
+        .filter(|row| descendant_inode_ids.contains(&row.inode_id))
+        .count();
+    let expected_descendant_local_state_count = expect
+        .local_state_after
+        .iter()
+        .filter(|row| descendant_inode_ids.contains(&row.inode_id))
+        .count();
+    let expected_descendant_sync_anchor_count = expect
+        .sync_anchor_after
+        .iter()
+        .filter(|row| descendant_inode_ids.contains(&row.inode_id))
+        .count();
+
+    let planning_report = evaluate_remote_subtree_rename_planning_invariants(
+        RemoteSubtreeRenamePlanningInvariantInputs {
+            planned_action_decision_after: Some(first_planner_result.decision.as_str()),
+            planned_action_reason_after: Some(first_planner_result.reason.as_str()),
+        },
+    );
+    let root_views = db
+        .load_file_sync_views(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
+        .expect("load root views after subtree rename execute");
+    let root_remote = root_views
+        .remote
+        .as_ref()
+        .expect("root remote row after subtree rename execute");
+    let root_local = root_views
+        .local
+        .as_ref()
+        .expect("root local row after subtree rename execute");
+    let apply_report =
+        evaluate_apply_remote_subtree_rename_invariants(ApplyRemoteSubtreeRenameInvariantInputs {
+            root_local_exists_on_disk_after: root_local.exists_on_disk,
+            root_local_dirty_after: root_local.dirty,
+            root_local_parent_inode_after: root_local.parent_inode_id,
+            root_local_display_name_after: root_local.display_name.as_str(),
+            root_remote_synced_seq_after: root_remote.observed_seq,
+            root_remote_revision_no_after: root_remote.revision_no,
+            root_remote_parent_inode_after: root_remote.parent_inode_id,
+            root_remote_display_name_after: root_remote.display_name.as_str(),
+            root_sync_anchor_seq_after: root_views
+                .sync_anchor
+                .as_ref()
+                .map(|anchor| anchor.synced_seq),
+            root_sync_anchor_revision_no_after: root_views
+                .sync_anchor
+                .as_ref()
+                .map(|anchor| anchor.revision_no),
+            root_sync_anchor_parent_inode_after: root_views
+                .sync_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.parent_inode_id),
+            root_sync_anchor_display_name_after: root_views
+                .sync_anchor
+                .as_ref()
+                .map(|anchor| anchor.display_name.as_str()),
+            descendant_remote_count_after,
+            expected_descendant_remote_count,
+            descendant_local_state_count_after,
+            expected_descendant_local_state_count,
+            descendant_sync_anchor_count_after,
+            expected_descendant_sync_anchor_count,
+            root_planned_action_present_after: db
+                .load_planned_action(
+                    &second_planner_tick.namespace_id,
+                    second_planner_tick.inode_id,
+                )
+                .expect("load root planned action after subtree rename execute")
+                .is_some(),
+            issue_kind_after: issues.first().map(|issue| issue.kind.as_str()),
+        });
+    let report = combine_reconciliation_reports([planning_report, apply_report]);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("first_planner_result={first_planner_result:?}"),
+        format!("execution={:?}", expect.execution),
+        format!("second_planner_result={second_planner_result:?}"),
+        format!("issues_after={issues:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("remote-subtree-rename"))
+    .collect::<Vec<_>>();
+    let rendered_trace = render_trace(&scenario, &trace);
+
+    let mut final_root_exists = root_path.exists();
+    let mut final_target_exists = target_path.exists();
+    if retry_after_failure
+        && matches!(
+            expect.execution,
+            RawSubtreeRenameExecutionExpect::ExecuteErrorKind { .. }
+        )
+    {
+        remove_local_path_if_present(&target_path);
+        let retried = {
+            let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for subtree rename retry");
+            execute_next_client_action(
+                &mut db,
+                &store,
+                |_client_file_id| None,
+                |_namespace_id, _inode_id| Some(root_path.clone()),
+                |_namespace_id, _inode_id, _parent_inode_id, _display_name| {
+                    Some(target_path.clone())
+                },
+                execute.uploaded_at_ms,
+                execute.created_at_ms.saturating_add(1),
+                |_request| {
+                    panic!("apply_remote_subtree_rename should not dispatch a mutation request")
+                },
+            )
+            .expect("retry execute_next_client_action after clearing destination")
+        };
+        match retried {
+            Some(NextClientAction::ExecutedApplyRemoteSubtreeRename(
+                ExecutedApplyRemoteSubtreeRename { .. },
+            )) => {}
+            other => panic!("expected retry to apply remote subtree rename, got {other:?}"),
+        }
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after subtree rename retry");
+        let retry_planner_result = plan_file(
+            &mut db,
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+            second_planner_tick.now_ms.saturating_add(1),
+        )
+        .expect("plan subtree root after retry");
+        assert_eq!(retry_planner_result.decision.as_str(), "no_op");
+        final_root_exists = root_path.exists();
+        final_target_exists = target_path.exists();
+    }
+
+    SubtreeRenameInvariantFixtureRunReport {
+        rendered_trace,
+        final_root_exists,
+        final_target_exists,
+    }
+}
+
+fn run_remote_subtree_rename_conflict_report(
+    fixture_path: &str,
+) -> SubtreeRenameInvariantFixtureRunReport {
+    let scenario = load_fixture(fixture_path);
+    let initial: SubtreeRenameObservationInitial =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: SubtreeRenameConflictObservationExpect =
+        scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-remote-subtree-rename-conflict");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+
+    materialize_local_tree(&source_root, &initial.local_entries);
+    let root_path = source_root.join(&initial.root_relative_path);
+    seed_remote_subtree_rename_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_tick = actions[2].planner().expect("planner action third");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan subtree rename conflict after restart");
+    assert_eq!(planner_result, expect.planner_result);
+
+    for path_expectation in &expect.path_expectations {
+        assert_eq!(
+            source_root.join(&path_expectation.relative_path).exists(),
+            path_expectation.exists,
+            "unexpected path existence for {}",
+            path_expectation.relative_path.display()
+        );
+    }
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("planner_result={planner_result:?}"),
+    ];
+
+    SubtreeRenameInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+        final_root_exists: root_path.exists(),
+        final_target_exists: source_root.join(&initial.target_relative_path).exists(),
     }
 }
 
@@ -2667,6 +3135,178 @@ fn assert_subtree_states_match(
             expected_planned.get(&inode_id).cloned()
         );
     }
+}
+
+fn seed_remote_subtree_rename_observation_state(
+    db_path: &Path,
+    initial: &SubtreeRenameObservationInitial,
+) {
+    let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
+    db.planner_transaction("seed-remote-subtree-rename-observation-state", |tx| {
+        for row in &initial.remote_state {
+            tx.upsert_remote_file(row)?;
+        }
+        for row in &initial.local_state {
+            tx.upsert_local_file(row)?;
+        }
+        for row in &initial.sync_anchor {
+            tx.upsert_sync_anchor(row)?;
+        }
+        for row in &initial.planned_actions {
+            tx.upsert_planned_action(row)?;
+        }
+        for row in &initial.pending_inode_mutations {
+            let row = row.clone().into_row();
+            tx.record_pending_inode_mutation(
+                &row.namespace_id,
+                row.inode_id,
+                &row.request,
+                row.created_at_ms,
+            )?;
+        }
+        for row in &initial.transfer_ledgers {
+            tx.upsert_transfer_ledger(&row.clone().into_row())?;
+        }
+        Ok(())
+    })
+    .expect("seed remote subtree rename observation state");
+}
+
+fn assert_subtree_rename_execution_matches_expectation(
+    result: Result<Option<NextClientAction>, ExecuteNextClientActionError>,
+    expected: &RawSubtreeRenameExecutionExpect,
+) {
+    match expected {
+        RawSubtreeRenameExecutionExpect::ExecutedApplyRemoteSubtreeRename {
+            executed_apply_remote_subtree_rename,
+        } => {
+            let executed = result.expect("subtree rename execution should succeed");
+            assert_eq!(
+                executed,
+                Some(NextClientAction::ExecutedApplyRemoteSubtreeRename(
+                    ExecutedApplyRemoteSubtreeRename {
+                        applied: executed_apply_remote_subtree_rename.clone(),
+                    },
+                ))
+            );
+        }
+        RawSubtreeRenameExecutionExpect::ExecuteErrorKind { execute_error_kind } => {
+            let error = result.expect_err("subtree rename execution should fail");
+            let actual_kind = match error {
+                ExecuteNextClientActionError::ApplyRemoteSubtreeRename(
+                    ExecuteApplyRemoteSubtreeRenameError::CurrentPathMissing { .. },
+                ) => "current_path_missing",
+                ExecuteNextClientActionError::ApplyRemoteSubtreeRename(
+                    ExecuteApplyRemoteSubtreeRenameError::TargetPathMissing { .. },
+                ) => "target_path_missing",
+                ExecuteNextClientActionError::ApplyRemoteSubtreeRename(
+                    ExecuteApplyRemoteSubtreeRenameError::DestinationOccupied { .. },
+                ) => "destination_occupied",
+                ExecuteNextClientActionError::ApplyRemoteSubtreeRename(
+                    ExecuteApplyRemoteSubtreeRenameError::LocalApplyFailed { .. },
+                ) => "rename_io",
+                other => panic!("unexpected subtree rename execution error: {other:?}"),
+            };
+            assert_eq!(actual_kind, execute_error_kind);
+        }
+    }
+}
+
+fn assert_subtree_rename_states_match(
+    db: &SqliteStateDb,
+    initial: &SubtreeRenameObservationInitial,
+    expect: &SubtreeRenameObservationExpect,
+) {
+    let namespace_id = initial
+        .remote_state
+        .first()
+        .map(|row| row.namespace_id.clone())
+        .or_else(|| {
+            initial
+                .local_state
+                .first()
+                .map(|row| row.namespace_id.clone())
+        })
+        .expect("subtree rename fixture namespace");
+    let mut inode_ids = BTreeSet::new();
+    inode_ids.extend(initial.remote_state.iter().map(|row| row.inode_id));
+    inode_ids.extend(initial.local_state.iter().map(|row| row.inode_id));
+    inode_ids.extend(initial.sync_anchor.iter().map(|row| row.inode_id));
+
+    let expected_remote = expect
+        .remote_state_after
+        .iter()
+        .cloned()
+        .map(|row| (row.inode_id, row))
+        .collect::<BTreeMap<_, _>>();
+    let expected_local = expect
+        .local_state_after
+        .iter()
+        .cloned()
+        .map(|row| (row.inode_id, row))
+        .collect::<BTreeMap<_, _>>();
+    let expected_anchor = expect
+        .sync_anchor_after
+        .iter()
+        .cloned()
+        .map(|row| (row.inode_id, row))
+        .collect::<BTreeMap<_, _>>();
+    let expected_planned = expect
+        .planned_actions_after
+        .iter()
+        .cloned()
+        .map(|row| (row.inode_id, row))
+        .collect::<BTreeMap<_, _>>();
+
+    for inode_id in inode_ids {
+        let views = db
+            .load_file_sync_views(&namespace_id, inode_id)
+            .expect("load subtree rename views");
+        assert_eq!(views.remote, expected_remote.get(&inode_id).cloned());
+        assert_eq!(views.local, expected_local.get(&inode_id).cloned());
+        assert_eq!(views.sync_anchor, expected_anchor.get(&inode_id).cloned());
+        assert_eq!(
+            db.load_planned_action(&namespace_id, inode_id)
+                .expect("load subtree rename planned action"),
+            expected_planned.get(&inode_id).cloned()
+        );
+    }
+}
+
+fn remove_local_path_if_present(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(path).expect("remove existing directory path");
+    } else {
+        fs::remove_file(path).expect("remove existing file path");
+    }
+}
+
+fn rooted_subtree_inode_ids(
+    local_rows: &[LocalFileStateRow],
+    root_inode_id: InodeId,
+) -> BTreeSet<InodeId> {
+    let mut subtree_inode_ids = BTreeSet::from([root_inode_id]);
+    loop {
+        let mut changed = false;
+        for row in local_rows {
+            if subtree_inode_ids.contains(&row.inode_id) {
+                continue;
+            }
+            if row
+                .parent_inode_id
+                .is_some_and(|parent_inode_id| subtree_inode_ids.contains(&parent_inode_id))
+            {
+                changed = subtree_inode_ids.insert(row.inode_id) || changed;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    subtree_inode_ids
 }
 
 fn seed_remote_rename_observation_state(db_path: &Path, initial: &RenameObservationInitial) {
@@ -2951,6 +3591,49 @@ struct SubtreeDeleteConflictObservationExpect {
 }
 
 #[derive(Debug, Deserialize)]
+struct SubtreeRenameObservationInitial {
+    root_relative_path: PathBuf,
+    target_relative_path: PathBuf,
+    remote_state: Vec<RemoteFileStateRow>,
+    local_state: Vec<LocalFileStateRow>,
+    sync_anchor: Vec<SyncAnchorRow>,
+    local_entries: Vec<FixtureLocalTreeEntry>,
+    #[serde(default)]
+    planned_actions: Vec<PlannedActionRow>,
+    #[serde(default)]
+    pending_inode_mutations: Vec<RawPendingInodeMutationRow>,
+    #[serde(default)]
+    transfer_ledgers: Vec<FixtureBoundTransferLedgerSeed>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtreeRenameObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    remote_state_after: Vec<RemoteFileStateRow>,
+    #[serde(default)]
+    local_state_after: Vec<LocalFileStateRow>,
+    #[serde(default)]
+    sync_anchor_after: Vec<SyncAnchorRow>,
+    #[serde(default)]
+    planned_actions_after: Vec<PlannedActionRow>,
+    #[serde(default)]
+    conflicts_and_errors: Vec<RawConflictOrErrorExpect>,
+    execution: RawSubtreeRenameExecutionExpect,
+    first_planner_result: PlannedActionRecord,
+    second_planner_result: PlannedActionRecord,
+    path_expectations: Vec<FixturePathExpectation>,
+    #[serde(default)]
+    invariants: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtreeRenameConflictObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    planner_result: PlannedActionRecord,
+    path_expectations: Vec<FixturePathExpectation>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RenameObservationInitial {
     remote_state: RemoteFileStateRow,
     local_state: LocalFileStateRow,
@@ -3045,6 +3728,13 @@ struct DeleteInvariantFixtureRunReport {
 struct SubtreeDeleteInvariantFixtureRunReport {
     rendered_trace: String,
     final_root_exists: bool,
+}
+
+#[derive(Debug)]
+struct SubtreeRenameInvariantFixtureRunReport {
+    rendered_trace: String,
+    final_root_exists: bool,
+    final_target_exists: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3358,6 +4048,17 @@ enum RawDeleteExecutionExpect {
 enum RawSubtreeDeleteExecutionExpect {
     ExecutedApplyRemoteSubtreeDelete {
         executed_apply_remote_subtree_delete: loon_client::state_db::AppliedInodeMutation,
+    },
+    ExecuteErrorKind {
+        execute_error_kind: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+enum RawSubtreeRenameExecutionExpect {
+    ExecutedApplyRemoteSubtreeRename {
+        executed_apply_remote_subtree_rename: loon_client::state_db::AppliedInodeMutation,
     },
     ExecuteErrorKind {
         execute_error_kind: String,

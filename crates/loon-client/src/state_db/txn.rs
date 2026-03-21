@@ -1,7 +1,8 @@
 use super::loads::{
-    assess_remote_subtree_delete_from_conn, load_bound_apply_remote_delete_views_from_conn,
-    load_bound_apply_remote_rename_views_from_conn,
+    assess_remote_subtree_delete_from_conn, assess_remote_subtree_rename_from_conn,
+    load_bound_apply_remote_delete_views_from_conn, load_bound_apply_remote_rename_views_from_conn,
     load_bound_apply_remote_subtree_delete_views_from_conn,
+    load_bound_apply_remote_subtree_rename_views_from_conn,
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
     load_conflicts_and_errors, load_inode_upload, load_local_file,
     load_local_only_candidates_for_namespace, load_local_only_conflicts_and_errors,
@@ -127,12 +128,28 @@ impl SqliteStateDb {
         assess_remote_subtree_delete_from_conn(&self.conn, namespace_id, inode_id)
     }
 
+    pub fn assess_remote_subtree_rename(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<RemoteSubtreeRenameAssessment, StateDbError> {
+        assess_remote_subtree_rename_from_conn(&self.conn, namespace_id, inode_id)
+    }
+
     pub fn load_bound_apply_remote_subtree_delete_views(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<BoundApplyRemoteSubtreeDeleteViews, StateDbError> {
         load_bound_apply_remote_subtree_delete_views_from_conn(&self.conn, namespace_id, inode_id)
+    }
+
+    pub fn load_bound_apply_remote_subtree_rename_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<BoundApplyRemoteSubtreeRenameViews, StateDbError> {
+        load_bound_apply_remote_subtree_rename_views_from_conn(&self.conn, namespace_id, inode_id)
     }
 
     pub fn load_planned_action(
@@ -440,6 +457,17 @@ impl SqliteStateDb {
     ) -> Result<AppliedInodeMutation, StateDbError> {
         self.planner_transaction("apply_remote_subtree_delete", |tx| {
             tx.apply_remote_subtree_delete(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_remote_subtree_rename(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_remote_subtree_rename", |tx| {
+            tx.apply_remote_subtree_rename(namespace_id, inode_id, applied_at_ms)
         })
     }
 
@@ -1855,6 +1883,56 @@ impl PlannerTxn<'_> {
         })
     }
 
+    pub fn apply_remote_subtree_rename(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = load_bound_apply_remote_subtree_rename_views_from_conn(
+            &self.tx,
+            namespace_id,
+            inode_id,
+        )?;
+
+        let next_local = LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: views.root_local.inode_kind,
+            content_digest: views.root_local.content_digest,
+            parent_inode_id: views.root_remote.parent_inode_id,
+            display_name: views.root_remote.display_name.clone(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: applied_at_ms,
+        };
+        let next_anchor = SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: views.root_remote.inode_kind.clone(),
+            synced_seq: views.root_remote.observed_seq,
+            revision_no: views.root_remote.revision_no,
+            content_digest: views.root_remote.content_digest.clone(),
+            content_manifest_digest: views.root_remote.content_manifest_digest.clone(),
+            parent_inode_id: views.root_remote.parent_inode_id,
+            display_name: views.root_remote.display_name,
+        };
+
+        self.upsert_local_file(&next_local)?;
+        self.upsert_sync_anchor(&next_anchor)?;
+        self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "apply_remote_subtree_rename_local_apply_failed",
+        )?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
     pub fn apply_remote_subtree_delete(
         &mut self,
         namespace_id: &NamespaceId,
@@ -2215,12 +2293,28 @@ impl PlannerTxn<'_> {
         assess_remote_subtree_delete_from_conn(&self.tx, namespace_id, inode_id)
     }
 
+    pub fn assess_remote_subtree_rename(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<RemoteSubtreeRenameAssessment, StateDbError> {
+        assess_remote_subtree_rename_from_conn(&self.tx, namespace_id, inode_id)
+    }
+
     pub fn load_bound_apply_remote_subtree_delete_views(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
     ) -> Result<BoundApplyRemoteSubtreeDeleteViews, StateDbError> {
         load_bound_apply_remote_subtree_delete_views_from_conn(&self.tx, namespace_id, inode_id)
+    }
+
+    pub fn load_bound_apply_remote_subtree_rename_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<BoundApplyRemoteSubtreeRenameViews, StateDbError> {
+        load_bound_apply_remote_subtree_rename_views_from_conn(&self.tx, namespace_id, inode_id)
     }
 
     pub fn load_local_only_file(

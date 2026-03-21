@@ -443,6 +443,48 @@ Exit criteria:
 - missing current-path and recursive-remove failures become durable named issue rows instead of
   generic executor errors
 
+### Slice 4: bound-directory remote rename/move observation
+
+Goal:
+
+- finish Milestone 9 for already-bound hierarchy reconciliation by treating authoritative
+  bound-directory rename and move as explicit local work instead of generic drift
+- keep the first slice strict by only handling clean, already-bound subtrees
+- preserve descendant durable state instead of rewriting inode-keyed rows unnecessarily
+
+Update:
+
+- `docs/specs/070-client-architecture.md`
+- `crates/loon-client/`
+- `tests/scenarios/client/`
+
+Add:
+
+- planner decision `apply_remote_subtree_rename`
+- planner reasons for root-local divergence, descendant divergence, descendant busy state, and
+  unusable target parents
+- durable root-level directory rename executor and named failure issue rows
+- reconciliation fixtures and invariants for successful same-parent rename, successful move,
+  occupied-destination failure, and deferred conflict handling
+
+Why next:
+
+- after file rename/delete and subtree delete, directory rename/move is the remaining already-bound
+  hierarchy gap
+- descendant rows are inode-keyed, so strict bound-only subtree rename can finish Milestone 9
+  without inventing new descendant path-rewrite machinery
+
+Exit criteria:
+
+- a path-only authoritative observation for a clean bound directory subtree survives restart and
+  plans `apply_remote_subtree_rename`
+- the mixed client tick can durably rename or move the local subtree root and return to
+  `already_converged`
+- only the root path-view rows change on success; descendant durable rows remain unchanged
+- occupied destinations and path-resolution failures become durable named issue rows, and unusable
+  target parents or non-converged/busy descendants defer to conflict work instead of moving
+  eagerly
+
 ## Historical slice order
 
 Milestones 1 through 7 were executed through the following ordered slices.

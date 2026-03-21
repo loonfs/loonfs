@@ -463,6 +463,36 @@ pub struct ApplyRemoteSubtreeDeleteInvariantInputs<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteSubtreeRenamePlanningInvariantInputs<'a> {
+    pub planned_action_decision_after: Option<&'a str>,
+    pub planned_action_reason_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyRemoteSubtreeRenameInvariantInputs<'a> {
+    pub root_local_exists_on_disk_after: bool,
+    pub root_local_dirty_after: bool,
+    pub root_local_parent_inode_after: Option<InodeId>,
+    pub root_local_display_name_after: &'a str,
+    pub root_remote_synced_seq_after: ChangeSeq,
+    pub root_remote_revision_no_after: RevisionNo,
+    pub root_remote_parent_inode_after: Option<InodeId>,
+    pub root_remote_display_name_after: &'a str,
+    pub root_sync_anchor_seq_after: Option<ChangeSeq>,
+    pub root_sync_anchor_revision_no_after: Option<RevisionNo>,
+    pub root_sync_anchor_parent_inode_after: Option<InodeId>,
+    pub root_sync_anchor_display_name_after: Option<&'a str>,
+    pub descendant_remote_count_after: usize,
+    pub expected_descendant_remote_count: usize,
+    pub descendant_local_state_count_after: usize,
+    pub expected_descendant_local_state_count: usize,
+    pub descendant_sync_anchor_count_after: usize,
+    pub expected_descendant_sync_anchor_count: usize,
+    pub root_planned_action_present_after: bool,
+    pub issue_kind_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ApplyRemoteRenameInvariantInputs<'a> {
     pub local_exists_on_disk_after: bool,
     pub local_dirty_after: bool,
@@ -1914,6 +1944,95 @@ pub fn evaluate_apply_remote_subtree_delete_invariants(
                 name: "apply_remote_subtree_delete_failure_records_durable_issue".to_owned(),
                 passed: inputs.issue_kind_after
                     == Some("apply_remote_subtree_delete_local_apply_failed"),
+                detail: format!("issue_kind_after={:?}", inputs.issue_kind_after),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_remote_subtree_rename_planning_invariants(
+    inputs: RemoteSubtreeRenamePlanningInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "remote_subtree_path_change_plans_apply_remote_subtree_rename".to_owned(),
+            passed: inputs.planned_action_decision_after == Some("apply_remote_subtree_rename")
+                && inputs.planned_action_reason_after
+                    == Some("remote_subtree_path_differs_from_anchor"),
+            detail: format!(
+                "decision={:?} reason={:?}",
+                inputs.planned_action_decision_after, inputs.planned_action_reason_after
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_apply_remote_subtree_rename_invariants(
+    inputs: ApplyRemoteSubtreeRenameInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    let updates_root = inputs.root_local_exists_on_disk_after
+        && !inputs.root_local_dirty_after
+        && inputs.root_local_parent_inode_after == inputs.root_remote_parent_inode_after
+        && inputs.root_local_display_name_after == inputs.root_remote_display_name_after
+        && inputs.root_sync_anchor_seq_after == Some(inputs.root_remote_synced_seq_after)
+        && inputs.root_sync_anchor_revision_no_after == Some(inputs.root_remote_revision_no_after)
+        && inputs.root_sync_anchor_parent_inode_after == inputs.root_remote_parent_inode_after
+        && inputs.root_sync_anchor_display_name_after
+            == Some(inputs.root_remote_display_name_after);
+    let preserves_descendants = inputs.descendant_remote_count_after
+        == inputs.expected_descendant_remote_count
+        && inputs.descendant_local_state_count_after
+            == inputs.expected_descendant_local_state_count
+        && inputs.descendant_sync_anchor_count_after
+            == inputs.expected_descendant_sync_anchor_count;
+
+    ClientReconciliationInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "apply_remote_subtree_rename_updates_root_local_state_and_sync_anchor"
+                    .to_owned(),
+                passed: updates_root,
+                detail: format!(
+                    "root_local_exists_on_disk_after={} root_local_dirty_after={} root_local_parent_inode_after={:?} root_local_display_name_after={} root_remote_seq_after={} root_remote_revision_after={} root_remote_parent_inode_after={:?} root_remote_display_name_after={} root_sync_anchor_seq_after={:?} root_sync_anchor_revision_after={:?} root_sync_anchor_parent_inode_after={:?} root_sync_anchor_display_name_after={:?}",
+                    inputs.root_local_exists_on_disk_after,
+                    inputs.root_local_dirty_after,
+                    inputs.root_local_parent_inode_after,
+                    inputs.root_local_display_name_after,
+                    inputs.root_remote_synced_seq_after.0,
+                    inputs.root_remote_revision_no_after.0,
+                    inputs.root_remote_parent_inode_after,
+                    inputs.root_remote_display_name_after,
+                    inputs.root_sync_anchor_seq_after.map(|seq| seq.0),
+                    inputs.root_sync_anchor_revision_no_after.map(|revision| revision.0),
+                    inputs.root_sync_anchor_parent_inode_after,
+                    inputs.root_sync_anchor_display_name_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_subtree_rename_preserves_descendant_durable_state".to_owned(),
+                passed: preserves_descendants,
+                detail: format!(
+                    "descendant_remote_count_after={} expected_descendant_remote_count={} descendant_local_state_count_after={} expected_descendant_local_state_count={} descendant_sync_anchor_count_after={} expected_descendant_sync_anchor_count={}",
+                    inputs.descendant_remote_count_after,
+                    inputs.expected_descendant_remote_count,
+                    inputs.descendant_local_state_count_after,
+                    inputs.expected_descendant_local_state_count,
+                    inputs.descendant_sync_anchor_count_after,
+                    inputs.expected_descendant_sync_anchor_count
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_subtree_rename_clears_root_planned_action".to_owned(),
+                passed: !inputs.root_planned_action_present_after,
+                detail: format!(
+                    "root_planned_action_present_after={}",
+                    inputs.root_planned_action_present_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_subtree_rename_failure_records_durable_issue".to_owned(),
+                passed: inputs.issue_kind_after
+                    == Some("apply_remote_subtree_rename_local_apply_failed"),
                 detail: format!("issue_kind_after={:?}", inputs.issue_kind_after),
             },
         ],
@@ -3520,6 +3639,7 @@ impl AggregateCheck {
 mod tests {
     use super::{
         evaluate_apply_remote_delete_invariants, evaluate_apply_remote_subtree_delete_invariants,
+        evaluate_apply_remote_subtree_rename_invariants,
         evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
         evaluate_content_object_invariants, evaluate_download_transfer_invariants,
         evaluate_inode_upload_transfer_invariants, evaluate_local_only_upload_transfer_invariants,
@@ -3529,21 +3649,23 @@ mod tests {
         evaluate_remote_observation_ambiguous_bind_invariants,
         evaluate_remote_observation_convergence_invariants,
         evaluate_remote_only_directory_materialization_invariants,
-        evaluate_remote_subtree_delete_planning_invariants, ApplyRemoteDeleteInvariantInputs,
-        ApplyRemoteSubtreeDeleteInvariantInputs, CheckpointHeadPublishInvariantInputs,
-        CheckpointObjectInvariantInputs, CheckpointObjectInvariantSnapshot,
-        CheckpointProgressAuthorizer, CheckpointReplayInvariantInputs, CommitInvariantInputs,
-        ContentObjectInvariantInputs, ContentObjectInvariantSnapshot,
-        DownloadTransferInvariantInputs, DownloadTransferOutcomeKind,
-        InodeUploadTransferInvariantInputs, InodeUploadTransferOutcomeKind,
-        LocalOnlyUploadTransferInvariantInputs, LocalOnlyUploadTransferOutcomeKind,
-        ProgressInvariantSnapshot, ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
-        QueueCompleteInvariantInputs, QueueCompleteOutcomeKind,
-        RemoteDeletePlanningInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
-        RemoteObservationConvergenceInvariantInputs,
+        evaluate_remote_subtree_delete_planning_invariants,
+        evaluate_remote_subtree_rename_planning_invariants, ApplyRemoteDeleteInvariantInputs,
+        ApplyRemoteSubtreeDeleteInvariantInputs, ApplyRemoteSubtreeRenameInvariantInputs,
+        CheckpointHeadPublishInvariantInputs, CheckpointObjectInvariantInputs,
+        CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
+        CheckpointReplayInvariantInputs, CommitInvariantInputs, ContentObjectInvariantInputs,
+        ContentObjectInvariantSnapshot, DownloadTransferInvariantInputs,
+        DownloadTransferOutcomeKind, InodeUploadTransferInvariantInputs,
+        InodeUploadTransferOutcomeKind, LocalOnlyUploadTransferInvariantInputs,
+        LocalOnlyUploadTransferOutcomeKind, ProgressInvariantSnapshot,
+        ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
+        QueueCompleteOutcomeKind, RemoteDeletePlanningInvariantInputs,
+        RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
         RemoteOnlyDirectoryMaterializationInvariantInputs,
         RemoteOnlyDirectoryMaterializationOutcomeKind, RemoteSubtreeDeletePlanningInvariantInputs,
-        StoredCheckpointSegmentSnapshot, StoredContentBlockSnapshot, WalReplayInvariantInputs,
+        RemoteSubtreeRenamePlanningInvariantInputs, StoredCheckpointSegmentSnapshot,
+        StoredContentBlockSnapshot, WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
     use loon_core::commit::{
@@ -4598,6 +4720,89 @@ mod tests {
         assert!(
             !report
                 .check("apply_remote_subtree_delete_failure_records_durable_issue")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_subtree_rename_as_passed() {
+        let planning_report = evaluate_remote_subtree_rename_planning_invariants(
+            RemoteSubtreeRenamePlanningInvariantInputs {
+                planned_action_decision_after: Some("apply_remote_subtree_rename"),
+                planned_action_reason_after: Some("remote_subtree_path_differs_from_anchor"),
+            },
+        );
+        let apply_report = evaluate_apply_remote_subtree_rename_invariants(
+            ApplyRemoteSubtreeRenameInvariantInputs {
+                root_local_exists_on_disk_after: true,
+                root_local_dirty_after: false,
+                root_local_parent_inode_after: Some(InodeId(20)),
+                root_local_display_name_after: "reports-2026",
+                root_remote_synced_seq_after: ChangeSeq(42),
+                root_remote_revision_no_after: RevisionNo(7),
+                root_remote_parent_inode_after: Some(InodeId(20)),
+                root_remote_display_name_after: "reports-2026",
+                root_sync_anchor_seq_after: Some(ChangeSeq(42)),
+                root_sync_anchor_revision_no_after: Some(RevisionNo(7)),
+                root_sync_anchor_parent_inode_after: Some(InodeId(20)),
+                root_sync_anchor_display_name_after: Some("reports-2026"),
+                descendant_remote_count_after: 2,
+                expected_descendant_remote_count: 2,
+                descendant_local_state_count_after: 2,
+                expected_descendant_local_state_count: 2,
+                descendant_sync_anchor_count_after: 2,
+                expected_descendant_sync_anchor_count: 2,
+                root_planned_action_present_after: false,
+                issue_kind_after: None,
+            },
+        );
+
+        assert!(
+            planning_report
+                .check("remote_subtree_path_change_plans_apply_remote_subtree_rename")
+                .expect("planning check")
+                .passed
+        );
+        assert!(
+            apply_report
+                .check("apply_remote_subtree_rename_preserves_descendant_durable_state")
+                .expect("apply check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_subtree_rename_failure_without_issue_as_failed()
+    {
+        let report = evaluate_apply_remote_subtree_rename_invariants(
+            ApplyRemoteSubtreeRenameInvariantInputs {
+                root_local_exists_on_disk_after: true,
+                root_local_dirty_after: false,
+                root_local_parent_inode_after: Some(InodeId(20)),
+                root_local_display_name_after: "reports-2026",
+                root_remote_synced_seq_after: ChangeSeq(42),
+                root_remote_revision_no_after: RevisionNo(7),
+                root_remote_parent_inode_after: Some(InodeId(20)),
+                root_remote_display_name_after: "reports-2026",
+                root_sync_anchor_seq_after: Some(ChangeSeq(42)),
+                root_sync_anchor_revision_no_after: Some(RevisionNo(7)),
+                root_sync_anchor_parent_inode_after: Some(InodeId(20)),
+                root_sync_anchor_display_name_after: Some("reports-2026"),
+                descendant_remote_count_after: 1,
+                expected_descendant_remote_count: 2,
+                descendant_local_state_count_after: 1,
+                expected_descendant_local_state_count: 2,
+                descendant_sync_anchor_count_after: 1,
+                expected_descendant_sync_anchor_count: 2,
+                root_planned_action_present_after: true,
+                issue_kind_after: None,
+            },
+        );
+
+        assert!(
+            !report
+                .check("apply_remote_subtree_rename_failure_records_durable_issue")
                 .expect("check")
                 .passed
         );

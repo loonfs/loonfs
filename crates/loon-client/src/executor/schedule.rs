@@ -1,6 +1,7 @@
 use super::inode::{
     execute_apply_remote_delete, execute_apply_remote_rename, execute_apply_remote_subtree_delete,
-    execute_download_remote_edit, execute_materialize_remote_dir, execute_upload_local_edit,
+    execute_apply_remote_subtree_rename, execute_download_remote_edit,
+    execute_materialize_remote_dir, execute_upload_local_edit,
 };
 use super::local_only::execute_local_only_create;
 use super::*;
@@ -115,6 +116,28 @@ where
                         created_at_ms,
                     )?;
                     Ok(Some(NextClientAction::ExecutedApplyRemoteSubtreeDelete(
+                        executed,
+                    )))
+                }
+                value if value == PlannerDecision::ApplyRemoteSubtreeRename.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let views =
+                        db.load_bound_apply_remote_subtree_rename_views(&namespace_id, inode_id)?;
+                    let target_path = resolve_inode_target_path(
+                        &namespace_id,
+                        inode_id,
+                        views.root_remote.parent_inode_id,
+                        &views.root_remote.display_name,
+                    );
+                    let executed = execute_apply_remote_subtree_rename(
+                        db,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        target_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedApplyRemoteSubtreeRename(
                         executed,
                     )))
                 }

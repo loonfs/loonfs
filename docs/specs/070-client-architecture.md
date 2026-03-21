@@ -1953,6 +1953,150 @@ Executable invariant IDs for this slice:
 - `apply_remote_subtree_delete_clears_subtree_planned_actions`
 - `apply_remote_subtree_delete_failure_records_durable_issue`
 
+## First bound-directory remote subtree rename observation path
+
+The next remote hierarchy reconciliation slice is strict bound-directory rename/move only.
+
+Rules:
+
+- `apply_remote_observation` remains a durable metadata update; it must not move local
+  directories directly
+- a later planner pass may schedule one new inode-keyed decision:
+  - `apply_remote_subtree_rename`
+- `apply_remote_subtree_rename` is valid only when:
+  - `remote_state(namespace_id, inode_id)` exists
+  - `local_state(namespace_id, inode_id)` exists
+  - `sync_anchor(namespace_id, inode_id)` exists
+  - the root rows all have `inode_kind = dir`
+  - `remote_state.is_deleted = false`
+  - `local_state` still matches `sync_anchor` on:
+    - `parent_inode_id`
+    - `display_name`
+    - `exists_on_disk = true`
+    - `dirty = false`
+  - `remote_state` differs from `sync_anchor` only on:
+    - `parent_inode_id`
+    - `display_name`
+  - every rooted durable descendant is already bound and locally converged:
+    - one matching `local_state(namespace_id, inode_id)` row exists
+    - one matching `sync_anchor(namespace_id, inode_id)` row exists
+    - `exists_on_disk = true`
+    - `dirty = false`
+    - `inode_kind`, `parent_inode_id`, and `display_name` still match the anchor
+    - for files, `content_digest` still matches the anchor
+  - no rooted descendant has transfer-ledger or pending-mutation state
+  - the target parent is usable:
+    - if `remote_state.parent_inode_id = Some(target_parent)`, then that parent must have
+      matching `remote_state`, `local_state`, and `sync_anchor` rows
+    - the target parent must be a non-deleted bound directory
+    - the target parent must itself still be locally converged
+    - the target parent must not be the renamed root or any descendant of that root
+- if the root path changed remotely but the root itself no longer matches the anchor, the planner
+  must fall back to deferred `create_conflict_copy` with reason
+  `remote_subtree_path_differs_while_local_differs_from_anchor`
+- if any rooted descendant is dirty, missing its anchor, remote-only, or temp/local-only, the
+  planner must fall back to deferred `create_conflict_copy` with reason
+  `remote_subtree_path_differs_while_descendants_differ_from_anchor`
+- if any rooted descendant has active transfer or pending mutation state, the planner must fall
+  back to deferred `create_conflict_copy` with reason
+  `remote_subtree_path_differs_while_descendants_busy`
+- if the target parent is missing, unbound, deleted, not a directory, not locally converged, or
+  inside the renamed subtree, the planner must fall back to deferred `create_conflict_copy` with
+  reason `remote_subtree_path_target_parent_unusable`
+- the first slice still excludes:
+  - remote hierarchy cases whose target parent is not already a usable bound directory
+  - directory rename plus descendant content-change coalescing in one apply step
+  - directory response-path semantics
+
+Planner surface additions:
+
+- planner decision:
+  - `apply_remote_subtree_rename`
+- planner reasons:
+  - `remote_subtree_path_differs_from_anchor`
+  - `remote_subtree_path_differs_while_local_differs_from_anchor`
+  - `remote_subtree_path_differs_while_descendants_differ_from_anchor`
+  - `remote_subtree_path_differs_while_descendants_busy`
+  - `remote_subtree_path_target_parent_unusable`
+
+The subtree-rename executor takes:
+
+- `namespace_id`
+- `inode_id`
+- one caller-supplied resolver for the current bound local root path
+- one caller-supplied resolver for the desired target path view using:
+  - `namespace_id`
+  - `inode_id`
+  - current authoritative `remote_state.parent_inode_id`
+  - current authoritative `remote_state.display_name`
+- one explicit local apply timestamp
+
+Rules:
+
+- the mixed tick must treat `apply_remote_subtree_rename` as an executable inode action
+- the executor must load `planned_actions(namespace_id, inode_id)` and require
+  `decision = apply_remote_subtree_rename`
+- the executor must require the full rooted subtree preconditions above at execution time, not
+  only at planning time
+- the executor must resolve the current root local path successfully
+- the executor must resolve the desired target root path successfully
+- if the target path already exists locally, the executor must fail closed and record one durable
+  issue row with `kind = apply_remote_subtree_rename_local_apply_failed`
+- after a successful durable local rename, one SQLite transaction must:
+  - update only the root `local_state.parent_inode_id` and `local_state.display_name` from
+    `remote_state`
+  - preserve root `inode_kind = dir`
+  - preserve root `exists_on_disk = true`
+  - preserve root `dirty = false`
+  - advance only the root `sync_anchor` to the current authoritative remote seq/revision/path
+    view
+  - preserve all descendant `remote_state`, `local_state`, and `sync_anchor` rows unchanged
+  - clear the root `planned_actions(namespace_id, inode_id)` row
+  - clear any matching `apply_remote_subtree_rename_local_apply_failed` row on the root
+- on failure, the planned action must remain so the subtree rename can be retried later
+
+The local apply step must:
+
+- move the root directory with one filesystem rename from current path to target path
+- sync the destination parent directory
+- when the source and destination parents differ, sync the source parent directory too
+
+The first issue kind for this path is:
+
+- `apply_remote_subtree_rename_local_apply_failed`
+  - recorded for current-path resolution failures, target-path resolution failures, destination
+    collisions, and rename I/O failures
+  - `detail_json.failure` must be one of:
+    - `current_path_missing`
+    - `target_path_missing`
+    - `destination_occupied`
+    - `rename_io`
+
+Why this rule exists:
+
+- already-bound directory path changes are real hierarchy changes and should stop looking like
+  generic drift once file rename/delete and subtree delete are explicit
+- descendant rows are inode-keyed, so the first strict subtree rename slice can move the rooted
+  local tree by updating only the root path-view rows
+- deferring busy or non-converged descendants is safer than guessing how to merge hierarchy
+  movement with in-flight descendant work
+
+Failure modes prevented:
+
+- leaving a converged bound directory permanently at the wrong local path after authoritative
+  remote rename or move
+- silently moving a subtree into an occupied destination slot
+- moving a subtree under an unbound, deleted, or not-yet-converged parent directory
+- rewriting descendant durable rows unnecessarily when one root rename is sufficient
+
+Executable invariant IDs for this slice:
+
+- `remote_subtree_path_change_plans_apply_remote_subtree_rename`
+- `apply_remote_subtree_rename_updates_root_local_state_and_sync_anchor`
+- `apply_remote_subtree_rename_preserves_descendant_durable_state`
+- `apply_remote_subtree_rename_clears_root_planned_action`
+- `apply_remote_subtree_rename_failure_records_durable_issue`
+
 ## SQLite hardening boundary (schema v11)
 
 The next schema version does not add new client-truth tables. It hardens the existing durable

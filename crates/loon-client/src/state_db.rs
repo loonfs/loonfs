@@ -325,6 +325,68 @@ pub enum StateDbError {
         inode_id: u64,
         descendant_inode_id: u64,
     },
+    #[error(
+        "apply_remote_subtree_rename_state_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    ApplyRemoteSubtreeRenameStateMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "apply_remote_subtree_rename_requires_directory: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`"
+    )]
+    ApplyRemoteSubtreeRenameRequiresDirectory {
+        namespace_id: String,
+        inode_id: u64,
+        inode_kind: String,
+    },
+    #[error(
+        "apply_remote_subtree_rename_local_not_converged: namespace `{namespace_id}` inode `{inode_id}` field `{field}` local `{local}` != anchor `{anchor}`"
+    )]
+    ApplyRemoteSubtreeRenameLocalNotConverged {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        local: String,
+        anchor: String,
+    },
+    #[error(
+        "apply_remote_subtree_rename_remote_not_path_only: namespace `{namespace_id}` inode `{inode_id}` field `{field}` remote `{remote}` != anchor `{anchor}`"
+    )]
+    ApplyRemoteSubtreeRenameRemoteNotPathOnly {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        remote: String,
+        anchor: String,
+    },
+    #[error(
+        "apply_remote_subtree_rename_path_change_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    ApplyRemoteSubtreeRenamePathChangeMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "apply_remote_subtree_rename_descendant_not_converged: namespace `{namespace_id}` inode `{inode_id}` descendant `{descendant_inode_id}` reason `{reason}`"
+    )]
+    ApplyRemoteSubtreeRenameDescendantNotConverged {
+        namespace_id: String,
+        inode_id: u64,
+        descendant_inode_id: u64,
+        reason: &'static str,
+    },
+    #[error(
+        "apply_remote_subtree_rename_descendant_busy: namespace `{namespace_id}` inode `{inode_id}` descendant `{descendant_inode_id}`"
+    )]
+    ApplyRemoteSubtreeRenameDescendantBusy {
+        namespace_id: String,
+        inode_id: u64,
+        descendant_inode_id: u64,
+    },
+    #[error(
+        "apply_remote_subtree_rename_target_parent_unusable: namespace `{namespace_id}` inode `{inode_id}` target_parent `{target_parent_inode_id:?}` reason `{reason}`"
+    )]
+    ApplyRemoteSubtreeRenameTargetParentUnusable {
+        namespace_id: String,
+        inode_id: u64,
+        target_parent_inode_id: Option<u64>,
+        reason: &'static str,
+    },
     #[error("materialize_remote_dir_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
     MaterializeRemoteDirStateMissing { namespace_id: String, inode_id: u64 },
     #[error("materialize_remote_dir_requires_directory: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
@@ -468,6 +530,25 @@ pub enum RemoteSubtreeDeleteAssessment {
     DeferredDescendantsDiffer,
     DeferredDescendantsBusy,
     InertWithoutAnchor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundApplyRemoteSubtreeRenameViews {
+    pub namespace_id: NamespaceId,
+    pub root_inode_id: InodeId,
+    pub root_remote: RemoteFileStateRow,
+    pub root_local: LocalFileStateRow,
+    pub root_anchor: SyncAnchorRow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteSubtreeRenameAssessment {
+    NotApplicable,
+    Ready(BoundApplyRemoteSubtreeRenameViews),
+    DeferredRootLocalDiffers,
+    DeferredDescendantsDiffer,
+    DeferredDescendantsBusy,
+    DeferredTargetParentUnusable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -901,6 +982,46 @@ fn ensure_apply_remote_subtree_delete_local_anchor_match(
         inode_id: inode_id.0,
         field,
         local,
+        anchor,
+    })
+}
+
+fn ensure_apply_remote_subtree_rename_local_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    local: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if local == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::ApplyRemoteSubtreeRenameLocalNotConverged {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        local,
+        anchor,
+    })
+}
+
+fn ensure_apply_remote_subtree_rename_remote_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    remote: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if remote == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::ApplyRemoteSubtreeRenameRemoteNotPathOnly {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        remote,
         anchor,
     })
 }

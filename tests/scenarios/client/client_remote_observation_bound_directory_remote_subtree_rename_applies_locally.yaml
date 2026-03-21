@@ -1,0 +1,253 @@
+schema_version: 1
+scenario_kind: client
+name: client_remote_observation_bound_directory_remote_subtree_rename_applies_locally
+initial:
+  root_relative_path: workspace/reports
+  target_relative_path: workspace/reports-2026
+  remote_state:
+    - namespace_id: ns-1
+      inode_id: 2
+      inode_kind: dir
+      observed_seq: 42
+      revision_no: 9
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 1
+      display_name: workspace
+      is_deleted: false
+    - namespace_id: ns-1
+      inode_id: 10
+      inode_kind: dir
+      observed_seq: 41
+      revision_no: 7
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 2
+      display_name: reports
+      is_deleted: false
+    - namespace_id: ns-1
+      inode_id: 11
+      inode_kind: file
+      observed_seq: 41
+      revision_no: 3
+      content_digest: sha256:child-3
+      content_manifest_digest: sha256:manifest-child-3
+      parent_inode_id: 10
+      display_name: q1.txt
+      is_deleted: false
+  local_state:
+    - namespace_id: ns-1
+      inode_id: 2
+      inode_kind: dir
+      content_digest: null
+      parent_inode_id: 1
+      display_name: workspace
+      exists_on_disk: true
+      dirty: false
+      last_local_change_ms: 1700001210000
+    - namespace_id: ns-1
+      inode_id: 10
+      inode_kind: dir
+      content_digest: null
+      parent_inode_id: 2
+      display_name: reports
+      exists_on_disk: true
+      dirty: false
+      last_local_change_ms: 1700001210010
+    - namespace_id: ns-1
+      inode_id: 11
+      inode_kind: file
+      content_digest: sha256:child-3
+      parent_inode_id: 10
+      display_name: q1.txt
+      exists_on_disk: true
+      dirty: false
+      last_local_change_ms: 1700001210020
+  sync_anchor:
+    - namespace_id: ns-1
+      inode_id: 2
+      inode_kind: dir
+      synced_seq: 42
+      revision_no: 9
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 1
+      display_name: workspace
+    - namespace_id: ns-1
+      inode_id: 10
+      inode_kind: dir
+      synced_seq: 41
+      revision_no: 7
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 2
+      display_name: reports
+    - namespace_id: ns-1
+      inode_id: 11
+      inode_kind: file
+      synced_seq: 41
+      revision_no: 3
+      content_digest: sha256:child-3
+      content_manifest_digest: sha256:manifest-child-3
+      parent_inode_id: 10
+      display_name: q1.txt
+  local_entries:
+    - relative_path: workspace
+      inode_kind: dir
+    - relative_path: workspace/reports
+      inode_kind: dir
+    - relative_path: workspace/reports/q1.txt
+      inode_kind: file
+      content_utf8: |
+        quarterly report
+actions:
+  - apply_remote_observation:
+      applied_at_ms: 1700001218000
+      remote_observation:
+        namespace_id: ns-1
+        inode_id: 10
+        inode_kind: dir
+        observed_seq: 42
+        revision_no: 7
+        content_digest: null
+        content_manifest_digest: null
+        parent_inode_id: 2
+        display_name: reports-2026
+        is_deleted: false
+  - restart_client_state_db: true
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 10
+      now_ms: 1700001220000
+  - execute_next_client_action:
+      uploaded_at_ms: 1700001221000
+      created_at_ms: 1700001221000
+  - restart_client_state_db: true
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 10
+      now_ms: 1700001222000
+expect:
+  outcome:
+    updated_bound_remote_state:
+      namespace_id: ns-1
+      inode_id: 10
+  remote_state_after:
+    - namespace_id: ns-1
+      inode_id: 2
+      inode_kind: dir
+      observed_seq: 42
+      revision_no: 9
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 1
+      display_name: workspace
+      is_deleted: false
+    - namespace_id: ns-1
+      inode_id: 10
+      inode_kind: dir
+      observed_seq: 42
+      revision_no: 7
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 2
+      display_name: reports-2026
+      is_deleted: false
+    - namespace_id: ns-1
+      inode_id: 11
+      inode_kind: file
+      observed_seq: 41
+      revision_no: 3
+      content_digest: sha256:child-3
+      content_manifest_digest: sha256:manifest-child-3
+      parent_inode_id: 10
+      display_name: q1.txt
+      is_deleted: false
+  local_state_after:
+    - namespace_id: ns-1
+      inode_id: 2
+      inode_kind: dir
+      content_digest: null
+      parent_inode_id: 1
+      display_name: workspace
+      exists_on_disk: true
+      dirty: false
+      last_local_change_ms: 1700001210000
+    - namespace_id: ns-1
+      inode_id: 10
+      inode_kind: dir
+      content_digest: null
+      parent_inode_id: 2
+      display_name: reports-2026
+      exists_on_disk: true
+      dirty: false
+      last_local_change_ms: 1700001221000
+    - namespace_id: ns-1
+      inode_id: 11
+      inode_kind: file
+      content_digest: sha256:child-3
+      parent_inode_id: 10
+      display_name: q1.txt
+      exists_on_disk: true
+      dirty: false
+      last_local_change_ms: 1700001210020
+  sync_anchor_after:
+    - namespace_id: ns-1
+      inode_id: 2
+      inode_kind: dir
+      synced_seq: 42
+      revision_no: 9
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 1
+      display_name: workspace
+    - namespace_id: ns-1
+      inode_id: 10
+      inode_kind: dir
+      synced_seq: 42
+      revision_no: 7
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 2
+      display_name: reports-2026
+    - namespace_id: ns-1
+      inode_id: 11
+      inode_kind: file
+      synced_seq: 41
+      revision_no: 3
+      content_digest: sha256:child-3
+      content_manifest_digest: sha256:manifest-child-3
+      parent_inode_id: 10
+      display_name: q1.txt
+  planned_actions_after: []
+  conflicts_and_errors: []
+  execution:
+    executed_apply_remote_subtree_rename:
+      namespace_id: ns-1
+      inode_id: 10
+  first_planner_result:
+    namespace_id: ns-1
+    inode_id: 10
+    decision: apply_remote_subtree_rename
+    reason: remote_subtree_path_differs_from_anchor
+    created_at_ms: 1700001220000
+  second_planner_result:
+    namespace_id: ns-1
+    inode_id: 10
+    decision: no_op
+    reason: already_converged
+    created_at_ms: 1700001222000
+  path_expectations:
+    - relative_path: workspace/reports
+      exists: false
+    - relative_path: workspace/reports/q1.txt
+      exists: false
+    - relative_path: workspace/reports-2026
+      exists: true
+    - relative_path: workspace/reports-2026/q1.txt
+      exists: true
+  invariants:
+    - remote_subtree_path_change_plans_apply_remote_subtree_rename
+    - apply_remote_subtree_rename_updates_root_local_state_and_sync_anchor
+    - apply_remote_subtree_rename_preserves_descendant_durable_state
+    - apply_remote_subtree_rename_clears_root_planned_action

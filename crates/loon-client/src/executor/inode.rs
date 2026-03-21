@@ -11,8 +11,8 @@ use crate::local_apply::{
 };
 use crate::planner::{PlannedActionRecord, PlannerDecision};
 use crate::state_db::{
-    BoundApplyRemoteSubtreeDeleteViews, InodeUploadRow, RemoteFileStateRow, SqliteStateDb,
-    TransferDirection, TransferLedgerRow, TransferState,
+    BoundApplyRemoteSubtreeDeleteViews, BoundApplyRemoteSubtreeRenameViews, InodeUploadRow,
+    RemoteFileStateRow, SqliteStateDb, TransferDirection, TransferLedgerRow, TransferState,
 };
 use crate::upload::{
     finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
@@ -121,6 +121,24 @@ pub fn execute_apply_remote_subtree_delete_to_path(
         namespace_id,
         inode_id,
         Some(current_path),
+        applied_at_ms,
+    )
+}
+
+pub fn execute_apply_remote_subtree_rename_to_paths(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: &Path,
+    target_path: &Path,
+    applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteSubtreeRename, ExecuteApplyRemoteSubtreeRenameError> {
+    execute_apply_remote_subtree_rename(
+        db,
+        namespace_id,
+        inode_id,
+        Some(current_path),
+        Some(target_path),
         applied_at_ms,
     )
 }
@@ -265,6 +283,65 @@ pub(super) fn execute_apply_remote_subtree_delete(
 
     if let Err(error) = &result {
         record_apply_remote_subtree_delete_issue(db, namespace_id, inode_id, error, applied_at_ms);
+    }
+
+    result
+}
+
+pub(super) fn execute_apply_remote_subtree_rename(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteSubtreeRename, ExecuteApplyRemoteSubtreeRenameError> {
+    let result = (|| {
+        let BoundApplyRemoteSubtreeRenameViews { root_remote, .. } =
+            ensure_apply_remote_subtree_rename_ready(db, namespace_id, inode_id)?;
+        let current_path = current_path.ok_or_else(|| {
+            ExecuteApplyRemoteSubtreeRenameError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            }
+        })?;
+        if !current_path.exists() {
+            return Err(ExecuteApplyRemoteSubtreeRenameError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+
+        let target_path =
+            target_path.ok_or_else(|| ExecuteApplyRemoteSubtreeRenameError::TargetPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+        let target_parent_exists = target_path.parent().is_some_and(|parent| parent.exists());
+        if !target_parent_exists || target_path == current_path {
+            return Err(ExecuteApplyRemoteSubtreeRenameError::TargetPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+        if target_path.exists() {
+            return Err(ExecuteApplyRemoteSubtreeRenameError::DestinationOccupied {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                path: target_path.display().to_string(),
+            });
+        }
+
+        rename_path_durably(current_path, target_path)?;
+
+        let applied = db.apply_remote_subtree_rename(namespace_id, inode_id, applied_at_ms)?;
+        debug_assert_eq!(applied.namespace_id, root_remote.namespace_id);
+        debug_assert_eq!(applied.inode_id, root_remote.inode_id);
+        Ok(ExecutedApplyRemoteSubtreeRename { applied })
+    })();
+
+    if let Err(error) = &result {
+        record_apply_remote_subtree_rename_issue(db, namespace_id, inode_id, error, applied_at_ms);
     }
 
     result
@@ -638,6 +715,32 @@ fn ensure_apply_remote_subtree_delete_ready(
 
     db.load_bound_apply_remote_subtree_delete_views(namespace_id, inode_id)
         .map_err(ExecuteApplyRemoteSubtreeDeleteError::from)
+}
+
+fn ensure_apply_remote_subtree_rename_ready(
+    db: &SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<BoundApplyRemoteSubtreeRenameViews, ExecuteApplyRemoteSubtreeRenameError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::ApplyRemoteSubtreeRename {
+        return Err(
+            ExecuteApplyRemoteSubtreeRenameError::ApplyRemoteSubtreeRenameDecisionMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                decision: planned.decision,
+            },
+        );
+    }
+
+    db.load_bound_apply_remote_subtree_rename_views(namespace_id, inode_id)
+        .map_err(ExecuteApplyRemoteSubtreeRenameError::from)
 }
 
 fn ensure_download_remote_edit_ready(
@@ -1260,6 +1363,64 @@ fn record_apply_remote_subtree_delete_issue(
             "apply_remote_subtree_delete failed during local apply",
             json!({
                 "failure": "recursive_remove_io",
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        )),
+        _ => None,
+    };
+
+    if let Some((kind, summary, detail_json)) = issue {
+        let _ = db.record_conflict_or_error(
+            namespace_id,
+            inode_id,
+            kind,
+            summary,
+            &detail_json,
+            created_at_ms,
+        );
+    }
+}
+
+fn record_apply_remote_subtree_rename_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    error: &ExecuteApplyRemoteSubtreeRenameError,
+    created_at_ms: u64,
+) {
+    let issue = match error {
+        ExecuteApplyRemoteSubtreeRenameError::CurrentPathMissing { .. } => Some((
+            "apply_remote_subtree_rename_local_apply_failed",
+            "apply_remote_subtree_rename could not resolve the current local path",
+            json!({
+                "failure": "current_path_missing",
+            }),
+        )),
+        ExecuteApplyRemoteSubtreeRenameError::TargetPathMissing { .. } => Some((
+            "apply_remote_subtree_rename_local_apply_failed",
+            "apply_remote_subtree_rename could not resolve the target local path",
+            json!({
+                "failure": "target_path_missing",
+            }),
+        )),
+        ExecuteApplyRemoteSubtreeRenameError::DestinationOccupied { .. } => Some((
+            "apply_remote_subtree_rename_local_apply_failed",
+            "apply_remote_subtree_rename found the destination slot already occupied",
+            json!({
+                "failure": "destination_occupied",
+            }),
+        )),
+        ExecuteApplyRemoteSubtreeRenameError::LocalApplyFailed {
+            operation,
+            path,
+            source,
+        } => Some((
+            "apply_remote_subtree_rename_local_apply_failed",
+            "apply_remote_subtree_rename failed during local apply",
+            json!({
+                "failure": "rename_io",
                 "operation": operation,
                 "path": path,
                 "source": source.to_string(),

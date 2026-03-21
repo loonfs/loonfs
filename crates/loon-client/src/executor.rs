@@ -20,8 +20,9 @@ mod schedule;
 pub use dispatch::{dispatch_client_mutation_from_state, dispatch_inode_mutation_from_state};
 pub use inode::{
     execute_apply_remote_delete_to_path, execute_apply_remote_rename_to_paths,
-    execute_apply_remote_subtree_delete_to_path, execute_download_remote_edit_to_path,
-    execute_materialize_remote_dir_to_path, execute_upload_local_edit_from_path,
+    execute_apply_remote_subtree_delete_to_path, execute_apply_remote_subtree_rename_to_paths,
+    execute_download_remote_edit_to_path, execute_materialize_remote_dir_to_path,
+    execute_upload_local_edit_from_path,
 };
 pub use local_only::{
     execute_create_remote_dir, execute_local_only_create, execute_upload_local_create_from_path,
@@ -194,6 +195,11 @@ pub struct ExecutedApplyRemoteDelete {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutedApplyRemoteSubtreeDelete {
+    pub applied: AppliedInodeMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedApplyRemoteSubtreeRename {
     pub applied: AppliedInodeMutation,
 }
 
@@ -487,6 +493,59 @@ impl From<LocalApplyError> for ExecuteApplyRemoteSubtreeDeleteError {
 }
 
 #[derive(Debug, Error)]
+pub enum ExecuteApplyRemoteSubtreeRenameError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Planner(#[from] PlannerError),
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(
+        "apply_remote_subtree_rename_decision_missing: namespace `{namespace_id}` inode `{inode_id}` decision `{decision:?}`"
+    )]
+    ApplyRemoteSubtreeRenameDecisionMissing {
+        namespace_id: String,
+        inode_id: u64,
+        decision: PlannerDecision,
+    },
+    #[error(
+        "apply_remote_subtree_rename_current_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    CurrentPathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "apply_remote_subtree_rename_target_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    TargetPathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "apply_remote_subtree_rename_destination_occupied: namespace `{namespace_id}` inode `{inode_id}` path `{path}`"
+    )]
+    DestinationOccupied {
+        namespace_id: String,
+        inode_id: u64,
+        path: String,
+    },
+    #[error(
+        "apply_remote_subtree_rename_local_apply_failed: operation `{operation}` path `{path}` {source}"
+    )]
+    LocalApplyFailed {
+        operation: &'static str,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl From<LocalApplyError> for ExecuteApplyRemoteSubtreeRenameError {
+    fn from(error: LocalApplyError) -> Self {
+        Self::LocalApplyFailed {
+            operation: error.operation,
+            path: error.path,
+            source: error.source,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
 pub enum ExecuteMaterializeRemoteDirError {
     #[error(transparent)]
     StateDb(#[from] StateDbError),
@@ -548,6 +607,7 @@ pub enum NextClientAction {
     ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution),
     ExecutedApplyRemoteDelete(ExecutedApplyRemoteDelete),
     ExecutedApplyRemoteSubtreeDelete(ExecutedApplyRemoteSubtreeDelete),
+    ExecutedApplyRemoteSubtreeRename(ExecutedApplyRemoteSubtreeRename),
     ExecutedApplyRemoteRename(ExecutedApplyRemoteRename),
     ExecutedMaterializeRemoteDir(ExecutedMaterializeRemoteDir),
     SelectedPlannedAction(PlannedActionRow),
@@ -567,6 +627,8 @@ pub enum ExecuteNextClientActionError {
     ApplyRemoteDelete(#[from] ExecuteApplyRemoteDeleteError),
     #[error(transparent)]
     ApplyRemoteSubtreeDelete(#[from] ExecuteApplyRemoteSubtreeDeleteError),
+    #[error(transparent)]
+    ApplyRemoteSubtreeRename(#[from] ExecuteApplyRemoteSubtreeRenameError),
     #[error(transparent)]
     ApplyRemoteRename(#[from] ExecuteApplyRemoteRenameError),
     #[error(transparent)]

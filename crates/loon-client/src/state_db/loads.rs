@@ -420,7 +420,7 @@ pub(super) fn load_next_executable_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_rename', 'materialize_remote_dir')
+        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -433,7 +433,7 @@ pub(super) fn load_next_deferred_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_rename', 'materialize_remote_dir')
+        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -872,6 +872,237 @@ struct RemoteSubtreeDeleteAnalysis {
     first_local_only_descendant_parent_inode_id: Option<InodeId>,
 }
 
+struct RemoteSubtreeRenameAnalysis {
+    root_remote: Option<RemoteFileStateRow>,
+    root_local: Option<LocalFileStateRow>,
+    root_anchor: Option<SyncAnchorRow>,
+    first_busy_descendant_inode_id: Option<InodeId>,
+    first_nonconverged_descendant_inode_id: Option<InodeId>,
+    first_local_only_descendant_parent_inode_id: Option<InodeId>,
+    target_parent_inode_id: Option<InodeId>,
+    target_parent_unusable_reason: Option<&'static str>,
+}
+
+pub(super) fn assess_remote_subtree_rename_from_conn(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<RemoteSubtreeRenameAssessment, StateDbError> {
+    let analysis = analyze_remote_subtree_rename(conn, namespace_id, inode_id)?;
+    let Some(root_remote) = analysis.root_remote else {
+        return Ok(RemoteSubtreeRenameAssessment::NotApplicable);
+    };
+    if root_remote.inode_kind != InodeKind::Dir || root_remote.is_deleted {
+        return Ok(RemoteSubtreeRenameAssessment::NotApplicable);
+    }
+
+    match (analysis.root_local, analysis.root_anchor) {
+        (None, None) => Ok(RemoteSubtreeRenameAssessment::NotApplicable),
+        (Some(root_local), Some(root_anchor)) => {
+            if root_local.inode_kind != InodeKind::Dir || root_anchor.inode_kind != InodeKind::Dir {
+                return Ok(RemoteSubtreeRenameAssessment::DeferredRootLocalDiffers);
+            }
+            if !subtree_local_matches_anchor(&root_local, &root_anchor) {
+                return Ok(RemoteSubtreeRenameAssessment::DeferredRootLocalDiffers);
+            }
+            if !root_remote_matches_anchor_except_path(&root_remote, &root_anchor) {
+                return Ok(RemoteSubtreeRenameAssessment::DeferredRootLocalDiffers);
+            }
+            if root_remote.parent_inode_id == root_anchor.parent_inode_id
+                && root_remote.display_name == root_anchor.display_name
+            {
+                return Ok(RemoteSubtreeRenameAssessment::NotApplicable);
+            }
+            if analysis.first_busy_descendant_inode_id.is_some() {
+                return Ok(RemoteSubtreeRenameAssessment::DeferredDescendantsBusy);
+            }
+            if analysis.first_nonconverged_descendant_inode_id.is_some()
+                || analysis
+                    .first_local_only_descendant_parent_inode_id
+                    .is_some()
+            {
+                return Ok(RemoteSubtreeRenameAssessment::DeferredDescendantsDiffer);
+            }
+            if analysis.target_parent_unusable_reason.is_some() {
+                return Ok(RemoteSubtreeRenameAssessment::DeferredTargetParentUnusable);
+            }
+
+            Ok(RemoteSubtreeRenameAssessment::Ready(
+                BoundApplyRemoteSubtreeRenameViews {
+                    namespace_id: namespace_id.clone(),
+                    root_inode_id: inode_id,
+                    root_remote,
+                    root_local,
+                    root_anchor,
+                },
+            ))
+        }
+        _ => Ok(RemoteSubtreeRenameAssessment::NotApplicable),
+    }
+}
+
+pub(super) fn load_bound_apply_remote_subtree_rename_views_from_conn(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<BoundApplyRemoteSubtreeRenameViews, StateDbError> {
+    let analysis = analyze_remote_subtree_rename(conn, namespace_id, inode_id)?;
+    let root_remote =
+        analysis
+            .root_remote
+            .ok_or_else(|| StateDbError::ApplyRemoteSubtreeRenameStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+    let root_local =
+        analysis
+            .root_local
+            .ok_or_else(|| StateDbError::ApplyRemoteSubtreeRenameStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+    let root_anchor =
+        analysis
+            .root_anchor
+            .ok_or_else(|| StateDbError::ApplyRemoteSubtreeRenameStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+
+    if root_remote.inode_kind != InodeKind::Dir
+        || root_local.inode_kind != InodeKind::Dir
+        || root_anchor.inode_kind != InodeKind::Dir
+    {
+        return Err(StateDbError::ApplyRemoteSubtreeRenameRequiresDirectory {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            inode_kind: inode_kind_as_str(&root_local.inode_kind).to_owned(),
+        });
+    }
+
+    ensure_apply_remote_subtree_rename_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_digest",
+        format!("{:?}", root_local.content_digest),
+        format!("{:?}", root_anchor.content_digest),
+    )?;
+    ensure_apply_remote_subtree_rename_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "parent_inode_id",
+        format!("{:?}", root_local.parent_inode_id),
+        format!("{:?}", root_anchor.parent_inode_id),
+    )?;
+    ensure_apply_remote_subtree_rename_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "display_name",
+        root_local.display_name.clone(),
+        root_anchor.display_name.clone(),
+    )?;
+    if !root_local.exists_on_disk {
+        return Err(StateDbError::ApplyRemoteSubtreeRenameLocalNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "exists_on_disk",
+            local: "false".to_owned(),
+            anchor: "true".to_owned(),
+        });
+    }
+    if root_local.dirty {
+        return Err(StateDbError::ApplyRemoteSubtreeRenameLocalNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "dirty",
+            local: "true".to_owned(),
+            anchor: "false".to_owned(),
+        });
+    }
+
+    ensure_apply_remote_subtree_rename_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "revision_no",
+        root_remote.revision_no.0.to_string(),
+        root_anchor.revision_no.0.to_string(),
+    )?;
+    ensure_apply_remote_subtree_rename_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_digest",
+        format!("{:?}", root_remote.content_digest),
+        format!("{:?}", root_anchor.content_digest),
+    )?;
+    ensure_apply_remote_subtree_rename_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_manifest_digest",
+        format!("{:?}", root_remote.content_manifest_digest),
+        format!("{:?}", root_anchor.content_manifest_digest),
+    )?;
+    if root_remote.is_deleted {
+        return Err(StateDbError::ApplyRemoteSubtreeRenameRemoteNotPathOnly {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "is_deleted",
+            remote: "true".to_owned(),
+            anchor: "false".to_owned(),
+        });
+    }
+    if root_remote.parent_inode_id == root_anchor.parent_inode_id
+        && root_remote.display_name == root_anchor.display_name
+    {
+        return Err(StateDbError::ApplyRemoteSubtreeRenamePathChangeMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        });
+    }
+    if let Some(descendant_inode_id) = analysis.first_busy_descendant_inode_id {
+        return Err(StateDbError::ApplyRemoteSubtreeRenameDescendantBusy {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            descendant_inode_id: descendant_inode_id.0,
+        });
+    }
+    if let Some(descendant_inode_id) = analysis.first_nonconverged_descendant_inode_id {
+        return Err(
+            StateDbError::ApplyRemoteSubtreeRenameDescendantNotConverged {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                descendant_inode_id: descendant_inode_id.0,
+                reason: "local_or_remote_mismatch",
+            },
+        );
+    }
+    if let Some(parent_inode_id) = analysis.first_local_only_descendant_parent_inode_id {
+        return Err(
+            StateDbError::ApplyRemoteSubtreeRenameDescendantNotConverged {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                descendant_inode_id: parent_inode_id.0,
+                reason: "local_only_descendant_present",
+            },
+        );
+    }
+    if let Some(reason) = analysis.target_parent_unusable_reason {
+        return Err(StateDbError::ApplyRemoteSubtreeRenameTargetParentUnusable {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            target_parent_inode_id: analysis.target_parent_inode_id.map(|id| id.0),
+            reason,
+        });
+    }
+
+    Ok(BoundApplyRemoteSubtreeRenameViews {
+        namespace_id: namespace_id.clone(),
+        root_inode_id: inode_id,
+        root_remote,
+        root_local,
+        root_anchor,
+    })
+}
+
 pub(super) fn assess_remote_subtree_delete_from_conn(
     conn: &Connection,
     namespace_id: &NamespaceId,
@@ -1117,6 +1348,126 @@ fn analyze_remote_subtree_delete(
     })
 }
 
+fn analyze_remote_subtree_rename(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<RemoteSubtreeRenameAnalysis, StateDbError> {
+    let root_remote = load_remote_file(conn, namespace_id, inode_id)?;
+    let root_local = load_local_file(conn, namespace_id, inode_id)?;
+    let root_anchor = load_sync_anchor(conn, namespace_id, inode_id)?;
+    let subtree_inode_ids = load_local_subtree_inode_ids(conn, namespace_id, inode_id)?;
+
+    let mut first_busy_descendant_inode_id = None;
+    let mut first_nonconverged_descendant_inode_id = None;
+    for descendant_inode_id in subtree_inode_ids
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != inode_id)
+    {
+        let has_active_transfer = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM transfer_ledger
+                WHERE namespace_id = ?1 AND inode_id = ?2
+            )",
+            params![
+                namespace_id.as_str(),
+                to_sql_u64(descendant_inode_id.0, "inode_id")?,
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let has_pending_inode_mutation =
+            load_pending_inode_mutation_for_inode(conn, namespace_id, descendant_inode_id)?
+                .is_some();
+        if has_active_transfer || has_pending_inode_mutation {
+            first_busy_descendant_inode_id = Some(descendant_inode_id);
+            break;
+        }
+
+        let descendant_remote = load_remote_file(conn, namespace_id, descendant_inode_id)?;
+        let descendant_local = load_local_file(conn, namespace_id, descendant_inode_id)?
+            .expect("recursive local subtree should only contain local rows");
+        let descendant_anchor = load_sync_anchor(conn, namespace_id, descendant_inode_id)?;
+        let descendant_is_clean = match (descendant_remote.as_ref(), descendant_anchor.as_ref()) {
+            (Some(remote), Some(anchor)) => {
+                subtree_local_matches_anchor(&descendant_local, anchor)
+                    && subtree_remote_matches_anchor(remote, anchor)
+            }
+            _ => false,
+        };
+        if !descendant_is_clean {
+            first_nonconverged_descendant_inode_id = Some(descendant_inode_id);
+            break;
+        }
+    }
+
+    let first_local_only_descendant_parent_inode_id =
+        load_local_only_descendants_under_subtree(conn, namespace_id, inode_id)?
+            .into_iter()
+            .find_map(|row| row.parent_inode_id);
+
+    let target_parent_inode_id = root_remote
+        .as_ref()
+        .and_then(|remote| remote.parent_inode_id);
+    let target_parent_unusable_reason = match target_parent_inode_id {
+        Some(target_parent_inode_id) => assess_subtree_rename_target_parent(
+            conn,
+            namespace_id,
+            target_parent_inode_id,
+            &subtree_inode_ids,
+        )?,
+        None => None,
+    };
+
+    Ok(RemoteSubtreeRenameAnalysis {
+        root_remote,
+        root_local,
+        root_anchor,
+        first_busy_descendant_inode_id,
+        first_nonconverged_descendant_inode_id,
+        first_local_only_descendant_parent_inode_id,
+        target_parent_inode_id,
+        target_parent_unusable_reason,
+    })
+}
+
+fn assess_subtree_rename_target_parent(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    target_parent_inode_id: InodeId,
+    subtree_inode_ids: &[InodeId],
+) -> Result<Option<&'static str>, StateDbError> {
+    if subtree_inode_ids.contains(&target_parent_inode_id) {
+        return Ok(Some("parent_inside_subtree"));
+    }
+
+    let remote = load_remote_file(conn, namespace_id, target_parent_inode_id)?;
+    let local = load_local_file(conn, namespace_id, target_parent_inode_id)?;
+    let anchor = load_sync_anchor(conn, namespace_id, target_parent_inode_id)?;
+    let (remote, local, anchor) = match (remote, local, anchor) {
+        (Some(remote), Some(local), Some(anchor)) => (remote, local, anchor),
+        _ => return Ok(Some("parent_not_bound")),
+    };
+
+    if remote.inode_kind != InodeKind::Dir
+        || local.inode_kind != InodeKind::Dir
+        || anchor.inode_kind != InodeKind::Dir
+    {
+        return Ok(Some("parent_not_directory"));
+    }
+    if remote.is_deleted {
+        return Ok(Some("parent_deleted"));
+    }
+    if !subtree_local_matches_anchor(&local, &anchor)
+        || !subtree_remote_matches_anchor(&remote, &anchor)
+    {
+        return Ok(Some("parent_not_converged"));
+    }
+
+    Ok(None)
+}
+
 fn load_local_subtree_inode_ids(
     conn: &Connection,
     namespace_id: &NamespaceId,
@@ -1252,6 +1603,17 @@ fn subtree_remote_matches_anchor(remote: &RemoteFileStateRow, anchor: &SyncAncho
         && remote.content_manifest_digest == anchor.content_manifest_digest
         && remote.parent_inode_id == anchor.parent_inode_id
         && remote.display_name == anchor.display_name
+}
+
+fn root_remote_matches_anchor_except_path(
+    remote: &RemoteFileStateRow,
+    anchor: &SyncAnchorRow,
+) -> bool {
+    !remote.is_deleted
+        && remote.inode_kind == anchor.inode_kind
+        && remote.revision_no == anchor.revision_no
+        && remote.content_digest == anchor.content_digest
+        && remote.content_manifest_digest == anchor.content_manifest_digest
 }
 
 pub(super) fn load_local_only_file(

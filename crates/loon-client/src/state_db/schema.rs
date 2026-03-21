@@ -1,7 +1,7 @@
 use super::{SqliteStateDb, StateDbError};
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const SCHEMA_VERSION: i32 = 14;
+pub(crate) const SCHEMA_VERSION: i32 = 15;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
@@ -999,6 +999,28 @@ fn schema_v14_create_sql() -> String {
         )
 }
 
+const SCHEMA_V15_RENAME_SQL: &str = SCHEMA_V14_RENAME_SQL;
+
+const SCHEMA_V15_COPY_SQL: &str = SCHEMA_V14_COPY_SQL;
+
+const SCHEMA_V15_DROP_OLD_SQL: &str = SCHEMA_V14_DROP_OLD_SQL;
+
+fn schema_v15_create_sql() -> String {
+    schema_v14_create_sql()
+        .replace(
+            "CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_rename', 'materialize_remote_dir', 'create_conflict_copy', 'no_op'))",
+            "CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir', 'create_conflict_copy', 'no_op'))",
+        )
+        .replace(
+            "CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'remote_deleted_from_anchor', 'remote_deleted_while_local_differs_from_anchor', 'remote_deleted_without_anchor', 'remote_subtree_deleted_from_anchor', 'remote_subtree_deleted_while_local_differs_from_anchor', 'remote_subtree_deleted_while_descendants_differ_from_anchor', 'remote_subtree_deleted_while_descendants_busy', 'remote_subtree_deleted_without_anchor', 'remote_path_differs_from_anchor', 'remote_path_and_content_differ_from_anchor', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))",
+            "CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'remote_deleted_from_anchor', 'remote_deleted_while_local_differs_from_anchor', 'remote_deleted_without_anchor', 'remote_subtree_deleted_from_anchor', 'remote_subtree_deleted_while_local_differs_from_anchor', 'remote_subtree_deleted_while_descendants_differ_from_anchor', 'remote_subtree_deleted_while_descendants_busy', 'remote_subtree_deleted_without_anchor', 'remote_subtree_path_differs_from_anchor', 'remote_subtree_path_differs_while_local_differs_from_anchor', 'remote_subtree_path_differs_while_descendants_differ_from_anchor', 'remote_subtree_path_differs_while_descendants_busy', 'remote_subtree_path_target_parent_unusable', 'remote_path_differs_from_anchor', 'remote_path_and_content_differ_from_anchor', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))",
+        )
+        .replace(
+            "CHECK (kind IN ('remote_observation_bind_ambiguous', 'download_remote_edit_remote_digest_mismatch', 'download_remote_edit_local_apply_failed', 'download_remote_edit_transfer_reset', 'materialize_remote_dir_local_apply_failed', 'apply_remote_rename_local_apply_failed', 'apply_remote_delete_local_apply_failed', 'apply_remote_subtree_delete_local_apply_failed', 'upload_local_edit_upload_failed', 'upload_local_edit_transfer_reset'))",
+            "CHECK (kind IN ('remote_observation_bind_ambiguous', 'download_remote_edit_remote_digest_mismatch', 'download_remote_edit_local_apply_failed', 'download_remote_edit_transfer_reset', 'materialize_remote_dir_local_apply_failed', 'apply_remote_rename_local_apply_failed', 'apply_remote_delete_local_apply_failed', 'apply_remote_subtree_delete_local_apply_failed', 'apply_remote_subtree_rename_local_apply_failed', 'upload_local_edit_upload_failed', 'upload_local_edit_transfer_reset'))",
+        )
+}
+
 pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -1064,6 +1086,9 @@ pub(super) fn install_schema_version_for_test(
     }
     if target_version >= 14 {
         apply_v14_hardening(conn)?;
+    }
+    if target_version >= 15 {
+        apply_v15_hardening(conn)?;
     }
 
     Ok(())
@@ -1173,6 +1198,11 @@ impl SqliteStateDb {
 
         if current_version == 13 {
             apply_v14_hardening(&mut self.conn)?;
+            current_version = 14;
+        }
+
+        if current_version == 14 {
+            apply_v15_hardening(&mut self.conn)?;
         }
 
         Ok(())
@@ -1223,7 +1253,7 @@ fn apply_v13_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
         tx.execute_batch(&schema_v13_create_sql())?;
         tx.execute_batch(SCHEMA_V13_COPY_SQL)?;
         tx.execute_batch(SCHEMA_V13_DROP_OLD_SQL)?;
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", 13)?;
         tx.commit()?;
         Ok(())
     })();
@@ -1241,7 +1271,25 @@ fn apply_v14_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
         tx.execute_batch(&schema_v14_create_sql())?;
         tx.execute_batch(SCHEMA_V14_COPY_SQL)?;
         tx.execute_batch(SCHEMA_V14_DROP_OLD_SQL)?;
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.pragma_update(None, "user_version", 14)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    result?;
+    ensure_no_foreign_key_violations(conn)?;
+    Ok(())
+}
+
+fn apply_v15_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result: Result<(), StateDbError> = (|| {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA_V15_RENAME_SQL)?;
+        tx.execute_batch(&schema_v15_create_sql())?;
+        tx.execute_batch(SCHEMA_V15_COPY_SQL)?;
+        tx.execute_batch(SCHEMA_V15_DROP_OLD_SQL)?;
+        tx.pragma_update(None, "user_version", 15)?;
         tx.commit()?;
         Ok(())
     })();

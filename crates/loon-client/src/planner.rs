@@ -1,7 +1,7 @@
 use crate::state_db::{
     ClientFileId, FileSyncViews, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    PlannedActionRow, RemoteSubtreeDeleteAssessment, SqliteStateDb, StateDbError, SyncAnchorRow,
-    TransferDirection,
+    PlannedActionRow, RemoteSubtreeDeleteAssessment, RemoteSubtreeRenameAssessment, SqliteStateDb,
+    StateDbError, SyncAnchorRow, TransferDirection,
 };
 use loon_types::{InodeId, InodeKind, NamespaceId};
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ pub enum PlannerDecision {
     DownloadRemoteEdit,
     ApplyRemoteDelete,
     ApplyRemoteSubtreeDelete,
+    ApplyRemoteSubtreeRename,
     ApplyRemoteRename,
     MaterializeRemoteDir,
     CreateConflictCopy,
@@ -39,6 +40,11 @@ pub enum PlannerReason {
     RemoteSubtreeDeletedWhileDescendantsDifferFromAnchor,
     RemoteSubtreeDeletedWhileDescendantsBusy,
     RemoteSubtreeDeletedWithoutAnchor,
+    RemoteSubtreePathDiffersFromAnchor,
+    RemoteSubtreePathDiffersWhileLocalDiffersFromAnchor,
+    RemoteSubtreePathDiffersWhileDescendantsDifferFromAnchor,
+    RemoteSubtreePathDiffersWhileDescendantsBusy,
+    RemoteSubtreePathTargetParentUnusable,
     RemotePathDiffersFromAnchor,
     RemotePathAndContentDifferFromAnchor,
     LocalAndRemoteDifferFromAnchor,
@@ -83,9 +89,17 @@ pub fn plan_file(
 ) -> Result<PlannedActionRecord, PlannerError> {
     db.planner_transaction("plan_file", |tx| {
         let views = tx.load_file_sync_views(namespace_id, inode_id)?;
-        let mut action =
+        let mut action = if let Some(action) =
             decide_remote_subtree_delete_action(tx, namespace_id, inode_id, &views, now_ms)?
-                .unwrap_or_else(|| decide_file_action(&views, now_ms));
+        {
+            action
+        } else if let Some(action) =
+            decide_remote_subtree_rename_action(tx, namespace_id, inode_id, &views, now_ms)?
+        {
+            action
+        } else {
+            decide_file_action(&views, now_ms)
+        };
         if let Some(preserved) =
             preserve_in_flight_action_for_remote_delete(tx, namespace_id, inode_id, &views, now_ms)?
         {
@@ -168,10 +182,18 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
                     PlannerDecision::UploadLocalEdit,
                     PlannerReason::LocalDiffersFromAnchor,
                 ),
-                (true, false) if remote_content_matches_anchor && !remote_path_matches_anchor => (
-                    PlannerDecision::ApplyRemoteRename,
-                    PlannerReason::RemotePathDiffersFromAnchor,
-                ),
+                (true, false)
+                    if remote.inode_kind == InodeKind::File
+                        && local.inode_kind == InodeKind::File
+                        && anchor.inode_kind == InodeKind::File
+                        && remote_content_matches_anchor
+                        && !remote_path_matches_anchor =>
+                {
+                    (
+                        PlannerDecision::ApplyRemoteRename,
+                        PlannerReason::RemotePathDiffersFromAnchor,
+                    )
+                }
                 (true, false) if !remote_content_matches_anchor && !remote_path_matches_anchor => (
                     PlannerDecision::CreateConflictCopy,
                     PlannerReason::RemotePathAndContentDifferFromAnchor,
@@ -354,6 +376,7 @@ impl PlannerDecision {
             Self::DownloadRemoteEdit => "download_remote_edit",
             Self::ApplyRemoteDelete => "apply_remote_delete",
             Self::ApplyRemoteSubtreeDelete => "apply_remote_subtree_delete",
+            Self::ApplyRemoteSubtreeRename => "apply_remote_subtree_rename",
             Self::ApplyRemoteRename => "apply_remote_rename",
             Self::MaterializeRemoteDir => "materialize_remote_dir",
             Self::CreateConflictCopy => "create_conflict_copy",
@@ -369,6 +392,7 @@ impl PlannerDecision {
             "download_remote_edit" => Ok(Self::DownloadRemoteEdit),
             "apply_remote_delete" => Ok(Self::ApplyRemoteDelete),
             "apply_remote_subtree_delete" => Ok(Self::ApplyRemoteSubtreeDelete),
+            "apply_remote_subtree_rename" => Ok(Self::ApplyRemoteSubtreeRename),
             "apply_remote_rename" => Ok(Self::ApplyRemoteRename),
             "materialize_remote_dir" => Ok(Self::MaterializeRemoteDir),
             "create_conflict_copy" => Ok(Self::CreateConflictCopy),
@@ -405,6 +429,19 @@ impl PlannerReason {
                 "remote_subtree_deleted_while_descendants_busy"
             }
             Self::RemoteSubtreeDeletedWithoutAnchor => "remote_subtree_deleted_without_anchor",
+            Self::RemoteSubtreePathDiffersFromAnchor => "remote_subtree_path_differs_from_anchor",
+            Self::RemoteSubtreePathDiffersWhileLocalDiffersFromAnchor => {
+                "remote_subtree_path_differs_while_local_differs_from_anchor"
+            }
+            Self::RemoteSubtreePathDiffersWhileDescendantsDifferFromAnchor => {
+                "remote_subtree_path_differs_while_descendants_differ_from_anchor"
+            }
+            Self::RemoteSubtreePathDiffersWhileDescendantsBusy => {
+                "remote_subtree_path_differs_while_descendants_busy"
+            }
+            Self::RemoteSubtreePathTargetParentUnusable => {
+                "remote_subtree_path_target_parent_unusable"
+            }
             Self::RemotePathDiffersFromAnchor => "remote_path_differs_from_anchor",
             Self::RemotePathAndContentDifferFromAnchor => {
                 "remote_path_and_content_differ_from_anchor"
@@ -444,6 +481,21 @@ impl PlannerReason {
                 Ok(Self::RemoteSubtreeDeletedWhileDescendantsBusy)
             }
             "remote_subtree_deleted_without_anchor" => Ok(Self::RemoteSubtreeDeletedWithoutAnchor),
+            "remote_subtree_path_differs_from_anchor" => {
+                Ok(Self::RemoteSubtreePathDiffersFromAnchor)
+            }
+            "remote_subtree_path_differs_while_local_differs_from_anchor" => {
+                Ok(Self::RemoteSubtreePathDiffersWhileLocalDiffersFromAnchor)
+            }
+            "remote_subtree_path_differs_while_descendants_differ_from_anchor" => {
+                Ok(Self::RemoteSubtreePathDiffersWhileDescendantsDifferFromAnchor)
+            }
+            "remote_subtree_path_differs_while_descendants_busy" => {
+                Ok(Self::RemoteSubtreePathDiffersWhileDescendantsBusy)
+            }
+            "remote_subtree_path_target_parent_unusable" => {
+                Ok(Self::RemoteSubtreePathTargetParentUnusable)
+            }
             "remote_path_differs_from_anchor" => Ok(Self::RemotePathDiffersFromAnchor),
             "remote_path_and_content_differ_from_anchor" => {
                 Ok(Self::RemotePathAndContentDifferFromAnchor)
@@ -630,6 +682,53 @@ fn decide_remote_subtree_delete_action(
     }))
 }
 
+fn decide_remote_subtree_rename_action(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    views: &FileSyncViews,
+    now_ms: u64,
+) -> Result<Option<PlannedActionRecord>, StateDbError> {
+    let Some(remote) = views.remote.as_ref() else {
+        return Ok(None);
+    };
+    if remote.inode_kind != InodeKind::Dir || remote.is_deleted {
+        return Ok(None);
+    }
+
+    let (decision, reason) = match tx.assess_remote_subtree_rename(namespace_id, inode_id)? {
+        RemoteSubtreeRenameAssessment::NotApplicable => return Ok(None),
+        RemoteSubtreeRenameAssessment::Ready(_) => (
+            PlannerDecision::ApplyRemoteSubtreeRename,
+            PlannerReason::RemoteSubtreePathDiffersFromAnchor,
+        ),
+        RemoteSubtreeRenameAssessment::DeferredRootLocalDiffers => (
+            PlannerDecision::CreateConflictCopy,
+            PlannerReason::RemoteSubtreePathDiffersWhileLocalDiffersFromAnchor,
+        ),
+        RemoteSubtreeRenameAssessment::DeferredDescendantsDiffer => (
+            PlannerDecision::CreateConflictCopy,
+            PlannerReason::RemoteSubtreePathDiffersWhileDescendantsDifferFromAnchor,
+        ),
+        RemoteSubtreeRenameAssessment::DeferredDescendantsBusy => (
+            PlannerDecision::CreateConflictCopy,
+            PlannerReason::RemoteSubtreePathDiffersWhileDescendantsBusy,
+        ),
+        RemoteSubtreeRenameAssessment::DeferredTargetParentUnusable => (
+            PlannerDecision::CreateConflictCopy,
+            PlannerReason::RemoteSubtreePathTargetParentUnusable,
+        ),
+    };
+
+    Ok(Some(PlannedActionRecord {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        decision,
+        reason,
+        created_at_ms: now_ms,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -638,7 +737,7 @@ mod tests {
     };
     use crate::state_db::{
         ClientFileId, FileSyncViews, LocalFileStateRow, LocalOnlyFileStateRow, RemoteFileStateRow,
-        SqliteStateDb, SyncAnchorRow,
+        SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow, TransferState,
     };
     use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 
@@ -1123,6 +1222,366 @@ mod tests {
         assert_eq!(
             planned.reason,
             PlannerReason::RemoteSubtreeDeletedWithoutAnchor
+        );
+    }
+
+    fn seed_remote_subtree_rename_plan_state(
+        db: &mut SqliteStateDb,
+        namespace_id: &NamespaceId,
+        root_inode_id: InodeId,
+        child_inode_id: InodeId,
+        root_remote_parent_inode_id: Option<InodeId>,
+        root_remote_display_name: &str,
+        seed_target_parent: bool,
+    ) {
+        let current_parent_inode_id = InodeId(2);
+        let target_parent_inode_id = InodeId(20);
+
+        db.planner_transaction("seed-subtree-rename-state", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: current_parent_inode_id,
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(9),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "workspace".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: current_parent_inode_id,
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "workspace".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: current_parent_inode_id,
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(42),
+                revision_no: RevisionNo(9),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "workspace".to_owned(),
+            })?;
+            if seed_target_parent {
+                tx.upsert_remote_file(&RemoteFileStateRow {
+                    namespace_id: namespace_id.clone(),
+                    inode_id: target_parent_inode_id,
+                    inode_kind: InodeKind::Dir,
+                    observed_seq: ChangeSeq(42),
+                    revision_no: RevisionNo(10),
+                    content_digest: None,
+                    content_manifest_digest: None,
+                    parent_inode_id: Some(InodeId(1)),
+                    display_name: "archive".to_owned(),
+                    is_deleted: false,
+                })?;
+                tx.upsert_local_file(&LocalFileStateRow {
+                    namespace_id: namespace_id.clone(),
+                    inode_id: target_parent_inode_id,
+                    inode_kind: InodeKind::Dir,
+                    content_digest: None,
+                    parent_inode_id: Some(InodeId(1)),
+                    display_name: "archive".to_owned(),
+                    exists_on_disk: true,
+                    dirty: false,
+                    last_local_change_ms: 1_700_000_001_005,
+                })?;
+                tx.upsert_sync_anchor(&SyncAnchorRow {
+                    namespace_id: namespace_id.clone(),
+                    inode_id: target_parent_inode_id,
+                    inode_kind: InodeKind::Dir,
+                    synced_seq: ChangeSeq(42),
+                    revision_no: RevisionNo(10),
+                    content_digest: None,
+                    content_manifest_digest: None,
+                    parent_inode_id: Some(InodeId(1)),
+                    display_name: "archive".to_owned(),
+                })?;
+            }
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(7),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: root_remote_parent_inode_id,
+                display_name: root_remote_display_name.to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(current_parent_inode_id),
+                display_name: "reports".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_010,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(41),
+                revision_no: RevisionNo(7),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(current_parent_inode_id),
+                display_name: "reports".to_owned(),
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: child_inode_id,
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(41),
+                revision_no: RevisionNo(3),
+                content_digest: Some("sha256:child-3".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-child-3".to_owned()),
+                parent_inode_id: Some(root_inode_id),
+                display_name: "q1.txt".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: child_inode_id,
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:child-3".to_owned()),
+                parent_inode_id: Some(root_inode_id),
+                display_name: "q1.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_020,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: child_inode_id,
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(41),
+                revision_no: RevisionNo(3),
+                content_digest: Some("sha256:child-3".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-child-3".to_owned()),
+                parent_inode_id: Some(root_inode_id),
+                display_name: "q1.txt".to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed subtree rename state");
+    }
+
+    #[test]
+    fn planner_marks_same_parent_directory_rename_for_apply_remote_subtree_rename() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        let root_inode_id = InodeId(10);
+        let child_inode_id = InodeId(11);
+
+        seed_remote_subtree_rename_plan_state(
+            &mut db,
+            &namespace_id,
+            root_inode_id,
+            child_inode_id,
+            Some(InodeId(2)),
+            "reports-2026",
+            false,
+        );
+
+        let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
+            .expect("plan subtree rename");
+
+        assert_eq!(planned.decision, PlannerDecision::ApplyRemoteSubtreeRename);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteSubtreePathDiffersFromAnchor
+        );
+    }
+
+    #[test]
+    fn planner_marks_directory_move_for_apply_remote_subtree_rename() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        let root_inode_id = InodeId(10);
+        let child_inode_id = InodeId(11);
+
+        seed_remote_subtree_rename_plan_state(
+            &mut db,
+            &namespace_id,
+            root_inode_id,
+            child_inode_id,
+            Some(InodeId(20)),
+            "reports",
+            true,
+        );
+
+        let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
+            .expect("plan subtree move");
+
+        assert_eq!(planned.decision, PlannerDecision::ApplyRemoteSubtreeRename);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteSubtreePathDiffersFromAnchor
+        );
+    }
+
+    #[test]
+    fn planner_defers_subtree_rename_when_target_parent_is_unusable() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        let root_inode_id = InodeId(10);
+        let child_inode_id = InodeId(11);
+
+        seed_remote_subtree_rename_plan_state(
+            &mut db,
+            &namespace_id,
+            root_inode_id,
+            child_inode_id,
+            Some(InodeId(20)),
+            "reports",
+            false,
+        );
+
+        let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
+            .expect("plan subtree rename conflict");
+
+        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteSubtreePathTargetParentUnusable
+        );
+    }
+
+    #[test]
+    fn planner_defers_subtree_rename_when_descendant_differs_from_anchor() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        let root_inode_id = InodeId(10);
+        let child_inode_id = InodeId(11);
+
+        seed_remote_subtree_rename_plan_state(
+            &mut db,
+            &namespace_id,
+            root_inode_id,
+            child_inode_id,
+            Some(InodeId(2)),
+            "reports-2026",
+            false,
+        );
+        db.planner_transaction("diverge-subtree-child", |tx| {
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: child_inode_id,
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:diverged-child".to_owned()),
+                parent_inode_id: Some(root_inode_id),
+                display_name: "q1.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_030,
+            })?;
+            Ok(())
+        })
+        .expect("diverge descendant");
+
+        let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
+            .expect("plan subtree rename descendant conflict");
+
+        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteSubtreePathDiffersWhileDescendantsDifferFromAnchor
+        );
+    }
+
+    #[test]
+    fn planner_defers_subtree_rename_when_descendant_is_busy() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        let root_inode_id = InodeId(10);
+        let child_inode_id = InodeId(11);
+
+        seed_remote_subtree_rename_plan_state(
+            &mut db,
+            &namespace_id,
+            root_inode_id,
+            child_inode_id,
+            Some(InodeId(2)),
+            "reports-2026",
+            false,
+        );
+        db.upsert_transfer_ledger(&TransferLedgerRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: child_inode_id,
+            transfer_id: "upload:ns-1:11:sha256:manifest-child-3".to_owned(),
+            direction: TransferDirection::Upload,
+            object_key: "namespaces/ns-1/manifests/sha256:manifest-child-3.json".to_owned(),
+            block_index: 1,
+            block_count: 2,
+            state: TransferState::Uploading,
+            updated_at_ms: 1_700_000_001_040,
+        })
+        .expect("seed descendant transfer");
+
+        let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
+            .expect("plan subtree rename busy conflict");
+
+        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteSubtreePathDiffersWhileDescendantsBusy
+        );
+    }
+
+    #[test]
+    fn planner_defers_subtree_rename_when_root_local_differs_from_anchor() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        let root_inode_id = InodeId(10);
+        let child_inode_id = InodeId(11);
+
+        seed_remote_subtree_rename_plan_state(
+            &mut db,
+            &namespace_id,
+            root_inode_id,
+            child_inode_id,
+            Some(InodeId(2)),
+            "reports-2026",
+            false,
+        );
+        db.planner_transaction("diverge-subtree-root", |tx| {
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "reports-local".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_050,
+            })?;
+            Ok(())
+        })
+        .expect("diverge root local path");
+
+        let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
+            .expect("plan subtree rename root conflict");
+
+        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteSubtreePathDiffersWhileLocalDiffersFromAnchor
         );
     }
 
