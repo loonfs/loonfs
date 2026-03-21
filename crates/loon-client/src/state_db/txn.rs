@@ -1,5 +1,7 @@
 use super::loads::{
-    load_bound_apply_remote_delete_views_from_conn, load_bound_apply_remote_rename_views_from_conn,
+    assess_remote_subtree_delete_from_conn, load_bound_apply_remote_delete_views_from_conn,
+    load_bound_apply_remote_rename_views_from_conn,
+    load_bound_apply_remote_subtree_delete_views_from_conn,
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
     load_conflicts_and_errors, load_inode_upload, load_local_file,
     load_local_only_candidates_for_namespace, load_local_only_conflicts_and_errors,
@@ -115,6 +117,22 @@ impl SqliteStateDb {
         inode_id: InodeId,
     ) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
         load_bound_apply_remote_delete_views_from_conn(&self.conn, namespace_id, inode_id)
+    }
+
+    pub fn assess_remote_subtree_delete(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<RemoteSubtreeDeleteAssessment, StateDbError> {
+        assess_remote_subtree_delete_from_conn(&self.conn, namespace_id, inode_id)
+    }
+
+    pub fn load_bound_apply_remote_subtree_delete_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<BoundApplyRemoteSubtreeDeleteViews, StateDbError> {
+        load_bound_apply_remote_subtree_delete_views_from_conn(&self.conn, namespace_id, inode_id)
     }
 
     pub fn load_planned_action(
@@ -411,6 +429,17 @@ impl SqliteStateDb {
     ) -> Result<AppliedInodeMutation, StateDbError> {
         self.planner_transaction("apply_remote_delete", |tx| {
             tx.apply_remote_delete(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_remote_subtree_delete(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_remote_subtree_delete", |tx| {
+            tx.apply_remote_subtree_delete(namespace_id, inode_id, applied_at_ms)
         })
     }
 
@@ -866,6 +895,42 @@ impl PlannerTxn<'_> {
             "DELETE FROM sync_anchor WHERE namespace_id = ?1 AND inode_id = ?2",
             params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
         )?;
+        Ok(())
+    }
+
+    pub fn delete_local_files_for_inodes(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_ids: &[InodeId],
+    ) -> Result<(), StateDbError> {
+        for inode_id in inode_ids {
+            self.delete_local_file(namespace_id, *inode_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_sync_anchors_for_inodes(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_ids: &[InodeId],
+    ) -> Result<(), StateDbError> {
+        for inode_id in inode_ids {
+            self.delete_sync_anchor(namespace_id, *inode_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_remote_files_for_inodes(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_ids: &[InodeId],
+    ) -> Result<(), StateDbError> {
+        for inode_id in inode_ids {
+            self.tx.execute(
+                "DELETE FROM remote_state WHERE namespace_id = ?1 AND inode_id = ?2",
+                params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
+            )?;
+        }
         Ok(())
     }
 
@@ -1790,6 +1855,30 @@ impl PlannerTxn<'_> {
         })
     }
 
+    pub fn apply_remote_subtree_delete(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        _applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = load_bound_apply_remote_subtree_delete_views_from_conn(
+            &self.tx,
+            namespace_id,
+            inode_id,
+        )?;
+
+        self.delete_planned_actions_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        self.delete_conflicts_and_errors_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        self.delete_remote_files_for_inodes(namespace_id, &views.descendant_remote_inode_ids)?;
+        self.delete_local_files_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        self.delete_sync_anchors_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
     pub fn apply_remote_observation(
         &mut self,
         observed: &ObservedRemoteInode,
@@ -2118,6 +2207,22 @@ impl PlannerTxn<'_> {
         })
     }
 
+    pub fn assess_remote_subtree_delete(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<RemoteSubtreeDeleteAssessment, StateDbError> {
+        assess_remote_subtree_delete_from_conn(&self.tx, namespace_id, inode_id)
+    }
+
+    pub fn load_bound_apply_remote_subtree_delete_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<BoundApplyRemoteSubtreeDeleteViews, StateDbError> {
+        load_bound_apply_remote_subtree_delete_views_from_conn(&self.tx, namespace_id, inode_id)
+    }
+
     pub fn load_local_only_file(
         &self,
         client_file_id: &ClientFileId,
@@ -2189,6 +2294,17 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    pub fn delete_planned_actions_for_inodes(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_ids: &[InodeId],
+    ) -> Result<(), StateDbError> {
+        for inode_id in inode_ids {
+            self.delete_planned_action(namespace_id, *inode_id)?;
+        }
+        Ok(())
+    }
+
     pub fn delete_planned_local_only_action(
         &mut self,
         client_file_id: &ClientFileId,
@@ -2253,6 +2369,21 @@ impl PlannerTxn<'_> {
             "DELETE FROM pending_inode_mutations WHERE client_request_id = ?1",
             params![client_request_id],
         )?;
+        Ok(())
+    }
+
+    pub fn delete_conflicts_and_errors_for_inodes(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_ids: &[InodeId],
+    ) -> Result<(), StateDbError> {
+        for inode_id in inode_ids {
+            self.tx.execute(
+                "DELETE FROM conflicts_and_errors
+                WHERE namespace_id = ?1 AND inode_id = ?2",
+                params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
+            )?;
+        }
         Ok(())
     }
 

@@ -83,6 +83,15 @@ pub(crate) fn remove_path_durably(target_path: &Path) -> Result<(), LocalApplyEr
     Ok(())
 }
 
+pub(crate) fn remove_tree_durably(target_path: &Path) -> Result<(), LocalApplyError> {
+    let parent_dir = target_parent_dir(target_path);
+    fs::remove_dir_all(target_path)
+        .map_err(|source| io_error("remove_dir_all", target_path, source))?;
+    sync_parent_dir(parent_dir)
+        .map_err(|source| io_error("sync_parent_dir", parent_dir, source))?;
+    Ok(())
+}
+
 pub(crate) fn stage_file_size(target_path: &Path) -> Result<Option<u64>, LocalApplyError> {
     let stage_path = staging_path_for_target(target_path)?;
     match fs::metadata(&stage_path) {
@@ -190,8 +199,8 @@ fn sync_dir(_path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         append_stage_bytes, apply_bytes_atomically, create_directory_durably, finalize_stage_file,
-        remove_path_durably, rename_path_durably, reset_stage_file, stage_file_size,
-        staging_path_for_target,
+        remove_path_durably, remove_tree_durably, rename_path_durably, reset_stage_file,
+        stage_file_size, staging_path_for_target,
     };
     use loon_testkit::tempdir::TestDir;
     use std::fs;
@@ -325,6 +334,19 @@ mod tests {
         remove_path_durably(&target_path).expect("remove path durably");
 
         assert!(!target_path.exists(), "target path should be removed");
+    }
+
+    #[test]
+    fn remove_tree_durably_unlinks_nested_directory() {
+        let temp_dir = TestDir::new("local-apply-delete-tree");
+        let target_path = temp_dir.path().join("docs/archive");
+        fs::create_dir_all(target_path.join("nested")).expect("create nested dir");
+        fs::write(target_path.join("nested/report.txt"), "hello from loon")
+            .expect("seed nested file");
+
+        remove_tree_durably(&target_path).expect("remove tree durably");
+
+        assert!(!target_path.exists(), "target tree should be removed");
     }
 
     #[test]

@@ -401,6 +401,48 @@ Exit criteria:
 - tombstoned remote rows without local/anchor become inert `no_op` planner state
 - missing current-path failures become durable named issue rows instead of generic executor errors
 
+### Slice 3: bound-directory remote subtree delete observation
+
+Goal:
+
+- treat authoritative remote directory deletion as one root-level local subtree remove instead of
+  generic drift
+- preserve only the observed root tombstone after successful local apply
+- clear descendant durable client state instead of inventing synthetic descendant tombstones
+
+Update:
+
+- `docs/specs/070-client-architecture.md`
+- `crates/loon-client/`
+- `tests/scenarios/client/`
+
+Add:
+
+- planner decision `apply_remote_subtree_delete`
+- planner reasons for tombstoned authoritative directory observations, including descendant-dirty
+  and descendant-busy cases
+- durable recursive local-remove executor and named failure issue rows
+- reconciliation fixtures and invariants for successful subtree delete, failure, and deferred
+  conflict handling
+
+Why next:
+
+- subtree delete is the next remote hierarchy gap after file rename and file delete
+- it is still narrower than directory rename because it does not require descendant path rewrites
+- it forces an explicit durable state shape for deleted bound directories before broader hierarchy
+  reconciliation widens again
+
+Exit criteria:
+
+- a tombstoned bound directory with clean bound descendants survives restart and plans
+  `apply_remote_subtree_delete`
+- the mixed client tick can remove the local subtree, preserve only the root remote tombstone,
+  clear descendant remote rows, and leave no local/anchor rows for the subtree
+- tombstoned bound directories with dirty, placeholder, temp-identity, or busy descendants defer
+  to conflict work instead of eagerly deleting
+- missing current-path and recursive-remove failures become durable named issue rows instead of
+  generic executor errors
+
 ## Historical slice order
 
 Milestones 1 through 7 were executed through the following ordered slices.

@@ -1,7 +1,7 @@
 use loon_client::executor::{
     execute_next_client_action, ExecuteApplyRemoteDeleteError, ExecuteApplyRemoteRenameError,
-    ExecuteNextClientActionError, ExecutedApplyRemoteDelete, ExecutedApplyRemoteRename,
-    NextClientAction,
+    ExecuteApplyRemoteSubtreeDeleteError, ExecuteNextClientActionError, ExecutedApplyRemoteDelete,
+    ExecutedApplyRemoteRename, ExecutedApplyRemoteSubtreeDelete, NextClientAction,
 };
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
@@ -15,26 +15,29 @@ use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::content_manifest;
 use loon_testkit::invariants::{
     evaluate_apply_remote_delete_invariants, evaluate_apply_remote_rename_invariants,
-    evaluate_remote_delete_planning_invariants,
+    evaluate_apply_remote_subtree_delete_invariants, evaluate_remote_delete_planning_invariants,
     evaluate_remote_observation_active_download_invariants,
     evaluate_remote_observation_active_upload_invariants,
     evaluate_remote_observation_ambiguous_bind_invariants,
     evaluate_remote_observation_convergence_invariants,
     evaluate_remote_observation_late_bind_invariants,
-    evaluate_remote_path_change_planning_invariants, ApplyRemoteDeleteInvariantInputs,
-    ApplyRemoteRenameInvariantInputs, ClientReconciliationInvariantReport,
-    RemoteDeletePlanningInvariantInputs, RemoteObservationActiveDownloadInvariantInputs,
-    RemoteObservationActiveUploadInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
-    RemoteObservationConvergenceInvariantInputs, RemoteObservationLateBindInvariantInputs,
-    RemotePathChangePlanningInvariantInputs,
+    evaluate_remote_path_change_planning_invariants,
+    evaluate_remote_subtree_delete_planning_invariants, ApplyRemoteDeleteInvariantInputs,
+    ApplyRemoteRenameInvariantInputs, ApplyRemoteSubtreeDeleteInvariantInputs,
+    ClientReconciliationInvariantReport, RemoteDeletePlanningInvariantInputs,
+    RemoteObservationActiveDownloadInvariantInputs, RemoteObservationActiveUploadInvariantInputs,
+    RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
+    RemoteObservationLateBindInvariantInputs, RemotePathChangePlanningInvariantInputs,
+    RemoteSubtreeDeletePlanningInvariantInputs,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{
-    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId, NamespaceId,
-    RevisionNo,
+    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeId, InodeKind,
+    NamespaceId, RevisionNo,
 };
 use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -610,6 +613,54 @@ fn remote_observation_bound_file_remote_delete_missing_current_path_records_issu
 }
 
 #[test]
+fn remote_observation_bound_directory_remote_subtree_delete_applies_locally() {
+    let report = run_remote_subtree_delete_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_delete_applies_locally.yaml",
+    );
+
+    assert!(
+        !report.final_root_exists,
+        "deleted local subtree root should be removed after remote subtree delete apply"
+    );
+}
+
+#[test]
+fn remote_observation_bound_directory_remote_subtree_delete_missing_current_path_records_issue() {
+    let report = run_remote_subtree_delete_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_delete_current_path_missing_records_issue.yaml",
+    );
+
+    assert!(
+        !report.final_root_exists,
+        "missing root path fixture should leave the subtree absent"
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_delete_while_descendant_differs_defers_conflict_copy() {
+    let report = run_remote_subtree_delete_conflict_report(
+        "client/client_remote_observation_deletes_bound_directory_while_descendant_differs_from_anchor.yaml",
+    );
+
+    assert!(
+        report.final_root_exists,
+        "remote subtree delete should not eagerly remove a locally diverged subtree"
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_delete_while_descendant_busy_defers_conflict_copy() {
+    let report = run_remote_subtree_delete_conflict_report(
+        "client/client_remote_observation_deletes_bound_directory_while_descendant_upload_active.yaml",
+    );
+
+    assert!(
+        report.final_root_exists,
+        "remote subtree delete should not eagerly remove a busy subtree"
+    );
+}
+
+#[test]
 fn remote_observation_remote_delete_while_local_differs_from_anchor_defers_conflict_copy() {
     let scenario = load_fixture(
         "client/client_remote_observation_deletes_bound_file_while_local_differs_from_anchor.yaml",
@@ -1014,6 +1065,48 @@ fn remote_observation_remote_delete_failure_invariant_trace_matches_checked_in_a
         report.rendered_trace,
         include_str!(
             "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_delete_current_path_missing_records_issue.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_delete_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_subtree_delete_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_delete_applies_locally.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_applies_locally.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_delete_failure_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_subtree_delete_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_delete_current_path_missing_records_issue.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_current_path_missing_records_issue.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_delete_deferred_conflict_trace_matches_checked_in_artifact() {
+    let report = run_remote_subtree_delete_conflict_report(
+        "client/client_remote_observation_deletes_bound_directory_while_descendant_differs_from_anchor.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_deletes_bound_directory_while_descendant_differs_from_anchor.txt"
         )
     );
 }
@@ -2180,6 +2273,402 @@ fn run_remote_delete_invariant_report(fixture_path: &str) -> DeleteInvariantFixt
     }
 }
 
+fn run_remote_subtree_delete_invariant_report(
+    fixture_path: &str,
+) -> SubtreeDeleteInvariantFixtureRunReport {
+    let scenario = load_fixture(fixture_path);
+    let initial: SubtreeDeleteObservationInitial =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteRenameFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: SubtreeDeleteObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-remote-subtree-delete");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create objectstore root");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    materialize_local_tree(&source_root, &initial.local_entries);
+    let root_path = source_root.join(&initial.root_relative_path);
+    seed_remote_subtree_delete_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let first_planner_tick = actions[2].planner().expect("planner action third");
+    let execute = actions[3]
+        .execute_next_client_action()
+        .expect("execute action fourth");
+    assert!(actions[4].is_restart(), "restart should be fifth");
+    let second_planner_tick = actions[5].planner().expect("planner action sixth");
+
+    let observation_outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(observation_outcome, expect.outcome.clone().into_outcome());
+
+    let first_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+        plan_file(
+            &mut db,
+            &first_planner_tick.namespace_id,
+            first_planner_tick.inode_id,
+            first_planner_tick.now_ms,
+        )
+        .expect("plan bound subtree root after observation")
+    };
+    assert_eq!(first_planner_result, expect.first_planner_result);
+
+    let executed = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for subtree delete execute");
+        execute_next_client_action(
+            &mut db,
+            &store,
+            |_client_file_id| None,
+            |_namespace_id, _inode_id| Some(root_path.clone()),
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
+            execute.uploaded_at_ms,
+            execute.created_at_ms,
+            |_request| panic!("apply_remote_subtree_delete should not dispatch a mutation request"),
+        )
+    };
+    assert_subtree_delete_execution_matches_expectation(executed, &expect.execution);
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after subtree delete execute");
+    let second_planner_result = plan_file(
+        &mut db,
+        &second_planner_tick.namespace_id,
+        second_planner_tick.inode_id,
+        second_planner_tick.now_ms,
+    )
+    .expect("plan bound subtree root after execute");
+    assert_eq!(second_planner_result, expect.second_planner_result);
+
+    assert_subtree_states_match(&db, &initial, &expect);
+
+    let issues = db
+        .load_conflicts_and_errors(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
+        .expect("load subtree delete issues after execute")
+        .into_iter()
+        .map(RawConflictOrErrorExpect::from_row)
+        .collect::<Vec<_>>();
+    assert_eq!(issues, expect.conflicts_and_errors);
+
+    for path_expectation in &expect.path_expectations {
+        assert_eq!(
+            source_root.join(&path_expectation.relative_path).exists(),
+            path_expectation.exists,
+            "unexpected path existence for {}",
+            path_expectation.relative_path.display()
+        );
+    }
+
+    let descendant_inode_ids = initial
+        .remote_state
+        .iter()
+        .filter(|row| row.inode_id != second_planner_tick.inode_id)
+        .map(|row| row.inode_id)
+        .collect::<BTreeSet<_>>();
+    let subtree_inode_ids = initial
+        .local_state
+        .iter()
+        .map(|row| row.inode_id)
+        .collect::<BTreeSet<_>>();
+    let descendant_remote_count_after = descendant_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&second_planner_tick.namespace_id, **inode_id)
+                .expect("load descendant views")
+                .remote
+                .is_some()
+        })
+        .count();
+    let subtree_local_state_count_after = subtree_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&second_planner_tick.namespace_id, **inode_id)
+                .expect("load subtree local views")
+                .local
+                .is_some()
+        })
+        .count();
+    let subtree_sync_anchor_count_after = subtree_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&second_planner_tick.namespace_id, **inode_id)
+                .expect("load subtree anchor views")
+                .sync_anchor
+                .is_some()
+        })
+        .count();
+    let subtree_planned_action_count_after = subtree_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_planned_action(&second_planner_tick.namespace_id, **inode_id)
+                .expect("load subtree planned action")
+                .is_some()
+        })
+        .count();
+
+    let planning_report = evaluate_remote_subtree_delete_planning_invariants(
+        RemoteSubtreeDeletePlanningInvariantInputs {
+            planned_action_decision_after: Some(first_planner_result.decision.as_str()),
+            planned_action_reason_after: Some(first_planner_result.reason.as_str()),
+        },
+    );
+    let root_views = db
+        .load_file_sync_views(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
+        .expect("load root views after subtree delete execute");
+    let apply_report =
+        evaluate_apply_remote_subtree_delete_invariants(ApplyRemoteSubtreeDeleteInvariantInputs {
+            root_remote_present_after: root_views.remote.is_some(),
+            root_remote_is_deleted_after: root_views
+                .remote
+                .as_ref()
+                .is_some_and(|remote| remote.is_deleted),
+            descendant_remote_count_after,
+            subtree_local_state_count_after,
+            subtree_sync_anchor_count_after,
+            subtree_planned_action_count_after,
+            issue_kind_after: issues.first().map(|issue| issue.kind.as_str()),
+        });
+    let report = combine_reconciliation_reports([planning_report, apply_report]);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("first_planner_result={first_planner_result:?}"),
+        format!("execution={:?}", expect.execution),
+        format!("second_planner_result={second_planner_result:?}"),
+        format!("issues_after={issues:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("remote-subtree-delete"))
+    .collect::<Vec<_>>();
+
+    SubtreeDeleteInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+        final_root_exists: root_path.exists(),
+    }
+}
+
+fn run_remote_subtree_delete_conflict_report(
+    fixture_path: &str,
+) -> SubtreeDeleteInvariantFixtureRunReport {
+    let scenario = load_fixture(fixture_path);
+    let initial: SubtreeDeleteObservationInitial =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: SubtreeDeleteConflictObservationExpect =
+        scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-remote-subtree-delete-conflict");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+
+    materialize_local_tree(&source_root, &initial.local_entries);
+    let root_path = source_root.join(&initial.root_relative_path);
+    seed_remote_subtree_delete_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_tick = actions[2].planner().expect("planner action third");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan subtree delete conflict after restart");
+    assert_eq!(planner_result, expect.planner_result);
+
+    for path_expectation in &expect.path_expectations {
+        assert_eq!(
+            source_root.join(&path_expectation.relative_path).exists(),
+            path_expectation.exists,
+            "unexpected path existence for {}",
+            path_expectation.relative_path.display()
+        );
+    }
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("planner_result={planner_result:?}"),
+    ];
+
+    SubtreeDeleteInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+        final_root_exists: root_path.exists(),
+    }
+}
+
+fn materialize_local_tree(root: &Path, entries: &[FixtureLocalTreeEntry]) {
+    for entry in entries {
+        let path = root.join(&entry.relative_path);
+        match entry.inode_kind {
+            InodeKind::Dir => {
+                fs::create_dir_all(&path).expect("create local directory");
+            }
+            InodeKind::File => {
+                fs::create_dir_all(path.parent().expect("file parent"))
+                    .expect("create local file parent");
+                fs::write(&path, entry.content_utf8.as_deref().unwrap_or_default())
+                    .expect("write local file");
+            }
+            InodeKind::Symlink | InodeKind::Mount => {
+                panic!("fixture local tree currently supports only files and directories")
+            }
+        }
+    }
+}
+
+fn seed_remote_subtree_delete_observation_state(
+    db_path: &Path,
+    initial: &SubtreeDeleteObservationInitial,
+) {
+    let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
+    db.planner_transaction("seed-remote-subtree-delete-observation-state", |tx| {
+        for row in &initial.remote_state {
+            tx.upsert_remote_file(row)?;
+        }
+        for row in &initial.local_state {
+            tx.upsert_local_file(row)?;
+        }
+        for row in &initial.sync_anchor {
+            tx.upsert_sync_anchor(row)?;
+        }
+        for row in &initial.planned_actions {
+            tx.upsert_planned_action(row)?;
+        }
+        for row in &initial.pending_inode_mutations {
+            let row = row.clone().into_row();
+            tx.record_pending_inode_mutation(
+                &row.namespace_id,
+                row.inode_id,
+                &row.request,
+                row.created_at_ms,
+            )?;
+        }
+        for row in &initial.transfer_ledgers {
+            tx.upsert_transfer_ledger(&row.clone().into_row())?;
+        }
+        Ok(())
+    })
+    .expect("seed remote subtree delete observation state");
+}
+
+fn assert_subtree_delete_execution_matches_expectation(
+    result: Result<Option<NextClientAction>, ExecuteNextClientActionError>,
+    expected: &RawSubtreeDeleteExecutionExpect,
+) {
+    match expected {
+        RawSubtreeDeleteExecutionExpect::ExecutedApplyRemoteSubtreeDelete {
+            executed_apply_remote_subtree_delete,
+        } => {
+            let executed = result.expect("subtree delete execution should succeed");
+            assert_eq!(
+                executed,
+                Some(NextClientAction::ExecutedApplyRemoteSubtreeDelete(
+                    ExecutedApplyRemoteSubtreeDelete {
+                        applied: executed_apply_remote_subtree_delete.clone(),
+                    },
+                ))
+            );
+        }
+        RawSubtreeDeleteExecutionExpect::ExecuteErrorKind { execute_error_kind } => {
+            let error = result.expect_err("subtree delete execution should fail");
+            let actual_kind = match error {
+                ExecuteNextClientActionError::ApplyRemoteSubtreeDelete(
+                    ExecuteApplyRemoteSubtreeDeleteError::CurrentPathMissing { .. },
+                ) => "current_path_missing",
+                ExecuteNextClientActionError::ApplyRemoteSubtreeDelete(
+                    ExecuteApplyRemoteSubtreeDeleteError::LocalApplyFailed { .. },
+                ) => "recursive_remove_io",
+                other => panic!("unexpected subtree delete execution error: {other:?}"),
+            };
+            assert_eq!(actual_kind, execute_error_kind);
+        }
+    }
+}
+
+fn assert_subtree_states_match(
+    db: &SqliteStateDb,
+    initial: &SubtreeDeleteObservationInitial,
+    expect: &SubtreeDeleteObservationExpect,
+) {
+    let namespace_id = initial
+        .remote_state
+        .first()
+        .map(|row| row.namespace_id.clone())
+        .or_else(|| {
+            initial
+                .local_state
+                .first()
+                .map(|row| row.namespace_id.clone())
+        })
+        .expect("subtree fixture namespace");
+    let mut inode_ids = BTreeSet::new();
+    inode_ids.extend(initial.remote_state.iter().map(|row| row.inode_id));
+    inode_ids.extend(initial.local_state.iter().map(|row| row.inode_id));
+    inode_ids.extend(initial.sync_anchor.iter().map(|row| row.inode_id));
+
+    let expected_remote = expect
+        .remote_state_after
+        .iter()
+        .cloned()
+        .map(|row| (row.inode_id, row))
+        .collect::<BTreeMap<_, _>>();
+    let expected_local = expect
+        .local_state_after
+        .iter()
+        .cloned()
+        .map(|row| (row.inode_id, row))
+        .collect::<BTreeMap<_, _>>();
+    let expected_anchor = expect
+        .sync_anchor_after
+        .iter()
+        .cloned()
+        .map(|row| (row.inode_id, row))
+        .collect::<BTreeMap<_, _>>();
+    let expected_planned = expect
+        .planned_actions_after
+        .iter()
+        .cloned()
+        .map(|row| (row.inode_id, row))
+        .collect::<BTreeMap<_, _>>();
+
+    for inode_id in inode_ids {
+        let views = db
+            .load_file_sync_views(&namespace_id, inode_id)
+            .expect("load subtree views");
+        assert_eq!(views.remote, expected_remote.get(&inode_id).cloned());
+        assert_eq!(views.local, expected_local.get(&inode_id).cloned());
+        assert_eq!(views.sync_anchor, expected_anchor.get(&inode_id).cloned());
+        assert_eq!(
+            db.load_planned_action(&namespace_id, inode_id)
+                .expect("load subtree planned action"),
+            expected_planned.get(&inode_id).cloned()
+        );
+    }
+}
+
 fn seed_remote_rename_observation_state(db_path: &Path, initial: &RenameObservationInitial) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-remote-rename-observation-state", |tx| {
@@ -2420,6 +2909,48 @@ struct DeleteConflictObservationExpect {
 }
 
 #[derive(Debug, Deserialize)]
+struct SubtreeDeleteObservationInitial {
+    root_relative_path: PathBuf,
+    remote_state: Vec<RemoteFileStateRow>,
+    local_state: Vec<LocalFileStateRow>,
+    sync_anchor: Vec<SyncAnchorRow>,
+    local_entries: Vec<FixtureLocalTreeEntry>,
+    #[serde(default)]
+    planned_actions: Vec<PlannedActionRow>,
+    #[serde(default)]
+    pending_inode_mutations: Vec<RawPendingInodeMutationRow>,
+    #[serde(default)]
+    transfer_ledgers: Vec<FixtureBoundTransferLedgerSeed>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtreeDeleteObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    remote_state_after: Vec<RemoteFileStateRow>,
+    #[serde(default)]
+    local_state_after: Vec<LocalFileStateRow>,
+    #[serde(default)]
+    sync_anchor_after: Vec<SyncAnchorRow>,
+    #[serde(default)]
+    planned_actions_after: Vec<PlannedActionRow>,
+    #[serde(default)]
+    conflicts_and_errors: Vec<RawConflictOrErrorExpect>,
+    execution: RawSubtreeDeleteExecutionExpect,
+    first_planner_result: PlannedActionRecord,
+    second_planner_result: PlannedActionRecord,
+    path_expectations: Vec<FixturePathExpectation>,
+    #[serde(default)]
+    invariants: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtreeDeleteConflictObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    planner_result: PlannedActionRecord,
+    path_expectations: Vec<FixturePathExpectation>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RenameObservationInitial {
     remote_state: RemoteFileStateRow,
     local_state: LocalFileStateRow,
@@ -2478,6 +3009,20 @@ struct FixtureLocalFile {
     content_utf8: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct FixtureLocalTreeEntry {
+    relative_path: PathBuf,
+    inode_kind: InodeKind,
+    #[serde(default)]
+    content_utf8: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct FixturePathExpectation {
+    relative_path: PathBuf,
+    exists: bool,
+}
+
 #[derive(Debug)]
 struct ReconciliationInvariantFixtureRunReport {
     rendered_trace: String,
@@ -2494,6 +3039,12 @@ struct RenameInvariantFixtureRunReport {
 struct DeleteInvariantFixtureRunReport {
     rendered_trace: String,
     final_current_exists: bool,
+}
+
+#[derive(Debug)]
+struct SubtreeDeleteInvariantFixtureRunReport {
+    rendered_trace: String,
+    final_root_exists: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2802,6 +3353,17 @@ enum RawDeleteExecutionExpect {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+enum RawSubtreeDeleteExecutionExpect {
+    ExecutedApplyRemoteSubtreeDelete {
+        executed_apply_remote_subtree_delete: loon_client::state_db::AppliedInodeMutation,
+    },
+    ExecuteErrorKind {
+        execute_error_kind: String,
+    },
+}
+
 impl RawConflictOrErrorExpect {
     fn from_row(row: loon_client::state_db::ConflictOrErrorRow) -> Self {
         Self {
@@ -2832,6 +3394,35 @@ struct RawReplaceFileOp {
     inode_id: InodeId,
     base_revision_no: RevisionNo,
     content_manifest_digest: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FixtureBoundTransferLedgerSeed {
+    namespace_id: NamespaceId,
+    inode_id: InodeId,
+    transfer_id: String,
+    direction: TransferDirection,
+    object_key: String,
+    block_index: u64,
+    block_count: u64,
+    state: TransferState,
+    updated_at_ms: u64,
+}
+
+impl FixtureBoundTransferLedgerSeed {
+    fn into_row(self) -> TransferLedgerRow {
+        TransferLedgerRow {
+            namespace_id: self.namespace_id,
+            inode_id: self.inode_id,
+            transfer_id: self.transfer_id,
+            direction: self.direction,
+            object_key: self.object_key,
+            block_index: self.block_index,
+            block_count: self.block_count,
+            state: self.state,
+            updated_at_ms: self.updated_at_ms,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

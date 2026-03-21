@@ -446,6 +446,23 @@ pub struct ApplyRemoteDeleteInvariantInputs<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteSubtreeDeletePlanningInvariantInputs<'a> {
+    pub planned_action_decision_after: Option<&'a str>,
+    pub planned_action_reason_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyRemoteSubtreeDeleteInvariantInputs<'a> {
+    pub root_remote_present_after: bool,
+    pub root_remote_is_deleted_after: bool,
+    pub descendant_remote_count_after: usize,
+    pub subtree_local_state_count_after: usize,
+    pub subtree_sync_anchor_count_after: usize,
+    pub subtree_planned_action_count_after: usize,
+    pub issue_kind_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ApplyRemoteRenameInvariantInputs<'a> {
     pub local_exists_on_disk_after: bool,
     pub local_dirty_after: bool,
@@ -1832,6 +1849,71 @@ pub fn evaluate_apply_remote_delete_invariants(
             InvariantCheck {
                 name: "apply_remote_delete_failure_records_durable_issue".to_owned(),
                 passed: inputs.issue_kind_after == Some("apply_remote_delete_local_apply_failed"),
+                detail: format!("issue_kind_after={:?}", inputs.issue_kind_after),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_remote_subtree_delete_planning_invariants(
+    inputs: RemoteSubtreeDeletePlanningInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "remote_subtree_delete_plans_apply_remote_subtree_delete".to_owned(),
+            passed: inputs.planned_action_decision_after == Some("apply_remote_subtree_delete")
+                && inputs.planned_action_reason_after == Some("remote_subtree_deleted_from_anchor"),
+            detail: format!(
+                "decision={:?} reason={:?}",
+                inputs.planned_action_decision_after, inputs.planned_action_reason_after
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_apply_remote_subtree_delete_invariants(
+    inputs: ApplyRemoteSubtreeDeleteInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "apply_remote_subtree_delete_preserves_root_remote_tombstone".to_owned(),
+                passed: inputs.root_remote_present_after && inputs.root_remote_is_deleted_after,
+                detail: format!(
+                    "root_remote_present_after={} root_remote_is_deleted_after={}",
+                    inputs.root_remote_present_after, inputs.root_remote_is_deleted_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_subtree_delete_clears_descendant_remote_rows".to_owned(),
+                passed: inputs.descendant_remote_count_after == 0,
+                detail: format!(
+                    "descendant_remote_count_after={}",
+                    inputs.descendant_remote_count_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_subtree_delete_clears_local_state_and_sync_anchor_for_subtree"
+                    .to_owned(),
+                passed: inputs.subtree_local_state_count_after == 0
+                    && inputs.subtree_sync_anchor_count_after == 0,
+                detail: format!(
+                    "subtree_local_state_count_after={} subtree_sync_anchor_count_after={}",
+                    inputs.subtree_local_state_count_after, inputs.subtree_sync_anchor_count_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_subtree_delete_clears_subtree_planned_actions".to_owned(),
+                passed: inputs.subtree_planned_action_count_after == 0,
+                detail: format!(
+                    "subtree_planned_action_count_after={}",
+                    inputs.subtree_planned_action_count_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_subtree_delete_failure_records_durable_issue".to_owned(),
+                passed: inputs.issue_kind_after
+                    == Some("apply_remote_subtree_delete_local_apply_failed"),
                 detail: format!("issue_kind_after={:?}", inputs.issue_kind_after),
             },
         ],
@@ -3437,17 +3519,18 @@ impl AggregateCheck {
 #[cfg(test)]
 mod tests {
     use super::{
-        evaluate_apply_remote_delete_invariants, evaluate_checkpoint_head_publish_invariants,
-        evaluate_checkpoint_object_invariants, evaluate_content_object_invariants,
-        evaluate_download_transfer_invariants, evaluate_inode_upload_transfer_invariants,
-        evaluate_local_only_upload_transfer_invariants,
+        evaluate_apply_remote_delete_invariants, evaluate_apply_remote_subtree_delete_invariants,
+        evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
+        evaluate_content_object_invariants, evaluate_download_transfer_invariants,
+        evaluate_inode_upload_transfer_invariants, evaluate_local_only_upload_transfer_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
         evaluate_queue_complete_invariants, evaluate_remote_delete_planning_invariants,
         evaluate_remote_observation_ambiguous_bind_invariants,
         evaluate_remote_observation_convergence_invariants,
         evaluate_remote_only_directory_materialization_invariants,
-        ApplyRemoteDeleteInvariantInputs, CheckpointHeadPublishInvariantInputs,
+        evaluate_remote_subtree_delete_planning_invariants, ApplyRemoteDeleteInvariantInputs,
+        ApplyRemoteSubtreeDeleteInvariantInputs, CheckpointHeadPublishInvariantInputs,
         CheckpointObjectInvariantInputs, CheckpointObjectInvariantSnapshot,
         CheckpointProgressAuthorizer, CheckpointReplayInvariantInputs, CommitInvariantInputs,
         ContentObjectInvariantInputs, ContentObjectInvariantSnapshot,
@@ -3459,8 +3542,8 @@ mod tests {
         RemoteDeletePlanningInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
         RemoteObservationConvergenceInvariantInputs,
         RemoteOnlyDirectoryMaterializationInvariantInputs,
-        RemoteOnlyDirectoryMaterializationOutcomeKind, StoredCheckpointSegmentSnapshot,
-        StoredContentBlockSnapshot, WalReplayInvariantInputs,
+        RemoteOnlyDirectoryMaterializationOutcomeKind, RemoteSubtreeDeletePlanningInvariantInputs,
+        StoredCheckpointSegmentSnapshot, StoredContentBlockSnapshot, WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
     use loon_core::commit::{
@@ -4458,6 +4541,63 @@ mod tests {
         assert!(
             !report
                 .check("apply_remote_delete_failure_records_durable_issue")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_subtree_delete_as_passed() {
+        let planning_report = evaluate_remote_subtree_delete_planning_invariants(
+            RemoteSubtreeDeletePlanningInvariantInputs {
+                planned_action_decision_after: Some("apply_remote_subtree_delete"),
+                planned_action_reason_after: Some("remote_subtree_deleted_from_anchor"),
+            },
+        );
+        let apply_report = evaluate_apply_remote_subtree_delete_invariants(
+            ApplyRemoteSubtreeDeleteInvariantInputs {
+                root_remote_present_after: true,
+                root_remote_is_deleted_after: true,
+                descendant_remote_count_after: 0,
+                subtree_local_state_count_after: 0,
+                subtree_sync_anchor_count_after: 0,
+                subtree_planned_action_count_after: 0,
+                issue_kind_after: None,
+            },
+        );
+
+        assert!(
+            planning_report
+                .check("remote_subtree_delete_plans_apply_remote_subtree_delete")
+                .expect("planning check")
+                .passed
+        );
+        assert!(
+            apply_report
+                .check("apply_remote_subtree_delete_clears_descendant_remote_rows")
+                .expect("apply check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_subtree_delete_failure_without_issue_as_failed()
+    {
+        let report = evaluate_apply_remote_subtree_delete_invariants(
+            ApplyRemoteSubtreeDeleteInvariantInputs {
+                root_remote_present_after: true,
+                root_remote_is_deleted_after: true,
+                descendant_remote_count_after: 2,
+                subtree_local_state_count_after: 3,
+                subtree_sync_anchor_count_after: 3,
+                subtree_planned_action_count_after: 1,
+                issue_kind_after: None,
+            },
+        );
+
+        assert!(
+            !report
+                .check("apply_remote_subtree_delete_failure_records_durable_issue")
                 .expect("check")
                 .passed
         );

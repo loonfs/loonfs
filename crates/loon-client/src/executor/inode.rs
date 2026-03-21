@@ -6,12 +6,13 @@ use crate::download::{
 };
 use crate::local_apply::{
     append_stage_bytes, create_directory_durably, finalize_stage_file, remove_path_durably,
-    rename_path_durably, reset_stage_file, stage_file_size, staging_path_for_target,
+    remove_tree_durably, rename_path_durably, reset_stage_file, stage_file_size,
+    staging_path_for_target,
 };
 use crate::planner::{PlannedActionRecord, PlannerDecision};
 use crate::state_db::{
-    InodeUploadRow, RemoteFileStateRow, SqliteStateDb, TransferDirection, TransferLedgerRow,
-    TransferState,
+    BoundApplyRemoteSubtreeDeleteViews, InodeUploadRow, RemoteFileStateRow, SqliteStateDb,
+    TransferDirection, TransferLedgerRow, TransferState,
 };
 use crate::upload::{
     finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
@@ -100,6 +101,22 @@ pub fn execute_apply_remote_delete_to_path(
     applied_at_ms: u64,
 ) -> Result<ExecutedApplyRemoteDelete, ExecuteApplyRemoteDeleteError> {
     execute_apply_remote_delete(
+        db,
+        namespace_id,
+        inode_id,
+        Some(current_path),
+        applied_at_ms,
+    )
+}
+
+pub fn execute_apply_remote_subtree_delete_to_path(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: &Path,
+    applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteSubtreeDelete, ExecuteApplyRemoteSubtreeDeleteError> {
+    execute_apply_remote_subtree_delete(
         db,
         namespace_id,
         inode_id,
@@ -210,6 +227,44 @@ pub(super) fn execute_apply_remote_delete(
 
     if let Err(error) = &result {
         record_apply_remote_delete_issue(db, namespace_id, inode_id, error, applied_at_ms);
+    }
+
+    result
+}
+
+pub(super) fn execute_apply_remote_subtree_delete(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteSubtreeDelete, ExecuteApplyRemoteSubtreeDeleteError> {
+    let result = (|| {
+        let BoundApplyRemoteSubtreeDeleteViews { root_remote, .. } =
+            ensure_apply_remote_subtree_delete_ready(db, namespace_id, inode_id)?;
+        let current_path = current_path.ok_or_else(|| {
+            ExecuteApplyRemoteSubtreeDeleteError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            }
+        })?;
+        if !current_path.exists() {
+            return Err(ExecuteApplyRemoteSubtreeDeleteError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+
+        remove_tree_durably(current_path)?;
+
+        let applied = db.apply_remote_subtree_delete(namespace_id, inode_id, applied_at_ms)?;
+        debug_assert_eq!(applied.namespace_id, root_remote.namespace_id);
+        debug_assert_eq!(applied.inode_id, root_remote.inode_id);
+        Ok(ExecutedApplyRemoteSubtreeDelete { applied })
+    })();
+
+    if let Err(error) = &result {
+        record_apply_remote_subtree_delete_issue(db, namespace_id, inode_id, error, applied_at_ms);
     }
 
     result
@@ -557,6 +612,32 @@ fn ensure_apply_remote_delete_ready(
 
     db.load_bound_apply_remote_delete_views(namespace_id, inode_id)
         .map_err(ExecuteApplyRemoteDeleteError::from)
+}
+
+fn ensure_apply_remote_subtree_delete_ready(
+    db: &SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<BoundApplyRemoteSubtreeDeleteViews, ExecuteApplyRemoteSubtreeDeleteError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::ApplyRemoteSubtreeDelete {
+        return Err(
+            ExecuteApplyRemoteSubtreeDeleteError::ApplyRemoteSubtreeDeleteDecisionMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                decision: planned.decision,
+            },
+        );
+    }
+
+    db.load_bound_apply_remote_subtree_delete_views(namespace_id, inode_id)
+        .map_err(ExecuteApplyRemoteSubtreeDeleteError::from)
 }
 
 fn ensure_download_remote_edit_ready(
@@ -1135,6 +1216,50 @@ fn record_apply_remote_delete_issue(
             "apply_remote_delete failed during local apply",
             json!({
                 "failure": "unlink_io",
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        )),
+        _ => None,
+    };
+
+    if let Some((kind, summary, detail_json)) = issue {
+        let _ = db.record_conflict_or_error(
+            namespace_id,
+            inode_id,
+            kind,
+            summary,
+            &detail_json,
+            created_at_ms,
+        );
+    }
+}
+
+fn record_apply_remote_subtree_delete_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    error: &ExecuteApplyRemoteSubtreeDeleteError,
+    created_at_ms: u64,
+) {
+    let issue = match error {
+        ExecuteApplyRemoteSubtreeDeleteError::CurrentPathMissing { .. } => Some((
+            "apply_remote_subtree_delete_local_apply_failed",
+            "apply_remote_subtree_delete could not resolve the current local path",
+            json!({
+                "failure": "current_path_missing",
+            }),
+        )),
+        ExecuteApplyRemoteSubtreeDeleteError::LocalApplyFailed {
+            operation,
+            path,
+            source,
+        } => Some((
+            "apply_remote_subtree_delete_local_apply_failed",
+            "apply_remote_subtree_delete failed during local apply",
+            json!({
+                "failure": "recursive_remove_io",
                 "operation": operation,
                 "path": path,
                 "source": source.to_string(),

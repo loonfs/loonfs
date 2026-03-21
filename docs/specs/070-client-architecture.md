@@ -1840,6 +1840,119 @@ Executable invariant IDs for this slice:
 - `apply_remote_delete_clears_planned_action`
 - `apply_remote_delete_failure_records_durable_issue`
 
+## First bound-directory remote subtree delete observation path
+
+The next remote hierarchy reconciliation slice is bound-directory-only.
+
+Rules:
+
+- `apply_remote_observation` remains a durable metadata update; it must not remove local
+  directories directly
+- a later planner pass may schedule one new inode-keyed decision:
+  - `apply_remote_subtree_delete`
+- `apply_remote_subtree_delete` is valid only when:
+  - `remote_state(namespace_id, inode_id)` exists
+  - `local_state(namespace_id, inode_id)` exists
+  - `sync_anchor(namespace_id, inode_id)` exists
+  - the root rows all have `inode_kind = dir`
+  - `remote_state.is_deleted = true`
+  - the full rooted durable local subtree is already bound and locally converged
+- the first subtree-delete slice defines "locally converged" strictly for every rooted descendant
+  that still exists in durable client state:
+  - one matching `local_state(namespace_id, inode_id)` row exists
+  - one matching `sync_anchor(namespace_id, inode_id)` row exists
+  - `exists_on_disk = true`
+  - `dirty = false`
+  - `inode_kind`, `parent_inode_id`, and `display_name` still match the anchor
+  - for files, `content_digest` still matches the anchor
+- if the root is tombstoned but the durable state is `(remote tombstone, no local, no anchor)`,
+  the planner must return `no_op` with reason `remote_subtree_deleted_without_anchor`
+- if any rooted descendant is dirty, missing its anchor, is only a remote-only placeholder, or is
+  a temp/local-only inode, the planner must fall back to deferred `create_conflict_copy` with
+  reason `remote_subtree_deleted_while_descendants_differ_from_anchor`
+- if any rooted descendant has transfer-ledger or pending-mutation state, the planner must fall
+  back to deferred `create_conflict_copy` with reason
+  `remote_subtree_deleted_while_descendants_busy`
+- if the root itself no longer matches the anchor while the remote row is tombstoned, the planner
+  must fall back to deferred `create_conflict_copy` with reason
+  `remote_subtree_deleted_while_local_differs_from_anchor`
+- the first slice still excludes:
+  - remote directory rename reconciliation
+  - mixed subtree delete with descendant uploads/downloads still in flight
+
+Planner surface additions:
+
+- planner decision:
+  - `apply_remote_subtree_delete`
+- planner reasons:
+  - `remote_subtree_deleted_from_anchor`
+  - `remote_subtree_deleted_while_local_differs_from_anchor`
+  - `remote_subtree_deleted_while_descendants_differ_from_anchor`
+  - `remote_subtree_deleted_while_descendants_busy`
+  - `remote_subtree_deleted_without_anchor`
+
+The subtree-delete executor takes:
+
+- `namespace_id`
+- `inode_id`
+- one caller-supplied resolver for the current bound local root path
+- one explicit local apply timestamp
+
+Rules:
+
+- the mixed tick must treat `apply_remote_subtree_delete` as an executable inode action
+- the executor must load `planned_actions(namespace_id, inode_id)` and require
+  `decision = apply_remote_subtree_delete`
+- the executor must require the bound-directory subtree-delete preconditions above at execution
+  time, not only at planning time
+- the executor must resolve the current root local path successfully
+- if the current root path is missing locally, the executor must fail closed and record one
+  durable issue row with `kind = apply_remote_subtree_delete_local_apply_failed`
+- after a successful durable local recursive remove, one SQLite transaction must:
+  - preserve `remote_state(namespace_id, inode_id)` for the root with `is_deleted = true`
+  - delete descendant `remote_state` rows in the rooted subtree
+  - delete `local_state` rows for the full rooted subtree, including the root
+  - delete `sync_anchor` rows for the full rooted subtree, including the root
+  - clear `planned_actions` rows for the full rooted subtree
+  - clear any matching `apply_remote_subtree_delete_local_apply_failed` row on the root
+
+The local apply step must:
+
+- recursively remove the root directory tree
+- sync the root parent directory after the removal
+
+The first issue kind for this path is:
+
+- `apply_remote_subtree_delete_local_apply_failed`
+  - recorded for root-path resolution failures and recursive local-remove failures
+  - `detail_json.failure` must be one of:
+    - `current_path_missing`
+    - `recursive_remove_io`
+
+Why this rule exists:
+
+- authoritative remote directory tombstones are real hierarchy changes, not generic content drift
+- subtree delete is simpler than directory rename because it does not require descendant path
+  rewrites, but it still needs an explicit durable state shape
+- preserving only the root tombstone while clearing descendant rows keeps later planning simpler
+  than synthesizing one tombstone per removed descendant
+
+Failure modes prevented:
+
+- leaving a bound local subtree present after the authoritative remote directory was deleted
+- inventing descendant tombstones that were never actually observed remotely
+- silently canceling descendant transfer or pending-mutation work instead of surfacing the
+  conflict/defer decision durably
+
+Executable invariant IDs for this slice:
+
+- `remote_subtree_delete_plans_apply_remote_subtree_delete`
+- `apply_remote_subtree_delete_preserves_root_remote_tombstone`
+- `apply_remote_subtree_delete_clears_descendant_remote_rows`
+- `apply_remote_subtree_delete_clears_local_state_and_sync_anchor_for_subtree`
+- `apply_remote_subtree_delete_clears_subtree_planned_actions`
+- `apply_remote_subtree_delete_failure_records_durable_issue`
+
 ## SQLite hardening boundary (schema v11)
 
 The next schema version does not add new client-truth tables. It hardens the existing durable

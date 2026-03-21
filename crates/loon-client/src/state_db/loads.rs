@@ -420,7 +420,7 @@ pub(super) fn load_next_executable_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_rename', 'materialize_remote_dir')
+        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -433,7 +433,7 @@ pub(super) fn load_next_deferred_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_rename', 'materialize_remote_dir')
+        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -859,6 +859,399 @@ pub(super) fn load_bound_apply_remote_delete_views_from_conn(
     }
 
     Ok((remote, local, anchor))
+}
+
+struct RemoteSubtreeDeleteAnalysis {
+    root_remote: Option<RemoteFileStateRow>,
+    root_local: Option<LocalFileStateRow>,
+    root_anchor: Option<SyncAnchorRow>,
+    subtree_inode_ids: Vec<InodeId>,
+    descendant_remote_inode_ids: Vec<InodeId>,
+    first_busy_descendant_inode_id: Option<InodeId>,
+    first_nonconverged_descendant_inode_id: Option<InodeId>,
+    first_local_only_descendant_parent_inode_id: Option<InodeId>,
+}
+
+pub(super) fn assess_remote_subtree_delete_from_conn(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<RemoteSubtreeDeleteAssessment, StateDbError> {
+    let analysis = analyze_remote_subtree_delete(conn, namespace_id, inode_id)?;
+    let Some(root_remote) = analysis.root_remote else {
+        return Ok(RemoteSubtreeDeleteAssessment::NotApplicable);
+    };
+    if root_remote.inode_kind != InodeKind::Dir || !root_remote.is_deleted {
+        return Ok(RemoteSubtreeDeleteAssessment::NotApplicable);
+    }
+
+    match (analysis.root_local, analysis.root_anchor) {
+        (None, None) => Ok(RemoteSubtreeDeleteAssessment::InertWithoutAnchor),
+        (Some(root_local), Some(root_anchor)) => {
+            if root_local.inode_kind != InodeKind::Dir || root_anchor.inode_kind != InodeKind::Dir {
+                return Ok(RemoteSubtreeDeleteAssessment::DeferredRootLocalDiffers);
+            }
+            if !subtree_local_matches_anchor(&root_local, &root_anchor) {
+                return Ok(RemoteSubtreeDeleteAssessment::DeferredRootLocalDiffers);
+            }
+            if analysis.first_busy_descendant_inode_id.is_some() {
+                return Ok(RemoteSubtreeDeleteAssessment::DeferredDescendantsBusy);
+            }
+            if analysis.first_nonconverged_descendant_inode_id.is_some()
+                || analysis
+                    .first_local_only_descendant_parent_inode_id
+                    .is_some()
+            {
+                return Ok(RemoteSubtreeDeleteAssessment::DeferredDescendantsDiffer);
+            }
+
+            Ok(RemoteSubtreeDeleteAssessment::Ready(
+                BoundApplyRemoteSubtreeDeleteViews {
+                    namespace_id: namespace_id.clone(),
+                    root_inode_id: inode_id,
+                    root_remote,
+                    root_local,
+                    root_anchor,
+                    subtree_inode_ids: analysis.subtree_inode_ids,
+                    descendant_remote_inode_ids: analysis.descendant_remote_inode_ids,
+                },
+            ))
+        }
+        _ => Ok(RemoteSubtreeDeleteAssessment::DeferredRootLocalDiffers),
+    }
+}
+
+pub(super) fn load_bound_apply_remote_subtree_delete_views_from_conn(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<BoundApplyRemoteSubtreeDeleteViews, StateDbError> {
+    let analysis = analyze_remote_subtree_delete(conn, namespace_id, inode_id)?;
+    let root_remote =
+        analysis
+            .root_remote
+            .ok_or_else(|| StateDbError::ApplyRemoteSubtreeDeleteStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+    let root_local =
+        analysis
+            .root_local
+            .ok_or_else(|| StateDbError::ApplyRemoteSubtreeDeleteStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+    let root_anchor =
+        analysis
+            .root_anchor
+            .ok_or_else(|| StateDbError::ApplyRemoteSubtreeDeleteStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+
+    if root_remote.inode_kind != InodeKind::Dir
+        || root_local.inode_kind != InodeKind::Dir
+        || root_anchor.inode_kind != InodeKind::Dir
+    {
+        return Err(StateDbError::ApplyRemoteSubtreeDeleteRequiresDirectory {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            inode_kind: inode_kind_as_str(&root_local.inode_kind).to_owned(),
+        });
+    }
+
+    ensure_apply_remote_subtree_delete_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_digest",
+        format!("{:?}", root_local.content_digest),
+        format!("{:?}", root_anchor.content_digest),
+    )?;
+    ensure_apply_remote_subtree_delete_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "parent_inode_id",
+        format!("{:?}", root_local.parent_inode_id),
+        format!("{:?}", root_anchor.parent_inode_id),
+    )?;
+    ensure_apply_remote_subtree_delete_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "display_name",
+        root_local.display_name.clone(),
+        root_anchor.display_name.clone(),
+    )?;
+    if !root_local.exists_on_disk {
+        return Err(StateDbError::ApplyRemoteSubtreeDeleteLocalNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "exists_on_disk",
+            local: "false".to_owned(),
+            anchor: "true".to_owned(),
+        });
+    }
+    if root_local.dirty {
+        return Err(StateDbError::ApplyRemoteSubtreeDeleteLocalNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "dirty",
+            local: "true".to_owned(),
+            anchor: "false".to_owned(),
+        });
+    }
+    if !root_remote.is_deleted {
+        return Err(StateDbError::ApplyRemoteSubtreeDeleteRemoteNotDeleted {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        });
+    }
+    if let Some(descendant_inode_id) = analysis.first_busy_descendant_inode_id {
+        return Err(StateDbError::ApplyRemoteSubtreeDeleteDescendantBusy {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            descendant_inode_id: descendant_inode_id.0,
+        });
+    }
+    if let Some(descendant_inode_id) = analysis.first_nonconverged_descendant_inode_id {
+        return Err(
+            StateDbError::ApplyRemoteSubtreeDeleteDescendantNotConverged {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                descendant_inode_id: descendant_inode_id.0,
+                reason: "local_or_remote_mismatch",
+            },
+        );
+    }
+    if let Some(parent_inode_id) = analysis.first_local_only_descendant_parent_inode_id {
+        return Err(
+            StateDbError::ApplyRemoteSubtreeDeleteDescendantNotConverged {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                descendant_inode_id: parent_inode_id.0,
+                reason: "local_only_descendant_present",
+            },
+        );
+    }
+
+    Ok(BoundApplyRemoteSubtreeDeleteViews {
+        namespace_id: namespace_id.clone(),
+        root_inode_id: inode_id,
+        root_remote,
+        root_local,
+        root_anchor,
+        subtree_inode_ids: analysis.subtree_inode_ids,
+        descendant_remote_inode_ids: analysis.descendant_remote_inode_ids,
+    })
+}
+
+fn analyze_remote_subtree_delete(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<RemoteSubtreeDeleteAnalysis, StateDbError> {
+    let root_remote = load_remote_file(conn, namespace_id, inode_id)?;
+    let root_local = load_local_file(conn, namespace_id, inode_id)?;
+    let root_anchor = load_sync_anchor(conn, namespace_id, inode_id)?;
+    let subtree_inode_ids = load_local_subtree_inode_ids(conn, namespace_id, inode_id)?;
+    let descendant_remote_inode_ids =
+        load_remote_subtree_descendant_inode_ids(conn, namespace_id, inode_id)?;
+
+    let mut first_busy_descendant_inode_id = None;
+    let mut first_nonconverged_descendant_inode_id = None;
+    for descendant_inode_id in subtree_inode_ids
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != inode_id)
+    {
+        let has_active_transfer = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM transfer_ledger
+                WHERE namespace_id = ?1 AND inode_id = ?2
+            )",
+            params![
+                namespace_id.as_str(),
+                to_sql_u64(descendant_inode_id.0, "inode_id")?,
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let has_pending_inode_mutation =
+            load_pending_inode_mutation_for_inode(conn, namespace_id, descendant_inode_id)?
+                .is_some();
+        if has_active_transfer || has_pending_inode_mutation {
+            first_busy_descendant_inode_id = Some(descendant_inode_id);
+            break;
+        }
+
+        let descendant_remote = load_remote_file(conn, namespace_id, descendant_inode_id)?;
+        let descendant_local = load_local_file(conn, namespace_id, descendant_inode_id)?
+            .expect("recursive local subtree should only contain local rows");
+        let descendant_anchor = load_sync_anchor(conn, namespace_id, descendant_inode_id)?;
+        let descendant_is_clean = match (descendant_remote.as_ref(), descendant_anchor.as_ref()) {
+            (Some(remote), Some(anchor)) => {
+                subtree_local_matches_anchor(&descendant_local, anchor)
+                    && subtree_remote_matches_anchor(remote, anchor)
+            }
+            _ => false,
+        };
+        if !descendant_is_clean {
+            first_nonconverged_descendant_inode_id = Some(descendant_inode_id);
+            break;
+        }
+    }
+
+    let first_local_only_descendant_parent_inode_id =
+        load_local_only_descendants_under_subtree(conn, namespace_id, inode_id)?
+            .into_iter()
+            .find_map(|row| row.parent_inode_id);
+
+    Ok(RemoteSubtreeDeleteAnalysis {
+        root_remote,
+        root_local,
+        root_anchor,
+        subtree_inode_ids,
+        descendant_remote_inode_ids,
+        first_busy_descendant_inode_id,
+        first_nonconverged_descendant_inode_id,
+        first_local_only_descendant_parent_inode_id,
+    })
+}
+
+fn load_local_subtree_inode_ids(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    root_inode_id: InodeId,
+) -> Result<Vec<InodeId>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE rooted_local(inode_id) AS (
+            SELECT inode_id
+            FROM local_state
+            WHERE namespace_id = ?1 AND inode_id = ?2
+            UNION ALL
+            SELECT child.inode_id
+            FROM local_state child
+            JOIN rooted_local parent ON child.parent_inode_id = parent.inode_id
+            WHERE child.namespace_id = ?1
+        )
+        SELECT inode_id
+        FROM rooted_local
+        ORDER BY inode_id ASC",
+    )?;
+    let mut rows = stmt.query(params![
+        namespace_id.as_str(),
+        to_sql_u64(root_inode_id.0, "inode_id")?,
+    ])?;
+    let mut inode_ids = Vec::new();
+    while let Some(row) = rows.next()? {
+        inode_ids.push(InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?));
+    }
+    Ok(inode_ids)
+}
+
+fn load_remote_subtree_descendant_inode_ids(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    root_inode_id: InodeId,
+) -> Result<Vec<InodeId>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE rooted_remote(inode_id) AS (
+            SELECT inode_id
+            FROM remote_state
+            WHERE namespace_id = ?1 AND inode_id = ?2
+            UNION ALL
+            SELECT child.inode_id
+            FROM remote_state child
+            JOIN rooted_remote parent ON child.parent_inode_id = parent.inode_id
+            WHERE child.namespace_id = ?1
+        )
+        SELECT inode_id
+        FROM rooted_remote
+        WHERE inode_id != ?2
+        ORDER BY inode_id ASC",
+    )?;
+    let mut rows = stmt.query(params![
+        namespace_id.as_str(),
+        to_sql_u64(root_inode_id.0, "inode_id")?,
+    ])?;
+    let mut inode_ids = Vec::new();
+    while let Some(row) = rows.next()? {
+        inode_ids.push(InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?));
+    }
+    Ok(inode_ids)
+}
+
+fn load_local_only_descendants_under_subtree(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    root_inode_id: InodeId,
+) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE rooted_dirs(inode_id) AS (
+            SELECT inode_id
+            FROM local_state
+            WHERE namespace_id = ?1 AND inode_id = ?2 AND inode_kind = 'dir'
+            UNION ALL
+            SELECT child.inode_id
+            FROM local_state child
+            JOIN rooted_dirs parent ON child.parent_inode_id = parent.inode_id
+            WHERE child.namespace_id = ?1 AND child.inode_kind = 'dir'
+        )
+        SELECT
+            client_file_id,
+            namespace_id,
+            inode_kind,
+            parent_inode_id,
+            display_name,
+            content_digest,
+            exists_on_disk,
+            dirty,
+            last_local_change_ms
+        FROM local_only_state
+        WHERE namespace_id = ?1
+          AND parent_inode_id IN (SELECT inode_id FROM rooted_dirs)
+        ORDER BY client_file_id ASC",
+    )?;
+    let mut rows = stmt.query(params![
+        namespace_id.as_str(),
+        to_sql_u64(root_inode_id.0, "inode_id")?,
+    ])?;
+    let mut descendants = Vec::new();
+    while let Some(row) = rows.next()? {
+        let parent_inode_id = row.get::<_, Option<i64>>(3)?;
+        descendants.push(LocalOnlyFileStateRow {
+            client_file_id: ClientFileId::new(row.get::<_, String>(0)?),
+            namespace_id: NamespaceId::from(row.get::<_, String>(1)?),
+            inode_kind: inode_kind_from_str(&row.get::<_, String>(2)?)?,
+            parent_inode_id: parent_inode_id
+                .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
+                .transpose()?,
+            display_name: row.get::<_, String>(4)?,
+            content_digest: row.get::<_, Option<String>>(5)?,
+            exists_on_disk: row.get::<_, bool>(6)?,
+            dirty: row.get::<_, bool>(7)?,
+            last_local_change_ms: from_sql_u64(row.get::<_, i64>(8)?, "last_local_change_ms")?,
+        });
+    }
+    Ok(descendants)
+}
+
+fn subtree_local_matches_anchor(local: &LocalFileStateRow, anchor: &SyncAnchorRow) -> bool {
+    local.exists_on_disk
+        && !local.dirty
+        && local.inode_kind == anchor.inode_kind
+        && local.content_digest == anchor.content_digest
+        && local.parent_inode_id == anchor.parent_inode_id
+        && local.display_name == anchor.display_name
+}
+
+fn subtree_remote_matches_anchor(remote: &RemoteFileStateRow, anchor: &SyncAnchorRow) -> bool {
+    !remote.is_deleted
+        && remote.inode_kind == anchor.inode_kind
+        && remote.revision_no == anchor.revision_no
+        && remote.content_digest == anchor.content_digest
+        && remote.content_manifest_digest == anchor.content_manifest_digest
+        && remote.parent_inode_id == anchor.parent_inode_id
+        && remote.display_name == anchor.display_name
 }
 
 pub(super) fn load_local_only_file(

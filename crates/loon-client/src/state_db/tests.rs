@@ -1765,6 +1765,170 @@ fn apply_remote_delete_preserves_tombstone_and_clears_local_state_and_anchor() {
 }
 
 #[test]
+fn apply_remote_subtree_delete_preserves_root_tombstone_and_clears_subtree_state() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let root_inode_id = InodeId(10);
+    let child_inode_id = InodeId(11);
+
+    db.planner_transaction("seed-apply-remote-subtree-delete", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: root_inode_id,
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(420),
+            revision_no: RevisionNo(7),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "reports".to_owned(),
+            is_deleted: true,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: root_inode_id,
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "reports".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: root_inode_id,
+            inode_kind: InodeKind::Dir,
+            synced_seq: ChangeSeq(419),
+            revision_no: RevisionNo(7),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "reports".to_owned(),
+        })?;
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: child_inode_id,
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(419),
+            revision_no: RevisionNo(3),
+            content_digest: Some("sha256:child-3".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-child-3".to_owned()),
+            parent_inode_id: Some(root_inode_id),
+            display_name: "q1.txt".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: child_inode_id,
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:child-3".to_owned()),
+            parent_inode_id: Some(root_inode_id),
+            display_name: "q1.txt".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_100_010,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: child_inode_id,
+            inode_kind: InodeKind::File,
+            synced_seq: ChangeSeq(419),
+            revision_no: RevisionNo(3),
+            content_digest: Some("sha256:child-3".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-child-3".to_owned()),
+            parent_inode_id: Some(root_inode_id),
+            display_name: "q1.txt".to_owned(),
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: root_inode_id,
+            decision: "apply_remote_subtree_delete".to_owned(),
+            reason: "remote_subtree_deleted_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_100_500,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: child_inode_id,
+            decision: "create_conflict_copy".to_owned(),
+            reason: "local_and_remote_differ_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_100_550,
+        })?;
+        Ok(())
+    })
+    .expect("seed apply_remote_subtree_delete state");
+    db.record_conflict_or_error(
+        &namespace_id,
+        root_inode_id,
+        "apply_remote_subtree_delete_local_apply_failed",
+        "stale failure",
+        &json!({"failure": "current_path_missing"}),
+        1_700_000_100_600,
+    )
+    .expect("record stale subtree delete issue");
+
+    let applied = db
+        .apply_remote_subtree_delete(&namespace_id, root_inode_id, 1_700_000_101_000)
+        .expect("apply remote subtree delete");
+
+    assert_eq!(
+        applied,
+        super::AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id: root_inode_id,
+        }
+    );
+    assert_eq!(
+        db.load_file_sync_views(&namespace_id, root_inode_id)
+            .expect("load root tombstone after apply"),
+        FileSyncViews {
+            namespace_id: namespace_id.clone(),
+            inode_id: root_inode_id,
+            remote: Some(RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(420),
+                revision_no: RevisionNo(7),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "reports".to_owned(),
+                is_deleted: true,
+            }),
+            local: None,
+            sync_anchor: None,
+        }
+    );
+    assert_eq!(
+        db.load_file_sync_views(&namespace_id, child_inode_id)
+            .expect("load child views after subtree delete"),
+        FileSyncViews {
+            namespace_id: namespace_id.clone(),
+            inode_id: child_inode_id,
+            remote: None,
+            local: None,
+            sync_anchor: None,
+        }
+    );
+    assert_eq!(
+        db.load_planned_action(&namespace_id, root_inode_id)
+            .expect("load root planned action after subtree delete"),
+        None
+    );
+    assert_eq!(
+        db.load_planned_action(&namespace_id, child_inode_id)
+            .expect("load child planned action after subtree delete"),
+        None
+    );
+    assert_eq!(
+        db.load_conflicts_and_errors(&namespace_id, root_inode_id)
+            .expect("load root issues after subtree delete"),
+        Vec::new()
+    );
+}
+
+#[test]
 fn apply_inode_mutation_response_is_idempotent_when_bound_state_already_matches() {
     let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
     let namespace_id = NamespaceId::from("ns-1");
