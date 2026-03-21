@@ -42,7 +42,7 @@ pub(crate) fn apply_bytes_atomically(
 
 pub(crate) fn create_directory_durably(target_path: &Path) -> Result<(), LocalApplyError> {
     let parent_dir = target_parent_dir(target_path);
-    fs::create_dir_all(target_path)
+    fs::create_dir(target_path)
         .map_err(|source| io_error("create_target_dir", target_path, source))?;
     sync_dir(target_path).map_err(|source| io_error("sync_target_dir", target_path, source))?;
     sync_parent_dir(parent_dir)
@@ -256,10 +256,29 @@ mod tests {
     fn create_directory_durably_creates_target_directory() {
         let temp_dir = TestDir::new("local-apply-dir");
         let target_path = temp_dir.path().join("nested/incoming");
+        fs::create_dir_all(target_path.parent().expect("parent dir")).expect("create parent dir");
 
         create_directory_durably(&target_path).expect("create directory durably");
 
         assert!(target_path.is_dir(), "target directory should exist");
+    }
+
+    #[test]
+    fn create_directory_durably_requires_existing_parent_directory() {
+        let temp_dir = TestDir::new("local-apply-dir-parent-missing");
+        let target_path = temp_dir.path().join("nested/incoming");
+
+        let error = create_directory_durably(&target_path).expect_err("parent should be required");
+
+        assert_eq!(error.operation, "create_target_dir");
+        assert!(
+            matches!(
+                error.source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ),
+            "unexpected error kind: {:?}",
+            error.source.kind()
+        );
     }
 
     #[test]

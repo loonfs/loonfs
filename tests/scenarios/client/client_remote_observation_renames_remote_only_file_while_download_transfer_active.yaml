@@ -84,6 +84,6 @@ expect:
   planner_result:
     namespace_id: ns-1
     inode_id: 42
-    decision: download_remote_edit
-    reason: remote_observed_without_anchor
+    decision: no_op
+    reason: remote_parent_waiting_for_materialization
     created_at_ms: 1700000410000

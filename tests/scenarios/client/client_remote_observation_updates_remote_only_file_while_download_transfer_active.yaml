@@ -80,12 +80,13 @@ expect:
     exists_on_disk: false
     dirty: false
     last_local_change_ms: 1700000612000
-  planned_action_cleared: false
+  planned_action_cleared: true
   invariants:
     - remote_observation_active_download_preserves_transfer_ledger
+    - remote_only_materialization_waits_for_parent_materialization
   planner_result:
     namespace_id: ns-1
     inode_id: 601
-    decision: download_remote_edit
-    reason: remote_observed_without_anchor
+    decision: no_op
+    reason: remote_parent_waiting_for_materialization
     created_at_ms: 1700000615000

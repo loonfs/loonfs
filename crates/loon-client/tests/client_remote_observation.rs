@@ -23,6 +23,7 @@ use loon_testkit::invariants::{
     evaluate_remote_observation_ambiguous_bind_invariants,
     evaluate_remote_observation_convergence_invariants,
     evaluate_remote_observation_late_bind_invariants,
+    evaluate_remote_only_parent_materialization_wait_invariants,
     evaluate_remote_path_change_planning_invariants,
     evaluate_remote_subtree_delete_planning_invariants,
     evaluate_remote_subtree_rename_planning_invariants, ApplyRemoteDeleteInvariantInputs,
@@ -31,8 +32,8 @@ use loon_testkit::invariants::{
     RemoteDeletePlanningInvariantInputs, RemoteObservationActiveDownloadInvariantInputs,
     RemoteObservationActiveUploadInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
     RemoteObservationConvergenceInvariantInputs, RemoteObservationLateBindInvariantInputs,
-    RemotePathChangePlanningInvariantInputs, RemoteSubtreeDeletePlanningInvariantInputs,
-    RemoteSubtreeRenamePlanningInvariantInputs,
+    RemoteOnlyParentMaterializationWaitInvariantInputs, RemotePathChangePlanningInvariantInputs,
+    RemoteSubtreeDeletePlanningInvariantInputs, RemoteSubtreeRenamePlanningInvariantInputs,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -1116,6 +1117,21 @@ fn remote_observation_remote_move_invariant_trace_matches_checked_in_artifact() 
 }
 
 #[test]
+fn remote_observation_materialized_target_parent_unblocks_file_rename_trace_matches_checked_in_artifact(
+) {
+    let report = run_materializable_target_parent_file_rename_report(
+        "client/client_remote_observation_bound_file_remote_move_waits_for_target_parent_materialization.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_move_waits_for_target_parent_materialization.txt"
+        )
+    );
+}
+
+#[test]
 fn remote_observation_remote_rename_failure_invariant_trace_matches_checked_in_artifact() {
     let report = run_remote_rename_invariant_report(
         "client/client_remote_observation_bound_file_remote_rename_destination_occupied_records_issue.yaml",
@@ -1168,6 +1184,21 @@ fn remote_observation_remote_subtree_delete_invariant_trace_matches_checked_in_a
         report.rendered_trace,
         include_str!(
             "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_applies_locally.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_subtree_delete_remote_only_descendant_trace_matches_checked_in_artifact(
+) {
+    let report = run_remote_subtree_delete_invariant_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_delete_clears_remote_only_descendants.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_clears_remote_only_descendants.txt"
         )
     );
 }
@@ -1231,6 +1262,21 @@ fn remote_observation_remote_subtree_move_invariant_trace_matches_checked_in_art
 }
 
 #[test]
+fn remote_observation_materialized_target_parent_unblocks_subtree_move_trace_matches_checked_in_artifact(
+) {
+    let report = run_materializable_target_parent_subtree_rename_report(
+        "client/client_remote_observation_bound_directory_remote_subtree_move_waits_for_target_parent_materialization.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_move_waits_for_target_parent_materialization.txt"
+        )
+    );
+}
+
+#[test]
 fn remote_observation_remote_subtree_rename_failure_invariant_trace_matches_checked_in_artifact() {
     let report = run_remote_subtree_rename_invariant_report(
         "client/client_remote_observation_bound_directory_remote_subtree_rename_destination_occupied_records_issue.yaml",
@@ -1241,6 +1287,20 @@ fn remote_observation_remote_subtree_rename_failure_invariant_trace_matches_chec
         report.rendered_trace,
         include_str!(
             "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_rename_destination_occupied_records_issue.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_only_parent_wait_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_only_parent_wait_invariant_report(
+        "client/client_remote_observation_updates_remote_only_file_while_download_transfer_active.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_updates_remote_only_file_while_download_transfer_active.txt"
         )
     );
 }
@@ -1319,8 +1379,16 @@ fn remote_observation_active_download_invariant_passes() {
             .expect("apply remote observation");
     }
 
-    let db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
-    let report = evaluate_remote_observation_active_download_invariants(
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_tick = actions[2].planner().expect("planner action third");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan remote-only file after observation");
+    let active_download_report = evaluate_remote_observation_active_download_invariants(
         RemoteObservationActiveDownloadInvariantInputs {
             transfer_present_after: db
                 .load_transfer_ledger_for_inode(
@@ -1334,7 +1402,22 @@ fn remote_observation_active_download_invariant_passes() {
             expected_remote_synced_seq: observe.remote_observation.observed_seq,
         },
     );
+    let wait_report = evaluate_remote_only_parent_materialization_wait_invariants(
+        RemoteOnlyParentMaterializationWaitInvariantInputs {
+            planner_decision: planner_result.decision.as_str(),
+            planner_reason: planner_result.reason.as_str(),
+            planned_action_present_after: db
+                .load_planned_action(
+                    &initial.remote_state.namespace_id,
+                    initial.remote_state.inode_id,
+                )
+                .expect("load planned action after wait planning")
+                .is_some(),
+        },
+    );
+    let report = combine_reconciliation_reports([active_download_report, wait_report]);
 
+    assert_eq!(planner_result, expect.planner_result);
     assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
 }
 
@@ -2407,6 +2490,720 @@ fn run_remote_delete_invariant_report(fixture_path: &str) -> DeleteInvariantFixt
     }
 }
 
+fn run_remote_only_parent_wait_invariant_report(
+    fixture_path: &str,
+) -> ReconciliationInvariantFixtureRunReport {
+    let scenario = load_fixture(fixture_path);
+    let initial: DownloadObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: DownloadObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-parent-wait-invariants");
+    let db_path = temp_dir.path().join("client.sqlite3");
+
+    seed_remote_only_observation_state(&db_path, &initial);
+    let observe = actions[0].apply().expect("apply action first");
+    {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation");
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_tick = actions[2].planner().expect("planner action third");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan remote-only inode after observation");
+    let active_download_report = evaluate_remote_observation_active_download_invariants(
+        RemoteObservationActiveDownloadInvariantInputs {
+            transfer_present_after: db
+                .load_transfer_ledger_for_inode(
+                    &planner_tick.namespace_id,
+                    planner_tick.inode_id,
+                    TransferDirection::Download,
+                )
+                .expect("load download transfer ledger after wait planning")
+                .is_some(),
+            remote_synced_seq_after: expect.remote_state.observed_seq,
+            expected_remote_synced_seq: observe.remote_observation.observed_seq,
+        },
+    );
+    let wait_report = evaluate_remote_only_parent_materialization_wait_invariants(
+        RemoteOnlyParentMaterializationWaitInvariantInputs {
+            planner_decision: planner_result.decision.as_str(),
+            planner_reason: planner_result.reason.as_str(),
+            planned_action_present_after: db
+                .load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
+                .expect("load planned action after wait planning")
+                .is_some(),
+        },
+    );
+    let report = combine_reconciliation_reports([active_download_report, wait_report]);
+    assert_eq!(planner_result, expect.planner_result);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("planner_result={planner_result:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("remote-only-parent-wait"))
+    .collect::<Vec<_>>();
+
+    ReconciliationInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
+}
+
+fn run_materializable_target_parent_file_rename_report(
+    fixture_path: &str,
+) -> ReconciliationInvariantFixtureRunReport {
+    let scenario = load_fixture(fixture_path);
+    let initial: RenameObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteRenameFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: MaterializableRenameObservationExpect =
+        scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-materializable-file-rename");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create objectstore root");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let current_path = source_root.join(&initial.local_file.relative_path);
+    let target_path = source_root.join(&initial.target_relative_path);
+    let target_parent_path = target_path
+        .parent()
+        .expect("target parent path")
+        .to_path_buf();
+    fs::create_dir_all(current_path.parent().expect("current path parent"))
+        .expect("create current path parent");
+    fs::write(&current_path, initial.local_file.content_utf8.as_bytes())
+        .expect("write current local file");
+
+    seed_remote_rename_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    let wait_planner_tick = actions[2].planner().expect("planner action third");
+    let parent_planner_tick = actions[3].planner().expect("planner action fourth");
+    let parent_execute = actions[4]
+        .execute_next_client_action()
+        .expect("execute action fifth");
+    let rename_planner_tick = actions[6].planner().expect("planner action seventh");
+    let rename_execute = actions[7]
+        .execute_next_client_action()
+        .expect("execute action eighth");
+    let final_planner_tick = actions[9].planner().expect("planner action tenth");
+
+    let observation_outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(observation_outcome, expect.outcome.clone().into_outcome());
+
+    let waiting_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for waiting plan");
+        plan_file(
+            &mut db,
+            &wait_planner_tick.namespace_id,
+            wait_planner_tick.inode_id,
+            wait_planner_tick.now_ms,
+        )
+        .expect("plan waiting file move")
+    };
+    assert_eq!(waiting_planner_result, expect.waiting_planner_result);
+
+    let parent_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for parent plan");
+        plan_file(
+            &mut db,
+            &parent_planner_tick.namespace_id,
+            parent_planner_tick.inode_id,
+            parent_planner_tick.now_ms,
+        )
+        .expect("plan target parent materialization")
+    };
+    assert_eq!(parent_planner_result, expect.parent_planner_result);
+
+    let parent_executed = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for parent execute");
+        execute_next_client_action(
+            &mut db,
+            &store,
+            |_client_file_id| None,
+            |_namespace_id, _inode_id| Some(target_parent_path.clone()),
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
+            parent_execute.uploaded_at_ms,
+            parent_execute.created_at_ms,
+            |_request| panic!("materialize_remote_dir should not dispatch a mutation request"),
+        )
+        .expect("execute parent materialization")
+    };
+    match parent_executed {
+        Some(NextClientAction::ExecutedMaterializeRemoteDir(_)) => {}
+        other => panic!("expected executed materialize_remote_dir, got {other:?}"),
+    }
+
+    let rename_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for rename plan");
+        plan_file(
+            &mut db,
+            &rename_planner_tick.namespace_id,
+            rename_planner_tick.inode_id,
+            rename_planner_tick.now_ms,
+        )
+        .expect("plan file move after parent materialization")
+    };
+    assert_eq!(rename_planner_result, expect.rename_planner_result);
+
+    let rename_executed = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for rename execute");
+        execute_next_client_action(
+            &mut db,
+            &store,
+            |_client_file_id| None,
+            |_namespace_id, _inode_id| Some(current_path.clone()),
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| Some(target_path.clone()),
+            rename_execute.uploaded_at_ms,
+            rename_execute.created_at_ms,
+            |_request| panic!("apply_remote_rename should not dispatch a mutation request"),
+        )
+        .expect("execute file rename after parent materialization")
+    };
+    match rename_executed {
+        Some(NextClientAction::ExecutedApplyRemoteRename(ExecutedApplyRemoteRename {
+            applied,
+        })) => assert_eq!(
+            applied,
+            loon_client::state_db::AppliedInodeMutation {
+                namespace_id: rename_planner_tick.namespace_id.clone(),
+                inode_id: rename_planner_tick.inode_id,
+            }
+        ),
+        other => panic!("expected executed apply_remote_rename, got {other:?}"),
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for final plan");
+    let final_planner_result = plan_file(
+        &mut db,
+        &final_planner_tick.namespace_id,
+        final_planner_tick.inode_id,
+        final_planner_tick.now_ms,
+    )
+    .expect("plan file after rename apply");
+    assert_eq!(final_planner_result, expect.final_planner_result);
+
+    let file_views = db
+        .load_file_sync_views(
+            &final_planner_tick.namespace_id,
+            final_planner_tick.inode_id,
+        )
+        .expect("load renamed file views");
+    assert_eq!(file_views.remote, Some(expect.remote_state.clone()));
+    assert_eq!(file_views.local, Some(expect.local_state.clone()));
+    assert_eq!(file_views.sync_anchor, Some(expect.sync_anchor.clone()));
+    let target_parent_views = db
+        .load_file_sync_views(
+            &parent_planner_tick.namespace_id,
+            parent_planner_tick.inode_id,
+        )
+        .expect("load target parent views");
+    assert_eq!(
+        target_parent_views.local,
+        Some(expect.target_parent_local_state.clone())
+    );
+    assert_eq!(
+        target_parent_views.sync_anchor,
+        Some(expect.target_parent_sync_anchor.clone())
+    );
+    assert_eq!(
+        db.load_planned_action(
+            &final_planner_tick.namespace_id,
+            final_planner_tick.inode_id
+        )
+        .expect("load planned action after rename"),
+        if expect.planned_action_cleared {
+            None
+        } else {
+            panic!("fixture expects file planned action to clear")
+        }
+    );
+    assert!(
+        target_parent_path.is_dir(),
+        "target parent should be materialized"
+    );
+    assert!(
+        target_path.is_file(),
+        "target file should exist after rename"
+    );
+    assert!(
+        !current_path.exists(),
+        "current file path should be removed after rename"
+    );
+
+    let planning_report =
+        evaluate_remote_path_change_planning_invariants(RemotePathChangePlanningInvariantInputs {
+            planned_action_decision_after: Some(rename_planner_result.decision.as_str()),
+            planned_action_reason_after: Some(rename_planner_result.reason.as_str()),
+        });
+    let apply_report = evaluate_apply_remote_rename_invariants(ApplyRemoteRenameInvariantInputs {
+        local_exists_on_disk_after: file_views
+            .local
+            .as_ref()
+            .expect("renamed local row")
+            .exists_on_disk,
+        local_dirty_after: file_views.local.as_ref().expect("renamed local row").dirty,
+        local_parent_inode_after: file_views
+            .local
+            .as_ref()
+            .and_then(|local| local.parent_inode_id),
+        local_display_name_after: file_views
+            .local
+            .as_ref()
+            .expect("renamed local row")
+            .display_name
+            .as_str(),
+        remote_synced_seq_after: file_views
+            .remote
+            .as_ref()
+            .expect("renamed remote row")
+            .observed_seq,
+        remote_revision_no_after: file_views
+            .remote
+            .as_ref()
+            .expect("renamed remote row")
+            .revision_no,
+        remote_content_digest_after: file_views
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.content_digest.as_deref()),
+        remote_parent_inode_after: file_views
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.parent_inode_id),
+        remote_display_name_after: file_views
+            .remote
+            .as_ref()
+            .expect("renamed remote row")
+            .display_name
+            .as_str(),
+        sync_anchor_seq_after: file_views
+            .sync_anchor
+            .as_ref()
+            .map(|anchor| anchor.synced_seq),
+        sync_anchor_revision_no_after: file_views
+            .sync_anchor
+            .as_ref()
+            .map(|anchor| anchor.revision_no),
+        sync_anchor_content_digest_after: file_views
+            .sync_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.content_digest.as_deref()),
+        sync_anchor_parent_inode_after: file_views
+            .sync_anchor
+            .as_ref()
+            .and_then(|anchor| anchor.parent_inode_id),
+        sync_anchor_display_name_after: file_views
+            .sync_anchor
+            .as_ref()
+            .map(|anchor| anchor.display_name.as_str()),
+        planned_action_present_after: db
+            .load_planned_action(
+                &final_planner_tick.namespace_id,
+                final_planner_tick.inode_id,
+            )
+            .expect("load planned action for invariants")
+            .is_some(),
+        issue_kind_after: None,
+    });
+    let report = combine_reconciliation_reports([planning_report, apply_report]);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("waiting_planner_result={waiting_planner_result:?}"),
+        format!("parent_planner_result={parent_planner_result:?}"),
+        format!(
+            "execution={:?}",
+            NextClientAction::ExecutedApplyRemoteRename(ExecutedApplyRemoteRename {
+                applied: loon_client::state_db::AppliedInodeMutation {
+                    namespace_id: rename_planner_tick.namespace_id.clone(),
+                    inode_id: rename_planner_tick.inode_id,
+                },
+            })
+        ),
+        format!("rename_planner_result={rename_planner_result:?}"),
+        format!("final_planner_result={final_planner_result:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("materialized-target-parent-file-rename"))
+    .collect::<Vec<_>>();
+
+    ReconciliationInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
+}
+
+fn run_materializable_target_parent_subtree_rename_report(
+    fixture_path: &str,
+) -> ReconciliationInvariantFixtureRunReport {
+    let scenario = load_fixture(fixture_path);
+    let initial: SubtreeRenameObservationInitial =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteRenameFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: MaterializableSubtreeRenameObservationExpect =
+        scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-materializable-subtree-rename");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create objectstore root");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    materialize_local_tree(&source_root, &initial.local_entries);
+    let root_path = source_root.join(&initial.root_relative_path);
+    let target_path = source_root.join(&initial.target_relative_path);
+    let first_parent_path = target_path
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("first target parent path")
+        .to_path_buf();
+    let second_parent_path = target_path
+        .parent()
+        .expect("second target parent path")
+        .to_path_buf();
+    seed_remote_subtree_rename_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    let wait_planner_tick = actions[2].planner().expect("planner action third");
+    let first_parent_planner_tick = actions[3].planner().expect("planner action fourth");
+    let first_parent_execute = actions[4]
+        .execute_next_client_action()
+        .expect("execute action fifth");
+    let second_parent_planner_tick = actions[6].planner().expect("planner action seventh");
+    let second_parent_execute = actions[7]
+        .execute_next_client_action()
+        .expect("execute action eighth");
+    let rename_planner_tick = actions[9].planner().expect("planner action tenth");
+    let rename_execute = actions[10]
+        .execute_next_client_action()
+        .expect("execute action eleventh");
+    let final_planner_tick = actions[12].planner().expect("planner action thirteenth");
+
+    let observation_outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(observation_outcome, expect.outcome.clone().into_outcome());
+
+    let waiting_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for waiting plan");
+        plan_file(
+            &mut db,
+            &wait_planner_tick.namespace_id,
+            wait_planner_tick.inode_id,
+            wait_planner_tick.now_ms,
+        )
+        .expect("plan waiting subtree move")
+    };
+    assert_eq!(waiting_planner_result, expect.waiting_planner_result);
+
+    let first_parent_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for first parent plan");
+        plan_file(
+            &mut db,
+            &first_parent_planner_tick.namespace_id,
+            first_parent_planner_tick.inode_id,
+            first_parent_planner_tick.now_ms,
+        )
+        .expect("plan first target parent materialization")
+    };
+    assert_eq!(
+        first_parent_planner_result,
+        expect.first_parent_planner_result
+    );
+
+    let first_parent_executed = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for first parent execute");
+        execute_next_client_action(
+            &mut db,
+            &store,
+            |_client_file_id| None,
+            |_namespace_id, _inode_id| Some(first_parent_path.clone()),
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
+            first_parent_execute.uploaded_at_ms,
+            first_parent_execute.created_at_ms,
+            |_request| panic!("materialize_remote_dir should not dispatch a mutation request"),
+        )
+        .expect("execute first parent materialization")
+    };
+    match first_parent_executed {
+        Some(NextClientAction::ExecutedMaterializeRemoteDir(_)) => {}
+        other => panic!("expected first executed materialize_remote_dir, got {other:?}"),
+    }
+
+    let second_parent_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for second parent plan");
+        plan_file(
+            &mut db,
+            &second_parent_planner_tick.namespace_id,
+            second_parent_planner_tick.inode_id,
+            second_parent_planner_tick.now_ms,
+        )
+        .expect("plan second target parent materialization")
+    };
+    assert_eq!(
+        second_parent_planner_result,
+        expect.second_parent_planner_result
+    );
+
+    let second_parent_executed = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for second parent execute");
+        execute_next_client_action(
+            &mut db,
+            &store,
+            |_client_file_id| None,
+            |_namespace_id, _inode_id| Some(second_parent_path.clone()),
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
+            second_parent_execute.uploaded_at_ms,
+            second_parent_execute.created_at_ms,
+            |_request| panic!("materialize_remote_dir should not dispatch a mutation request"),
+        )
+        .expect("execute second parent materialization")
+    };
+    match second_parent_executed {
+        Some(NextClientAction::ExecutedMaterializeRemoteDir(_)) => {}
+        other => panic!("expected second executed materialize_remote_dir, got {other:?}"),
+    }
+
+    let rename_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for subtree rename plan");
+        plan_file(
+            &mut db,
+            &rename_planner_tick.namespace_id,
+            rename_planner_tick.inode_id,
+            rename_planner_tick.now_ms,
+        )
+        .expect("plan subtree move after parent-chain materialization")
+    };
+    assert_eq!(rename_planner_result, expect.rename_planner_result);
+
+    let rename_executed = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for subtree rename execute");
+        execute_next_client_action(
+            &mut db,
+            &store,
+            |_client_file_id| None,
+            |_namespace_id, _inode_id| Some(root_path.clone()),
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| Some(target_path.clone()),
+            rename_execute.uploaded_at_ms,
+            rename_execute.created_at_ms,
+            |_request| panic!("apply_remote_subtree_rename should not dispatch a mutation request"),
+        )
+        .expect("execute subtree rename after parent-chain materialization")
+    };
+    match rename_executed {
+        Some(NextClientAction::ExecutedApplyRemoteSubtreeRename(
+            ExecutedApplyRemoteSubtreeRename { applied },
+        )) => assert_eq!(
+            applied,
+            loon_client::state_db::AppliedInodeMutation {
+                namespace_id: rename_planner_tick.namespace_id.clone(),
+                inode_id: rename_planner_tick.inode_id,
+            }
+        ),
+        other => panic!("expected executed apply_remote_subtree_rename, got {other:?}"),
+    }
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for final subtree plan");
+    let final_planner_result = plan_file(
+        &mut db,
+        &final_planner_tick.namespace_id,
+        final_planner_tick.inode_id,
+        final_planner_tick.now_ms,
+    )
+    .expect("plan subtree after rename apply");
+    assert_eq!(final_planner_result, expect.final_planner_result);
+
+    let expect_as_standard = SubtreeRenameObservationExpect {
+        outcome: expect.outcome.clone(),
+        remote_state_after: expect.remote_state_after.clone(),
+        local_state_after: expect.local_state_after.clone(),
+        sync_anchor_after: expect.sync_anchor_after.clone(),
+        planned_actions_after: expect.planned_actions_after.clone(),
+        conflicts_and_errors: Vec::new(),
+        execution: RawSubtreeRenameExecutionExpect::ExecutedApplyRemoteSubtreeRename {
+            executed_apply_remote_subtree_rename: loon_client::state_db::AppliedInodeMutation {
+                namespace_id: rename_planner_tick.namespace_id.clone(),
+                inode_id: rename_planner_tick.inode_id,
+            },
+        },
+        first_planner_result: expect.rename_planner_result.clone(),
+        second_planner_result: expect.final_planner_result.clone(),
+        path_expectations: expect.path_expectations.clone(),
+        invariants: expect.invariants.clone(),
+    };
+    assert_subtree_rename_states_match(&db, &initial, &expect_as_standard);
+
+    for path_expectation in &expect.path_expectations {
+        assert_eq!(
+            source_root.join(&path_expectation.relative_path).exists(),
+            path_expectation.exists,
+            "unexpected path existence for {}",
+            path_expectation.relative_path.display()
+        );
+    }
+
+    let subtree_inode_ids =
+        rooted_subtree_inode_ids(&initial.local_state, final_planner_tick.inode_id);
+    let descendant_inode_ids = subtree_inode_ids
+        .iter()
+        .copied()
+        .filter(|inode_id| *inode_id != final_planner_tick.inode_id)
+        .collect::<BTreeSet<_>>();
+    let descendant_remote_count_after = descendant_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&final_planner_tick.namespace_id, **inode_id)
+                .expect("load descendant remote views")
+                .remote
+                .is_some()
+        })
+        .count();
+    let descendant_local_state_count_after = descendant_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&final_planner_tick.namespace_id, **inode_id)
+                .expect("load descendant local views")
+                .local
+                .is_some()
+        })
+        .count();
+    let descendant_sync_anchor_count_after = descendant_inode_ids
+        .iter()
+        .filter(|inode_id| {
+            db.load_file_sync_views(&final_planner_tick.namespace_id, **inode_id)
+                .expect("load descendant anchor views")
+                .sync_anchor
+                .is_some()
+        })
+        .count();
+    let expected_descendant_remote_count = expect
+        .remote_state_after
+        .iter()
+        .filter(|row| descendant_inode_ids.contains(&row.inode_id))
+        .count();
+    let expected_descendant_local_state_count = expect
+        .local_state_after
+        .iter()
+        .filter(|row| descendant_inode_ids.contains(&row.inode_id))
+        .count();
+    let expected_descendant_sync_anchor_count = expect
+        .sync_anchor_after
+        .iter()
+        .filter(|row| descendant_inode_ids.contains(&row.inode_id))
+        .count();
+
+    let planning_report = evaluate_remote_subtree_rename_planning_invariants(
+        RemoteSubtreeRenamePlanningInvariantInputs {
+            planned_action_decision_after: Some(rename_planner_result.decision.as_str()),
+            planned_action_reason_after: Some(rename_planner_result.reason.as_str()),
+        },
+    );
+    let root_views = db
+        .load_file_sync_views(
+            &final_planner_tick.namespace_id,
+            final_planner_tick.inode_id,
+        )
+        .expect("load root views after subtree rename");
+    let root_remote = root_views
+        .remote
+        .as_ref()
+        .expect("root remote row after subtree rename");
+    let root_local = root_views
+        .local
+        .as_ref()
+        .expect("root local row after subtree rename");
+    let apply_report =
+        evaluate_apply_remote_subtree_rename_invariants(ApplyRemoteSubtreeRenameInvariantInputs {
+            root_local_exists_on_disk_after: root_local.exists_on_disk,
+            root_local_dirty_after: root_local.dirty,
+            root_local_parent_inode_after: root_local.parent_inode_id,
+            root_local_display_name_after: root_local.display_name.as_str(),
+            root_remote_synced_seq_after: root_remote.observed_seq,
+            root_remote_revision_no_after: root_remote.revision_no,
+            root_remote_parent_inode_after: root_remote.parent_inode_id,
+            root_remote_display_name_after: root_remote.display_name.as_str(),
+            root_sync_anchor_seq_after: root_views
+                .sync_anchor
+                .as_ref()
+                .map(|anchor| anchor.synced_seq),
+            root_sync_anchor_revision_no_after: root_views
+                .sync_anchor
+                .as_ref()
+                .map(|anchor| anchor.revision_no),
+            root_sync_anchor_parent_inode_after: root_views
+                .sync_anchor
+                .as_ref()
+                .and_then(|anchor| anchor.parent_inode_id),
+            root_sync_anchor_display_name_after: root_views
+                .sync_anchor
+                .as_ref()
+                .map(|anchor| anchor.display_name.as_str()),
+            descendant_remote_count_after,
+            expected_descendant_remote_count,
+            descendant_local_state_count_after,
+            expected_descendant_local_state_count,
+            descendant_sync_anchor_count_after,
+            expected_descendant_sync_anchor_count,
+            root_planned_action_present_after: db
+                .load_planned_action(
+                    &final_planner_tick.namespace_id,
+                    final_planner_tick.inode_id,
+                )
+                .expect("load root planned action after subtree rename")
+                .is_some(),
+            issue_kind_after: None,
+        });
+    let report = combine_reconciliation_reports([planning_report, apply_report]);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("waiting_planner_result={waiting_planner_result:?}"),
+        format!("first_parent_planner_result={first_parent_planner_result:?}"),
+        format!("second_parent_planner_result={second_parent_planner_result:?}"),
+        format!(
+            "execution={:?}",
+            NextClientAction::ExecutedApplyRemoteSubtreeRename(ExecutedApplyRemoteSubtreeRename {
+                applied: loon_client::state_db::AppliedInodeMutation {
+                    namespace_id: rename_planner_tick.namespace_id.clone(),
+                    inode_id: rename_planner_tick.inode_id,
+                },
+            })
+        ),
+        format!("rename_planner_result={rename_planner_result:?}"),
+        format!("final_planner_result={final_planner_result:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("materialized-target-parent-subtree-rename"))
+    .collect::<Vec<_>>();
+
+    ReconciliationInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+    }
+}
+
 fn run_remote_subtree_delete_invariant_report(
     fixture_path: &str,
 ) -> SubtreeDeleteInvariantFixtureRunReport {
@@ -3312,6 +4109,15 @@ fn rooted_subtree_inode_ids(
 fn seed_remote_rename_observation_state(db_path: &Path, initial: &RenameObservationInitial) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-remote-rename-observation-state", |tx| {
+        for row in &initial.additional_remote_state {
+            tx.upsert_remote_file(row)?;
+        }
+        for row in &initial.additional_local_state {
+            tx.upsert_local_file(row)?;
+        }
+        for row in &initial.additional_sync_anchor {
+            tx.upsert_sync_anchor(row)?;
+        }
         tx.upsert_remote_file(&initial.remote_state)?;
         tx.upsert_local_file(&initial.local_state)?;
         tx.upsert_sync_anchor(&initial.sync_anchor)?;
@@ -3627,6 +4433,26 @@ struct SubtreeRenameObservationExpect {
 }
 
 #[derive(Debug, Deserialize)]
+struct MaterializableSubtreeRenameObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    waiting_planner_result: PlannedActionRecord,
+    first_parent_planner_result: PlannedActionRecord,
+    second_parent_planner_result: PlannedActionRecord,
+    rename_planner_result: PlannedActionRecord,
+    final_planner_result: PlannedActionRecord,
+    remote_state_after: Vec<RemoteFileStateRow>,
+    #[serde(default)]
+    local_state_after: Vec<LocalFileStateRow>,
+    #[serde(default)]
+    sync_anchor_after: Vec<SyncAnchorRow>,
+    #[serde(default)]
+    planned_actions_after: Vec<PlannedActionRow>,
+    path_expectations: Vec<FixturePathExpectation>,
+    #[serde(default)]
+    invariants: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SubtreeRenameConflictObservationExpect {
     outcome: RawAppliedRemoteObservation,
     planner_result: PlannedActionRecord,
@@ -3638,6 +4464,12 @@ struct RenameObservationInitial {
     remote_state: RemoteFileStateRow,
     local_state: LocalFileStateRow,
     sync_anchor: SyncAnchorRow,
+    #[serde(default)]
+    additional_remote_state: Vec<RemoteFileStateRow>,
+    #[serde(default)]
+    additional_local_state: Vec<LocalFileStateRow>,
+    #[serde(default)]
+    additional_sync_anchor: Vec<SyncAnchorRow>,
     local_file: FixtureLocalFile,
     target_relative_path: PathBuf,
     #[serde(default)]
@@ -3656,6 +4488,23 @@ struct RenameObservationExpect {
     execution: RawRenameExecutionExpect,
     first_planner_result: PlannedActionRecord,
     second_planner_result: PlannedActionRecord,
+    #[serde(default)]
+    invariants: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MaterializableRenameObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    waiting_planner_result: PlannedActionRecord,
+    parent_planner_result: PlannedActionRecord,
+    rename_planner_result: PlannedActionRecord,
+    final_planner_result: PlannedActionRecord,
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: SyncAnchorRow,
+    target_parent_local_state: LocalFileStateRow,
+    target_parent_sync_anchor: SyncAnchorRow,
+    planned_action_cleared: bool,
     #[serde(default)]
     invariants: Vec<String>,
 }

@@ -7,6 +7,7 @@ scenario=client_remote_observation_bound_directory_remote_subtree_delete_current
   6. invariants[remote-subtree-delete] remote_subtree_delete_plans_apply_remote_subtree_delete=pass detail=decision=Some("apply_remote_subtree_delete") reason=Some("remote_subtree_deleted_from_anchor")
   7. invariants[remote-subtree-delete] apply_remote_subtree_delete_preserves_root_remote_tombstone=pass detail=root_remote_present_after=true root_remote_is_deleted_after=true
   8. invariants[remote-subtree-delete] apply_remote_subtree_delete_clears_descendant_remote_rows=fail detail=descendant_remote_count_after=1
-  9. invariants[remote-subtree-delete] apply_remote_subtree_delete_clears_local_state_and_sync_anchor_for_subtree=fail detail=subtree_local_state_count_after=2 subtree_sync_anchor_count_after=2
-  10. invariants[remote-subtree-delete] apply_remote_subtree_delete_clears_subtree_planned_actions=fail detail=subtree_planned_action_count_after=1
-  11. invariants[remote-subtree-delete] apply_remote_subtree_delete_failure_records_durable_issue=pass detail=issue_kind_after=Some("apply_remote_subtree_delete_local_apply_failed")
+  9. invariants[remote-subtree-delete] apply_remote_subtree_delete_clears_remote_only_descendants=fail detail=descendant_remote_count_after=1 subtree_local_state_count_after=2
+  10. invariants[remote-subtree-delete] apply_remote_subtree_delete_clears_local_state_and_sync_anchor_for_subtree=fail detail=subtree_local_state_count_after=2 subtree_sync_anchor_count_after=2
+  11. invariants[remote-subtree-delete] apply_remote_subtree_delete_clears_subtree_planned_actions=fail detail=subtree_planned_action_count_after=1
+  12. invariants[remote-subtree-delete] apply_remote_subtree_delete_failure_records_durable_issue=pass detail=issue_kind_after=Some("apply_remote_subtree_delete_local_apply_failed")

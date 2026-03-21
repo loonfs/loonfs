@@ -1,6 +1,7 @@
 use super::loads::{
-    assess_remote_subtree_delete_from_conn, assess_remote_subtree_rename_from_conn,
-    load_bound_apply_remote_delete_views_from_conn, load_bound_apply_remote_rename_views_from_conn,
+    assess_hierarchy_parent_materialization_from_conn, assess_remote_subtree_delete_from_conn,
+    assess_remote_subtree_rename_from_conn, load_bound_apply_remote_delete_views_from_conn,
+    load_bound_apply_remote_rename_views_from_conn,
     load_bound_apply_remote_subtree_delete_views_from_conn,
     load_bound_apply_remote_subtree_rename_views_from_conn,
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
@@ -15,6 +16,7 @@ use super::loads::{
 };
 use super::schema::initialize_connection;
 use super::*;
+use crate::planner::plan_file_in_tx;
 use crate::upload::UploadedContent;
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -1804,6 +1806,7 @@ impl PlannerTxn<'_> {
             inode_id,
             "materialize_remote_dir_local_apply_failed",
         )?;
+        self.replan_direct_authoritative_children(namespace_id, inode_id, applied_at_ms)?;
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -1926,6 +1929,7 @@ impl PlannerTxn<'_> {
             inode_id,
             "apply_remote_subtree_rename_local_apply_failed",
         )?;
+        self.replan_direct_authoritative_children(namespace_id, inode_id, applied_at_ms)?;
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -2301,6 +2305,18 @@ impl PlannerTxn<'_> {
         assess_remote_subtree_rename_from_conn(&self.tx, namespace_id, inode_id)
     }
 
+    pub fn assess_hierarchy_parent_materialization(
+        &self,
+        namespace_id: &NamespaceId,
+        target_parent_inode_id: InodeId,
+    ) -> Result<HierarchyParentMaterializationAssessment, StateDbError> {
+        assess_hierarchy_parent_materialization_from_conn(
+            &self.tx,
+            namespace_id,
+            target_parent_inode_id,
+        )
+    }
+
     pub fn load_bound_apply_remote_subtree_delete_views(
         &self,
         namespace_id: &NamespaceId,
@@ -2385,6 +2401,42 @@ impl PlannerTxn<'_> {
             "DELETE FROM planned_actions WHERE namespace_id = ?1 AND inode_id = ?2",
             params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
         )?;
+        Ok(())
+    }
+
+    fn load_direct_authoritative_child_inode_ids(
+        &self,
+        namespace_id: &NamespaceId,
+        parent_inode_id: InodeId,
+    ) -> Result<Vec<InodeId>, StateDbError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT inode_id
+            FROM remote_state
+            WHERE namespace_id = ?1 AND parent_inode_id = ?2
+            ORDER BY inode_id ASC",
+        )?;
+        let mut rows = stmt.query(params![
+            namespace_id.as_str(),
+            to_sql_u64(parent_inode_id.0, "parent_inode_id")?,
+        ])?;
+        let mut child_inode_ids = Vec::new();
+        while let Some(row) = rows.next()? {
+            child_inode_ids.push(InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?));
+        }
+        Ok(child_inode_ids)
+    }
+
+    fn replan_direct_authoritative_children(
+        &mut self,
+        namespace_id: &NamespaceId,
+        parent_inode_id: InodeId,
+        now_ms: u64,
+    ) -> Result<(), StateDbError> {
+        for child_inode_id in
+            self.load_direct_authoritative_child_inode_ids(namespace_id, parent_inode_id)?
+        {
+            plan_file_in_tx(self, namespace_id, child_inode_id, now_ms)?;
+        }
         Ok(())
     }
 

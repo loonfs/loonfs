@@ -1514,6 +1514,40 @@ fn apply_remote_rename_updates_local_state_and_anchor_and_clears_issue() {
     db.planner_transaction("seed-apply-remote-rename", |tx| {
         tx.upsert_remote_file(&RemoteFileStateRow {
             namespace_id: namespace_id.clone(),
+            inode_id: InodeId(3),
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(420),
+            revision_no: RevisionNo(9),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: "archive".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(3),
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: None,
+            display_name: "archive".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_099_900,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(3),
+            inode_kind: InodeKind::Dir,
+            synced_seq: ChangeSeq(420),
+            revision_no: RevisionNo(9),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: "archive".to_owned(),
+        })?;
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
             inode_id,
             inode_kind: InodeKind::File,
             observed_seq: ChangeSeq(420),
@@ -1945,7 +1979,7 @@ fn apply_remote_subtree_rename_updates_root_path_view_and_preserves_descendants(
             revision_no: RevisionNo(9),
             content_digest: None,
             content_manifest_digest: None,
-            parent_inode_id: Some(InodeId(2)),
+            parent_inode_id: None,
             display_name: "archive".to_owned(),
             is_deleted: false,
         })?;
@@ -1954,7 +1988,7 @@ fn apply_remote_subtree_rename_updates_root_path_view_and_preserves_descendants(
             inode_id: target_parent_inode_id,
             inode_kind: InodeKind::Dir,
             content_digest: None,
-            parent_inode_id: Some(InodeId(2)),
+            parent_inode_id: None,
             display_name: "archive".to_owned(),
             exists_on_disk: true,
             dirty: false,
@@ -1968,7 +2002,7 @@ fn apply_remote_subtree_rename_updates_root_path_view_and_preserves_descendants(
             revision_no: RevisionNo(9),
             content_digest: None,
             content_manifest_digest: None,
-            parent_inode_id: Some(InodeId(2)),
+            parent_inode_id: None,
             display_name: "archive".to_owned(),
         })?;
         tx.upsert_remote_file(&RemoteFileStateRow {
@@ -2163,6 +2197,143 @@ fn apply_remote_subtree_rename_updates_root_path_view_and_preserves_descendants(
         db.load_conflicts_and_errors(&namespace_id, root_inode_id)
             .expect("load subtree rename issues after apply"),
         Vec::new()
+    );
+}
+
+#[test]
+fn apply_materialize_remote_dir_replans_waiting_move_child() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let parent_inode_id = InodeId(2);
+    let target_parent_inode_id = InodeId(700);
+    let inode_id = InodeId(42);
+
+    db.planner_transaction("seed-materialize-replan-child", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: parent_inode_id,
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(42),
+            revision_no: RevisionNo(9),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: "workspace".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: parent_inode_id,
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: None,
+            display_name: "workspace".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_112_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: parent_inode_id,
+            inode_kind: InodeKind::Dir,
+            synced_seq: ChangeSeq(42),
+            revision_no: RevisionNo(9),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: "workspace".to_owned(),
+        })?;
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: target_parent_inode_id,
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(43),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: Some(parent_inode_id),
+            display_name: "incoming".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: target_parent_inode_id,
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: Some(parent_inode_id),
+            display_name: "incoming".to_owned(),
+            exists_on_disk: false,
+            dirty: false,
+            last_local_change_ms: 1_700_000_112_010,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: target_parent_inode_id,
+            decision: "materialize_remote_dir".to_owned(),
+            reason: "remote_observed_without_anchor".to_owned(),
+            created_at_ms: 1_700_000_112_020,
+        })?;
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(43),
+            revision_no: RevisionNo(17),
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+            parent_inode_id: Some(target_parent_inode_id),
+            display_name: "report.txt".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            parent_inode_id: Some(parent_inode_id),
+            display_name: "report.txt".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_112_030,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            synced_seq: ChangeSeq(42),
+            revision_no: RevisionNo(17),
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+            parent_inode_id: Some(parent_inode_id),
+            display_name: "report.txt".to_owned(),
+        })?;
+        Ok(())
+    })
+    .expect("seed wait state");
+
+    let waiting = crate::planner::plan_file(&mut db, &namespace_id, inode_id, 1_700_000_112_040)
+        .expect("plan waiting move child");
+    assert_eq!(waiting.decision, crate::planner::PlannerDecision::NoOp);
+    assert_eq!(
+        waiting.reason,
+        crate::planner::PlannerReason::RemotePathWaitingForTargetParentMaterialization
+    );
+
+    let applied = db
+        .apply_materialize_remote_dir(&namespace_id, target_parent_inode_id, 1_700_000_112_050)
+        .expect("materialize target parent");
+    assert_eq!(applied.inode_id, target_parent_inode_id);
+
+    assert_eq!(
+        db.load_planned_action(&namespace_id, inode_id)
+            .expect("load replanned child"),
+        Some(PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            decision: "apply_remote_rename".to_owned(),
+            reason: "remote_path_differs_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_112_050,
+        })
     );
 }
 

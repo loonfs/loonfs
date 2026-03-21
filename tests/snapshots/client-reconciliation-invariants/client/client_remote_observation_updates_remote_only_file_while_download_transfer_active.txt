@@ -1,0 +1,5 @@
+scenario=client_remote_observation_updates_remote_only_file_while_download_transfer_active kind=client schema_version=1 seed=None actions=3 faults=0 expect_keys=6
+  1. outcome=DiscoveredRemoteOnly { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(601) }
+  2. planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(601), decision: NoOp, reason: RemoteParentWaitingForMaterialization, created_at_ms: 1700000615000 }
+  3. invariants[remote-only-parent-wait] remote_observation_active_download_preserves_transfer_ledger=pass detail=transfer_present_after=true remote_seq_after=43 expected_remote_seq=43
+  4. invariants[remote-only-parent-wait] remote_only_materialization_waits_for_parent_materialization=pass detail=planner_decision=no_op planner_reason=remote_parent_waiting_for_materialization planned_action_present_after=false

@@ -4,8 +4,10 @@ use loon_client::state_db::{
     PlannedActionRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
 };
 use loon_testkit::invariants::{
-    evaluate_remote_only_discovery_invariants, ClientReconciliationInvariantReport,
-    RemoteOnlyDiscoveryInvariantInputs,
+    evaluate_remote_only_discovery_invariants,
+    evaluate_remote_only_parent_materialization_wait_invariants,
+    ClientReconciliationInvariantReport, RemoteOnlyDiscoveryInvariantInputs,
+    RemoteOnlyParentMaterializationWaitInvariantInputs,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -91,16 +93,25 @@ fn run_remote_only_discovery_scenario(relative_path: &str, temp_dir_name: &str) 
         expect.planned_action.clone()
     );
 
-    let report = evaluate_remote_only_discovery_invariants(RemoteOnlyDiscoveryInvariantInputs {
-        inode_kind: expect.local_state.inode_kind.clone(),
-        local_exists_on_disk_after: expect.local_state.exists_on_disk,
-        local_dirty_after: expect.local_state.dirty,
-        sync_anchor_present_after: expect.sync_anchor.is_some(),
-        planned_action_decision_after: expect
-            .planned_action
-            .as_ref()
-            .map(|row| row.decision.as_str()),
-    });
+    let discovery_report =
+        evaluate_remote_only_discovery_invariants(RemoteOnlyDiscoveryInvariantInputs {
+            inode_kind: expect.local_state.inode_kind.clone(),
+            local_exists_on_disk_after: expect.local_state.exists_on_disk,
+            local_dirty_after: expect.local_state.dirty,
+            sync_anchor_present_after: expect.sync_anchor.is_some(),
+            planned_action_decision_after: expect
+                .planned_action
+                .as_ref()
+                .map(|row| row.decision.as_str()),
+        });
+    let wait_report = evaluate_remote_only_parent_materialization_wait_invariants(
+        RemoteOnlyParentMaterializationWaitInvariantInputs {
+            planner_decision: planner_result.decision.as_str(),
+            planner_reason: planner_result.reason.as_str(),
+            planned_action_present_after: expect.planned_action.is_some(),
+        },
+    );
+    let report = combine_reconciliation_reports([discovery_report, wait_report]);
     assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
 }
 
@@ -133,16 +144,25 @@ fn run_remote_only_discovery_invariant_report(
         planner_tick.now_ms,
     )
     .expect("plan discovered remote-only inode after restart");
-    let report = evaluate_remote_only_discovery_invariants(RemoteOnlyDiscoveryInvariantInputs {
-        inode_kind: expect.local_state.inode_kind.clone(),
-        local_exists_on_disk_after: expect.local_state.exists_on_disk,
-        local_dirty_after: expect.local_state.dirty,
-        sync_anchor_present_after: expect.sync_anchor.is_some(),
-        planned_action_decision_after: expect
-            .planned_action
-            .as_ref()
-            .map(|row| row.decision.as_str()),
-    });
+    let discovery_report =
+        evaluate_remote_only_discovery_invariants(RemoteOnlyDiscoveryInvariantInputs {
+            inode_kind: expect.local_state.inode_kind.clone(),
+            local_exists_on_disk_after: expect.local_state.exists_on_disk,
+            local_dirty_after: expect.local_state.dirty,
+            sync_anchor_present_after: expect.sync_anchor.is_some(),
+            planned_action_decision_after: expect
+                .planned_action
+                .as_ref()
+                .map(|row| row.decision.as_str()),
+        });
+    let wait_report = evaluate_remote_only_parent_materialization_wait_invariants(
+        RemoteOnlyParentMaterializationWaitInvariantInputs {
+            planner_decision: planner_result.decision.as_str(),
+            planner_reason: planner_result.reason.as_str(),
+            planned_action_present_after: expect.planned_action.is_some(),
+        },
+    );
+    let report = combine_reconciliation_reports([discovery_report, wait_report]);
 
     assert_eq!(planner_result, expect.planner_result);
     assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
@@ -280,6 +300,17 @@ fn assert_expected_reconciliation_invariants(
 #[derive(Debug)]
 struct ReconciliationInvariantFixtureRunReport {
     rendered_trace: String,
+}
+
+fn combine_reconciliation_reports<I>(reports: I) -> ClientReconciliationInvariantReport
+where
+    I: IntoIterator<Item = ClientReconciliationInvariantReport>,
+{
+    let checks = reports
+        .into_iter()
+        .flat_map(|report| report.checks)
+        .collect::<Vec<_>>();
+    ClientReconciliationInvariantReport { checks }
 }
 
 type TestDir = loon_testkit::tempdir::TestDir;

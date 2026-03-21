@@ -778,6 +778,29 @@ pub(super) fn load_bound_apply_remote_rename_views_from_conn(
             inode_id: inode_id.0,
         });
     }
+    if remote.parent_inode_id != anchor.parent_inode_id {
+        if let Some(target_parent_inode_id) = remote.parent_inode_id {
+            match assess_target_parent_chain(conn, namespace_id, target_parent_inode_id, None)? {
+                TargetParentAssessment::Usable => {}
+                TargetParentAssessment::WaitingForMaterialization => {
+                    return Err(StateDbError::ApplyRemoteRenameTargetParentUnusable {
+                        namespace_id: namespace_id.as_str().to_owned(),
+                        inode_id: inode_id.0,
+                        target_parent_inode_id: Some(target_parent_inode_id.0),
+                        reason: "parent_waiting_for_materialization",
+                    });
+                }
+                TargetParentAssessment::Unusable(reason) => {
+                    return Err(StateDbError::ApplyRemoteRenameTargetParentUnusable {
+                        namespace_id: namespace_id.as_str().to_owned(),
+                        inode_id: inode_id.0,
+                        target_parent_inode_id: Some(target_parent_inode_id.0),
+                        reason,
+                    });
+                }
+            }
+        }
+    }
 
     Ok((remote, local, anchor))
 }
@@ -880,7 +903,32 @@ struct RemoteSubtreeRenameAnalysis {
     first_nonconverged_descendant_inode_id: Option<InodeId>,
     first_local_only_descendant_parent_inode_id: Option<InodeId>,
     target_parent_inode_id: Option<InodeId>,
-    target_parent_unusable_reason: Option<&'static str>,
+    target_parent_assessment: TargetParentAssessment,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetParentAssessment {
+    Usable,
+    WaitingForMaterialization,
+    Unusable(&'static str),
+}
+
+pub(super) fn assess_hierarchy_parent_materialization_from_conn(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    target_parent_inode_id: InodeId,
+) -> Result<HierarchyParentMaterializationAssessment, StateDbError> {
+    Ok(
+        match assess_target_parent_chain(conn, namespace_id, target_parent_inode_id, None)? {
+            TargetParentAssessment::Usable => HierarchyParentMaterializationAssessment::Usable,
+            TargetParentAssessment::WaitingForMaterialization => {
+                HierarchyParentMaterializationAssessment::WaitingForMaterialization
+            }
+            TargetParentAssessment::Unusable(_) => {
+                HierarchyParentMaterializationAssessment::Unusable
+            }
+        },
+    )
 }
 
 pub(super) fn assess_remote_subtree_rename_from_conn(
@@ -923,7 +971,15 @@ pub(super) fn assess_remote_subtree_rename_from_conn(
             {
                 return Ok(RemoteSubtreeRenameAssessment::DeferredDescendantsDiffer);
             }
-            if analysis.target_parent_unusable_reason.is_some() {
+            if analysis.target_parent_assessment
+                == TargetParentAssessment::WaitingForMaterialization
+            {
+                return Ok(RemoteSubtreeRenameAssessment::WaitingForTargetParentMaterialization);
+            }
+            if matches!(
+                analysis.target_parent_assessment,
+                TargetParentAssessment::Unusable(_)
+            ) {
                 return Ok(RemoteSubtreeRenameAssessment::DeferredTargetParentUnusable);
             }
 
@@ -1085,13 +1141,24 @@ pub(super) fn load_bound_apply_remote_subtree_rename_views_from_conn(
             },
         );
     }
-    if let Some(reason) = analysis.target_parent_unusable_reason {
-        return Err(StateDbError::ApplyRemoteSubtreeRenameTargetParentUnusable {
-            namespace_id: namespace_id.as_str().to_owned(),
-            inode_id: inode_id.0,
-            target_parent_inode_id: analysis.target_parent_inode_id.map(|id| id.0),
-            reason,
-        });
+    match analysis.target_parent_assessment {
+        TargetParentAssessment::Usable => {}
+        TargetParentAssessment::WaitingForMaterialization => {
+            return Err(StateDbError::ApplyRemoteSubtreeRenameTargetParentUnusable {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                target_parent_inode_id: analysis.target_parent_inode_id.map(|id| id.0),
+                reason: "parent_waiting_for_materialization",
+            });
+        }
+        TargetParentAssessment::Unusable(reason) => {
+            return Err(StateDbError::ApplyRemoteSubtreeRenameTargetParentUnusable {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                target_parent_inode_id: analysis.target_parent_inode_id.map(|id| id.0),
+                reason,
+            });
+        }
     }
 
     Ok(BoundApplyRemoteSubtreeRenameViews {
@@ -1294,22 +1361,7 @@ fn analyze_remote_subtree_delete(
         .copied()
         .filter(|candidate| *candidate != inode_id)
     {
-        let has_active_transfer = conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1
-                FROM transfer_ledger
-                WHERE namespace_id = ?1 AND inode_id = ?2
-            )",
-            params![
-                namespace_id.as_str(),
-                to_sql_u64(descendant_inode_id.0, "inode_id")?,
-            ],
-            |row| row.get::<_, bool>(0),
-        )?;
-        let has_pending_inode_mutation =
-            load_pending_inode_mutation_for_inode(conn, namespace_id, descendant_inode_id)?
-                .is_some();
-        if has_active_transfer || has_pending_inode_mutation {
+        if inode_has_active_transfer_or_pending_mutation(conn, namespace_id, descendant_inode_id)? {
             first_busy_descendant_inode_id = Some(descendant_inode_id);
             break;
         }
@@ -1322,6 +1374,9 @@ fn analyze_remote_subtree_delete(
             (Some(remote), Some(anchor)) => {
                 subtree_local_matches_anchor(&descendant_local, anchor)
                     && subtree_remote_matches_anchor(remote, anchor)
+            }
+            (Some(remote), None) => {
+                remote_only_placeholder_matches_remote_state(&descendant_local, remote)
             }
             _ => false,
         };
@@ -1365,22 +1420,7 @@ fn analyze_remote_subtree_rename(
         .copied()
         .filter(|candidate| *candidate != inode_id)
     {
-        let has_active_transfer = conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1
-                FROM transfer_ledger
-                WHERE namespace_id = ?1 AND inode_id = ?2
-            )",
-            params![
-                namespace_id.as_str(),
-                to_sql_u64(descendant_inode_id.0, "inode_id")?,
-            ],
-            |row| row.get::<_, bool>(0),
-        )?;
-        let has_pending_inode_mutation =
-            load_pending_inode_mutation_for_inode(conn, namespace_id, descendant_inode_id)?
-                .is_some();
-        if has_active_transfer || has_pending_inode_mutation {
+        if inode_has_active_transfer_or_pending_mutation(conn, namespace_id, descendant_inode_id)? {
             first_busy_descendant_inode_id = Some(descendant_inode_id);
             break;
         }
@@ -1393,6 +1433,9 @@ fn analyze_remote_subtree_rename(
             (Some(remote), Some(anchor)) => {
                 subtree_local_matches_anchor(&descendant_local, anchor)
                     && subtree_remote_matches_anchor(remote, anchor)
+            }
+            (Some(remote), None) => {
+                remote_only_placeholder_matches_remote_state(&descendant_local, remote)
             }
             _ => false,
         };
@@ -1410,14 +1453,19 @@ fn analyze_remote_subtree_rename(
     let target_parent_inode_id = root_remote
         .as_ref()
         .and_then(|remote| remote.parent_inode_id);
-    let target_parent_unusable_reason = match target_parent_inode_id {
-        Some(target_parent_inode_id) => assess_subtree_rename_target_parent(
+    let target_parent_assessment = match (&root_remote, &root_anchor, target_parent_inode_id) {
+        (Some(root_remote), Some(root_anchor), _)
+            if root_remote.parent_inode_id == root_anchor.parent_inode_id =>
+        {
+            TargetParentAssessment::Usable
+        }
+        (_, _, Some(target_parent_inode_id)) => assess_target_parent_chain(
             conn,
             namespace_id,
             target_parent_inode_id,
-            &subtree_inode_ids,
+            Some(&subtree_inode_ids),
         )?,
-        None => None,
+        _ => TargetParentAssessment::Usable,
     };
 
     Ok(RemoteSubtreeRenameAnalysis {
@@ -1428,44 +1476,75 @@ fn analyze_remote_subtree_rename(
         first_nonconverged_descendant_inode_id,
         first_local_only_descendant_parent_inode_id,
         target_parent_inode_id,
-        target_parent_unusable_reason,
+        target_parent_assessment,
     })
 }
 
-fn assess_subtree_rename_target_parent(
+fn assess_target_parent_chain(
     conn: &Connection,
     namespace_id: &NamespaceId,
     target_parent_inode_id: InodeId,
-    subtree_inode_ids: &[InodeId],
-) -> Result<Option<&'static str>, StateDbError> {
-    if subtree_inode_ids.contains(&target_parent_inode_id) {
-        return Ok(Some("parent_inside_subtree"));
+    subtree_inode_ids: Option<&[InodeId]>,
+) -> Result<TargetParentAssessment, StateDbError> {
+    let mut current_parent_inode_id = Some(target_parent_inode_id);
+    let mut saw_placeholder_on_chain = false;
+    let mut visited_inode_ids = Vec::new();
+
+    while let Some(current_inode_id) = current_parent_inode_id {
+        if visited_inode_ids.contains(&current_inode_id) {
+            return Ok(TargetParentAssessment::Unusable("parent_cycle"));
+        }
+        visited_inode_ids.push(current_inode_id);
+        if subtree_inode_ids.is_some_and(|ids| ids.contains(&current_inode_id)) {
+            return Ok(TargetParentAssessment::Unusable("parent_inside_subtree"));
+        }
+        if inode_has_active_transfer_or_pending_mutation(conn, namespace_id, current_inode_id)? {
+            return Ok(TargetParentAssessment::Unusable("parent_busy"));
+        }
+
+        let remote = load_remote_file(conn, namespace_id, current_inode_id)?;
+        let local = load_local_file(conn, namespace_id, current_inode_id)?;
+        let anchor = load_sync_anchor(conn, namespace_id, current_inode_id)?;
+        match (remote, local, anchor) {
+            (Some(remote), Some(local), Some(anchor)) => {
+                if remote.inode_kind != InodeKind::Dir
+                    || local.inode_kind != InodeKind::Dir
+                    || anchor.inode_kind != InodeKind::Dir
+                {
+                    return Ok(TargetParentAssessment::Unusable("parent_not_directory"));
+                }
+                if remote.is_deleted {
+                    return Ok(TargetParentAssessment::Unusable("parent_deleted"));
+                }
+                if !subtree_local_matches_anchor(&local, &anchor)
+                    || !subtree_remote_matches_anchor(&remote, &anchor)
+                {
+                    return Ok(TargetParentAssessment::Unusable("parent_not_converged"));
+                }
+                current_parent_inode_id = remote.parent_inode_id;
+            }
+            (Some(remote), Some(local), None)
+                if remote.inode_kind == InodeKind::Dir
+                    && local.inode_kind == InodeKind::Dir
+                    && remote_only_placeholder_matches_remote_state(&local, &remote) =>
+            {
+                saw_placeholder_on_chain = true;
+                current_parent_inode_id = remote.parent_inode_id;
+            }
+            (Some(_), Some(_), None) => {
+                return Ok(TargetParentAssessment::Unusable(
+                    "parent_not_materializable",
+                ));
+            }
+            _ => return Ok(TargetParentAssessment::Unusable("parent_missing")),
+        }
     }
 
-    let remote = load_remote_file(conn, namespace_id, target_parent_inode_id)?;
-    let local = load_local_file(conn, namespace_id, target_parent_inode_id)?;
-    let anchor = load_sync_anchor(conn, namespace_id, target_parent_inode_id)?;
-    let (remote, local, anchor) = match (remote, local, anchor) {
-        (Some(remote), Some(local), Some(anchor)) => (remote, local, anchor),
-        _ => return Ok(Some("parent_not_bound")),
-    };
-
-    if remote.inode_kind != InodeKind::Dir
-        || local.inode_kind != InodeKind::Dir
-        || anchor.inode_kind != InodeKind::Dir
-    {
-        return Ok(Some("parent_not_directory"));
-    }
-    if remote.is_deleted {
-        return Ok(Some("parent_deleted"));
-    }
-    if !subtree_local_matches_anchor(&local, &anchor)
-        || !subtree_remote_matches_anchor(&remote, &anchor)
-    {
-        return Ok(Some("parent_not_converged"));
-    }
-
-    Ok(None)
+    Ok(if saw_placeholder_on_chain {
+        TargetParentAssessment::WaitingForMaterialization
+    } else {
+        TargetParentAssessment::Usable
+    })
 }
 
 fn load_local_subtree_inode_ids(
@@ -1603,6 +1682,37 @@ fn subtree_remote_matches_anchor(remote: &RemoteFileStateRow, anchor: &SyncAncho
         && remote.content_manifest_digest == anchor.content_manifest_digest
         && remote.parent_inode_id == anchor.parent_inode_id
         && remote.display_name == anchor.display_name
+}
+
+fn remote_only_placeholder_matches_remote_state(
+    local: &LocalFileStateRow,
+    remote: &RemoteFileStateRow,
+) -> bool {
+    !local.exists_on_disk
+        && !local.dirty
+        && !remote.is_deleted
+        && local.inode_kind == remote.inode_kind
+        && local.parent_inode_id == remote.parent_inode_id
+        && local.display_name == remote.display_name
+}
+
+fn inode_has_active_transfer_or_pending_mutation(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<bool, StateDbError> {
+    let has_active_transfer = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM transfer_ledger
+            WHERE namespace_id = ?1 AND inode_id = ?2
+        )",
+        params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?,],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let has_pending_inode_mutation =
+        load_pending_inode_mutation_for_inode(conn, namespace_id, inode_id)?.is_some();
+    Ok(has_active_transfer || has_pending_inode_mutation)
 }
 
 fn root_remote_matches_anchor_except_path(

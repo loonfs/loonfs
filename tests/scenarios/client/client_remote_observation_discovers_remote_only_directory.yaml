@@ -48,17 +48,13 @@ expect:
     dirty: false
     last_local_change_ms: 1700000708000
   sync_anchor: null
-  planned_action:
-    namespace_id: ns-1
-    inode_id: 701
-    decision: materialize_remote_dir
-    reason: remote_observed_without_anchor
-    created_at_ms: 1700000710000
+  planned_action: null
   invariants:
     - remote_only_directory_discovery_creates_placeholder_without_anchor
+    - remote_only_materialization_waits_for_parent_materialization
   planner_result:
     namespace_id: ns-1
     inode_id: 701
-    decision: materialize_remote_dir
-    reason: remote_observed_without_anchor
+    decision: no_op
+    reason: remote_parent_waiting_for_materialization
     created_at_ms: 1700000710000

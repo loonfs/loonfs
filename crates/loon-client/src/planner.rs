@@ -1,7 +1,7 @@
 use crate::state_db::{
-    ClientFileId, FileSyncViews, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    PlannedActionRow, RemoteSubtreeDeleteAssessment, RemoteSubtreeRenameAssessment, SqliteStateDb,
-    StateDbError, SyncAnchorRow, TransferDirection,
+    ClientFileId, FileSyncViews, HierarchyParentMaterializationAssessment, LocalOnlyFileStateRow,
+    LocalOnlyPlannedActionRow, PlannedActionRow, RemoteSubtreeDeleteAssessment,
+    RemoteSubtreeRenameAssessment, SqliteStateDb, StateDbError, SyncAnchorRow, TransferDirection,
 };
 use loon_types::{InodeId, InodeKind, NamespaceId};
 use serde::{Deserialize, Serialize};
@@ -44,8 +44,12 @@ pub enum PlannerReason {
     RemoteSubtreePathDiffersWhileLocalDiffersFromAnchor,
     RemoteSubtreePathDiffersWhileDescendantsDifferFromAnchor,
     RemoteSubtreePathDiffersWhileDescendantsBusy,
+    RemoteSubtreePathWaitingForTargetParentMaterialization,
     RemoteSubtreePathTargetParentUnusable,
+    RemoteParentWaitingForMaterialization,
     RemotePathDiffersFromAnchor,
+    RemotePathWaitingForTargetParentMaterialization,
+    RemotePathTargetParentUnusable,
     RemotePathAndContentDifferFromAnchor,
     LocalAndRemoteDifferFromAnchor,
     LocalObservedWithoutAnchor,
@@ -88,33 +92,50 @@ pub fn plan_file(
     now_ms: u64,
 ) -> Result<PlannedActionRecord, PlannerError> {
     db.planner_transaction("plan_file", |tx| {
-        let views = tx.load_file_sync_views(namespace_id, inode_id)?;
-        let mut action = if let Some(action) =
-            decide_remote_subtree_delete_action(tx, namespace_id, inode_id, &views, now_ms)?
-        {
-            action
-        } else if let Some(action) =
-            decide_remote_subtree_rename_action(tx, namespace_id, inode_id, &views, now_ms)?
-        {
-            action
-        } else {
-            decide_file_action(&views, now_ms)
-        };
-        if let Some(preserved) =
-            preserve_in_flight_action_for_remote_delete(tx, namespace_id, inode_id, &views, now_ms)?
-        {
-            action = preserved;
-        }
-
-        if action.decision == PlannerDecision::NoOp {
-            tx.delete_planned_action(namespace_id, inode_id)?;
-        } else {
-            tx.upsert_planned_action(&action.to_row())?;
-        }
-
-        Ok(action)
+        plan_file_in_tx(tx, namespace_id, inode_id, now_ms)
     })
     .map_err(PlannerError::from)
+}
+
+pub(crate) fn plan_file_in_tx(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    now_ms: u64,
+) -> Result<PlannedActionRecord, StateDbError> {
+    let views = tx.load_file_sync_views(namespace_id, inode_id)?;
+    let mut action = if let Some(action) =
+        decide_remote_subtree_delete_action(tx, namespace_id, inode_id, &views, now_ms)?
+    {
+        action
+    } else if let Some(action) =
+        decide_remote_subtree_rename_action(tx, namespace_id, inode_id, &views, now_ms)?
+    {
+        action
+    } else if let Some(action) =
+        decide_remote_only_materialization_wait_action(tx, namespace_id, inode_id, &views, now_ms)?
+    {
+        action
+    } else if let Some(action) =
+        decide_remote_file_rename_action(tx, namespace_id, inode_id, &views, now_ms)?
+    {
+        action
+    } else {
+        decide_file_action(&views, now_ms)
+    };
+    if let Some(preserved) =
+        preserve_in_flight_action_for_remote_delete(tx, namespace_id, inode_id, &views, now_ms)?
+    {
+        action = preserved;
+    }
+
+    if action.decision == PlannerDecision::NoOp {
+        tx.delete_planned_action(namespace_id, inode_id)?;
+    } else {
+        tx.upsert_planned_action(&action.to_row())?;
+    }
+
+    Ok(action)
 }
 
 pub fn plan_local_only_file(
@@ -439,10 +460,20 @@ impl PlannerReason {
             Self::RemoteSubtreePathDiffersWhileDescendantsBusy => {
                 "remote_subtree_path_differs_while_descendants_busy"
             }
+            Self::RemoteSubtreePathWaitingForTargetParentMaterialization => {
+                "remote_subtree_path_waiting_for_target_parent_materialization"
+            }
             Self::RemoteSubtreePathTargetParentUnusable => {
                 "remote_subtree_path_target_parent_unusable"
             }
+            Self::RemoteParentWaitingForMaterialization => {
+                "remote_parent_waiting_for_materialization"
+            }
             Self::RemotePathDiffersFromAnchor => "remote_path_differs_from_anchor",
+            Self::RemotePathWaitingForTargetParentMaterialization => {
+                "remote_path_waiting_for_target_parent_materialization"
+            }
+            Self::RemotePathTargetParentUnusable => "remote_path_target_parent_unusable",
             Self::RemotePathAndContentDifferFromAnchor => {
                 "remote_path_and_content_differ_from_anchor"
             }
@@ -493,10 +524,20 @@ impl PlannerReason {
             "remote_subtree_path_differs_while_descendants_busy" => {
                 Ok(Self::RemoteSubtreePathDiffersWhileDescendantsBusy)
             }
+            "remote_subtree_path_waiting_for_target_parent_materialization" => {
+                Ok(Self::RemoteSubtreePathWaitingForTargetParentMaterialization)
+            }
             "remote_subtree_path_target_parent_unusable" => {
                 Ok(Self::RemoteSubtreePathTargetParentUnusable)
             }
+            "remote_parent_waiting_for_materialization" => {
+                Ok(Self::RemoteParentWaitingForMaterialization)
+            }
             "remote_path_differs_from_anchor" => Ok(Self::RemotePathDiffersFromAnchor),
+            "remote_path_waiting_for_target_parent_materialization" => {
+                Ok(Self::RemotePathWaitingForTargetParentMaterialization)
+            }
+            "remote_path_target_parent_unusable" => Ok(Self::RemotePathTargetParentUnusable),
             "remote_path_and_content_differ_from_anchor" => {
                 Ok(Self::RemotePathAndContentDifferFromAnchor)
             }
@@ -558,6 +599,102 @@ fn remote_only_placeholder_matches_remote(
         && local.inode_kind == remote.inode_kind
         && local.parent_inode_id == remote.parent_inode_id
         && local.display_name == remote.display_name
+}
+
+fn decide_remote_only_materialization_wait_action(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    views: &FileSyncViews,
+    now_ms: u64,
+) -> Result<Option<PlannedActionRecord>, StateDbError> {
+    let (Some(remote), Some(local), None) = (
+        views.remote.as_ref(),
+        views.local.as_ref(),
+        views.sync_anchor.as_ref(),
+    ) else {
+        return Ok(None);
+    };
+    if !matches!(remote.inode_kind, InodeKind::File | InodeKind::Dir)
+        || !remote_only_placeholder_matches_remote(local, remote)
+    {
+        return Ok(None);
+    }
+    let Some(parent_inode_id) = remote.parent_inode_id else {
+        return Ok(None);
+    };
+
+    let parent_assessment =
+        tx.assess_hierarchy_parent_materialization(namespace_id, parent_inode_id)?;
+    if parent_assessment == HierarchyParentMaterializationAssessment::Usable {
+        return Ok(None);
+    }
+
+    Ok(Some(PlannedActionRecord {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        decision: PlannerDecision::NoOp,
+        reason: PlannerReason::RemoteParentWaitingForMaterialization,
+        created_at_ms: now_ms,
+    }))
+}
+
+fn decide_remote_file_rename_action(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    views: &FileSyncViews,
+    now_ms: u64,
+) -> Result<Option<PlannedActionRecord>, StateDbError> {
+    let (Some(remote), Some(local), Some(anchor)) = (
+        views.remote.as_ref(),
+        views.local.as_ref(),
+        views.sync_anchor.as_ref(),
+    ) else {
+        return Ok(None);
+    };
+    if remote.inode_kind != InodeKind::File
+        || local.inode_kind != InodeKind::File
+        || anchor.inode_kind != InodeKind::File
+        || !local_matches_anchor(local, anchor)
+        || !remote_content_matches_anchor(remote, anchor)
+        || remote_path_matches_anchor(remote, anchor)
+    {
+        return Ok(None);
+    }
+
+    let parent_assessment = if remote.parent_inode_id == anchor.parent_inode_id {
+        HierarchyParentMaterializationAssessment::Usable
+    } else {
+        match remote.parent_inode_id {
+            Some(target_parent_inode_id) => {
+                tx.assess_hierarchy_parent_materialization(namespace_id, target_parent_inode_id)?
+            }
+            None => HierarchyParentMaterializationAssessment::Usable,
+        }
+    };
+    let (decision, reason) = match parent_assessment {
+        HierarchyParentMaterializationAssessment::Usable => (
+            PlannerDecision::ApplyRemoteRename,
+            PlannerReason::RemotePathDiffersFromAnchor,
+        ),
+        HierarchyParentMaterializationAssessment::WaitingForMaterialization => (
+            PlannerDecision::NoOp,
+            PlannerReason::RemotePathWaitingForTargetParentMaterialization,
+        ),
+        HierarchyParentMaterializationAssessment::Unusable => (
+            PlannerDecision::CreateConflictCopy,
+            PlannerReason::RemotePathTargetParentUnusable,
+        ),
+    };
+
+    Ok(Some(PlannedActionRecord {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        decision,
+        reason,
+        created_at_ms: now_ms,
+    }))
 }
 
 fn preserve_in_flight_action_for_remote_delete(
@@ -713,6 +850,10 @@ fn decide_remote_subtree_rename_action(
         RemoteSubtreeRenameAssessment::DeferredDescendantsBusy => (
             PlannerDecision::CreateConflictCopy,
             PlannerReason::RemoteSubtreePathDiffersWhileDescendantsBusy,
+        ),
+        RemoteSubtreeRenameAssessment::WaitingForTargetParentMaterialization => (
+            PlannerDecision::NoOp,
+            PlannerReason::RemoteSubtreePathWaitingForTargetParentMaterialization,
         ),
         RemoteSubtreeRenameAssessment::DeferredTargetParentUnusable => (
             PlannerDecision::CreateConflictCopy,
@@ -1281,7 +1422,7 @@ mod tests {
                     revision_no: RevisionNo(10),
                     content_digest: None,
                     content_manifest_digest: None,
-                    parent_inode_id: Some(InodeId(1)),
+                    parent_inode_id: None,
                     display_name: "archive".to_owned(),
                     is_deleted: false,
                 })?;
@@ -1290,7 +1431,7 @@ mod tests {
                     inode_id: target_parent_inode_id,
                     inode_kind: InodeKind::Dir,
                     content_digest: None,
-                    parent_inode_id: Some(InodeId(1)),
+                    parent_inode_id: None,
                     display_name: "archive".to_owned(),
                     exists_on_disk: true,
                     dirty: false,
@@ -1304,7 +1445,7 @@ mod tests {
                     revision_no: RevisionNo(10),
                     content_digest: None,
                     content_manifest_digest: None,
-                    parent_inode_id: Some(InodeId(1)),
+                    parent_inode_id: None,
                     display_name: "archive".to_owned(),
                 })?;
             }
@@ -1663,6 +1804,430 @@ mod tests {
 
         assert_eq!(planned.decision, PlannerDecision::MaterializeRemoteDir);
         assert_eq!(planned.reason, PlannerReason::RemoteObservedWithoutAnchor);
+    }
+
+    #[test]
+    fn planner_waits_remote_only_file_until_parent_materializes() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        db.planner_transaction("seed-remote-only-file-wait", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(52),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_712_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(52),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(700),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(53),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "incoming".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(700),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "incoming".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_712_100,
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(701),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(54),
+                revision_no: RevisionNo(1),
+                content_digest: Some("sha256:child".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-child".to_owned()),
+                parent_inode_id: Some(InodeId(700)),
+                display_name: "welcome.txt".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(701),
+                inode_kind: InodeKind::File,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(700)),
+                display_name: "welcome.txt".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_712_200,
+            })?;
+            Ok(())
+        })
+        .expect("seed remote-only wait state");
+
+        let planned = plan_file(&mut db, &namespace_id, InodeId(701), 1_700_000_713_000)
+            .expect("plan remote-only file child");
+
+        assert_eq!(planned.decision, PlannerDecision::NoOp);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteParentWaitingForMaterialization
+        );
+    }
+
+    #[test]
+    fn planner_waits_remote_only_directory_until_parent_materializes() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        db.planner_transaction("seed-remote-only-dir-wait", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(52),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_722_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(52),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(700),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(53),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "incoming".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(700),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "incoming".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_722_100,
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(701),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(54),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(700)),
+                display_name: "nested".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(701),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(700)),
+                display_name: "nested".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_722_200,
+            })?;
+            Ok(())
+        })
+        .expect("seed remote-only dir wait state");
+
+        let planned = plan_file(&mut db, &namespace_id, InodeId(701), 1_700_000_723_000)
+            .expect("plan remote-only directory child");
+
+        assert_eq!(planned.decision, PlannerDecision::NoOp);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteParentWaitingForMaterialization
+        );
+    }
+
+    #[test]
+    fn planner_allows_remote_subtree_rename_with_remote_only_descendant_placeholder() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        let root_inode_id = InodeId(10);
+        let child_inode_id = InodeId(11);
+
+        db.planner_transaction("seed-subtree-rename-remote-only-descendant", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(9),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_724_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(42),
+                revision_no: RevisionNo(9),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(43),
+                revision_no: RevisionNo(7),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "reports-2026".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "reports".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_724_010,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(42),
+                revision_no: RevisionNo(7),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "reports".to_owned(),
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: child_inode_id,
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(root_inode_id),
+                display_name: "incoming".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: child_inode_id,
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(root_inode_id),
+                display_name: "incoming".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_724_020,
+            })?;
+            Ok(())
+        })
+        .expect("seed subtree rename with remote-only descendant");
+
+        let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_725_000)
+            .expect("plan subtree rename with remote-only descendant");
+
+        assert_eq!(planned.decision, PlannerDecision::ApplyRemoteSubtreeRename);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteSubtreePathDiffersFromAnchor
+        );
+    }
+
+    #[test]
+    fn planner_allows_remote_subtree_delete_with_remote_only_descendant_placeholder() {
+        let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+        let namespace_id = NamespaceId::from("ns-1");
+        let root_inode_id = InodeId(10);
+        let child_inode_id = InodeId(11);
+
+        db.planner_transaction("seed-subtree-delete-remote-only-descendant", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(9),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_726_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(42),
+                revision_no: RevisionNo(9),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "workspace".to_owned(),
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(43),
+                revision_no: RevisionNo(7),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "reports".to_owned(),
+                is_deleted: true,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "reports".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_726_010,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: root_inode_id,
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(42),
+                revision_no: RevisionNo(7),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "reports".to_owned(),
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: child_inode_id,
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(42),
+                revision_no: RevisionNo(1),
+                content_digest: Some("sha256:child".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-child".to_owned()),
+                parent_inode_id: Some(root_inode_id),
+                display_name: "welcome.txt".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: child_inode_id,
+                inode_kind: InodeKind::File,
+                content_digest: None,
+                parent_inode_id: Some(root_inode_id),
+                display_name: "welcome.txt".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_726_020,
+            })?;
+            Ok(())
+        })
+        .expect("seed subtree delete with remote-only descendant");
+
+        let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_727_000)
+            .expect("plan subtree delete with remote-only descendant");
+
+        assert_eq!(planned.decision, PlannerDecision::ApplyRemoteSubtreeDelete);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteSubtreeDeletedFromAnchor
+        );
     }
 
     #[test]

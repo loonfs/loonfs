@@ -424,6 +424,13 @@ pub struct RemoteOnlyDirectoryMaterializationInvariantInputs<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteOnlyParentMaterializationWaitInvariantInputs<'a> {
+    pub planner_decision: &'a str,
+    pub planner_reason: &'a str,
+    pub planned_action_present_after: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct RemotePathChangePlanningInvariantInputs<'a> {
     pub planned_action_decision_after: Option<&'a str>,
     pub planned_action_reason_after: Option<&'a str>,
@@ -1755,15 +1762,15 @@ pub fn evaluate_remote_only_discovery_invariants(
             name: name.to_owned(),
             passed: !inputs.local_exists_on_disk_after
                 && !inputs.local_dirty_after
-                && !inputs.sync_anchor_present_after
-                && inputs.planned_action_decision_after == expected_decision,
+                && !inputs.sync_anchor_present_after,
             detail: format!(
-                "inode_kind={:?} local_exists_on_disk_after={} local_dirty_after={} sync_anchor_present_after={} planned_action_decision_after={:?}",
+                "inode_kind={:?} local_exists_on_disk_after={} local_dirty_after={} sync_anchor_present_after={} planned_action_decision_after={:?} expected_immediate_decision={:?}",
                 inputs.inode_kind,
                 inputs.local_exists_on_disk_after,
                 inputs.local_dirty_after,
                 inputs.sync_anchor_present_after,
-                inputs.planned_action_decision_after
+                inputs.planned_action_decision_after,
+                expected_decision
             ),
         }],
     }
@@ -1815,19 +1822,49 @@ pub fn evaluate_remote_only_directory_materialization_invariants(
     }
 }
 
+pub fn evaluate_remote_only_parent_materialization_wait_invariants(
+    inputs: RemoteOnlyParentMaterializationWaitInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "remote_only_materialization_waits_for_parent_materialization".to_owned(),
+            passed: inputs.planner_decision == "no_op"
+                && inputs.planner_reason == "remote_parent_waiting_for_materialization"
+                && !inputs.planned_action_present_after,
+            detail: format!(
+                "planner_decision={} planner_reason={} planned_action_present_after={}",
+                inputs.planner_decision, inputs.planner_reason, inputs.planned_action_present_after
+            ),
+        }],
+    }
+}
+
 pub fn evaluate_remote_path_change_planning_invariants(
     inputs: RemotePathChangePlanningInvariantInputs<'_>,
 ) -> ClientReconciliationInvariantReport {
     ClientReconciliationInvariantReport {
-        checks: vec![InvariantCheck {
-            name: "remote_path_change_plans_apply_remote_rename".to_owned(),
-            passed: inputs.planned_action_decision_after == Some("apply_remote_rename")
-                && inputs.planned_action_reason_after == Some("remote_path_differs_from_anchor"),
-            detail: format!(
-                "planned_action_decision_after={:?} planned_action_reason_after={:?}",
-                inputs.planned_action_decision_after, inputs.planned_action_reason_after
-            ),
-        }],
+        checks: vec![
+            InvariantCheck {
+                name: "remote_path_change_plans_apply_remote_rename".to_owned(),
+                passed: inputs.planned_action_decision_after == Some("apply_remote_rename")
+                    && inputs.planned_action_reason_after
+                        == Some("remote_path_differs_from_anchor"),
+                detail: format!(
+                    "planned_action_decision_after={:?} planned_action_reason_after={:?}",
+                    inputs.planned_action_decision_after, inputs.planned_action_reason_after
+                ),
+            },
+            InvariantCheck {
+                name: "materialized_target_parent_unblocks_apply_remote_rename".to_owned(),
+                passed: inputs.planned_action_decision_after == Some("apply_remote_rename")
+                    && inputs.planned_action_reason_after
+                        == Some("remote_path_differs_from_anchor"),
+                detail: format!(
+                    "planned_action_decision_after={:?} planned_action_reason_after={:?}",
+                    inputs.planned_action_decision_after, inputs.planned_action_reason_after
+                ),
+            },
+        ],
     }
 }
 
@@ -1923,6 +1960,15 @@ pub fn evaluate_apply_remote_subtree_delete_invariants(
                 ),
             },
             InvariantCheck {
+                name: "apply_remote_subtree_delete_clears_remote_only_descendants".to_owned(),
+                passed: inputs.descendant_remote_count_after == 0
+                    && inputs.subtree_local_state_count_after == 0,
+                detail: format!(
+                    "descendant_remote_count_after={} subtree_local_state_count_after={}",
+                    inputs.descendant_remote_count_after, inputs.subtree_local_state_count_after
+                ),
+            },
+            InvariantCheck {
                 name: "apply_remote_subtree_delete_clears_local_state_and_sync_anchor_for_subtree"
                     .to_owned(),
                 passed: inputs.subtree_local_state_count_after == 0
@@ -1954,16 +2000,28 @@ pub fn evaluate_remote_subtree_rename_planning_invariants(
     inputs: RemoteSubtreeRenamePlanningInvariantInputs<'_>,
 ) -> ClientReconciliationInvariantReport {
     ClientReconciliationInvariantReport {
-        checks: vec![InvariantCheck {
-            name: "remote_subtree_path_change_plans_apply_remote_subtree_rename".to_owned(),
-            passed: inputs.planned_action_decision_after == Some("apply_remote_subtree_rename")
-                && inputs.planned_action_reason_after
-                    == Some("remote_subtree_path_differs_from_anchor"),
-            detail: format!(
-                "decision={:?} reason={:?}",
-                inputs.planned_action_decision_after, inputs.planned_action_reason_after
-            ),
-        }],
+        checks: vec![
+            InvariantCheck {
+                name: "remote_subtree_path_change_plans_apply_remote_subtree_rename".to_owned(),
+                passed: inputs.planned_action_decision_after == Some("apply_remote_subtree_rename")
+                    && inputs.planned_action_reason_after
+                        == Some("remote_subtree_path_differs_from_anchor"),
+                detail: format!(
+                    "decision={:?} reason={:?}",
+                    inputs.planned_action_decision_after, inputs.planned_action_reason_after
+                ),
+            },
+            InvariantCheck {
+                name: "materialized_target_parent_unblocks_apply_remote_subtree_rename".to_owned(),
+                passed: inputs.planned_action_decision_after == Some("apply_remote_subtree_rename")
+                    && inputs.planned_action_reason_after
+                        == Some("remote_subtree_path_differs_from_anchor"),
+                detail: format!(
+                    "decision={:?} reason={:?}",
+                    inputs.planned_action_decision_after, inputs.planned_action_reason_after
+                ),
+            },
+        ],
     }
 }
 
@@ -2010,6 +2068,19 @@ pub fn evaluate_apply_remote_subtree_rename_invariants(
             },
             InvariantCheck {
                 name: "apply_remote_subtree_rename_preserves_descendant_durable_state".to_owned(),
+                passed: preserves_descendants,
+                detail: format!(
+                    "descendant_remote_count_after={} expected_descendant_remote_count={} descendant_local_state_count_after={} expected_descendant_local_state_count={} descendant_sync_anchor_count_after={} expected_descendant_sync_anchor_count={}",
+                    inputs.descendant_remote_count_after,
+                    inputs.expected_descendant_remote_count,
+                    inputs.descendant_local_state_count_after,
+                    inputs.expected_descendant_local_state_count,
+                    inputs.descendant_sync_anchor_count_after,
+                    inputs.expected_descendant_sync_anchor_count
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_subtree_rename_preserves_remote_only_descendants".to_owned(),
                 passed: preserves_descendants,
                 detail: format!(
                     "descendant_remote_count_after={} expected_descendant_remote_count={} descendant_local_state_count_after={} expected_descendant_local_state_count={} descendant_sync_anchor_count_after={} expected_descendant_sync_anchor_count={}",
@@ -3649,6 +3720,8 @@ mod tests {
         evaluate_remote_observation_ambiguous_bind_invariants,
         evaluate_remote_observation_convergence_invariants,
         evaluate_remote_only_directory_materialization_invariants,
+        evaluate_remote_only_parent_materialization_wait_invariants,
+        evaluate_remote_path_change_planning_invariants,
         evaluate_remote_subtree_delete_planning_invariants,
         evaluate_remote_subtree_rename_planning_invariants, ApplyRemoteDeleteInvariantInputs,
         ApplyRemoteSubtreeDeleteInvariantInputs, ApplyRemoteSubtreeRenameInvariantInputs,
@@ -3663,7 +3736,9 @@ mod tests {
         QueueCompleteOutcomeKind, RemoteDeletePlanningInvariantInputs,
         RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
         RemoteOnlyDirectoryMaterializationInvariantInputs,
-        RemoteOnlyDirectoryMaterializationOutcomeKind, RemoteSubtreeDeletePlanningInvariantInputs,
+        RemoteOnlyDirectoryMaterializationOutcomeKind,
+        RemoteOnlyParentMaterializationWaitInvariantInputs,
+        RemotePathChangePlanningInvariantInputs, RemoteSubtreeDeletePlanningInvariantInputs,
         RemoteSubtreeRenamePlanningInvariantInputs, StoredCheckpointSegmentSnapshot,
         StoredContentBlockSnapshot, WalReplayInvariantInputs,
     };
@@ -4619,6 +4694,42 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_invariant_report_marks_remote_only_parent_wait_as_passed() {
+        let report = evaluate_remote_only_parent_materialization_wait_invariants(
+            RemoteOnlyParentMaterializationWaitInvariantInputs {
+                planner_decision: "no_op",
+                planner_reason: "remote_parent_waiting_for_materialization",
+                planned_action_present_after: false,
+            },
+        );
+
+        assert!(
+            report
+                .check("remote_only_materialization_waits_for_parent_materialization")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_only_parent_wait_as_failed_when_row_persists() {
+        let report = evaluate_remote_only_parent_materialization_wait_invariants(
+            RemoteOnlyParentMaterializationWaitInvariantInputs {
+                planner_decision: "no_op",
+                planner_reason: "remote_parent_waiting_for_materialization",
+                planned_action_present_after: true,
+            },
+        );
+
+        assert!(
+            !report
+                .check("remote_only_materialization_waits_for_parent_materialization")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
     fn reconciliation_invariant_report_marks_remote_delete_as_passed() {
         let planning_report =
             evaluate_remote_delete_planning_invariants(RemoteDeletePlanningInvariantInputs {
@@ -4645,6 +4756,23 @@ mod tests {
             apply_report
                 .check("apply_remote_delete_clears_local_state_and_sync_anchor")
                 .expect("apply check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_materialized_target_parent_unblocks_file_rename() {
+        let report = evaluate_remote_path_change_planning_invariants(
+            RemotePathChangePlanningInvariantInputs {
+                planned_action_decision_after: Some("apply_remote_rename"),
+                planned_action_reason_after: Some("remote_path_differs_from_anchor"),
+            },
+        );
+
+        assert!(
+            report
+                .check("materialized_target_parent_unblocks_apply_remote_rename")
+                .expect("check")
                 .passed
         );
     }
@@ -4698,6 +4826,12 @@ mod tests {
             apply_report
                 .check("apply_remote_subtree_delete_clears_descendant_remote_rows")
                 .expect("apply check")
+                .passed
+        );
+        assert!(
+            apply_report
+                .check("apply_remote_subtree_delete_clears_remote_only_descendants")
+                .expect("apply remote-only descendant check")
                 .passed
         );
     }
@@ -4765,9 +4899,21 @@ mod tests {
                 .passed
         );
         assert!(
+            planning_report
+                .check("materialized_target_parent_unblocks_apply_remote_subtree_rename")
+                .expect("materialized target-parent check")
+                .passed
+        );
+        assert!(
             apply_report
                 .check("apply_remote_subtree_rename_preserves_descendant_durable_state")
                 .expect("apply check")
+                .passed
+        );
+        assert!(
+            apply_report
+                .check("apply_remote_subtree_rename_preserves_remote_only_descendants")
+                .expect("apply remote-only descendant check")
                 .passed
         );
     }

@@ -262,6 +262,15 @@ pub enum StateDbError {
         "apply_remote_rename_path_change_missing: namespace `{namespace_id}` inode `{inode_id}`"
     )]
     ApplyRemoteRenamePathChangeMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "apply_remote_rename_target_parent_unusable: namespace `{namespace_id}` inode `{inode_id}` target_parent `{target_parent_inode_id:?}` reason `{reason}`"
+    )]
+    ApplyRemoteRenameTargetParentUnusable {
+        namespace_id: String,
+        inode_id: u64,
+        target_parent_inode_id: Option<u64>,
+        reason: &'static str,
+    },
     #[error("apply_remote_delete_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
     ApplyRemoteDeleteStateMissing { namespace_id: String, inode_id: u64 },
     #[error("apply_remote_delete_requires_file: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
@@ -548,7 +557,15 @@ pub enum RemoteSubtreeRenameAssessment {
     DeferredRootLocalDiffers,
     DeferredDescendantsDiffer,
     DeferredDescendantsBusy,
+    WaitingForTargetParentMaterialization,
     DeferredTargetParentUnusable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchyParentMaterializationAssessment {
+    Usable,
+    WaitingForMaterialization,
+    Unusable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

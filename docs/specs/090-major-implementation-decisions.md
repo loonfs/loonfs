@@ -525,6 +525,59 @@ finished deciding which invariant families are worth keeping long term.
 
 ---
 
+## Decision 12: mixed-state hierarchy convergence uses explicit parent materialization steps
+
+### Problem
+
+The strict bound-only hierarchy slices leave a large real-world gap: authoritative remote moves can
+target directory chains the client already knows about, but has not materialized locally yet.
+There are two tempting shortcuts:
+
+- let rename/delete executors create missing parents inline
+- let remote-only descendant placeholders block subtree reconciliation indefinitely
+
+Both shortcuts make the protocol harder to reason about. Inline parent creation hides additional
+state transitions inside the wrong executor, and treating every remote-only descendant as a blocker
+collapses too much valid authoritative state into generic conflict work.
+
+### Recommendation
+
+Keep mixed-state hierarchy convergence explicit and incremental.
+
+Milestone 10 rules:
+
+- target-parent materialization is a prerequisite step, not part of
+  `apply_remote_rename` or `apply_remote_subtree_rename`
+- `materialize_remote_dir` operates one directory at a time for hierarchy convergence; it must not
+  recursively create missing authoritative ancestors
+- waiting for parent materialization is a named `no_op` planner state, not deferred conflict work
+- remote-only descendants are allowed during subtree rename/delete when they remain clean
+  placeholders with no anchor, transfer state, or pending mutation state
+- dirty, temp/local-only, or busy descendants still block subtree rename/delete
+
+### Why
+
+This keeps each executor responsible for one durable state transition:
+
+- materialize one parent directory
+- rename one file or subtree
+- delete one subtree
+
+That separation makes replay, retry, and failure reporting much easier to review. It also lets the
+planner distinguish between "waiting on another authoritative step" and "this hierarchy change is
+actually unsafe."
+
+### Failure modes prevented
+
+- rename/delete executors synthesizing parent directories that were never observed authoritatively
+- path-change flows failing only at executor time when the planner should have known they were just
+  waiting on parent materialization
+- subtree rename/delete deferring unnecessarily because one descendant is a clean remote-only
+  placeholder
+- mixed-state hierarchy protocols that become too implicit to test deterministically
+
+---
+
 ## Decisions that are now safe to leave to implementers
 
 Once the decisions above are accepted, most remaining choices are comparatively low leverage. Examples:

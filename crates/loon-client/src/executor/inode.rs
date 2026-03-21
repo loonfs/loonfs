@@ -442,6 +442,12 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
             })?;
+        if !target_path.parent().is_some_and(|parent| parent.exists()) {
+            return Err(ExecuteDownloadRemoteEditError::SourcePathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
         let manifest_digest = remote
             .content_manifest_digest
             .as_deref()
@@ -611,6 +617,12 @@ pub(super) fn execute_materialize_remote_dir(
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
             })?;
+        if !target_path.parent().is_some_and(|parent| parent.exists()) {
+            return Err(ExecuteMaterializeRemoteDirError::SourcePathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
 
         create_directory_durably(target_path)?;
 

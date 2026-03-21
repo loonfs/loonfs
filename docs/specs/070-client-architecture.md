@@ -1200,6 +1200,19 @@ Rules:
   - `inode_kind`
   - `parent_inode_id`
   - `display_name`
+- for the discovered remote-only file shape, the target parent directory must already be locally
+  usable before the executor may run:
+  - the namespace root counts as usable
+  - otherwise the parent must have converged `remote_state`, `local_state`, and `sync_anchor`
+    rows for a non-deleted directory
+  - the parent `local_state` must have `exists_on_disk = true` and `dirty = false`
+- if the remote-only placeholder is otherwise valid but its parent is not yet locally usable, the
+  planner must return:
+  - `decision = no_op`
+  - `reason = remote_parent_waiting_for_materialization`
+  - and clear any stale planned action row for that inode
+- the remote-only file executor must fail closed instead of synthesizing missing parent
+  directories implicitly
 - after bytes are downloaded and atomically written locally, one SQLite transaction must:
   - update `local_state` to `exists_on_disk = true`, `dirty = false`, and
     `content_digest = remote_state.content_digest`
@@ -1235,13 +1248,20 @@ Rules:
     - `content_digest = null`
     - `exists_on_disk = false`
   - `sync_anchor(namespace_id, inode_id)` is still absent
+- except for the namespace root case, the parent directory must already be locally usable before
+  `materialize_remote_dir` may execute
 - the local placeholder must still match the authoritative path view on:
   - `parent_inode_id`
   - `display_name`
+- the local apply step must create exactly the target directory and must not recursively create
+  missing authoritative ancestors
 - after the local directory is created durably, one SQLite transaction must:
   - update `local_state` to `exists_on_disk = true`, `dirty = false`
   - create `sync_anchor(namespace_id, inode_id)` from the authoritative remote row
   - clear `planned_actions(namespace_id, inode_id)`
+- after successful directory materialization, the planner transaction must replan direct
+  authoritative children whose `remote_state.parent_inode_id` equals the materialized directory
+  inode so waiting child work can become executable without a separate global sweep
 
 Why this rule exists:
 
@@ -2096,6 +2116,73 @@ Executable invariant IDs for this slice:
 - `apply_remote_subtree_rename_preserves_descendant_durable_state`
 - `apply_remote_subtree_rename_clears_root_planned_action`
 - `apply_remote_subtree_rename_failure_records_durable_issue`
+
+## Mixed-state hierarchy convergence with materializable parents
+
+The next hierarchy tranche keeps rename/delete explicit, but broadens them beyond the strict
+already-bound case.
+
+Rules:
+
+- target-parent creation stays a separate executor flow:
+  - `apply_remote_rename`
+  - `apply_remote_subtree_rename`
+  - `apply_remote_subtree_delete`
+  must never create missing parent directories inline
+- a target-parent chain is materializable only when every missing directory from the nearest
+  usable ancestor down to the target parent already has:
+  - authoritative `remote_state` as a non-deleted directory
+  - `local_state` as a non-dirty placeholder with `exists_on_disk = false`
+  - no `sync_anchor`
+  - no transfer-ledger or pending-mutation state
+- when a bound-file path-only observation targets a materializable but not-yet-usable parent
+  chain, the planner must return:
+  - `decision = no_op`
+  - `reason = remote_path_waiting_for_target_parent_materialization`
+- when a bound-directory subtree path-only observation targets a materializable but not-yet-usable
+  parent chain, the planner must return:
+  - `decision = no_op`
+  - `reason = remote_subtree_path_waiting_for_target_parent_materialization`
+- if the target-parent chain is missing authoritative placeholder state, deleted, non-directory,
+  dirty, temp/local-only, busy, or otherwise non-converged, the planner must still defer to
+  deferred `create_conflict_copy`
+- remote-only descendants no longer block subtree rename/delete when they are valid placeholders:
+  - matching authoritative `remote_state`
+  - `exists_on_disk = false`
+  - `dirty = false`
+  - no `sync_anchor`
+  - no transfer-ledger or pending-mutation state
+- dirty bound descendants, bound descendants missing or diverging from their anchor, temp/local-only
+  descendants, and busy descendants still block mixed-state subtree reconciliation
+- after successful `apply_remote_subtree_rename`, descendant remote-only placeholders remain
+  unchanged; path resolution continues to work because subtree state is inode-keyed through parent
+  chains
+- after successful `apply_remote_subtree_delete`, descendant remote-only placeholder rows are
+  cleared with the rest of the deleted subtree
+
+Why this rule exists:
+
+- authoritative remote hierarchy changes often arrive before every destination directory has been
+  materialized locally
+- waiting on explicit parent materialization is easier to reason about than letting rename/delete
+  create arbitrary missing ancestors inline
+- remote-only descendants are already authoritative state and should not force conflict work by
+  default
+
+Failure modes prevented:
+
+- a remote-only file or directory materializer silently creating unobserved parent directories
+- a bound rename failing late in the executor after the planner should already have known it was
+  only waiting for parent materialization
+- deferring subtree rename/delete solely because one descendant is a clean remote-only placeholder
+
+Executable invariant IDs for this tranche:
+
+- `remote_only_materialization_waits_for_parent_materialization`
+- `materialized_target_parent_unblocks_apply_remote_rename`
+- `materialized_target_parent_unblocks_apply_remote_subtree_rename`
+- `apply_remote_subtree_rename_preserves_remote_only_descendants`
+- `apply_remote_subtree_delete_clears_remote_only_descendants`
 
 ## SQLite hardening boundary (schema v11)
 

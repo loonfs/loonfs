@@ -1,106 +1,57 @@
 schema_version: 1
 scenario_kind: client
-name: client_remote_observation_bound_file_remote_move_applies_locally
+name: client_remote_observation_bound_file_remote_move_waits_for_target_parent_materialization
 initial:
   additional_remote_state:
     - namespace_id: ns-1
-      inode_id: 3
+      inode_id: 2
       inode_kind: dir
       observed_seq: 42
       revision_no: 9
       content_digest: null
       content_manifest_digest: null
       parent_inode_id: null
-      display_name: archive
+      display_name: workspace
+      is_deleted: false
+    - namespace_id: ns-1
+      inode_id: 700
+      inode_kind: dir
+      observed_seq: 43
+      revision_no: 1
+      content_digest: null
+      content_manifest_digest: null
+      parent_inode_id: 2
+      display_name: incoming
       is_deleted: false
   additional_local_state:
     - namespace_id: ns-1
-      inode_id: 3
+      inode_id: 2
       inode_kind: dir
       content_digest: null
       parent_inode_id: null
-      display_name: archive
+      display_name: workspace
       exists_on_disk: true
       dirty: false
-      last_local_change_ms: 1700000399000
+      last_local_change_ms: 1700001400000
+    - namespace_id: ns-1
+      inode_id: 700
+      inode_kind: dir
+      content_digest: null
+      parent_inode_id: 2
+      display_name: incoming
+      exists_on_disk: false
+      dirty: false
+      last_local_change_ms: 1700001400010
   additional_sync_anchor:
     - namespace_id: ns-1
-      inode_id: 3
+      inode_id: 2
       inode_kind: dir
       synced_seq: 42
       revision_no: 9
       content_digest: null
       content_manifest_digest: null
       parent_inode_id: null
-      display_name: archive
-  remote_state:
-    namespace_id: ns-1
-    inode_id: 42
-    inode_kind: file
-    observed_seq: 41
-    revision_no: 17
-    content_digest: sha256:anchor-17
-    content_manifest_digest: sha256:manifest-anchor-17
-    parent_inode_id: 2
-    display_name: report.txt
-    is_deleted: false
-  local_state:
-    namespace_id: ns-1
-    inode_id: 42
-    inode_kind: file
-    content_digest: sha256:anchor-17
-    parent_inode_id: 2
-    display_name: report.txt
-    exists_on_disk: true
-    dirty: false
-    last_local_change_ms: 1700000400000
-  sync_anchor:
-    namespace_id: ns-1
-    inode_id: 42
-    inode_kind: file
-    synced_seq: 41
-    revision_no: 17
-    content_digest: sha256:anchor-17
-    content_manifest_digest: sha256:manifest-anchor-17
-    parent_inode_id: 2
-    display_name: report.txt
-  local_file:
-    relative_path: reports/report.txt
-    content_utf8: |
-      hello from loon
-  target_relative_path: archive/report.txt
-actions:
-  - apply_remote_observation:
-      applied_at_ms: 1700000408000
-      remote_observation:
-        namespace_id: ns-1
-        inode_id: 42
-        inode_kind: file
-        observed_seq: 42
-        revision_no: 17
-        content_digest: sha256:anchor-17
-        content_manifest_digest: sha256:manifest-anchor-17
-        parent_inode_id: 3
-        display_name: report.txt
-        is_deleted: false
-  - restart_client_state_db: true
-  - planner_tick:
-      namespace_id: ns-1
-      inode_id: 42
-      now_ms: 1700000410000
-  - execute_next_client_action:
-      uploaded_at_ms: 1700000411000
-      created_at_ms: 1700000411000
-  - restart_client_state_db: true
-  - planner_tick:
-      namespace_id: ns-1
-      inode_id: 42
-      now_ms: 1700000412000
-expect:
-  outcome:
-    updated_bound_remote_state:
-      namespace_id: ns-1
-      inode_id: 42
+      display_name: workspace
   remote_state:
     namespace_id: ns-1
     inode_id: 42
@@ -109,7 +60,7 @@ expect:
     revision_no: 17
     content_digest: sha256:anchor-17
     content_manifest_digest: sha256:manifest-anchor-17
-    parent_inode_id: 3
+    parent_inode_id: 2
     display_name: report.txt
     is_deleted: false
   local_state:
@@ -117,11 +68,11 @@ expect:
     inode_id: 42
     inode_kind: file
     content_digest: sha256:anchor-17
-    parent_inode_id: 3
+    parent_inode_id: 2
     display_name: report.txt
     exists_on_disk: true
     dirty: false
-    last_local_change_ms: 1700000411000
+    last_local_change_ms: 1700001400020
   sync_anchor:
     namespace_id: ns-1
     inode_id: 42
@@ -130,26 +81,134 @@ expect:
     revision_no: 17
     content_digest: sha256:anchor-17
     content_manifest_digest: sha256:manifest-anchor-17
-    parent_inode_id: 3
+    parent_inode_id: 2
     display_name: report.txt
-  planned_action_cleared: true
-  execution:
-    executed_apply_remote_rename:
+  local_file:
+    relative_path: workspace/report.txt
+    content_utf8: |
+      hello from loon
+  target_relative_path: workspace/incoming/report.txt
+actions:
+  - apply_remote_observation:
+      applied_at_ms: 1700001408000
+      remote_observation:
+        namespace_id: ns-1
+        inode_id: 42
+        inode_kind: file
+        observed_seq: 43
+        revision_no: 17
+        content_digest: sha256:anchor-17
+        content_manifest_digest: sha256:manifest-anchor-17
+        parent_inode_id: 700
+        display_name: report.txt
+        is_deleted: false
+  - restart_client_state_db: true
+  - planner_tick:
       namespace_id: ns-1
       inode_id: 42
-  first_planner_result:
+      now_ms: 1700001410000
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 700
+      now_ms: 1700001411000
+  - execute_next_client_action:
+      uploaded_at_ms: 1700001412000
+      created_at_ms: 1700001412000
+  - restart_client_state_db: true
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 42
+      now_ms: 1700001413000
+  - execute_next_client_action:
+      uploaded_at_ms: 1700001414000
+      created_at_ms: 1700001414000
+  - restart_client_state_db: true
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 42
+      now_ms: 1700001415000
+expect:
+  outcome:
+    updated_bound_remote_state:
+      namespace_id: ns-1
+      inode_id: 42
+  waiting_planner_result:
+    namespace_id: ns-1
+    inode_id: 42
+    decision: no_op
+    reason: remote_path_waiting_for_target_parent_materialization
+    created_at_ms: 1700001410000
+  parent_planner_result:
+    namespace_id: ns-1
+    inode_id: 700
+    decision: materialize_remote_dir
+    reason: remote_observed_without_anchor
+    created_at_ms: 1700001411000
+  rename_planner_result:
     namespace_id: ns-1
     inode_id: 42
     decision: apply_remote_rename
     reason: remote_path_differs_from_anchor
-    created_at_ms: 1700000410000
-  second_planner_result:
+    created_at_ms: 1700001413000
+  final_planner_result:
     namespace_id: ns-1
     inode_id: 42
     decision: no_op
     reason: already_converged
-    created_at_ms: 1700000412000
+    created_at_ms: 1700001415000
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    observed_seq: 43
+    revision_no: 17
+    content_digest: sha256:anchor-17
+    content_manifest_digest: sha256:manifest-anchor-17
+    parent_inode_id: 700
+    display_name: report.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    content_digest: sha256:anchor-17
+    parent_inode_id: 700
+    display_name: report.txt
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700001414000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    synced_seq: 43
+    revision_no: 17
+    content_digest: sha256:anchor-17
+    content_manifest_digest: sha256:manifest-anchor-17
+    parent_inode_id: 700
+    display_name: report.txt
+  target_parent_local_state:
+    namespace_id: ns-1
+    inode_id: 700
+    inode_kind: dir
+    content_digest: null
+    parent_inode_id: 2
+    display_name: incoming
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700001412000
+  target_parent_sync_anchor:
+    namespace_id: ns-1
+    inode_id: 700
+    inode_kind: dir
+    synced_seq: 43
+    revision_no: 1
+    content_digest: null
+    content_manifest_digest: null
+    parent_inode_id: 2
+    display_name: incoming
+  planned_action_cleared: true
   invariants:
-    - remote_path_change_plans_apply_remote_rename
+    - materialized_target_parent_unblocks_apply_remote_rename
     - apply_remote_rename_updates_local_state_and_sync_anchor
     - apply_remote_rename_clears_planned_action

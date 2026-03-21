@@ -485,6 +485,52 @@ Exit criteria:
   target parents or non-converged/busy descendants defer to conflict work instead of moving
   eagerly
 
+## Milestone 10: mixed-state remote hierarchy convergence
+
+Goal:
+extend remote hierarchy reconciliation beyond the strict already-bound case by letting
+authoritative rename/delete work converge through remote-only placeholders and materializable
+target-parent chains.
+
+Primary crates:
+
+- `loon-client`
+- `loon-testkit`
+
+Deliverables:
+
+- waiting-state planner reasons for remote-only placeholders and bound path changes whose parent
+  chain is authoritative but not materialized yet
+- one-directory-at-a-time remote-only directory materialization that no longer creates missing
+  parents implicitly
+- direct-child replanning after parent materialization or subtree rename so waiting child work
+  becomes executable without a separate planner sweep
+- mixed-state subtree rename/delete semantics that allow remote-only descendants while still
+  deferring dirty, temp/local-only, or busy descendants
+- readable fixtures and checked-in invariant artifacts for waiting parent materialization, file
+  rename after parent materialization, subtree move after parent-chain materialization, and
+  subtree delete clearing remote-only descendants
+
+Required rules:
+
+- target-parent creation remains a separate executable step; rename/delete executors never create
+  missing parents inline
+- `materialize_remote_dir` stays one-directory-at-a-time for these hierarchy flows
+- remote-only descendants stop blocking subtree rename/delete, but dirty, temp/local-only, and
+  busy descendants still block
+- truly unusable target-parent chains still defer to `create_conflict_copy`
+
+Exit criteria:
+
+- remote-only file and directory placeholders wait with named `no_op` reasons until their parent
+  directory is locally usable
+- a bound-file authoritative move can wait for target-parent materialization, then replan to
+  `apply_remote_rename` and converge without manual cleanup
+- a bound-directory authoritative move can wait for a materializable remote-only parent chain, then
+  replan to `apply_remote_subtree_rename` while preserving remote-only descendant placeholders
+- subtree delete clears remote-only descendant placeholder rows instead of deferring on them
+  automatically
+
 ## Historical slice order
 
 Milestones 1 through 7 were executed through the following ordered slices.
