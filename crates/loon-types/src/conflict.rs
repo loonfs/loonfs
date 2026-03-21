@@ -24,6 +24,18 @@ impl ConflictClass {
             Self::SubtreeRenameVsLocalChanges => "subtree_rename_vs_local_changes",
         }
     }
+
+    pub fn artifact_kind(self) -> ConflictArtifactKind {
+        match self {
+            Self::SameInodeStaleBaseEdit
+            | Self::PathBindingCollision
+            | Self::DeleteVsEdit
+            | Self::RenameVsEdit => ConflictArtifactKind::File,
+            Self::SubtreeDeleteVsLocalChanges | Self::SubtreeRenameVsLocalChanges => {
+                ConflictArtifactKind::Subtree
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

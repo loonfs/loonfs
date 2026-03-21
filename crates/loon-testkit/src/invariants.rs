@@ -224,6 +224,39 @@ impl ClientReconciliationInvariantReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConflictArtifactRecoveryInvariantReport {
+    pub checks: Vec<InvariantCheck>,
+}
+
+impl ConflictArtifactRecoveryInvariantReport {
+    pub fn check(&self, name: &str) -> Option<&InvariantCheck> {
+        self.checks.iter().find(|check| check.name == name)
+    }
+
+    pub fn passed_names(&self) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|check| check.passed)
+            .map(|check| check.name.clone())
+            .collect()
+    }
+
+    pub fn render_trace_lines(&self, label: &str) -> Vec<String> {
+        self.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "invariants[{label}] {}={} detail={}",
+                    check.name,
+                    if check.passed { "pass" } else { "fail" },
+                    check.detail
+                )
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileConflictResolutionKind {
     SameInode,
@@ -275,6 +308,28 @@ pub struct SubtreeConflictResolutionInvariantInputs<'a> {
     pub final_target_exists: bool,
     pub bound_descendants_match_winner_after: bool,
     pub final_visible_sibling_tree_exists: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ConflictArtifactDiscoveryInvariantInputs {
+    pub discovered_artifact_count: usize,
+    pub cached_artifact_count_after: usize,
+    pub expected_namespace_artifact_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FileConflictArtifactRestoreInvariantInputs {
+    pub destination_was_absent_before: bool,
+    pub restored_content_matches_loser: bool,
+    pub canonical_path_untouched: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SubtreeConflictArtifactRestoreInvariantInputs {
+    pub destination_was_absent_before: bool,
+    pub restored_tree_matches_loser: bool,
+    pub deterministic_entry_order_preserved: bool,
+    pub canonical_tree_untouched: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2457,6 +2512,99 @@ pub fn evaluate_subtree_conflict_resolution_invariants(
     ClientReconciliationInvariantReport { checks }
 }
 
+pub fn evaluate_conflict_artifact_discovery_invariants(
+    inputs: ConflictArtifactDiscoveryInvariantInputs,
+) -> ConflictArtifactRecoveryInvariantReport {
+    ConflictArtifactRecoveryInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "conflict_artifact_discovery_caches_namespace_artifacts".to_owned(),
+            passed: inputs.discovered_artifact_count == inputs.expected_namespace_artifact_count
+                && inputs.cached_artifact_count_after == inputs.expected_namespace_artifact_count,
+            detail: format!(
+                "discovered_artifact_count={} cached_artifact_count_after={} expected_namespace_artifact_count={}",
+                inputs.discovered_artifact_count,
+                inputs.cached_artifact_count_after,
+                inputs.expected_namespace_artifact_count
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_file_conflict_artifact_restore_invariants(
+    inputs: FileConflictArtifactRestoreInvariantInputs,
+) -> ConflictArtifactRecoveryInvariantReport {
+    ConflictArtifactRecoveryInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "conflict_artifact_restore_requires_explicit_absent_destination".to_owned(),
+                passed: inputs.destination_was_absent_before,
+                detail: format!(
+                    "destination_was_absent_before={}",
+                    inputs.destination_was_absent_before
+                ),
+            },
+            InvariantCheck {
+                name: "file_conflict_artifact_restore_reproduces_loser_content".to_owned(),
+                passed: inputs.destination_was_absent_before
+                    && inputs.restored_content_matches_loser,
+                detail: format!(
+                    "destination_was_absent_before={} restored_content_matches_loser={}",
+                    inputs.destination_was_absent_before, inputs.restored_content_matches_loser
+                ),
+            },
+            InvariantCheck {
+                name: "file_conflict_artifact_restore_keeps_canonical_path_untouched".to_owned(),
+                passed: inputs.canonical_path_untouched,
+                detail: format!(
+                    "canonical_path_untouched={}",
+                    inputs.canonical_path_untouched
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_subtree_conflict_artifact_restore_invariants(
+    inputs: SubtreeConflictArtifactRestoreInvariantInputs,
+) -> ConflictArtifactRecoveryInvariantReport {
+    ConflictArtifactRecoveryInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "conflict_artifact_restore_requires_explicit_absent_destination".to_owned(),
+                passed: inputs.destination_was_absent_before,
+                detail: format!(
+                    "destination_was_absent_before={}",
+                    inputs.destination_was_absent_before
+                ),
+            },
+            InvariantCheck {
+                name: "subtree_conflict_artifact_restore_reproduces_full_loser_tree".to_owned(),
+                passed: inputs.destination_was_absent_before && inputs.restored_tree_matches_loser,
+                detail: format!(
+                    "destination_was_absent_before={} restored_tree_matches_loser={}",
+                    inputs.destination_was_absent_before, inputs.restored_tree_matches_loser
+                ),
+            },
+            InvariantCheck {
+                name: "subtree_conflict_artifact_restore_uses_deterministic_entry_order".to_owned(),
+                passed: inputs.deterministic_entry_order_preserved,
+                detail: format!(
+                    "deterministic_entry_order_preserved={}",
+                    inputs.deterministic_entry_order_preserved
+                ),
+            },
+            InvariantCheck {
+                name: "subtree_conflict_artifact_restore_keeps_canonical_tree_untouched".to_owned(),
+                passed: inputs.canonical_tree_untouched,
+                detail: format!(
+                    "canonical_tree_untouched={}",
+                    inputs.canonical_tree_untouched
+                ),
+            },
+        ],
+    }
+}
+
 pub fn evaluate_queue_shard_object_invariants(
     inputs: QueueShardObjectInvariantInputs<'_>,
 ) -> BackgroundWorkInvariantReport {
@@ -4006,7 +4154,8 @@ mod tests {
         evaluate_apply_remote_delete_invariants, evaluate_apply_remote_subtree_delete_invariants,
         evaluate_apply_remote_subtree_rename_invariants,
         evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
-        evaluate_content_object_invariants, evaluate_download_transfer_invariants,
+        evaluate_conflict_artifact_discovery_invariants, evaluate_content_object_invariants,
+        evaluate_download_transfer_invariants, evaluate_file_conflict_artifact_restore_invariants,
         evaluate_file_conflict_resolution_invariants, evaluate_inode_upload_transfer_invariants,
         evaluate_local_only_upload_transfer_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
@@ -4018,25 +4167,29 @@ mod tests {
         evaluate_remote_only_parent_materialization_wait_invariants,
         evaluate_remote_path_change_planning_invariants,
         evaluate_remote_subtree_delete_planning_invariants,
-        evaluate_remote_subtree_rename_planning_invariants, ApplyRemoteDeleteInvariantInputs,
+        evaluate_remote_subtree_rename_planning_invariants,
+        evaluate_subtree_conflict_artifact_restore_invariants, ApplyRemoteDeleteInvariantInputs,
         ApplyRemoteSubtreeDeleteInvariantInputs, ApplyRemoteSubtreeRenameInvariantInputs,
         CheckpointHeadPublishInvariantInputs, CheckpointObjectInvariantInputs,
         CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
-        CheckpointReplayInvariantInputs, CommitInvariantInputs, ContentObjectInvariantInputs,
+        CheckpointReplayInvariantInputs, CommitInvariantInputs,
+        ConflictArtifactDiscoveryInvariantInputs, ContentObjectInvariantInputs,
         ContentObjectInvariantSnapshot, DownloadTransferInvariantInputs,
-        DownloadTransferOutcomeKind, FileConflictResolutionInvariantInputs,
-        FileConflictResolutionKind, InodeUploadTransferInvariantInputs,
-        InodeUploadTransferOutcomeKind, LocalOnlyUploadTransferInvariantInputs,
-        LocalOnlyUploadTransferOutcomeKind, ProgressInvariantSnapshot,
-        ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
-        QueueCompleteOutcomeKind, RemoteDeletePlanningInvariantInputs,
-        RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
+        DownloadTransferOutcomeKind, FileConflictArtifactRestoreInvariantInputs,
+        FileConflictResolutionInvariantInputs, FileConflictResolutionKind,
+        InodeUploadTransferInvariantInputs, InodeUploadTransferOutcomeKind,
+        LocalOnlyUploadTransferInvariantInputs, LocalOnlyUploadTransferOutcomeKind,
+        ProgressInvariantSnapshot, ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
+        QueueCompleteInvariantInputs, QueueCompleteOutcomeKind,
+        RemoteDeletePlanningInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
+        RemoteObservationConvergenceInvariantInputs,
         RemoteOnlyDirectoryMaterializationInvariantInputs,
         RemoteOnlyDirectoryMaterializationOutcomeKind,
         RemoteOnlyParentMaterializationWaitInvariantInputs,
         RemotePathChangePlanningInvariantInputs, RemoteSubtreeDeletePlanningInvariantInputs,
         RemoteSubtreeRenamePlanningInvariantInputs, StoredCheckpointSegmentSnapshot,
-        StoredContentBlockSnapshot, WalReplayInvariantInputs,
+        StoredContentBlockSnapshot, SubtreeConflictArtifactRestoreInvariantInputs,
+        WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
     use loon_core::commit::{
@@ -5656,6 +5809,75 @@ mod tests {
             assert!(
                 !report.check(name).expect("check should exist").passed,
                 "{name} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn conflict_artifact_discovery_invariants_pass_when_namespace_cache_matches_store() {
+        let report = evaluate_conflict_artifact_discovery_invariants(
+            ConflictArtifactDiscoveryInvariantInputs {
+                discovered_artifact_count: 2,
+                cached_artifact_count_after: 2,
+                expected_namespace_artifact_count: 2,
+            },
+        );
+
+        assert!(
+            report
+                .check("conflict_artifact_discovery_caches_namespace_artifacts")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn conflict_artifact_restore_file_invariants_fail_when_destination_was_not_absent() {
+        let report = evaluate_file_conflict_artifact_restore_invariants(
+            FileConflictArtifactRestoreInvariantInputs {
+                destination_was_absent_before: false,
+                restored_content_matches_loser: true,
+                canonical_path_untouched: true,
+            },
+        );
+
+        for name in [
+            "conflict_artifact_restore_requires_explicit_absent_destination",
+            "file_conflict_artifact_restore_reproduces_loser_content",
+        ] {
+            assert!(
+                !report.check(name).expect("check should exist").passed,
+                "{name} should fail"
+            );
+        }
+        assert!(
+            report
+                .check("file_conflict_artifact_restore_keeps_canonical_path_untouched")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn conflict_artifact_restore_subtree_invariants_pass_for_full_restore() {
+        let report = evaluate_subtree_conflict_artifact_restore_invariants(
+            SubtreeConflictArtifactRestoreInvariantInputs {
+                destination_was_absent_before: true,
+                restored_tree_matches_loser: true,
+                deterministic_entry_order_preserved: true,
+                canonical_tree_untouched: true,
+            },
+        );
+
+        for name in [
+            "conflict_artifact_restore_requires_explicit_absent_destination",
+            "subtree_conflict_artifact_restore_reproduces_full_loser_tree",
+            "subtree_conflict_artifact_restore_uses_deterministic_entry_order",
+            "subtree_conflict_artifact_restore_keeps_canonical_tree_untouched",
+        ] {
+            assert!(
+                report.check(name).expect("check should exist").passed,
+                "{name} should pass"
             );
         }
     }

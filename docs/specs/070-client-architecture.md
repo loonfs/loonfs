@@ -2355,6 +2355,51 @@ Executable invariant IDs for this slice:
 - `subtree_conflict_artifact_entries_are_durable`
 - `stable_paths_default_does_not_materialize_visible_sibling_tree`
 
+## Conflict artifact discovery and restore
+
+Stable-path conflict artifacts are not only durable; they are also discoverable and restorable
+through library APIs.
+
+Rules:
+
+- discovery lists `namespaces/{namespace_id}/conflicts/` from object storage, decodes every
+  artifact object strictly, and upserts the validated rows into the local `conflict_artifacts`
+  cache in one transaction
+- malformed or mismatched artifact objects fail discovery closed; the client does not partially
+  update the namespace cache
+- restore is out-of-band recovery, not a planner decision
+- restore always targets an explicit caller-supplied destination path or root
+- restore never mutates `remote_state`, `local_state`, `sync_anchor`, `planned_actions`,
+  `conflicts_and_errors`, transfer ledgers, or pending mutation rows
+- restore never consumes, deletes, or rewrites the immutable artifact object or its cached row
+- file restore requires the destination parent to already exist and the destination file to be
+  absent
+- subtree restore requires the destination parent to already exist and the destination root to be
+  absent
+- subtree restore materializes the full loser tree in a sibling staging directory and only renames
+  the completed tree into place after every entry has been restored
+
+Failure modes:
+
+- `artifact missing`
+- `artifact kind mismatch`
+- `destination exists`
+- `destination parent missing`
+- `destination parent not directory`
+- `preserved manifest or block missing`
+- `decode or validation mismatch`
+- `local apply failure during staging or final rename`
+
+Executable invariant IDs for this slice:
+
+- `conflict_artifact_discovery_caches_namespace_artifacts`
+- `file_conflict_artifact_restore_reproduces_loser_content`
+- `file_conflict_artifact_restore_keeps_canonical_path_untouched`
+- `subtree_conflict_artifact_restore_reproduces_full_loser_tree`
+- `subtree_conflict_artifact_restore_uses_deterministic_entry_order`
+- `subtree_conflict_artifact_restore_keeps_canonical_tree_untouched`
+- `conflict_artifact_restore_requires_explicit_absent_destination`
+
 ## SQLite hardening boundary (schema v11)
 
 The next schema version does not add new client-truth tables. It hardens the existing durable

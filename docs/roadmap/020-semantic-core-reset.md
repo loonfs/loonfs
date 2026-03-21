@@ -545,6 +545,7 @@ Deliverables:
 - executable subtree conflict resolution decisions that preserve the loser subtree before applying
   the authoritative winner
 - durable client cache/indexing for created conflict artifacts
+- library-first discovery and explicit restore APIs for file and subtree conflict artifacts
 - readable fixtures and executable invariants proving loser preservation and canonical-path
   stability
 
@@ -556,6 +557,8 @@ Required rules:
   winner
 - subtree conflict resolution preserves the full loser subtree as a deterministic artifact instead
   of creating a visible sibling tree
+- conflict artifact restore is out-of-band recovery into an explicit caller destination and does
+  not mutate sync planner state
 - `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree rename,
   and still-unsupported future hierarchy classes after the stable-path taxonomy cleanup
 

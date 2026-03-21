@@ -1,10 +1,13 @@
 use crate::{
-    ModelClientIssue, ModelLocalOnlyIssue, ModelLocalOnlyObservationCandidate,
-    ModelObservedRemoteInode, ModelPlannedInodeAction, ModelPlannedLocalOnlyAction,
-    ModelRemoteObservationSelectionError, ModelScheduledClientAction,
+    ModelClientIssue, ModelConflictArtifactRestoreError, ModelLocalOnlyIssue,
+    ModelLocalOnlyObservationCandidate, ModelObservedRemoteInode, ModelPlannedInodeAction,
+    ModelPlannedLocalOnlyAction, ModelRemoteObservationSelectionError, ModelRestoredConflictFile,
+    ModelRestoredConflictSubtree, ModelRestoredConflictSubtreeEntry, ModelScheduledClientAction,
 };
-use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId};
+use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, SubtreeConflictArtifactEntry};
 use serde_json::json;
+use std::cmp::Ordering;
+use std::path::Path;
 
 pub fn allocate_client_request_id(next_counter: u64) -> String {
     format!("client-req-{next_counter:020}")
@@ -246,6 +249,77 @@ pub fn upsert_local_only_issue(
     next
 }
 
+pub fn model_restore_file_conflict_artifact(
+    destination_path: &str,
+    destination_exists: bool,
+    destination_parent_exists: bool,
+    destination_parent_is_dir: bool,
+    loser_content_manifest_digest: Option<&str>,
+) -> Result<ModelRestoredConflictFile, ModelConflictArtifactRestoreError> {
+    validate_restore_destination(
+        destination_path,
+        destination_exists,
+        destination_parent_exists,
+        destination_parent_is_dir,
+    )?;
+    let content_manifest_digest = loser_content_manifest_digest
+        .filter(|digest| !digest.is_empty())
+        .ok_or(ModelConflictArtifactRestoreError::FileArtifactMissingContentManifest)?;
+    Ok(ModelRestoredConflictFile {
+        destination_path: destination_path.to_owned(),
+        content_manifest_digest: content_manifest_digest.to_owned(),
+    })
+}
+
+pub fn model_restore_subtree_conflict_artifact(
+    destination_root: &str,
+    destination_exists: bool,
+    destination_parent_exists: bool,
+    destination_parent_is_dir: bool,
+    entries: &[SubtreeConflictArtifactEntry],
+) -> Result<ModelRestoredConflictSubtree, ModelConflictArtifactRestoreError> {
+    validate_restore_destination(
+        destination_root,
+        destination_exists,
+        destination_parent_exists,
+        destination_parent_is_dir,
+    )?;
+
+    let mut restored_entries = Vec::with_capacity(entries.len());
+    let mut previous: Option<&SubtreeConflictArtifactEntry> = None;
+    for entry in entries {
+        if entry.relative_path.is_empty() {
+            return Err(ModelConflictArtifactRestoreError::SubtreeEntryMissingRelativePath);
+        }
+        if let Some(previous_entry) = previous {
+            if compare_subtree_entries(previous_entry, entry) != Ordering::Less {
+                return Err(ModelConflictArtifactRestoreError::SubtreeEntriesUnordered {
+                    previous_relative_path: previous_entry.relative_path.clone(),
+                    current_relative_path: entry.relative_path.clone(),
+                });
+            }
+        }
+        if entry.inode_kind == InodeKind::File && entry.content_manifest_digest.is_none() {
+            return Err(
+                ModelConflictArtifactRestoreError::SubtreeFileEntryMissingContentManifest {
+                    relative_path: entry.relative_path.clone(),
+                },
+            );
+        }
+        restored_entries.push(ModelRestoredConflictSubtreeEntry {
+            relative_path: entry.relative_path.clone(),
+            inode_kind: entry.inode_kind.clone(),
+            content_manifest_digest: entry.content_manifest_digest.clone(),
+        });
+        previous = Some(entry);
+    }
+
+    Ok(ModelRestoredConflictSubtree {
+        destination_root: destination_root.to_owned(),
+        entries: restored_entries,
+    })
+}
+
 pub fn remote_observation_bind_ambiguous_issue(
     observed: &ModelObservedRemoteInode,
     matches: usize,
@@ -273,6 +347,52 @@ pub fn remote_observation_bind_ambiguous_issue(
         }),
         created_at_ms,
     }
+}
+
+fn validate_restore_destination(
+    destination_path: &str,
+    destination_exists: bool,
+    destination_parent_exists: bool,
+    destination_parent_is_dir: bool,
+) -> Result<(), ModelConflictArtifactRestoreError> {
+    if destination_exists {
+        return Err(ModelConflictArtifactRestoreError::DestinationExists {
+            destination_path: destination_path.to_owned(),
+        });
+    }
+    let path = Path::new(destination_path);
+    if path.file_name().is_none() {
+        return Err(
+            ModelConflictArtifactRestoreError::DestinationPathMissingLeaf {
+                destination_path: destination_path.to_owned(),
+            },
+        );
+    }
+    if !destination_parent_exists {
+        return Err(
+            ModelConflictArtifactRestoreError::DestinationParentMissing {
+                destination_path: destination_path.to_owned(),
+            },
+        );
+    }
+    if !destination_parent_is_dir {
+        return Err(
+            ModelConflictArtifactRestoreError::DestinationParentNotDirectory {
+                destination_path: destination_path.to_owned(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn compare_subtree_entries(
+    left: &SubtreeConflictArtifactEntry,
+    right: &SubtreeConflictArtifactEntry,
+) -> Ordering {
+    left.relative_path
+        .cmp(&right.relative_path)
+        .then_with(|| left.client_file_id.cmp(&right.client_file_id))
+        .then_with(|| left.inode_id.cmp(&right.inode_id))
 }
 
 pub fn local_apply_failed_issue(

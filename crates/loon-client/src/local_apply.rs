@@ -6,11 +6,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 #[error("local apply failed during `{operation}` for `{path}`: {source}")]
-pub(crate) struct LocalApplyError {
-    pub(crate) operation: &'static str,
-    pub(crate) path: String,
+pub struct LocalApplyError {
+    pub operation: &'static str,
+    pub path: String,
     #[source]
-    pub(crate) source: io::Error,
+    pub source: io::Error,
 }
 
 #[allow(dead_code)]

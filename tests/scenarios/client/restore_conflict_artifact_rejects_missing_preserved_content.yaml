@@ -1,0 +1,11 @@
+schema_version: 1
+scenario_kind: client
+name: restore_conflict_artifact_rejects_missing_preserved_content
+initial:
+  namespace_id: ns-1
+  canonical_relative_path: canonical/report.txt
+  restore_relative_path: recovered/report-local.txt
+  canonical_content_utf8: authoritative winner
+  loser_content_utf8: local loser
+expect:
+  error_kind: missing_preserved_content

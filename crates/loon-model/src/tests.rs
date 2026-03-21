@@ -1,7 +1,7 @@
 use super::*;
 use loon_types::{
     ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
-    CONTENT_BLOCK_SIZE_BYTES,
+    SubtreeConflictArtifactEntry, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -267,6 +267,123 @@ fn model_validates_inode_upload_record() {
     assert_eq!(
         resolved,
         "sha256:a7dd295b99876396927803c988ea9e657b53fd62d295a8483a013fd31b5660f6"
+    );
+}
+
+#[test]
+fn model_restores_file_conflict_artifact_into_explicit_destination() {
+    let restored = model_restore_file_conflict_artifact(
+        "/tmp/recovered/report.txt",
+        false,
+        true,
+        true,
+        Some("sha256:loser-manifest"),
+    )
+    .expect("restore file conflict artifact");
+
+    assert_eq!(restored.destination_path, "/tmp/recovered/report.txt");
+    assert_eq!(restored.content_manifest_digest, "sha256:loser-manifest");
+}
+
+#[test]
+fn model_file_conflict_restore_rejects_occupied_destination() {
+    let error = model_restore_file_conflict_artifact(
+        "/tmp/recovered/report.txt",
+        true,
+        true,
+        true,
+        Some("sha256:loser-manifest"),
+    )
+    .expect_err("occupied destination should fail");
+
+    assert_eq!(
+        error,
+        ModelConflictArtifactRestoreError::DestinationExists {
+            destination_path: "/tmp/recovered/report.txt".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn model_restores_subtree_conflict_artifact_in_deterministic_entry_order() {
+    let restored = model_restore_subtree_conflict_artifact(
+        "/tmp/recovered/reports-restored",
+        false,
+        true,
+        true,
+        &[
+            SubtreeConflictArtifactEntry {
+                relative_path: "docs".to_owned(),
+                inode_kind: InodeKind::Dir,
+                inode_id: Some(InodeId(7)),
+                client_file_id: None,
+                base_revision_no: None,
+                content_manifest_digest: None,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "docs".to_owned(),
+            },
+            SubtreeConflictArtifactEntry {
+                relative_path: "docs/report.txt".to_owned(),
+                inode_kind: InodeKind::File,
+                inode_id: Some(InodeId(8)),
+                client_file_id: None,
+                base_revision_no: Some(RevisionNo(2)),
+                content_manifest_digest: Some("sha256:loser-report".to_owned()),
+                content_digest: Some("sha256:loser-bytes".to_owned()),
+                parent_inode_id: Some(InodeId(7)),
+                display_name: "report.txt".to_owned(),
+            },
+        ],
+    )
+    .expect("restore subtree artifact");
+
+    assert_eq!(restored.destination_root, "/tmp/recovered/reports-restored");
+    assert_eq!(restored.entries.len(), 2);
+    assert_eq!(restored.entries[0].relative_path, "docs");
+    assert_eq!(restored.entries[1].relative_path, "docs/report.txt");
+}
+
+#[test]
+fn model_subtree_conflict_restore_rejects_unsorted_entries() {
+    let error = model_restore_subtree_conflict_artifact(
+        "/tmp/recovered/reports-restored",
+        false,
+        true,
+        true,
+        &[
+            SubtreeConflictArtifactEntry {
+                relative_path: "docs/report.txt".to_owned(),
+                inode_kind: InodeKind::File,
+                inode_id: Some(InodeId(8)),
+                client_file_id: None,
+                base_revision_no: Some(RevisionNo(2)),
+                content_manifest_digest: Some("sha256:loser-report".to_owned()),
+                content_digest: Some("sha256:loser-bytes".to_owned()),
+                parent_inode_id: Some(InodeId(7)),
+                display_name: "report.txt".to_owned(),
+            },
+            SubtreeConflictArtifactEntry {
+                relative_path: "docs".to_owned(),
+                inode_kind: InodeKind::Dir,
+                inode_id: Some(InodeId(7)),
+                client_file_id: None,
+                base_revision_no: None,
+                content_manifest_digest: None,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "docs".to_owned(),
+            },
+        ],
+    )
+    .expect_err("unsorted subtree entries should fail");
+
+    assert_eq!(
+        error,
+        ModelConflictArtifactRestoreError::SubtreeEntriesUnordered {
+            previous_relative_path: "docs/report.txt".to_owned(),
+            current_relative_path: "docs".to_owned(),
+        }
     );
 }
 

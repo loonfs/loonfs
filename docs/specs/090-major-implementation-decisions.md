@@ -573,12 +573,15 @@ Recommendation:
 - keep visible suffixed conflict files as optional presentation, not canonical storage
 - keep visible suffixed conflict trees as optional presentation, not canonical storage
 - keep strict authoritative CAS behavior in namespace commit
+- make discovery and restore library-first, out-of-band recovery APIs
+- require explicit caller destinations for restore and keep restore out of sync planner state
 
 Why:
 
 - canonical winner paths stay stable
 - inode identity stays honest
 - loser content remains recoverable without merging different identities together
+- artifact recovery does not destabilize canonical winner paths or planner truth
 - remote-only descendants are allowed during subtree rename/delete when they remain clean
   placeholders with no anchor, transfer state, or pending mutation state
 - dirty, temp/local-only, or busy descendants still block subtree rename/delete

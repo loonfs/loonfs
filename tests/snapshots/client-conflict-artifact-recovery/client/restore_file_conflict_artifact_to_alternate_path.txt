@@ -1,0 +1,7 @@
+scenario=restore_file_conflict_artifact_to_alternate_path kind=client schema_version=1 seed=None actions=0 faults=0 expect_keys=1
+  1. restored_conflict_id=conflict-4a5d1eb4dd43bb0676d944715163b844028043ca83d5cedc5fd85ae9fec8181e
+  2. restored_destination=recovered/report-local.txt canonical_destination=canonical/report.txt
+  3. restored_digest=sha256:94b02b7fa3ff55f53dfb5937355597b2ce6f15dd7cea94c10b9d5d32a3486ec1 manifest_digest=sha256:603c7a6682068da5a36de3e4f874d73031a3527808d60751c397a687a1489653
+  4. invariants[file-conflict-artifact-restore] conflict_artifact_restore_requires_explicit_absent_destination=pass detail=destination_was_absent_before=true
+  5. invariants[file-conflict-artifact-restore] file_conflict_artifact_restore_reproduces_loser_content=pass detail=destination_was_absent_before=true restored_content_matches_loser=true
+  6. invariants[file-conflict-artifact-restore] file_conflict_artifact_restore_keeps_canonical_path_untouched=pass detail=canonical_path_untouched=true

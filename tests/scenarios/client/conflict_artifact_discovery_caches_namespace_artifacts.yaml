@@ -1,0 +1,9 @@
+schema_version: 1
+scenario_kind: client
+name: conflict_artifact_discovery_caches_namespace_artifacts
+initial:
+  namespace_id: ns-1
+  expected_artifact_count: 2
+expect:
+  invariants:
+    - conflict_artifact_discovery_caches_namespace_artifacts

@@ -177,6 +177,16 @@ pub const CLIENT_RECONCILIATION_INVARIANTS: &[&str] = &[
     "apply_remote_rename_failure_records_durable_issue",
 ];
 
+pub const CLIENT_CONFLICT_ARTIFACT_RECOVERY_INVARIANTS: &[&str] = &[
+    "conflict_artifact_discovery_caches_namespace_artifacts",
+    "file_conflict_artifact_restore_reproduces_loser_content",
+    "file_conflict_artifact_restore_keeps_canonical_path_untouched",
+    "subtree_conflict_artifact_restore_reproduces_full_loser_tree",
+    "subtree_conflict_artifact_restore_uses_deterministic_entry_order",
+    "subtree_conflict_artifact_restore_keeps_canonical_tree_untouched",
+    "conflict_artifact_restore_requires_explicit_absent_destination",
+];
+
 pub const INVARIANTS: &[&str] = &[
     "no_orphaned_live_entry",
     "visible_revision_points_to_durable_content",
@@ -304,6 +314,13 @@ pub const INVARIANTS: &[&str] = &[
     "apply_remote_rename_updates_local_state_and_sync_anchor",
     "apply_remote_rename_clears_planned_action",
     "apply_remote_rename_failure_records_durable_issue",
+    "conflict_artifact_discovery_caches_namespace_artifacts",
+    "file_conflict_artifact_restore_reproduces_loser_content",
+    "file_conflict_artifact_restore_keeps_canonical_path_untouched",
+    "subtree_conflict_artifact_restore_reproduces_full_loser_tree",
+    "subtree_conflict_artifact_restore_uses_deterministic_entry_order",
+    "subtree_conflict_artifact_restore_keeps_canonical_tree_untouched",
+    "conflict_artifact_restore_requires_explicit_absent_destination",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

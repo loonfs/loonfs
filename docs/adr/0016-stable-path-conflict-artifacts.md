@@ -26,6 +26,9 @@ Rules:
 - the loser is preserved as a durable conflict artifact object
 - visible suffixed conflict siblings are presentation-only and are not the canonical storage model
 - authoritative namespace commit stays on strict CAS for stale-base writes in v1
+- artifact discovery and restore are library-first and out of band
+- restore always targets an explicit caller-supplied destination and never mutates sync planner
+  state
 
 ## Consequences
 
@@ -34,5 +37,7 @@ Rules:
 - clients can resolve file conflicts without renaming the canonical winner
 - clients can resolve supported subtree conflicts without materializing visible sibling trees
 - loser content stays recoverable through immutable content plus a deterministic conflict artifact
+- conflict artifacts can be rediscovered from object storage and restored later without rebinding
+  them into canonical sync state
 - `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree rename,
   and still-unsupported future hierarchy classes

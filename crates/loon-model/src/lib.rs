@@ -292,6 +292,51 @@ pub enum ModelRemoteObservationSelectionError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelConflictArtifactRestoreError {
+    DestinationExists {
+        destination_path: String,
+    },
+    DestinationParentMissing {
+        destination_path: String,
+    },
+    DestinationParentNotDirectory {
+        destination_path: String,
+    },
+    DestinationPathMissingLeaf {
+        destination_path: String,
+    },
+    FileArtifactMissingContentManifest,
+    SubtreeEntryMissingRelativePath,
+    SubtreeFileEntryMissingContentManifest {
+        relative_path: String,
+    },
+    SubtreeEntriesUnordered {
+        previous_relative_path: String,
+        current_relative_path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRestoredConflictFile {
+    pub destination_path: String,
+    pub content_manifest_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRestoredConflictSubtreeEntry {
+    pub relative_path: String,
+    pub inode_kind: InodeKind,
+    pub content_manifest_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRestoredConflictSubtree {
+    pub destination_root: String,
+    #[serde(default)]
+    pub entries: Vec<ModelRestoredConflictSubtreeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelMetadataPreconditionError {
     ParentMissing {
         parent_inode_id: InodeId,
@@ -713,6 +758,7 @@ pub use client::{
     allocate_client_request_id, bound_local_matches_remote_observation, download_transfer_id,
     expected_download_staged_size, local_apply_failed_issue, local_only_matches_remote_observation,
     local_only_upload_failed_issue, local_only_upload_transfer_id,
+    model_restore_file_conflict_artifact, model_restore_subtree_conflict_artifact,
     reconcile_download_resume_block_index, reconcile_upload_resume_block_index,
     remote_observation_bind_ambiguous_issue, remote_observation_is_stale,
     remote_only_discovery_supported, remote_only_placeholder_matches_remote_observation,
