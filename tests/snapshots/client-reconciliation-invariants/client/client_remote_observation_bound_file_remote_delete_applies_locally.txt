@@ -1,0 +1,11 @@
+scenario=client_remote_observation_bound_file_remote_delete_applies_locally kind=client schema_version=1 seed=None actions=6 faults=0 expect_keys=9
+  1. outcome=UpdatedBoundRemoteState { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42) }
+  2. first_planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42), decision: ApplyRemoteDelete, reason: RemoteDeletedFromAnchor, created_at_ms: 1700000510000 }
+  3. execution=ExecutedApplyRemoteDelete { executed_apply_remote_delete: AppliedInodeMutation { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42) } }
+  4. second_planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42), decision: NoOp, reason: RemoteDeletedWithoutAnchor, created_at_ms: 1700000512000 }
+  5. issues_after=[]
+  6. invariants[remote-delete] remote_delete_plans_apply_remote_delete=pass detail=decision=Some("apply_remote_delete") reason=Some("remote_deleted_from_anchor")
+  7. invariants[remote-delete] apply_remote_delete_preserves_remote_tombstone=pass detail=remote_present_after=true remote_is_deleted_after=true
+  8. invariants[remote-delete] apply_remote_delete_clears_local_state_and_sync_anchor=pass detail=local_present_after=false sync_anchor_present_after=false
+  9. invariants[remote-delete] apply_remote_delete_clears_planned_action=pass detail=planned_action_present_after=false
+  10. invariants[remote-delete] apply_remote_delete_failure_records_durable_issue=fail detail=issue_kind_after=None

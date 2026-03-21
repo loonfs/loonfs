@@ -258,8 +258,30 @@ pub enum StateDbError {
         remote: String,
         anchor: String,
     },
-    #[error("apply_remote_rename_path_change_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    #[error(
+        "apply_remote_rename_path_change_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
     ApplyRemoteRenamePathChangeMissing { namespace_id: String, inode_id: u64 },
+    #[error("apply_remote_delete_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    ApplyRemoteDeleteStateMissing { namespace_id: String, inode_id: u64 },
+    #[error("apply_remote_delete_requires_file: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
+    ApplyRemoteDeleteRequiresFile {
+        namespace_id: String,
+        inode_id: u64,
+        inode_kind: String,
+    },
+    #[error("apply_remote_delete_local_not_converged: namespace `{namespace_id}` inode `{inode_id}` field `{field}` local `{local}` != anchor `{anchor}`")]
+    ApplyRemoteDeleteLocalNotConverged {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        local: String,
+        anchor: String,
+    },
+    #[error(
+        "apply_remote_delete_remote_not_deleted: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    ApplyRemoteDeleteRemoteNotDeleted { namespace_id: String, inode_id: u64 },
     #[error("materialize_remote_dir_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
     MaterializeRemoteDirStateMissing { namespace_id: String, inode_id: u64 },
     #[error("materialize_remote_dir_requires_directory: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
@@ -775,6 +797,26 @@ fn ensure_apply_remote_rename_remote_anchor_match(
         inode_id: inode_id.0,
         field,
         remote,
+        anchor,
+    })
+}
+
+fn ensure_apply_remote_delete_local_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    local: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if local == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::ApplyRemoteDeleteLocalNotConverged {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        local,
         anchor,
     })
 }

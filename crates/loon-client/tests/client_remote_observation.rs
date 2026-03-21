@@ -1,6 +1,7 @@
 use loon_client::executor::{
-    execute_next_client_action, ExecuteApplyRemoteRenameError, ExecuteNextClientActionError,
-    ExecutedApplyRemoteRename, NextClientAction,
+    execute_next_client_action, ExecuteApplyRemoteDeleteError, ExecuteApplyRemoteRenameError,
+    ExecuteNextClientActionError, ExecutedApplyRemoteDelete, ExecutedApplyRemoteRename,
+    NextClientAction,
 };
 use loon_client::planner::{plan_file, PlannedActionRecord};
 use loon_client::state_db::{
@@ -13,16 +14,19 @@ use loon_client::upload::upload_small_file_from_path;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::content_manifest;
 use loon_testkit::invariants::{
-    evaluate_apply_remote_rename_invariants, evaluate_remote_path_change_planning_invariants,
+    evaluate_apply_remote_delete_invariants, evaluate_apply_remote_rename_invariants,
+    evaluate_remote_delete_planning_invariants,
     evaluate_remote_observation_active_download_invariants,
     evaluate_remote_observation_active_upload_invariants,
     evaluate_remote_observation_ambiguous_bind_invariants,
     evaluate_remote_observation_convergence_invariants,
-    evaluate_remote_observation_late_bind_invariants, ClientReconciliationInvariantReport,
-    ApplyRemoteRenameInvariantInputs,
-    RemoteObservationActiveDownloadInvariantInputs, RemoteObservationActiveUploadInvariantInputs,
-    RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
-    RemoteObservationLateBindInvariantInputs, RemotePathChangePlanningInvariantInputs,
+    evaluate_remote_observation_late_bind_invariants,
+    evaluate_remote_path_change_planning_invariants, ApplyRemoteDeleteInvariantInputs,
+    ApplyRemoteRenameInvariantInputs, ClientReconciliationInvariantReport,
+    RemoteDeletePlanningInvariantInputs, RemoteObservationActiveDownloadInvariantInputs,
+    RemoteObservationActiveUploadInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
+    RemoteObservationConvergenceInvariantInputs, RemoteObservationLateBindInvariantInputs,
+    RemotePathChangePlanningInvariantInputs,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -540,7 +544,10 @@ fn remote_observation_bound_file_remote_rename_applies_locally() {
         false,
     );
 
-    assert!(report.final_target_exists, "renamed target path should exist");
+    assert!(
+        report.final_target_exists,
+        "renamed target path should exist"
+    );
     assert!(
         !report.final_current_exists,
         "old local path should be removed after rename"
@@ -568,10 +575,83 @@ fn remote_observation_bound_file_remote_rename_destination_occupied_records_issu
         true,
     );
 
-    assert!(report.final_target_exists, "target path should exist after retry");
+    assert!(
+        report.final_target_exists,
+        "target path should exist after retry"
+    );
     assert!(
         !report.final_current_exists,
         "current path should be removed after retry"
+    );
+}
+
+#[test]
+fn remote_observation_bound_file_remote_delete_applies_locally() {
+    let report = run_remote_delete_invariant_report(
+        "client/client_remote_observation_bound_file_remote_delete_applies_locally.yaml",
+    );
+
+    assert!(
+        !report.final_current_exists,
+        "deleted local path should be removed after remote delete apply"
+    );
+}
+
+#[test]
+fn remote_observation_bound_file_remote_delete_missing_current_path_records_issue() {
+    let report = run_remote_delete_invariant_report(
+        "client/client_remote_observation_bound_file_remote_delete_current_path_missing_records_issue.yaml",
+    );
+
+    assert!(
+        !report.final_current_exists,
+        "missing current path fixture should leave the file absent"
+    );
+}
+
+#[test]
+fn remote_observation_remote_delete_while_local_differs_from_anchor_defers_conflict_copy() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_deletes_bound_file_while_local_differs_from_anchor.yaml",
+    );
+    let initial: DeleteObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: DeleteConflictObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-delete-local-differs");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let local_path = write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+
+    seed_remote_delete_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_tick = actions[2].planner().expect("planner action third");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan inode after restart");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert!(
+        local_path.exists(),
+        "remote delete should not eagerly unlink a locally diverged file"
     );
 }
 
@@ -598,11 +678,12 @@ fn remote_observation_path_change_while_upload_transfer_active_does_not_move_eag
     seed_edit_observation_state(&db_path, &initial);
 
     let observe = actions[0].apply().expect("apply action first");
-    {
+    let outcome = {
         let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
         db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
-            .expect("apply remote observation");
-    }
+            .expect("apply remote observation")
+    };
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
 
     let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
     let planner_tick = actions[2].planner().expect("planner action third");
@@ -615,11 +696,87 @@ fn remote_observation_path_change_while_upload_transfer_active_does_not_move_eag
     .expect("plan inode after restart");
 
     assert_eq!(planner_result, expect.planner_result);
-    assert!(local_path.exists(), "current path should remain during active upload");
+    assert!(
+        local_path.exists(),
+        "current path should remain during active upload"
+    );
     assert!(
         !renamed_path.exists(),
         "late rename observation should not move the file eagerly"
     );
+}
+
+#[test]
+fn remote_observation_delete_while_upload_transfer_active_does_not_unlink_eagerly() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_deletes_bound_file_while_upload_transfer_active.yaml",
+    );
+    let initial: EditObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: EditObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-active-upload-delete");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let local_path = write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+
+    seed_edit_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_tick = actions[2].planner().expect("planner action third");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan inode after restart");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert!(
+        local_path.exists(),
+        "current path should remain during active upload"
+    );
+
+    let views = db
+        .load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+        .expect("load bound views after delete observation");
+    let report = evaluate_remote_observation_active_upload_invariants(
+        RemoteObservationActiveUploadInvariantInputs {
+            transfer_present_after: db
+                .load_transfer_ledger_for_inode(
+                    &planner_tick.namespace_id,
+                    planner_tick.inode_id,
+                    TransferDirection::Upload,
+                )
+                .expect("load upload transfer ledger")
+                .is_some(),
+            pending_inode_mutation_present_after: db
+                .load_pending_inode_mutation(&initial.pending_inode_mutation.client_request_id)
+                .expect("load pending inode mutation")
+                .is_some(),
+            remote_synced_seq_after: views
+                .remote
+                .as_ref()
+                .expect("remote row after delete observation")
+                .observed_seq,
+            expected_remote_synced_seq: expect.remote_state.observed_seq,
+        },
+    );
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
 }
 
 #[test]
@@ -642,11 +799,12 @@ fn remote_observation_path_change_while_download_transfer_active_does_not_move_e
     seed_remote_only_observation_state(&db_path, &initial);
 
     let observe = actions[0].apply().expect("apply action first");
-    {
+    let outcome = {
         let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
         db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
-            .expect("apply remote observation");
-    }
+            .expect("apply remote observation")
+    };
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
 
     let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
     let planner_tick = actions[2].planner().expect("planner action third");
@@ -663,6 +821,92 @@ fn remote_observation_path_change_while_download_transfer_active_does_not_move_e
         !renamed_path.exists(),
         "late rename observation should not materialize the new path eagerly"
     );
+}
+
+#[test]
+fn remote_observation_delete_while_download_transfer_active_does_not_unlink_eagerly() {
+    let scenario = load_fixture(
+        "client/client_remote_observation_deletes_bound_file_while_download_transfer_active.yaml",
+    );
+    let initial: BoundDownloadObservationInitial =
+        scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteObservationFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: BoundDownloadObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-active-download-delete");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let local_path = write_source_file(
+        &source_root,
+        &initial.local_file.relative_path,
+        &initial.local_file.content_utf8,
+    );
+
+    seed_bound_download_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    let outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    let planner_tick = actions[2].planner().expect("planner action third");
+    let planner_result = plan_file(
+        &mut db,
+        &planner_tick.namespace_id,
+        planner_tick.inode_id,
+        planner_tick.now_ms,
+    )
+    .expect("plan inode after restart");
+
+    assert_eq!(planner_result, expect.planner_result);
+    assert!(
+        local_path.exists(),
+        "current path should remain during active download"
+    );
+
+    let views = db
+        .load_file_sync_views(&planner_tick.namespace_id, planner_tick.inode_id)
+        .expect("load bound views after delete observation");
+    assert_eq!(
+        views,
+        loon_client::state_db::FileSyncViews {
+            namespace_id: planner_tick.namespace_id.clone(),
+            inode_id: planner_tick.inode_id,
+            remote: Some(expect.remote_state.clone()),
+            local: Some(expect.local_state.clone()),
+            sync_anchor: Some(expect.sync_anchor.clone()),
+        }
+    );
+    assert_eq!(
+        db.load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
+            .expect("load planned action after delete observation")
+            .is_none(),
+        expect.planned_action_cleared
+    );
+    let report = evaluate_remote_observation_active_download_invariants(
+        RemoteObservationActiveDownloadInvariantInputs {
+            transfer_present_after: db
+                .load_transfer_ledger_for_inode(
+                    &planner_tick.namespace_id,
+                    planner_tick.inode_id,
+                    TransferDirection::Download,
+                )
+                .expect("load download transfer ledger")
+                .is_some(),
+            remote_synced_seq_after: views
+                .remote
+                .as_ref()
+                .expect("remote row after delete observation")
+                .observed_seq,
+            expected_remote_synced_seq: expect.remote_state.observed_seq,
+        },
+    );
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
 }
 
 #[test]
@@ -742,6 +986,34 @@ fn remote_observation_remote_rename_failure_invariant_trace_matches_checked_in_a
         report.rendered_trace,
         include_str!(
             "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_rename_destination_occupied_records_issue.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_delete_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_delete_invariant_report(
+        "client/client_remote_observation_bound_file_remote_delete_applies_locally.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_delete_applies_locally.txt"
+        )
+    );
+}
+
+#[test]
+fn remote_observation_remote_delete_failure_invariant_trace_matches_checked_in_artifact() {
+    let report = run_remote_delete_invariant_report(
+        "client/client_remote_observation_bound_file_remote_delete_current_path_missing_records_issue.yaml",
+    );
+
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_delete_current_path_missing_records_issue.txt"
         )
     );
 }
@@ -1145,6 +1417,60 @@ fn seed_remote_only_observation_state(db_path: &Path, initial: &DownloadObservat
     .expect("record active download transfer ledger");
 }
 
+fn seed_bound_download_observation_state(
+    db_path: &Path,
+    initial: &BoundDownloadObservationInitial,
+) {
+    let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
+    db.planner_transaction("seed-bound-download-observation-state", |tx| {
+        tx.upsert_remote_file(&initial.remote_state)?;
+        tx.upsert_local_file(&initial.local_state)?;
+        tx.upsert_sync_anchor(&initial.sync_anchor)?;
+        tx.upsert_planned_action(&initial.planned_action)?;
+        Ok(())
+    })
+    .expect("seed bound download observation state");
+    db.upsert_transfer_ledger(&TransferLedgerRow {
+        namespace_id: initial.remote_state.namespace_id.clone(),
+        inode_id: initial.remote_state.inode_id,
+        transfer_id: format!(
+            "download:{}:{}:{}",
+            initial.remote_state.namespace_id.as_str(),
+            initial.remote_state.inode_id.0,
+            initial
+                .remote_state
+                .content_manifest_digest
+                .as_deref()
+                .expect("bound download fixture should include manifest digest"),
+        ),
+        direction: initial.transfer_ledger.direction,
+        object_key: content_manifest(
+            initial.remote_state.namespace_id.as_str(),
+            initial
+                .remote_state
+                .content_manifest_digest
+                .as_deref()
+                .expect("bound download fixture should include manifest digest"),
+        ),
+        block_index: initial.transfer_ledger.block_index,
+        block_count: initial.transfer_ledger.block_count,
+        state: initial.transfer_ledger.state,
+        updated_at_ms: initial.transfer_ledger.updated_at_ms,
+    })
+    .expect("record bound download transfer ledger");
+}
+
+fn seed_remote_delete_observation_state(db_path: &Path, initial: &DeleteObservationInitial) {
+    let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
+    db.planner_transaction("seed-remote-delete-observation-state", |tx| {
+        tx.upsert_remote_file(&initial.remote_state)?;
+        tx.upsert_local_file(&initial.local_state)?;
+        tx.upsert_sync_anchor(&initial.sync_anchor)?;
+        Ok(())
+    })
+    .expect("seed remote delete observation state");
+}
+
 fn seed_ambiguous_observation_state(db_path: &Path, local_only_state: &[LocalOnlyFileStateRow]) {
     let mut db = SqliteStateDb::open(db_path).expect("open client state DB");
     db.planner_transaction("seed-ambiguous-observation-state", |tx| {
@@ -1520,7 +1846,10 @@ fn run_remote_rename_invariant_report(
     assert_eq!(second_planner_result, expect.second_planner_result);
 
     let views = db
-        .load_file_sync_views(&second_planner_tick.namespace_id, second_planner_tick.inode_id)
+        .load_file_sync_views(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
         .expect("load file sync views after rename execute");
     assert_eq!(
         views,
@@ -1533,7 +1862,10 @@ fn run_remote_rename_invariant_report(
         }
     );
     let actual_planned_action = db
-        .load_planned_action(&second_planner_tick.namespace_id, second_planner_tick.inode_id)
+        .load_planned_action(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
         .expect("load planned action after rename execute");
     if expect.planned_action_cleared {
         assert_eq!(actual_planned_action, None);
@@ -1551,21 +1883,26 @@ fn run_remote_rename_invariant_report(
         );
     }
     let issues = db
-        .load_conflicts_and_errors(&second_planner_tick.namespace_id, second_planner_tick.inode_id)
+        .load_conflicts_and_errors(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
         .expect("load rename issues after execute")
         .into_iter()
         .map(RawConflictOrErrorExpect::from_row)
         .collect::<Vec<_>>();
     assert_eq!(issues, expect.conflicts_and_errors);
 
-    let planning_report = evaluate_remote_path_change_planning_invariants(
-        RemotePathChangePlanningInvariantInputs {
+    let planning_report =
+        evaluate_remote_path_change_planning_invariants(RemotePathChangePlanningInvariantInputs {
             planned_action_decision_after: Some(expect.first_planner_result.decision.as_str()),
             planned_action_reason_after: Some(expect.first_planner_result.reason.as_str()),
-        },
-    );
+        });
     let apply_report = evaluate_apply_remote_rename_invariants(ApplyRemoteRenameInvariantInputs {
-        local_exists_on_disk_after: views.local.as_ref().is_some_and(|local| local.exists_on_disk),
+        local_exists_on_disk_after: views
+            .local
+            .as_ref()
+            .is_some_and(|local| local.exists_on_disk),
         local_dirty_after: views.local.as_ref().is_some_and(|local| local.dirty),
         local_parent_inode_after: views.local.as_ref().and_then(|local| local.parent_inode_id),
         local_display_name_after: views
@@ -1588,7 +1925,10 @@ fn run_remote_rename_invariant_report(
             .remote
             .as_ref()
             .and_then(|remote| remote.content_digest.as_deref()),
-        remote_parent_inode_after: views.remote.as_ref().and_then(|remote| remote.parent_inode_id),
+        remote_parent_inode_after: views
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.parent_inode_id),
         remote_display_name_after: views
             .remote
             .as_ref()
@@ -1596,10 +1936,7 @@ fn run_remote_rename_invariant_report(
             .display_name
             .as_str(),
         sync_anchor_seq_after: views.sync_anchor.as_ref().map(|anchor| anchor.synced_seq),
-        sync_anchor_revision_no_after: views
-            .sync_anchor
-            .as_ref()
-            .map(|anchor| anchor.revision_no),
+        sync_anchor_revision_no_after: views.sync_anchor.as_ref().map(|anchor| anchor.revision_no),
         sync_anchor_content_digest_after: views
             .sync_anchor
             .as_ref()
@@ -1632,7 +1969,12 @@ fn run_remote_rename_invariant_report(
 
     let mut final_current_exists = current_path.exists();
     let mut final_target_exists = target_path.exists();
-    if retry_after_failure && matches!(expect.execution, RawRenameExecutionExpect::ExecuteErrorKind { .. }) {
+    if retry_after_failure
+        && matches!(
+            expect.execution,
+            RawRenameExecutionExpect::ExecuteErrorKind { .. }
+        )
+    {
         if target_path.exists() {
             fs::remove_file(&target_path).expect("remove occupied target before retry");
         }
@@ -1643,7 +1985,9 @@ fn run_remote_rename_invariant_report(
                 &store,
                 |_client_file_id| None,
                 |_namespace_id, _inode_id| Some(current_path.clone()),
-                |_namespace_id, _inode_id, _parent_inode_id, _display_name| Some(target_path.clone()),
+                |_namespace_id, _inode_id, _parent_inode_id, _display_name| {
+                    Some(target_path.clone())
+                },
                 execute.uploaded_at_ms,
                 execute.created_at_ms.saturating_add(1),
                 |_request| panic!("apply_remote_rename should not dispatch a mutation request"),
@@ -1651,7 +1995,9 @@ fn run_remote_rename_invariant_report(
             .expect("retry execute_next_client_action after clearing destination")
         };
         match retried {
-            Some(NextClientAction::ExecutedApplyRemoteRename(ExecutedApplyRemoteRename { .. })) => {}
+            Some(NextClientAction::ExecutedApplyRemoteRename(ExecutedApplyRemoteRename {
+                ..
+            })) => {}
             other => panic!("expected retry to apply remote rename, got {other:?}"),
         }
         let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after retry");
@@ -1675,6 +2021,162 @@ fn run_remote_rename_invariant_report(
         rendered_trace,
         final_current_exists,
         final_target_exists,
+    }
+}
+
+fn run_remote_delete_invariant_report(fixture_path: &str) -> DeleteInvariantFixtureRunReport {
+    let scenario = load_fixture(fixture_path);
+    let initial: DeleteObservationInitial = scenario.decode_initial().expect("decode initial");
+    let actions: Vec<RemoteRenameFixtureAction> =
+        scenario.decode_actions().expect("decode actions");
+    let expect: DeleteObservationExpect = scenario.decode_expect().expect("decode expect");
+    let temp_dir = TestDir::new("client-remote-observation-remote-delete");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&store_root).expect("create objectstore root");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let current_path = source_root.join(&initial.local_file.relative_path);
+    fs::create_dir_all(current_path.parent().expect("current path parent"))
+        .expect("create current path parent");
+    if initial.seed_local_file {
+        fs::write(&current_path, initial.local_file.content_utf8.as_bytes())
+            .expect("write current local file");
+    }
+
+    seed_remote_delete_observation_state(&db_path, &initial);
+
+    let observe = actions[0].apply().expect("apply action first");
+    assert!(actions[1].is_restart(), "restart should be second");
+    let first_planner_tick = actions[2].planner().expect("planner action third");
+    let execute = actions[3]
+        .execute_next_client_action()
+        .expect("execute action fourth");
+    assert!(actions[4].is_restart(), "restart should be fifth");
+    let second_planner_tick = actions[5].planner().expect("planner action sixth");
+
+    let observation_outcome = {
+        let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+        db.apply_remote_observation(&observe.remote_observation, observe.applied_at_ms)
+            .expect("apply remote observation")
+    };
+    assert_eq!(observation_outcome, expect.outcome.clone().into_outcome());
+
+    let first_planner_result = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+        plan_file(
+            &mut db,
+            &first_planner_tick.namespace_id,
+            first_planner_tick.inode_id,
+            first_planner_tick.now_ms,
+        )
+        .expect("plan bound inode after observation")
+    };
+    assert_eq!(first_planner_result, expect.first_planner_result);
+
+    let executed = {
+        let mut db = SqliteStateDb::open(&db_path).expect("reopen DB for delete execute");
+        execute_next_client_action(
+            &mut db,
+            &store,
+            |_client_file_id| None,
+            |_namespace_id, _inode_id| Some(current_path.clone()),
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
+            execute.uploaded_at_ms,
+            execute.created_at_ms,
+            |_request| panic!("apply_remote_delete should not dispatch a mutation request"),
+        )
+    };
+    assert_delete_execution_matches_expectation(executed, &expect.execution);
+
+    let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after delete execute");
+    let second_planner_result = plan_file(
+        &mut db,
+        &second_planner_tick.namespace_id,
+        second_planner_tick.inode_id,
+        second_planner_tick.now_ms,
+    )
+    .expect("plan bound inode after delete execute");
+    assert_eq!(second_planner_result, expect.second_planner_result);
+
+    let views = db
+        .load_file_sync_views(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
+        .expect("load file sync views after delete execute");
+    assert_eq!(views.remote, Some(expect.remote_state.clone()));
+    assert_eq!(views.local, expect.local_state.clone());
+    assert_eq!(views.sync_anchor, expect.sync_anchor.clone());
+
+    let actual_planned_action = db
+        .load_planned_action(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
+        .expect("load planned action after delete execute");
+    if expect.planned_action_cleared {
+        assert_eq!(actual_planned_action, None);
+    } else {
+        let actual_planned_action = actual_planned_action
+            .as_ref()
+            .expect("planned action should remain after failed delete");
+        assert_eq!(
+            actual_planned_action.decision,
+            expect.second_planner_result.decision.as_str()
+        );
+        assert_eq!(
+            actual_planned_action.reason,
+            expect.second_planner_result.reason.as_str()
+        );
+    }
+
+    let issues = db
+        .load_conflicts_and_errors(
+            &second_planner_tick.namespace_id,
+            second_planner_tick.inode_id,
+        )
+        .expect("load remote delete issues after execute")
+        .into_iter()
+        .map(RawConflictOrErrorExpect::from_row)
+        .collect::<Vec<_>>();
+    assert_eq!(issues, expect.conflicts_and_errors);
+
+    let planning_report =
+        evaluate_remote_delete_planning_invariants(RemoteDeletePlanningInvariantInputs {
+            planned_action_decision_after: Some(first_planner_result.decision.as_str()),
+            planned_action_reason_after: Some(first_planner_result.reason.as_str()),
+        });
+    let apply_report = evaluate_apply_remote_delete_invariants(ApplyRemoteDeleteInvariantInputs {
+        remote_present_after: views.remote.is_some(),
+        remote_is_deleted_after: views
+            .remote
+            .as_ref()
+            .is_some_and(|remote| remote.is_deleted),
+        local_present_after: views.local.is_some(),
+        sync_anchor_present_after: views.sync_anchor.is_some(),
+        planned_action_present_after: actual_planned_action.is_some(),
+        issue_kind_after: issues.first().map(|issue| issue.kind.as_str()),
+    });
+    let report = combine_reconciliation_reports([planning_report, apply_report]);
+    assert_expected_reconciliation_invariants(&scenario, &report, &expect.invariants);
+
+    let trace = vec![
+        format!("outcome={:?}", expect.outcome.clone().into_outcome()),
+        format!("first_planner_result={first_planner_result:?}"),
+        format!("execution={:?}", expect.execution),
+        format!("second_planner_result={second_planner_result:?}"),
+        format!("issues_after={issues:?}"),
+    ]
+    .into_iter()
+    .chain(report.render_trace_lines("remote-delete"))
+    .collect::<Vec<_>>();
+
+    DeleteInvariantFixtureRunReport {
+        rendered_trace: render_trace(&scenario, &trace),
+        final_current_exists: current_path.exists(),
     }
 }
 
@@ -1734,6 +2236,40 @@ fn assert_rename_execution_matches_expectation(
                     ExecuteApplyRemoteRenameError::LocalApplyFailed { .. },
                 ) => "rename_io",
                 other => panic!("unexpected rename execution error: {other:?}"),
+            };
+            assert_eq!(actual_kind, execute_error_kind);
+        }
+    }
+}
+
+fn assert_delete_execution_matches_expectation(
+    result: Result<Option<NextClientAction>, ExecuteNextClientActionError>,
+    expected: &RawDeleteExecutionExpect,
+) {
+    match expected {
+        RawDeleteExecutionExpect::ExecutedApplyRemoteDelete {
+            executed_apply_remote_delete,
+        } => {
+            let executed = result.expect("delete execution should succeed");
+            assert_eq!(
+                executed,
+                Some(NextClientAction::ExecutedApplyRemoteDelete(
+                    ExecutedApplyRemoteDelete {
+                        applied: executed_apply_remote_delete.clone(),
+                    },
+                ))
+            );
+        }
+        RawDeleteExecutionExpect::ExecuteErrorKind { execute_error_kind } => {
+            let error = result.expect_err("delete execution should fail");
+            let actual_kind = match error {
+                ExecuteNextClientActionError::ApplyRemoteDelete(
+                    ExecuteApplyRemoteDeleteError::CurrentPathMissing { .. },
+                ) => "current_path_missing",
+                ExecuteNextClientActionError::ApplyRemoteDelete(
+                    ExecuteApplyRemoteDeleteError::LocalApplyFailed { .. },
+                ) => "unlink_io",
+                other => panic!("unexpected delete execution error: {other:?}"),
             };
             assert_eq!(actual_kind, execute_error_kind);
         }
@@ -1829,6 +2365,61 @@ struct DownloadObservationExpect {
 }
 
 #[derive(Debug, Deserialize)]
+struct BoundDownloadObservationInitial {
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: SyncAnchorRow,
+    local_file: FixtureLocalFile,
+    planned_action: PlannedActionRow,
+    transfer_ledger: FixtureTransferLedgerSeed,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct BoundDownloadObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: SyncAnchorRow,
+    planned_action_cleared: bool,
+    planner_result: PlannedActionRecord,
+    #[serde(default)]
+    invariants: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteObservationInitial {
+    remote_state: RemoteFileStateRow,
+    local_state: LocalFileStateRow,
+    sync_anchor: SyncAnchorRow,
+    local_file: FixtureLocalFile,
+    #[serde(default = "default_true")]
+    seed_local_file: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    remote_state: RemoteFileStateRow,
+    local_state: Option<LocalFileStateRow>,
+    sync_anchor: Option<SyncAnchorRow>,
+    planned_action_cleared: bool,
+    #[serde(default)]
+    conflicts_and_errors: Vec<RawConflictOrErrorExpect>,
+    execution: RawDeleteExecutionExpect,
+    first_planner_result: PlannedActionRecord,
+    second_planner_result: PlannedActionRecord,
+    #[serde(default)]
+    invariants: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteConflictObservationExpect {
+    outcome: RawAppliedRemoteObservation,
+    planner_result: PlannedActionRecord,
+}
+
+#[derive(Debug, Deserialize)]
 struct RenameObservationInitial {
     remote_state: RemoteFileStateRow,
     local_state: LocalFileStateRow,
@@ -1897,6 +2488,12 @@ struct RenameInvariantFixtureRunReport {
     rendered_trace: String,
     final_current_exists: bool,
     final_target_exists: bool,
+}
+
+#[derive(Debug)]
+struct DeleteInvariantFixtureRunReport {
+    rendered_trace: String,
+    final_current_exists: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2194,6 +2791,17 @@ enum RawRenameExecutionExpect {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+enum RawDeleteExecutionExpect {
+    ExecutedApplyRemoteDelete {
+        executed_apply_remote_delete: loon_client::state_db::AppliedInodeMutation,
+    },
+    ExecuteErrorKind {
+        execute_error_kind: String,
+    },
+}
+
 impl RawConflictOrErrorExpect {
     fn from_row(row: loon_client::state_db::ConflictOrErrorRow) -> Self {
         Self {
@@ -2370,3 +2978,7 @@ impl LateCreateResponseObservationAction {
 }
 
 type TestDir = loon_testkit::tempdir::TestDir;
+
+fn default_true() -> bool {
+    true
+}

@@ -365,6 +365,42 @@ Exit criteria:
 - the mixed client tick can apply that rename locally and return to `already_converged`
 - destination collisions become durable named issue rows instead of generic executor failures
 
+### Slice 2: bound-file remote delete observation
+
+Goal:
+
+- treat authoritative remote file deletion as real local unlink work instead of generic drift
+- keep the remote tombstone durable after successful local delete
+- make tombstoned remote-only state inert so it does not replan as a download
+
+Update:
+
+- `docs/specs/070-client-architecture.md`
+- `crates/loon-client/`
+- `tests/scenarios/client/`
+
+Add:
+
+- planner decision `apply_remote_delete`
+- planner reasons for tombstoned authoritative observations
+- durable local unlink executor and named failure issue rows
+- reconciliation fixtures and invariants for successful delete, failure, and active-transfer
+  preservation
+
+Why next:
+
+- remote rename and remote delete are the smallest file-only hierarchy reconciliation pair
+- successful delete needs an explicit durable state shape before subtree delete work can be
+  specified safely
+
+Exit criteria:
+
+- a bound-file tombstoned authoritative observation survives restart and plans `apply_remote_delete`
+- the mixed client tick can unlink the local file, preserve the remote tombstone, and leave no
+  local/anchor rows
+- tombstoned remote rows without local/anchor become inert `no_op` planner state
+- missing current-path failures become durable named issue rows instead of generic executor errors
+
 ## Historical slice order
 
 Milestones 1 through 7 were executed through the following ordered slices.

@@ -14,7 +14,7 @@ use loon_types::{
 use serde_json::json;
 
 #[test]
-fn sqlite_state_db_applies_schema_v12() {
+fn sqlite_state_db_applies_schema_v13() {
     let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
     assert_eq!(
@@ -1627,6 +1627,139 @@ fn apply_remote_rename_updates_local_state_and_anchor_and_clears_issue() {
     assert_eq!(
         db.load_conflicts_and_errors(&namespace_id, inode_id)
             .expect("load rename issues after apply_remote_rename"),
+        Vec::new()
+    );
+}
+
+#[test]
+fn apply_remote_delete_preserves_tombstone_and_clears_local_state_and_anchor() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let inode_id = InodeId(42);
+
+    db.planner_transaction("seed-apply-remote-delete", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(420),
+            revision_no: RevisionNo(17),
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "report.txt".to_owned(),
+            is_deleted: true,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "report.txt".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            synced_seq: ChangeSeq(419),
+            revision_no: RevisionNo(17),
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "report.txt".to_owned(),
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            decision: "apply_remote_delete".to_owned(),
+            reason: "remote_deleted_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_100_500,
+        })?;
+        tx.record_inode_upload(
+            &namespace_id,
+            inode_id,
+            &UploadedContent {
+                namespace_id: namespace_id.clone(),
+                file_size_bytes: 9,
+                file_digest_sha256: "sha256:anchor-17".to_owned(),
+                content_manifest_digest: "sha256:manifest-anchor-17".to_owned(),
+                manifest_object_key: "namespaces/ns-1/manifests/sha256:manifest-anchor-17.json"
+                    .to_owned(),
+                manifest_envelope: ContentManifestEnvelope::from_payload(ContentManifestPayload {
+                    namespace_id: namespace_id.clone(),
+                    file_size_bytes: 9,
+                    file_digest_sha256: "sha256:anchor-17".to_owned(),
+                    block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
+                    blocks: Vec::new(),
+                })
+                .expect("build apply_remote_delete uploaded content"),
+                block_objects: Vec::new(),
+            },
+            1_700_000_100_550,
+        )?;
+        Ok(())
+    })
+    .expect("seed apply_remote_delete state");
+    db.record_conflict_or_error(
+        &namespace_id,
+        inode_id,
+        "apply_remote_delete_local_apply_failed",
+        "stale failure",
+        &json!({"failure": "current_path_missing"}),
+        1_700_000_100_600,
+    )
+    .expect("record stale delete issue");
+
+    let applied = db
+        .apply_remote_delete(&namespace_id, inode_id, 1_700_000_101_000)
+        .expect("apply remote delete");
+
+    assert_eq!(
+        applied,
+        super::AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        }
+    );
+    assert_eq!(
+        db.load_file_sync_views(&namespace_id, inode_id)
+            .expect("load tombstoned views"),
+        FileSyncViews {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            remote: Some(RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(420),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                is_deleted: true,
+            }),
+            local: None,
+            sync_anchor: None,
+        }
+    );
+    assert_eq!(
+        db.load_planned_action(&namespace_id, inode_id)
+            .expect("load planned action after apply_remote_delete"),
+        None
+    );
+    assert_eq!(
+        db.load_inode_upload(&namespace_id, inode_id)
+            .expect("load inode upload after apply_remote_delete"),
+        None
+    );
+    assert_eq!(
+        db.load_conflicts_and_errors(&namespace_id, inode_id)
+            .expect("load delete issues after apply_remote_delete"),
         Vec::new()
     );
 }

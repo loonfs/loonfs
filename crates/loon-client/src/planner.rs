@@ -1,6 +1,6 @@
 use crate::state_db::{
     ClientFileId, FileSyncViews, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    PlannedActionRow, SqliteStateDb, StateDbError, SyncAnchorRow,
+    PlannedActionRow, SqliteStateDb, StateDbError, SyncAnchorRow, TransferDirection,
 };
 use loon_types::{InodeId, InodeKind, NamespaceId};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ pub enum PlannerDecision {
     UploadLocalCreate,
     UploadLocalEdit,
     DownloadRemoteEdit,
+    ApplyRemoteDelete,
     ApplyRemoteRename,
     MaterializeRemoteDir,
     CreateConflictCopy,
@@ -28,6 +29,9 @@ pub enum PlannerReason {
     LocalOnlyFileWithoutRemoteIdentity,
     LocalDiffersFromAnchor,
     RemoteDiffersFromAnchor,
+    RemoteDeletedFromAnchor,
+    RemoteDeletedWhileLocalDiffersFromAnchor,
+    RemoteDeletedWithoutAnchor,
     RemotePathDiffersFromAnchor,
     RemotePathAndContentDifferFromAnchor,
     LocalAndRemoteDifferFromAnchor,
@@ -72,7 +76,12 @@ pub fn plan_file(
 ) -> Result<PlannedActionRecord, PlannerError> {
     db.planner_transaction("plan_file", |tx| {
         let views = tx.load_file_sync_views(namespace_id, inode_id)?;
-        let action = decide_file_action(&views, now_ms);
+        let mut action = decide_file_action(&views, now_ms);
+        if let Some(preserved) =
+            preserve_in_flight_action_for_remote_delete(tx, namespace_id, inode_id, &views, now_ms)?
+        {
+            action = preserved;
+        }
 
         if action.decision == PlannerDecision::NoOp {
             tx.delete_planned_action(namespace_id, inode_id)?;
@@ -117,6 +126,27 @@ pub fn plan_local_only_inode(
 
 pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRecord {
     let (decision, reason) = match (&views.remote, &views.local, &views.sync_anchor) {
+        (Some(remote), local, anchor) if remote.is_deleted => match (local, anchor) {
+            (Some(local), Some(anchor))
+                if remote.inode_kind == InodeKind::File
+                    && local.inode_kind == InodeKind::File
+                    && anchor.inode_kind == InodeKind::File
+                    && local_matches_anchor(local, anchor) =>
+            {
+                (
+                    PlannerDecision::ApplyRemoteDelete,
+                    PlannerReason::RemoteDeletedFromAnchor,
+                )
+            }
+            (_, Some(_)) if remote.inode_kind == InodeKind::File => (
+                PlannerDecision::CreateConflictCopy,
+                PlannerReason::RemoteDeletedWhileLocalDiffersFromAnchor,
+            ),
+            _ => (
+                PlannerDecision::NoOp,
+                PlannerReason::RemoteDeletedWithoutAnchor,
+            ),
+        },
         (Some(remote), Some(local), Some(anchor)) => {
             let local_matches_anchor = local_matches_anchor(local, anchor);
             let remote_matches_anchor = remote_matches_anchor(remote, anchor);
@@ -313,6 +343,7 @@ impl PlannerDecision {
             Self::UploadLocalCreate => "upload_local_create",
             Self::UploadLocalEdit => "upload_local_edit",
             Self::DownloadRemoteEdit => "download_remote_edit",
+            Self::ApplyRemoteDelete => "apply_remote_delete",
             Self::ApplyRemoteRename => "apply_remote_rename",
             Self::MaterializeRemoteDir => "materialize_remote_dir",
             Self::CreateConflictCopy => "create_conflict_copy",
@@ -326,6 +357,7 @@ impl PlannerDecision {
             "upload_local_create" => Ok(Self::UploadLocalCreate),
             "upload_local_edit" => Ok(Self::UploadLocalEdit),
             "download_remote_edit" => Ok(Self::DownloadRemoteEdit),
+            "apply_remote_delete" => Ok(Self::ApplyRemoteDelete),
             "apply_remote_rename" => Ok(Self::ApplyRemoteRename),
             "materialize_remote_dir" => Ok(Self::MaterializeRemoteDir),
             "create_conflict_copy" => Ok(Self::CreateConflictCopy),
@@ -346,6 +378,11 @@ impl PlannerReason {
             Self::LocalOnlyFileWithoutRemoteIdentity => "local_only_file_without_remote_identity",
             Self::LocalDiffersFromAnchor => "local_differs_from_anchor",
             Self::RemoteDiffersFromAnchor => "remote_differs_from_anchor",
+            Self::RemoteDeletedFromAnchor => "remote_deleted_from_anchor",
+            Self::RemoteDeletedWhileLocalDiffersFromAnchor => {
+                "remote_deleted_while_local_differs_from_anchor"
+            }
+            Self::RemoteDeletedWithoutAnchor => "remote_deleted_without_anchor",
             Self::RemotePathDiffersFromAnchor => "remote_path_differs_from_anchor",
             Self::RemotePathAndContentDifferFromAnchor => {
                 "remote_path_and_content_differ_from_anchor"
@@ -369,6 +406,11 @@ impl PlannerReason {
             }
             "local_differs_from_anchor" => Ok(Self::LocalDiffersFromAnchor),
             "remote_differs_from_anchor" => Ok(Self::RemoteDiffersFromAnchor),
+            "remote_deleted_from_anchor" => Ok(Self::RemoteDeletedFromAnchor),
+            "remote_deleted_while_local_differs_from_anchor" => {
+                Ok(Self::RemoteDeletedWhileLocalDiffersFromAnchor)
+            }
+            "remote_deleted_without_anchor" => Ok(Self::RemoteDeletedWithoutAnchor),
             "remote_path_differs_from_anchor" => Ok(Self::RemotePathDiffersFromAnchor),
             "remote_path_and_content_differ_from_anchor" => {
                 Ok(Self::RemotePathAndContentDifferFromAnchor)
@@ -431,6 +473,81 @@ fn remote_only_placeholder_matches_remote(
         && local.inode_kind == remote.inode_kind
         && local.parent_inode_id == remote.parent_inode_id
         && local.display_name == remote.display_name
+}
+
+fn preserve_in_flight_action_for_remote_delete(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    views: &FileSyncViews,
+    now_ms: u64,
+) -> Result<Option<PlannedActionRecord>, StateDbError> {
+    let Some(remote) = views.remote.as_ref() else {
+        return Ok(None);
+    };
+    if !remote.is_deleted || remote.inode_kind != InodeKind::File {
+        return Ok(None);
+    }
+
+    let has_active_download = tx
+        .load_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Download)?
+        .is_some();
+    let has_active_upload = tx
+        .load_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?
+        .is_some();
+    let has_pending_inode_mutation = tx
+        .load_pending_inode_mutation_for_inode(namespace_id, inode_id)?
+        .is_some();
+    if !(has_active_download || has_active_upload || has_pending_inode_mutation) {
+        return Ok(None);
+    }
+
+    let existing_planned_action = tx.load_planned_action(namespace_id, inode_id)?;
+    if let Some(planned_row) = existing_planned_action.as_ref() {
+        match planned_row.decision.as_str() {
+            "upload_local_edit" => {
+                return Ok(Some(PlannedActionRecord {
+                    namespace_id: planned_row.namespace_id.clone(),
+                    inode_id: planned_row.inode_id,
+                    decision: PlannerDecision::UploadLocalEdit,
+                    reason: PlannerReason::LocalDiffersFromAnchor,
+                    created_at_ms: planned_row.created_at_ms,
+                }));
+            }
+            "download_remote_edit" => {
+                return Ok(Some(PlannedActionRecord {
+                    namespace_id: planned_row.namespace_id.clone(),
+                    inode_id: planned_row.inode_id,
+                    decision: PlannerDecision::DownloadRemoteEdit,
+                    reason: PlannerReason::RemoteDiffersFromAnchor,
+                    created_at_ms: planned_row.created_at_ms,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let (decision, reason) = if has_active_download {
+        (
+            PlannerDecision::DownloadRemoteEdit,
+            PlannerReason::RemoteDiffersFromAnchor,
+        )
+    } else {
+        (
+            PlannerDecision::UploadLocalEdit,
+            PlannerReason::LocalDiffersFromAnchor,
+        )
+    };
+
+    Ok(Some(PlannedActionRecord {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        decision,
+        reason,
+        created_at_ms: existing_planned_action
+            .map(|planned| planned.created_at_ms)
+            .unwrap_or(now_ms),
+    }))
 }
 
 #[cfg(test)]
@@ -589,6 +706,130 @@ mod tests {
             planned.reason,
             PlannerReason::RemotePathAndContentDifferFromAnchor
         );
+    }
+
+    #[test]
+    fn planner_marks_bound_tombstoned_file_for_apply_remote_delete() {
+        let views = FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            remote: Some(RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(420),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                is_deleted: true,
+            }),
+            local: Some(LocalFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_000,
+            }),
+            sync_anchor: Some(SyncAnchorRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(419),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+            }),
+        };
+
+        let planned = decide_file_action(&views, 1_700_000_002_000);
+
+        assert_eq!(planned.decision, PlannerDecision::ApplyRemoteDelete);
+        assert_eq!(planned.reason, PlannerReason::RemoteDeletedFromAnchor);
+    }
+
+    #[test]
+    fn planner_prefers_conflict_copy_for_remote_delete_when_local_diverges() {
+        let views = FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            remote: Some(RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(420),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                is_deleted: true,
+            }),
+            local: Some(LocalFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:diverged".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_000,
+            }),
+            sync_anchor: Some(SyncAnchorRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(419),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+            }),
+        };
+
+        let planned = decide_file_action(&views, 1_700_000_002_000);
+
+        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemoteDeletedWhileLocalDiffersFromAnchor
+        );
+    }
+
+    #[test]
+    fn planner_marks_tombstoned_remote_without_anchor_as_no_op() {
+        let views = FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            remote: Some(RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(420),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                is_deleted: true,
+            }),
+            local: None,
+            sync_anchor: None,
+        };
+
+        let planned = decide_file_action(&views, 1_700_000_002_000);
+
+        assert_eq!(planned.decision, PlannerDecision::NoOp);
+        assert_eq!(planned.reason, PlannerReason::RemoteDeletedWithoutAnchor);
     }
 
     #[test]

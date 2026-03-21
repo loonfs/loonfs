@@ -60,10 +60,7 @@ pub(crate) fn rename_path_durably(
         return Err(io_error(
             "rename_target_path",
             target_path,
-            io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "target path already exists",
-            ),
+            io::Error::new(io::ErrorKind::AlreadyExists, "target path already exists"),
         ));
     }
 
@@ -75,6 +72,14 @@ pub(crate) fn rename_path_durably(
         sync_parent_dir(source_parent_dir)
             .map_err(|source| io_error("sync_parent_dir", source_parent_dir, source))?;
     }
+    Ok(())
+}
+
+pub(crate) fn remove_path_durably(target_path: &Path) -> Result<(), LocalApplyError> {
+    let parent_dir = target_parent_dir(target_path);
+    fs::remove_file(target_path).map_err(|source| io_error("remove_file", target_path, source))?;
+    sync_parent_dir(parent_dir)
+        .map_err(|source| io_error("sync_parent_dir", parent_dir, source))?;
     Ok(())
 }
 
@@ -185,7 +190,8 @@ fn sync_dir(_path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         append_stage_bytes, apply_bytes_atomically, create_directory_durably, finalize_stage_file,
-        rename_path_durably, reset_stage_file, stage_file_size, staging_path_for_target,
+        remove_path_durably, rename_path_durably, reset_stage_file, stage_file_size,
+        staging_path_for_target,
     };
     use loon_testkit::tempdir::TestDir;
     use std::fs;
@@ -307,6 +313,18 @@ mod tests {
             fs::read_to_string(&target_path).expect("read occupied target path"),
             "occupied"
         );
+    }
+
+    #[test]
+    fn remove_path_durably_unlinks_file() {
+        let temp_dir = TestDir::new("local-apply-delete");
+        let target_path = temp_dir.path().join("docs/report.txt");
+        fs::create_dir_all(target_path.parent().expect("parent dir")).expect("create parent dir");
+        fs::write(&target_path, "hello from loon").expect("seed current file");
+
+        remove_path_durably(&target_path).expect("remove path durably");
+
+        assert!(!target_path.exists(), "target path should be removed");
     }
 
     #[test]

@@ -1,0 +1,11 @@
+scenario=client_remote_observation_bound_file_remote_delete_current_path_missing_records_issue kind=client schema_version=1 seed=None actions=6 faults=0 expect_keys=10
+  1. outcome=UpdatedBoundRemoteState { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42) }
+  2. first_planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42), decision: ApplyRemoteDelete, reason: RemoteDeletedFromAnchor, created_at_ms: 1700000530000 }
+  3. execution=ExecuteErrorKind { execute_error_kind: "current_path_missing" }
+  4. second_planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42), decision: ApplyRemoteDelete, reason: RemoteDeletedFromAnchor, created_at_ms: 1700000532000 }
+  5. issues_after=[RawConflictOrErrorExpect { kind: "apply_remote_delete_local_apply_failed", summary: "apply_remote_delete could not resolve the current local path", created_at_ms: 1700000531000, detail_json: Object {"failure": String("current_path_missing")} }]
+  6. invariants[remote-delete] remote_delete_plans_apply_remote_delete=pass detail=decision=Some("apply_remote_delete") reason=Some("remote_deleted_from_anchor")
+  7. invariants[remote-delete] apply_remote_delete_preserves_remote_tombstone=pass detail=remote_present_after=true remote_is_deleted_after=true
+  8. invariants[remote-delete] apply_remote_delete_clears_local_state_and_sync_anchor=fail detail=local_present_after=true sync_anchor_present_after=true
+  9. invariants[remote-delete] apply_remote_delete_clears_planned_action=fail detail=planned_action_present_after=true
+  10. invariants[remote-delete] apply_remote_delete_failure_records_durable_issue=pass detail=issue_kind_after=Some("apply_remote_delete_local_apply_failed")

@@ -1,5 +1,5 @@
 use super::loads::{
-    load_bound_apply_remote_rename_views_from_conn,
+    load_bound_apply_remote_delete_views_from_conn, load_bound_apply_remote_rename_views_from_conn,
     load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
     load_conflicts_and_errors, load_inode_upload, load_local_file,
     load_local_only_candidates_for_namespace, load_local_only_conflicts_and_errors,
@@ -107,6 +107,14 @@ impl SqliteStateDb {
         inode_id: InodeId,
     ) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
         load_bound_apply_remote_rename_views_from_conn(&self.conn, namespace_id, inode_id)
+    }
+
+    pub fn load_bound_apply_remote_delete_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
+        load_bound_apply_remote_delete_views_from_conn(&self.conn, namespace_id, inode_id)
     }
 
     pub fn load_planned_action(
@@ -395,6 +403,17 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn apply_remote_delete(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_remote_delete", |tx| {
+            tx.apply_remote_delete(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
     pub fn apply_remote_observation(
         &mut self,
         observed: &ObservedRemoteInode,
@@ -509,6 +528,31 @@ impl SqliteStateDb {
 }
 
 impl PlannerTxn<'_> {
+    pub fn load_planned_action(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<Option<PlannedActionRow>, StateDbError> {
+        load_planned_action(&self.tx, namespace_id, inode_id)
+    }
+
+    pub fn load_pending_inode_mutation_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<Option<PendingInodeMutationRow>, StateDbError> {
+        load_pending_inode_mutation_for_inode(&self.tx, namespace_id, inode_id)
+    }
+
+    pub fn load_transfer_ledger_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        direction: TransferDirection,
+    ) -> Result<Option<TransferLedgerRow>, StateDbError> {
+        load_transfer_ledger_for_inode(&self.tx, namespace_id, inode_id, direction)
+    }
+
     pub fn allocate_local_file_id(
         &mut self,
         namespace_id: &NamespaceId,
@@ -797,6 +841,30 @@ impl PlannerTxn<'_> {
                     .transpose()?,
                 &row.display_name,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_local_file(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM local_state WHERE namespace_id = ?1 AND inode_id = ?2",
+            params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_sync_anchor(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM sync_anchor WHERE namespace_id = ?1 AND inode_id = ?2",
+            params![namespace_id.as_str(), to_sql_u64(inode_id.0, "inode_id")?],
         )?;
         Ok(())
     }
@@ -1689,6 +1757,31 @@ impl PlannerTxn<'_> {
             namespace_id,
             inode_id,
             "apply_remote_rename_local_apply_failed",
+        )?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
+    pub fn apply_remote_delete(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        _applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let (_remote, _local, _anchor) =
+            load_bound_apply_remote_delete_views_from_conn(&self.tx, namespace_id, inode_id)?;
+
+        self.delete_planned_action(namespace_id, inode_id)?;
+        self.delete_inode_upload(namespace_id, inode_id)?;
+        self.delete_local_file(namespace_id, inode_id)?;
+        self.delete_sync_anchor(namespace_id, inode_id)?;
+        self.delete_conflict_or_error_kind(
+            namespace_id,
+            inode_id,
+            "apply_remote_delete_local_apply_failed",
         )?;
 
         Ok(AppliedInodeMutation {

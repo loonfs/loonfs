@@ -1738,6 +1738,108 @@ Executable invariant IDs for this slice:
 - `apply_remote_rename_clears_planned_action`
 - `apply_remote_rename_failure_records_durable_issue`
 
+## First bound-file remote delete observation path
+
+The next remote hierarchy reconciliation slice is also bound-file-only.
+
+Rules:
+
+- `apply_remote_observation` remains a durable metadata update; it must not unlink local files
+  directly
+- a later planner pass may schedule one new inode-keyed decision:
+  - `apply_remote_delete`
+- `apply_remote_delete` is valid only when:
+  - `remote_state(namespace_id, inode_id)` exists
+  - `local_state(namespace_id, inode_id)` exists
+  - `sync_anchor(namespace_id, inode_id)` exists
+  - all three rows have `inode_kind = file`
+  - `remote_state.is_deleted = true`
+  - `local_state` still matches `sync_anchor` on:
+    - `content_digest`
+    - `parent_inode_id`
+    - `display_name`
+    - `exists_on_disk = true`
+    - `dirty = false`
+- if `remote_state.is_deleted = true` while `local_state` no longer matches the anchor, the
+  planner must fall back to deferred `create_conflict_copy` with reason
+  `remote_deleted_while_local_differs_from_anchor`
+- if the durable state is a tombstoned remote row without local/anchor, the planner must return
+  `no_op` with reason `remote_deleted_without_anchor`
+- while upload/download work is still in flight for the inode, replanning must preserve the current
+  executable `upload_local_edit` or `download_remote_edit` action instead of replacing it with
+  delete reconciliation
+- the first slice still excludes:
+  - remote directory delete reconciliation
+  - remote subtree delete reconciliation
+
+Planner surface additions:
+
+- planner decision:
+  - `apply_remote_delete`
+- planner reasons:
+  - `remote_deleted_from_anchor`
+  - `remote_deleted_while_local_differs_from_anchor`
+  - `remote_deleted_without_anchor`
+
+The delete executor takes:
+
+- `namespace_id`
+- `inode_id`
+- one caller-supplied resolver for the current bound local path
+- one explicit local apply timestamp
+
+Rules:
+
+- the mixed tick must treat `apply_remote_delete` as an executable inode action
+- the executor must load `planned_actions(namespace_id, inode_id)` and require
+  `decision = apply_remote_delete`
+- the executor must require the bound-file delete preconditions above at execution time, not only
+  at planning time
+- the executor must require the current local path to resolve successfully
+- if the current path is missing locally, the executor must fail closed and record one durable
+  issue row with `kind = apply_remote_delete_local_apply_failed`
+- after a successful durable local unlink, one SQLite transaction must:
+  - preserve `remote_state(namespace_id, inode_id)` with `is_deleted = true`
+  - delete `local_state(namespace_id, inode_id)`
+  - delete `sync_anchor(namespace_id, inode_id)`
+  - clear `planned_actions(namespace_id, inode_id)`
+  - clear any matching `apply_remote_delete_local_apply_failed` row
+
+The local apply step must:
+
+- unlink the current file path
+- sync the parent directory after the unlink
+
+The first issue kind for this path is:
+
+- `apply_remote_delete_local_apply_failed`
+  - recorded for current-path resolution failures and local unlink failures
+  - `detail_json.failure` must be one of:
+    - `current_path_missing`
+    - `unlink_io`
+
+Why this rule exists:
+
+- a tombstoned authoritative file observation is a real hierarchy change, not just content drift
+- the client already stores bound file existence and path view durably, so delete should become a
+  first-class reconciliation path before broader subtree work begins
+- keeping the remote tombstone while clearing local/anchor rows lets later planning distinguish
+  “successfully applied delete” from “never observed this inode”
+
+Failure modes prevented:
+
+- preserving a locally present file after the remote inode is authoritatively tombstoned
+- replanning a successfully deleted file as a fresh download because only the tombstone remained
+- collapsing local unlink failures into generic executor errors without durable explanation
+
+Executable invariant IDs for this slice:
+
+- `remote_delete_plans_apply_remote_delete`
+- `apply_remote_delete_preserves_remote_tombstone`
+- `apply_remote_delete_clears_local_state_and_sync_anchor`
+- `apply_remote_delete_clears_planned_action`
+- `apply_remote_delete_failure_records_durable_issue`
+
 ## SQLite hardening boundary (schema v11)
 
 The next schema version does not add new client-truth tables. It hardens the existing durable

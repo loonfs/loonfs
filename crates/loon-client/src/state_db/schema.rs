@@ -1,7 +1,7 @@
 use super::{SqliteStateDb, StateDbError};
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const SCHEMA_VERSION: i32 = 12;
+pub(crate) const SCHEMA_VERSION: i32 = 13;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
@@ -955,6 +955,28 @@ const SCHEMA_V12_COPY_SQL: &str = SCHEMA_V11_COPY_SQL;
 
 const SCHEMA_V12_DROP_OLD_SQL: &str = SCHEMA_V11_DROP_OLD_SQL;
 
+const SCHEMA_V13_RENAME_SQL: &str = SCHEMA_V12_RENAME_SQL;
+
+const SCHEMA_V13_COPY_SQL: &str = SCHEMA_V12_COPY_SQL;
+
+const SCHEMA_V13_DROP_OLD_SQL: &str = SCHEMA_V12_DROP_OLD_SQL;
+
+fn schema_v13_create_sql() -> String {
+    SCHEMA_V12_CREATE_SQL
+        .replace(
+            "CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'download_remote_edit', 'apply_remote_rename', 'materialize_remote_dir', 'create_conflict_copy', 'no_op'))",
+            "CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'download_remote_edit', 'apply_remote_delete', 'apply_remote_rename', 'materialize_remote_dir', 'create_conflict_copy', 'no_op'))",
+        )
+        .replace(
+            "CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'remote_path_differs_from_anchor', 'remote_path_and_content_differ_from_anchor', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))",
+            "CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'remote_deleted_from_anchor', 'remote_deleted_while_local_differs_from_anchor', 'remote_deleted_without_anchor', 'remote_path_differs_from_anchor', 'remote_path_and_content_differ_from_anchor', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))",
+        )
+        .replace(
+            "CHECK (kind IN ('remote_observation_bind_ambiguous', 'download_remote_edit_remote_digest_mismatch', 'download_remote_edit_local_apply_failed', 'download_remote_edit_transfer_reset', 'materialize_remote_dir_local_apply_failed', 'apply_remote_rename_local_apply_failed', 'upload_local_edit_upload_failed', 'upload_local_edit_transfer_reset'))",
+            "CHECK (kind IN ('remote_observation_bind_ambiguous', 'download_remote_edit_remote_digest_mismatch', 'download_remote_edit_local_apply_failed', 'download_remote_edit_transfer_reset', 'materialize_remote_dir_local_apply_failed', 'apply_remote_rename_local_apply_failed', 'apply_remote_delete_local_apply_failed', 'upload_local_edit_upload_failed', 'upload_local_edit_transfer_reset'))",
+        )
+}
+
 pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -1011,6 +1033,12 @@ pub(super) fn install_schema_version_for_test(
     }
     if target_version >= 11 {
         apply_v11_hardening(conn)?;
+    }
+    if target_version >= 12 {
+        apply_v12_hardening(conn)?;
+    }
+    if target_version >= 13 {
+        apply_v13_hardening(conn)?;
     }
 
     Ok(())
@@ -1110,6 +1138,11 @@ impl SqliteStateDb {
 
         if current_version == 11 {
             apply_v12_hardening(&mut self.conn)?;
+            current_version = 12;
+        }
+
+        if current_version == 12 {
+            apply_v13_hardening(&mut self.conn)?;
         }
 
         Ok(())
@@ -1142,6 +1175,24 @@ fn apply_v12_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
         tx.execute_batch(SCHEMA_V12_CREATE_SQL)?;
         tx.execute_batch(SCHEMA_V12_COPY_SQL)?;
         tx.execute_batch(SCHEMA_V12_DROP_OLD_SQL)?;
+        tx.pragma_update(None, "user_version", 12)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    result?;
+    ensure_no_foreign_key_violations(conn)?;
+    Ok(())
+}
+
+fn apply_v13_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result: Result<(), StateDbError> = (|| {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA_V13_RENAME_SQL)?;
+        tx.execute_batch(&schema_v13_create_sql())?;
+        tx.execute_batch(SCHEMA_V13_COPY_SQL)?;
+        tx.execute_batch(SCHEMA_V13_DROP_OLD_SQL)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())

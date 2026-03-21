@@ -430,6 +430,22 @@ pub struct RemotePathChangePlanningInvariantInputs<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteDeletePlanningInvariantInputs<'a> {
+    pub planned_action_decision_after: Option<&'a str>,
+    pub planned_action_reason_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyRemoteDeleteInvariantInputs<'a> {
+    pub remote_present_after: bool,
+    pub remote_is_deleted_after: bool,
+    pub local_present_after: bool,
+    pub sync_anchor_present_after: bool,
+    pub planned_action_present_after: bool,
+    pub issue_kind_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ApplyRemoteRenameInvariantInputs<'a> {
     pub local_exists_on_disk_after: bool,
     pub local_dirty_after: bool,
@@ -1765,6 +1781,60 @@ pub fn evaluate_remote_path_change_planning_invariants(
                 inputs.planned_action_decision_after, inputs.planned_action_reason_after
             ),
         }],
+    }
+}
+
+pub fn evaluate_remote_delete_planning_invariants(
+    inputs: RemoteDeletePlanningInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "remote_delete_plans_apply_remote_delete".to_owned(),
+            passed: inputs.planned_action_decision_after == Some("apply_remote_delete")
+                && inputs.planned_action_reason_after == Some("remote_deleted_from_anchor"),
+            detail: format!(
+                "decision={:?} reason={:?}",
+                inputs.planned_action_decision_after, inputs.planned_action_reason_after
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_apply_remote_delete_invariants(
+    inputs: ApplyRemoteDeleteInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "apply_remote_delete_preserves_remote_tombstone".to_owned(),
+                passed: inputs.remote_present_after && inputs.remote_is_deleted_after,
+                detail: format!(
+                    "remote_present_after={} remote_is_deleted_after={}",
+                    inputs.remote_present_after, inputs.remote_is_deleted_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_delete_clears_local_state_and_sync_anchor".to_owned(),
+                passed: !inputs.local_present_after && !inputs.sync_anchor_present_after,
+                detail: format!(
+                    "local_present_after={} sync_anchor_present_after={}",
+                    inputs.local_present_after, inputs.sync_anchor_present_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_delete_clears_planned_action".to_owned(),
+                passed: !inputs.planned_action_present_after,
+                detail: format!(
+                    "planned_action_present_after={}",
+                    inputs.planned_action_present_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_delete_failure_records_durable_issue".to_owned(),
+                passed: inputs.issue_kind_after == Some("apply_remote_delete_local_apply_failed"),
+                detail: format!("issue_kind_after={:?}", inputs.issue_kind_after),
+            },
+        ],
     }
 }
 
@@ -3367,23 +3437,26 @@ impl AggregateCheck {
 #[cfg(test)]
 mod tests {
     use super::{
-        evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
-        evaluate_content_object_invariants, evaluate_download_transfer_invariants,
-        evaluate_inode_upload_transfer_invariants, evaluate_local_only_upload_transfer_invariants,
+        evaluate_apply_remote_delete_invariants, evaluate_checkpoint_head_publish_invariants,
+        evaluate_checkpoint_object_invariants, evaluate_content_object_invariants,
+        evaluate_download_transfer_invariants, evaluate_inode_upload_transfer_invariants,
+        evaluate_local_only_upload_transfer_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
-        evaluate_queue_complete_invariants, evaluate_remote_observation_ambiguous_bind_invariants,
+        evaluate_queue_complete_invariants, evaluate_remote_delete_planning_invariants,
+        evaluate_remote_observation_ambiguous_bind_invariants,
         evaluate_remote_observation_convergence_invariants,
         evaluate_remote_only_directory_materialization_invariants,
-        CheckpointHeadPublishInvariantInputs, CheckpointObjectInvariantInputs,
-        CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
-        CheckpointReplayInvariantInputs, CommitInvariantInputs, ContentObjectInvariantInputs,
-        ContentObjectInvariantSnapshot, DownloadTransferInvariantInputs,
-        DownloadTransferOutcomeKind, InodeUploadTransferInvariantInputs,
-        InodeUploadTransferOutcomeKind, LocalOnlyUploadTransferInvariantInputs,
-        LocalOnlyUploadTransferOutcomeKind, ProgressInvariantSnapshot,
-        ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
-        QueueCompleteOutcomeKind, RemoteObservationAmbiguousBindInvariantInputs,
+        ApplyRemoteDeleteInvariantInputs, CheckpointHeadPublishInvariantInputs,
+        CheckpointObjectInvariantInputs, CheckpointObjectInvariantSnapshot,
+        CheckpointProgressAuthorizer, CheckpointReplayInvariantInputs, CommitInvariantInputs,
+        ContentObjectInvariantInputs, ContentObjectInvariantSnapshot,
+        DownloadTransferInvariantInputs, DownloadTransferOutcomeKind,
+        InodeUploadTransferInvariantInputs, InodeUploadTransferOutcomeKind,
+        LocalOnlyUploadTransferInvariantInputs, LocalOnlyUploadTransferOutcomeKind,
+        ProgressInvariantSnapshot, ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
+        QueueCompleteInvariantInputs, QueueCompleteOutcomeKind,
+        RemoteDeletePlanningInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
         RemoteObservationConvergenceInvariantInputs,
         RemoteOnlyDirectoryMaterializationInvariantInputs,
         RemoteOnlyDirectoryMaterializationOutcomeKind, StoredCheckpointSegmentSnapshot,
@@ -4335,6 +4408,56 @@ mod tests {
         assert!(
             !report
                 .check("remote_only_directory_materialization_failure_records_durable_issue")
+                .expect("check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_delete_as_passed() {
+        let planning_report =
+            evaluate_remote_delete_planning_invariants(RemoteDeletePlanningInvariantInputs {
+                planned_action_decision_after: Some("apply_remote_delete"),
+                planned_action_reason_after: Some("remote_deleted_from_anchor"),
+            });
+        let apply_report =
+            evaluate_apply_remote_delete_invariants(ApplyRemoteDeleteInvariantInputs {
+                remote_present_after: true,
+                remote_is_deleted_after: true,
+                local_present_after: false,
+                sync_anchor_present_after: false,
+                planned_action_present_after: false,
+                issue_kind_after: None,
+            });
+
+        assert!(
+            planning_report
+                .check("remote_delete_plans_apply_remote_delete")
+                .expect("planning check")
+                .passed
+        );
+        assert!(
+            apply_report
+                .check("apply_remote_delete_clears_local_state_and_sync_anchor")
+                .expect("apply check")
+                .passed
+        );
+    }
+
+    #[test]
+    fn reconciliation_invariant_report_marks_remote_delete_failure_without_issue_as_failed() {
+        let report = evaluate_apply_remote_delete_invariants(ApplyRemoteDeleteInvariantInputs {
+            remote_present_after: true,
+            remote_is_deleted_after: true,
+            local_present_after: true,
+            sync_anchor_present_after: true,
+            planned_action_present_after: true,
+            issue_kind_after: None,
+        });
+
+        assert!(
+            !report
+                .check("apply_remote_delete_failure_records_durable_issue")
                 .expect("check")
                 .passed
         );

@@ -1,6 +1,6 @@
 use super::inode::{
-    execute_apply_remote_rename, execute_download_remote_edit, execute_materialize_remote_dir,
-    execute_upload_local_edit,
+    execute_apply_remote_delete, execute_apply_remote_rename, execute_download_remote_edit,
+    execute_materialize_remote_dir, execute_upload_local_edit,
 };
 use super::local_only::execute_local_only_create;
 use super::*;
@@ -93,6 +93,17 @@ where
                         created_at_ms,
                     )?;
                     Ok(Some(NextClientAction::ExecutedDownloadRemoteEdit(executed)))
+                }
+                value if value == PlannerDecision::ApplyRemoteDelete.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let executed = execute_apply_remote_delete(
+                        db,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedApplyRemoteDelete(executed)))
                 }
                 value if value == PlannerDecision::ApplyRemoteRename.as_str() => {
                     let current_path = resolve_inode_source_path(&namespace_id, inode_id);

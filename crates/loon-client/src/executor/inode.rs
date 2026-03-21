@@ -5,8 +5,8 @@ use crate::download::{
     verify_downloaded_file_path,
 };
 use crate::local_apply::{
-    append_stage_bytes, create_directory_durably, finalize_stage_file, rename_path_durably,
-    reset_stage_file, stage_file_size, staging_path_for_target,
+    append_stage_bytes, create_directory_durably, finalize_stage_file, remove_path_durably,
+    rename_path_durably, reset_stage_file, stage_file_size, staging_path_for_target,
 };
 use crate::planner::{PlannedActionRecord, PlannerDecision};
 use crate::state_db::{
@@ -92,6 +92,22 @@ pub fn execute_apply_remote_rename_to_paths(
     )
 }
 
+pub fn execute_apply_remote_delete_to_path(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: &Path,
+    applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteDelete, ExecuteApplyRemoteDeleteError> {
+    execute_apply_remote_delete(
+        db,
+        namespace_id,
+        inode_id,
+        Some(current_path),
+        applied_at_ms,
+    )
+}
+
 pub fn execute_materialize_remote_dir_to_path<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -113,13 +129,13 @@ pub(super) fn execute_apply_remote_rename(
     applied_at_ms: u64,
 ) -> Result<ExecutedApplyRemoteRename, ExecuteApplyRemoteRenameError> {
     let result = (|| {
-        let (remote, _local, _anchor) = ensure_apply_remote_rename_ready(db, namespace_id, inode_id)?;
-        let current_path = current_path.ok_or_else(|| {
-            ExecuteApplyRemoteRenameError::CurrentPathMissing {
+        let (remote, _local, _anchor) =
+            ensure_apply_remote_rename_ready(db, namespace_id, inode_id)?;
+        let current_path =
+            current_path.ok_or_else(|| ExecuteApplyRemoteRenameError::CurrentPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
-            }
-        })?;
+            })?;
         if !current_path.exists() {
             return Err(ExecuteApplyRemoteRenameError::CurrentPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
@@ -127,15 +143,12 @@ pub(super) fn execute_apply_remote_rename(
             });
         }
 
-        let target_path = target_path.ok_or_else(|| {
-            ExecuteApplyRemoteRenameError::TargetPathMissing {
+        let target_path =
+            target_path.ok_or_else(|| ExecuteApplyRemoteRenameError::TargetPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
-            }
-        })?;
-        let target_parent_exists = target_path
-            .parent()
-            .is_some_and(|parent| parent.exists());
+            })?;
+        let target_parent_exists = target_path.parent().is_some_and(|parent| parent.exists());
         if !target_parent_exists || target_path == current_path {
             return Err(ExecuteApplyRemoteRenameError::TargetPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
@@ -160,6 +173,43 @@ pub(super) fn execute_apply_remote_rename(
 
     if let Err(error) = &result {
         record_apply_remote_rename_issue(db, namespace_id, inode_id, error, applied_at_ms);
+    }
+
+    result
+}
+
+pub(super) fn execute_apply_remote_delete(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteDelete, ExecuteApplyRemoteDeleteError> {
+    let result = (|| {
+        let (remote, _local, _anchor) =
+            ensure_apply_remote_delete_ready(db, namespace_id, inode_id)?;
+        let current_path =
+            current_path.ok_or_else(|| ExecuteApplyRemoteDeleteError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+        if !current_path.exists() {
+            return Err(ExecuteApplyRemoteDeleteError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+
+        remove_path_durably(current_path)?;
+
+        let applied = db.apply_remote_delete(namespace_id, inode_id, applied_at_ms)?;
+        debug_assert_eq!(applied.namespace_id, remote.namespace_id);
+        debug_assert_eq!(applied.inode_id, remote.inode_id);
+        Ok(ExecutedApplyRemoteDelete { applied })
+    })();
+
+    if let Err(error) = &result {
+        record_apply_remote_delete_issue(db, namespace_id, inode_id, error, applied_at_ms);
     }
 
     result
@@ -447,7 +497,14 @@ fn ensure_apply_remote_rename_ready(
     db: &SqliteStateDb,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
-) -> Result<(RemoteFileStateRow, crate::state_db::LocalFileStateRow, crate::state_db::SyncAnchorRow), ExecuteApplyRemoteRenameError> {
+) -> Result<
+    (
+        RemoteFileStateRow,
+        crate::state_db::LocalFileStateRow,
+        crate::state_db::SyncAnchorRow,
+    ),
+    ExecuteApplyRemoteRenameError,
+> {
     let planned_row = db
         .load_planned_action(namespace_id, inode_id)?
         .ok_or_else(|| ExecutorError::PlannedActionMissing {
@@ -467,6 +524,39 @@ fn ensure_apply_remote_rename_ready(
 
     db.load_bound_apply_remote_rename_views(namespace_id, inode_id)
         .map_err(ExecuteApplyRemoteRenameError::from)
+}
+
+fn ensure_apply_remote_delete_ready(
+    db: &SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<
+    (
+        RemoteFileStateRow,
+        crate::state_db::LocalFileStateRow,
+        crate::state_db::SyncAnchorRow,
+    ),
+    ExecuteApplyRemoteDeleteError,
+> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::ApplyRemoteDelete {
+        return Err(
+            ExecuteApplyRemoteDeleteError::ApplyRemoteDeleteDecisionMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                decision: planned.decision,
+            },
+        );
+    }
+
+    db.load_bound_apply_remote_delete_views(namespace_id, inode_id)
+        .map_err(ExecuteApplyRemoteDeleteError::from)
 }
 
 fn ensure_download_remote_edit_ready(
@@ -1001,6 +1091,50 @@ fn record_apply_remote_rename_issue(
             "apply_remote_rename failed during local apply",
             json!({
                 "failure": "rename_io",
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        )),
+        _ => None,
+    };
+
+    if let Some((kind, summary, detail_json)) = issue {
+        let _ = db.record_conflict_or_error(
+            namespace_id,
+            inode_id,
+            kind,
+            summary,
+            &detail_json,
+            created_at_ms,
+        );
+    }
+}
+
+fn record_apply_remote_delete_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    error: &ExecuteApplyRemoteDeleteError,
+    created_at_ms: u64,
+) {
+    let issue = match error {
+        ExecuteApplyRemoteDeleteError::CurrentPathMissing { .. } => Some((
+            "apply_remote_delete_local_apply_failed",
+            "apply_remote_delete could not resolve the current local path",
+            json!({
+                "failure": "current_path_missing",
+            }),
+        )),
+        ExecuteApplyRemoteDeleteError::LocalApplyFailed {
+            operation,
+            path,
+            source,
+        } => Some((
+            "apply_remote_delete_local_apply_failed",
+            "apply_remote_delete failed during local apply",
+            json!({
+                "failure": "unlink_io",
                 "operation": operation,
                 "path": path,
                 "source": source.to_string(),
