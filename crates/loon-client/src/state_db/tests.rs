@@ -14,7 +14,7 @@ use loon_types::{
 use serde_json::json;
 
 #[test]
-fn sqlite_state_db_applies_schema_v11() {
+fn sqlite_state_db_applies_schema_v12() {
     let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
     assert_eq!(
@@ -54,9 +54,9 @@ fn sqlite_state_db_applies_schema_v11() {
 #[test]
 fn sqlite_state_db_migrates_every_historical_schema_version_to_latest() {
     for version in 1..SCHEMA_VERSION {
-        let conn = rusqlite::Connection::open_in_memory().expect("open historical schema DB");
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open historical schema DB");
         super::schema::initialize_connection(&conn).expect("initialize historical schema DB");
-        super::schema::install_schema_version_for_test(&conn, version)
+        super::schema::install_schema_version_for_test(&mut conn, version)
             .unwrap_or_else(|err| panic!("install schema version {version}: {err}"));
 
         let mut db = SqliteStateDb { conn };
@@ -698,6 +698,7 @@ fn load_next_executable_planned_action_skips_deferred_rows() {
             sample_local_with("ns-1", 7, InodeKind::File),
             sample_local_with("ns-1", 8, InodeKind::File),
             sample_local_with("ns-1", 9, InodeKind::File),
+            sample_local_with("ns-1", 10, InodeKind::File),
             sample_local_with("ns-1", 6, InodeKind::Dir),
         ],
     );
@@ -713,16 +714,23 @@ fn load_next_executable_planned_action_skips_deferred_rows() {
         tx.upsert_planned_action(&PlannedActionRow {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(8),
-            decision: "download_remote_edit".to_owned(),
-            reason: "remote_differs_from_anchor".to_owned(),
+            decision: "apply_remote_rename".to_owned(),
+            reason: "remote_path_differs_from_anchor".to_owned(),
             created_at_ms: 1_700_000_205_000,
         })?;
         tx.upsert_planned_action(&PlannedActionRow {
             namespace_id: NamespaceId::from("ns-1"),
             inode_id: InodeId(9),
+            decision: "download_remote_edit".to_owned(),
+            reason: "remote_differs_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_210_000,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(10),
             decision: "upload_local_edit".to_owned(),
             reason: "local_differs_from_anchor".to_owned(),
-            created_at_ms: 1_700_000_210_000,
+            created_at_ms: 1_700_000_215_000,
         })?;
         tx.upsert_planned_action(&PlannedActionRow {
             namespace_id: NamespaceId::from("ns-1"),
@@ -1495,6 +1503,132 @@ fn apply_client_mutation_response_rejects_idempotent_fallback_when_bound_state_d
         .load_pending_client_mutation("client-req-0001")
         .expect("load pending mutation after failed fallback")
         .is_some());
+}
+
+#[test]
+fn apply_remote_rename_updates_local_state_and_anchor_and_clears_issue() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let inode_id = InodeId(42);
+
+    db.planner_transaction("seed-apply-remote-rename", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(420),
+            revision_no: RevisionNo(17),
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+            parent_inode_id: Some(InodeId(3)),
+            display_name: "report-renamed.txt".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "report.txt".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            synced_seq: ChangeSeq(419),
+            revision_no: RevisionNo(17),
+            content_digest: Some("sha256:anchor-17".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "report.txt".to_owned(),
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            decision: "apply_remote_rename".to_owned(),
+            reason: "remote_path_differs_from_anchor".to_owned(),
+            created_at_ms: 1_700_000_100_500,
+        })?;
+        Ok(())
+    })
+    .expect("seed apply_remote_rename state");
+    db.record_conflict_or_error(
+        &namespace_id,
+        inode_id,
+        "apply_remote_rename_local_apply_failed",
+        "stale failure",
+        &json!({"failure": "destination_occupied"}),
+        1_700_000_100_600,
+    )
+    .expect("record stale rename issue");
+
+    let applied = db
+        .apply_remote_rename(&namespace_id, inode_id, 1_700_000_101_000)
+        .expect("apply remote rename");
+
+    assert_eq!(
+        applied,
+        super::AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        }
+    );
+    assert_eq!(
+        db.load_file_sync_views(&namespace_id, inode_id)
+            .expect("load renamed views"),
+        FileSyncViews {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            remote: Some(RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(420),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(3)),
+                display_name: "report-renamed.txt".to_owned(),
+                is_deleted: false,
+            }),
+            local: Some(LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(3)),
+                display_name: "report-renamed.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_101_000,
+            }),
+            sync_anchor: Some(SyncAnchorRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(420),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(3)),
+                display_name: "report-renamed.txt".to_owned(),
+            }),
+        }
+    );
+    assert_eq!(
+        db.load_planned_action(&namespace_id, inode_id)
+            .expect("load planned action after apply_remote_rename"),
+        None
+    );
+    assert_eq!(
+        db.load_conflicts_and_errors(&namespace_id, inode_id)
+            .expect("load rename issues after apply_remote_rename"),
+        Vec::new()
+    );
 }
 
 #[test]

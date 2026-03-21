@@ -1,5 +1,6 @@
 use super::inode::{
-    execute_download_remote_edit, execute_materialize_remote_dir, execute_upload_local_edit,
+    execute_apply_remote_rename, execute_download_remote_edit, execute_materialize_remote_dir,
+    execute_upload_local_edit,
 };
 use super::local_only::execute_local_only_create;
 use super::*;
@@ -15,11 +16,12 @@ enum NextClientActionCandidate {
     DeferredPlannedAction(PlannedActionRow),
 }
 
-pub fn execute_next_client_action<S, LP, IP, F>(
+pub fn execute_next_client_action<S, LP, IP, ITP, F>(
     db: &mut SqliteStateDb,
     store: &S,
     resolve_local_only_source_path: LP,
     resolve_inode_source_path: IP,
+    resolve_inode_target_path: ITP,
     uploaded_at_ms: u64,
     created_at_ms: u64,
     dispatch: F,
@@ -28,6 +30,7 @@ where
     S: ObjectStore,
     LP: FnOnce(&ClientFileId) -> Option<PathBuf>,
     IP: FnOnce(&NamespaceId, InodeId) -> Option<PathBuf>,
+    ITP: FnOnce(&NamespaceId, InodeId, Option<InodeId>, &str) -> Option<PathBuf>,
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
     let next_action = match select_next_client_action_candidate(
@@ -90,6 +93,26 @@ where
                         created_at_ms,
                     )?;
                     Ok(Some(NextClientAction::ExecutedDownloadRemoteEdit(executed)))
+                }
+                value if value == PlannerDecision::ApplyRemoteRename.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let (remote, _local, _anchor) =
+                        db.load_bound_apply_remote_rename_views(&namespace_id, inode_id)?;
+                    let target_path = resolve_inode_target_path(
+                        &namespace_id,
+                        inode_id,
+                        remote.parent_inode_id,
+                        &remote.display_name,
+                    );
+                    let executed = execute_apply_remote_rename(
+                        db,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        target_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedApplyRemoteRename(executed)))
                 }
                 value if value == PlannerDecision::MaterializeRemoteDir.as_str() => {
                     let target_path = resolve_inode_source_path(&namespace_id, inode_id);

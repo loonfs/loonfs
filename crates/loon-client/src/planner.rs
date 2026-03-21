@@ -13,6 +13,7 @@ pub enum PlannerDecision {
     UploadLocalCreate,
     UploadLocalEdit,
     DownloadRemoteEdit,
+    ApplyRemoteRename,
     MaterializeRemoteDir,
     CreateConflictCopy,
     NoOp,
@@ -27,6 +28,8 @@ pub enum PlannerReason {
     LocalOnlyFileWithoutRemoteIdentity,
     LocalDiffersFromAnchor,
     RemoteDiffersFromAnchor,
+    RemotePathDiffersFromAnchor,
+    RemotePathAndContentDifferFromAnchor,
     LocalAndRemoteDifferFromAnchor,
     LocalObservedWithoutAnchor,
     RemoteObservedWithoutAnchor,
@@ -117,12 +120,22 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
         (Some(remote), Some(local), Some(anchor)) => {
             let local_matches_anchor = local_matches_anchor(local, anchor);
             let remote_matches_anchor = remote_matches_anchor(remote, anchor);
+            let remote_content_matches_anchor = remote_content_matches_anchor(remote, anchor);
+            let remote_path_matches_anchor = remote_path_matches_anchor(remote, anchor);
 
             match (local_matches_anchor, remote_matches_anchor) {
                 (true, true) => (PlannerDecision::NoOp, PlannerReason::AlreadyConverged),
                 (false, true) => (
                     PlannerDecision::UploadLocalEdit,
                     PlannerReason::LocalDiffersFromAnchor,
+                ),
+                (true, false) if remote_content_matches_anchor && !remote_path_matches_anchor => (
+                    PlannerDecision::ApplyRemoteRename,
+                    PlannerReason::RemotePathDiffersFromAnchor,
+                ),
+                (true, false) if !remote_content_matches_anchor && !remote_path_matches_anchor => (
+                    PlannerDecision::CreateConflictCopy,
+                    PlannerReason::RemotePathAndContentDifferFromAnchor,
                 ),
                 (true, false) => (
                     PlannerDecision::DownloadRemoteEdit,
@@ -300,6 +313,7 @@ impl PlannerDecision {
             Self::UploadLocalCreate => "upload_local_create",
             Self::UploadLocalEdit => "upload_local_edit",
             Self::DownloadRemoteEdit => "download_remote_edit",
+            Self::ApplyRemoteRename => "apply_remote_rename",
             Self::MaterializeRemoteDir => "materialize_remote_dir",
             Self::CreateConflictCopy => "create_conflict_copy",
             Self::NoOp => "no_op",
@@ -312,6 +326,7 @@ impl PlannerDecision {
             "upload_local_create" => Ok(Self::UploadLocalCreate),
             "upload_local_edit" => Ok(Self::UploadLocalEdit),
             "download_remote_edit" => Ok(Self::DownloadRemoteEdit),
+            "apply_remote_rename" => Ok(Self::ApplyRemoteRename),
             "materialize_remote_dir" => Ok(Self::MaterializeRemoteDir),
             "create_conflict_copy" => Ok(Self::CreateConflictCopy),
             "no_op" => Ok(Self::NoOp),
@@ -331,6 +346,10 @@ impl PlannerReason {
             Self::LocalOnlyFileWithoutRemoteIdentity => "local_only_file_without_remote_identity",
             Self::LocalDiffersFromAnchor => "local_differs_from_anchor",
             Self::RemoteDiffersFromAnchor => "remote_differs_from_anchor",
+            Self::RemotePathDiffersFromAnchor => "remote_path_differs_from_anchor",
+            Self::RemotePathAndContentDifferFromAnchor => {
+                "remote_path_and_content_differ_from_anchor"
+            }
             Self::LocalAndRemoteDifferFromAnchor => "local_and_remote_differ_from_anchor",
             Self::LocalObservedWithoutAnchor => "local_observed_without_anchor",
             Self::RemoteObservedWithoutAnchor => "remote_observed_without_anchor",
@@ -350,6 +369,10 @@ impl PlannerReason {
             }
             "local_differs_from_anchor" => Ok(Self::LocalDiffersFromAnchor),
             "remote_differs_from_anchor" => Ok(Self::RemoteDiffersFromAnchor),
+            "remote_path_differs_from_anchor" => Ok(Self::RemotePathDiffersFromAnchor),
+            "remote_path_and_content_differ_from_anchor" => {
+                Ok(Self::RemotePathAndContentDifferFromAnchor)
+            }
             "local_and_remote_differ_from_anchor" => Ok(Self::LocalAndRemoteDifferFromAnchor),
             "local_observed_without_anchor" => Ok(Self::LocalObservedWithoutAnchor),
             "remote_observed_without_anchor" => Ok(Self::RemoteObservedWithoutAnchor),
@@ -365,12 +388,25 @@ fn remote_matches_anchor(
     remote: &crate::state_db::RemoteFileStateRow,
     anchor: &SyncAnchorRow,
 ) -> bool {
+    remote_content_matches_anchor(remote, anchor) && remote_path_matches_anchor(remote, anchor)
+}
+
+fn remote_content_matches_anchor(
+    remote: &crate::state_db::RemoteFileStateRow,
+    anchor: &SyncAnchorRow,
+) -> bool {
     !remote.is_deleted
         && remote.inode_kind == anchor.inode_kind
         && remote.revision_no == anchor.revision_no
         && remote.content_digest == anchor.content_digest
-        && remote.parent_inode_id == anchor.parent_inode_id
-        && remote.display_name == anchor.display_name
+        && remote.content_manifest_digest == anchor.content_manifest_digest
+}
+
+fn remote_path_matches_anchor(
+    remote: &crate::state_db::RemoteFileStateRow,
+    anchor: &SyncAnchorRow,
+) -> bool {
+    remote.parent_inode_id == anchor.parent_inode_id && remote.display_name == anchor.display_name
 }
 
 fn local_matches_anchor(
@@ -455,6 +491,103 @@ mod tests {
         assert_eq!(
             planned.reason,
             PlannerReason::LocalAndRemoteDifferFromAnchor
+        );
+    }
+
+    #[test]
+    fn planner_selects_apply_remote_rename_for_bound_remote_path_change() {
+        let views = FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            remote: Some(RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(420),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(3)),
+                display_name: "report-renamed.txt".to_owned(),
+                is_deleted: false,
+            }),
+            local: Some(LocalFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_000,
+            }),
+            sync_anchor: Some(SyncAnchorRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(419),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+            }),
+        };
+
+        let planned = decide_file_action(&views, 1_700_000_002_000);
+
+        assert_eq!(planned.decision, PlannerDecision::ApplyRemoteRename);
+        assert_eq!(planned.reason, PlannerReason::RemotePathDiffersFromAnchor);
+    }
+
+    #[test]
+    fn planner_prefers_conflict_copy_for_remote_path_and_content_change() {
+        let views = FileSyncViews {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            remote: Some(RemoteFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(420),
+                revision_no: RevisionNo(18),
+                content_digest: Some("sha256:remote-18".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-remote-18".to_owned()),
+                parent_inode_id: Some(InodeId(3)),
+                display_name: "report-renamed.txt".to_owned(),
+                is_deleted: false,
+            }),
+            local: Some(LocalFileStateRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_700_000_001_000,
+            }),
+            sync_anchor: Some(SyncAnchorRow {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(419),
+                revision_no: RevisionNo(17),
+                content_digest: Some("sha256:anchor-17".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-anchor-17".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "report.txt".to_owned(),
+            }),
+        };
+
+        let planned = decide_file_action(&views, 1_700_000_002_000);
+
+        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.reason,
+            PlannerReason::RemotePathAndContentDifferFromAnchor
         );
     }
 

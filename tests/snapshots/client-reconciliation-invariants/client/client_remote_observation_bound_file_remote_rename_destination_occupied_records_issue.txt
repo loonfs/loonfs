@@ -1,0 +1,10 @@
+scenario=client_remote_observation_bound_file_remote_rename_destination_occupied_records_issue kind=client schema_version=1 seed=None actions=6 faults=0 expect_keys=10
+  1. outcome=UpdatedBoundRemoteState { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42) }
+  2. first_planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42), decision: ApplyRemoteRename, reason: RemotePathDiffersFromAnchor, created_at_ms: 1700000410000 }
+  3. execution=ExecuteErrorKind { execute_error_kind: "destination_occupied" }
+  4. second_planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(42), decision: ApplyRemoteRename, reason: RemotePathDiffersFromAnchor, created_at_ms: 1700000412000 }
+  5. issues_after=[RawConflictOrErrorExpect { kind: "apply_remote_rename_local_apply_failed", summary: "apply_remote_rename found the destination slot already occupied", created_at_ms: 1700000411000, detail_json: Object {"failure": String("destination_occupied")} }]
+  6. invariants[remote-rename] remote_path_change_plans_apply_remote_rename=pass detail=planned_action_decision_after=Some("apply_remote_rename") planned_action_reason_after=Some("remote_path_differs_from_anchor")
+  7. invariants[remote-rename] apply_remote_rename_updates_local_state_and_sync_anchor=fail detail=local_exists_on_disk_after=true local_dirty_after=false local_parent_inode_after=Some(InodeId(2)) local_display_name_after=report.txt remote_seq_after=42 remote_revision_after=17 remote_content_digest_after=Some("sha256:anchor-17") remote_parent_inode_after=Some(InodeId(2)) remote_display_name_after=report-renamed.txt sync_anchor_seq_after=Some(41) sync_anchor_revision_after=Some(17) sync_anchor_content_digest_after=Some("sha256:anchor-17") sync_anchor_parent_inode_after=Some(InodeId(2)) sync_anchor_display_name_after=Some("report.txt")
+  8. invariants[remote-rename] apply_remote_rename_clears_planned_action=fail detail=planned_action_present_after=true
+  9. invariants[remote-rename] apply_remote_rename_failure_records_durable_issue=pass detail=issue_kind_after=Some("apply_remote_rename_local_apply_failed")

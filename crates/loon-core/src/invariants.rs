@@ -128,6 +128,10 @@ pub const CLIENT_RECONCILIATION_INVARIANTS: &[&str] = &[
     "remote_only_directory_materialization_updates_local_state_and_sync_anchor",
     "remote_only_directory_materialization_clears_planned_action",
     "remote_only_directory_materialization_failure_records_durable_issue",
+    "remote_path_change_plans_apply_remote_rename",
+    "apply_remote_rename_updates_local_state_and_sync_anchor",
+    "apply_remote_rename_clears_planned_action",
+    "apply_remote_rename_failure_records_durable_issue",
 ];
 
 pub const INVARIANTS: &[&str] = &[
@@ -221,6 +225,10 @@ pub const INVARIANTS: &[&str] = &[
     "remote_only_directory_materialization_updates_local_state_and_sync_anchor",
     "remote_only_directory_materialization_clears_planned_action",
     "remote_only_directory_materialization_failure_records_durable_issue",
+    "remote_path_change_plans_apply_remote_rename",
+    "apply_remote_rename_updates_local_state_and_sync_anchor",
+    "apply_remote_rename_clears_planned_action",
+    "apply_remote_rename_failure_records_durable_issue",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

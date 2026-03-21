@@ -332,6 +332,39 @@ Exit criteria:
 - model/core differential harnesses fail when invariant outcomes diverge even if final state still
   matches
 
+## Milestone 9: remote hierarchy reconciliation
+
+Goal:
+resume product-facing client work by teaching the client to reconcile authoritative remote path
+changes for already-bound files without collapsing them into generic drift.
+
+Primary crates:
+
+- `loon-client`
+- `loon-testkit`
+
+Deliverables:
+
+- the first bound-file remote rename observation path, including same-parent rename and moves
+  between already-bound directories
+- one executable `apply_remote_rename` planner/executor path that durably moves the local file
+- durable failure surfacing for destination collisions and path-resolution failures
+- reconciliation fixtures and executable invariant coverage for remote path-change handling
+
+Required rules:
+
+- stay file-only in this milestone's first slice; remote directory rename/delete reconciliation
+  remains out of scope
+- keep remote observations authoritative for durable metadata, but do not move files during
+  `apply_remote_observation`
+- fail closed when the destination slot is already occupied locally
+
+Exit criteria:
+
+- a bound-file authoritative path-only observation survives restart and plans `apply_remote_rename`
+- the mixed client tick can apply that rename locally and return to `already_converged`
+- destination collisions become durable named issue rows instead of generic executor failures
+
 ## Historical slice order
 
 Milestones 1 through 7 were executed through the following ordered slices.

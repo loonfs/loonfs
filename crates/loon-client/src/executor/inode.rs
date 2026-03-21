@@ -5,8 +5,8 @@ use crate::download::{
     verify_downloaded_file_path,
 };
 use crate::local_apply::{
-    append_stage_bytes, create_directory_durably, finalize_stage_file, reset_stage_file,
-    stage_file_size, staging_path_for_target,
+    append_stage_bytes, create_directory_durably, finalize_stage_file, rename_path_durably,
+    reset_stage_file, stage_file_size, staging_path_for_target,
 };
 use crate::planner::{PlannedActionRecord, PlannerDecision};
 use crate::state_db::{
@@ -74,6 +74,24 @@ pub fn execute_download_remote_edit_to_path<S: ObjectStore>(
     )
 }
 
+pub fn execute_apply_remote_rename_to_paths(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: &Path,
+    target_path: &Path,
+    applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteRename, ExecuteApplyRemoteRenameError> {
+    execute_apply_remote_rename(
+        db,
+        namespace_id,
+        inode_id,
+        Some(current_path),
+        Some(target_path),
+        applied_at_ms,
+    )
+}
+
 pub fn execute_materialize_remote_dir_to_path<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -84,6 +102,67 @@ pub fn execute_materialize_remote_dir_to_path<S: ObjectStore>(
 ) -> Result<ExecutedMaterializeRemoteDir, ExecuteMaterializeRemoteDirError> {
     let _ = store;
     execute_materialize_remote_dir(db, namespace_id, inode_id, Some(target_path), applied_at_ms)
+}
+
+pub(super) fn execute_apply_remote_rename(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteRename, ExecuteApplyRemoteRenameError> {
+    let result = (|| {
+        let (remote, _local, _anchor) = ensure_apply_remote_rename_ready(db, namespace_id, inode_id)?;
+        let current_path = current_path.ok_or_else(|| {
+            ExecuteApplyRemoteRenameError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            }
+        })?;
+        if !current_path.exists() {
+            return Err(ExecuteApplyRemoteRenameError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+
+        let target_path = target_path.ok_or_else(|| {
+            ExecuteApplyRemoteRenameError::TargetPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            }
+        })?;
+        let target_parent_exists = target_path
+            .parent()
+            .is_some_and(|parent| parent.exists());
+        if !target_parent_exists || target_path == current_path {
+            return Err(ExecuteApplyRemoteRenameError::TargetPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+        if target_path.exists() {
+            return Err(ExecuteApplyRemoteRenameError::DestinationOccupied {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                path: target_path.display().to_string(),
+            });
+        }
+
+        rename_path_durably(current_path, target_path)?;
+
+        let applied = db.apply_remote_rename(namespace_id, inode_id, applied_at_ms)?;
+        debug_assert_eq!(applied.namespace_id, remote.namespace_id);
+        debug_assert_eq!(applied.inode_id, remote.inode_id);
+        Ok(ExecutedApplyRemoteRename { applied })
+    })();
+
+    if let Err(error) = &result {
+        record_apply_remote_rename_issue(db, namespace_id, inode_id, error, applied_at_ms);
+    }
+
+    result
 }
 
 pub(super) fn execute_upload_local_edit<S: ObjectStore, F>(
@@ -362,6 +441,32 @@ pub(super) fn execute_materialize_remote_dir(
     }
 
     result
+}
+
+fn ensure_apply_remote_rename_ready(
+    db: &SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<(RemoteFileStateRow, crate::state_db::LocalFileStateRow, crate::state_db::SyncAnchorRow), ExecuteApplyRemoteRenameError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::ApplyRemoteRename {
+        return Err(
+            ExecuteApplyRemoteRenameError::ApplyRemoteRenameDecisionMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                decision: planned.decision,
+            },
+        );
+    }
+
+    db.load_bound_apply_remote_rename_views(namespace_id, inode_id)
+        .map_err(ExecuteApplyRemoteRenameError::from)
 }
 
 fn ensure_download_remote_edit_ready(
@@ -838,6 +943,64 @@ fn record_download_remote_edit_issue(
             "download_remote_edit_local_apply_failed",
             "download_remote_edit failed during local apply",
             json!({
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        )),
+        _ => None,
+    };
+
+    if let Some((kind, summary, detail_json)) = issue {
+        let _ = db.record_conflict_or_error(
+            namespace_id,
+            inode_id,
+            kind,
+            summary,
+            &detail_json,
+            created_at_ms,
+        );
+    }
+}
+
+fn record_apply_remote_rename_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    error: &ExecuteApplyRemoteRenameError,
+    created_at_ms: u64,
+) {
+    let issue = match error {
+        ExecuteApplyRemoteRenameError::CurrentPathMissing { .. } => Some((
+            "apply_remote_rename_local_apply_failed",
+            "apply_remote_rename could not resolve the current local path",
+            json!({
+                "failure": "current_path_missing",
+            }),
+        )),
+        ExecuteApplyRemoteRenameError::TargetPathMissing { .. } => Some((
+            "apply_remote_rename_local_apply_failed",
+            "apply_remote_rename could not resolve the target local path",
+            json!({
+                "failure": "target_path_missing",
+            }),
+        )),
+        ExecuteApplyRemoteRenameError::DestinationOccupied { .. } => Some((
+            "apply_remote_rename_local_apply_failed",
+            "apply_remote_rename found the destination slot already occupied",
+            json!({
+                "failure": "destination_occupied",
+            }),
+        )),
+        ExecuteApplyRemoteRenameError::LocalApplyFailed {
+            operation,
+            path,
+            source,
+        } => Some((
+            "apply_remote_rename_local_apply_failed",
+            "apply_remote_rename failed during local apply",
+            json!({
+                "failure": "rename_io",
                 "operation": operation,
                 "path": path,
                 "source": source.to_string(),

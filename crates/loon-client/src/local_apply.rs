@@ -50,6 +50,34 @@ pub(crate) fn create_directory_durably(target_path: &Path) -> Result<(), LocalAp
     Ok(())
 }
 
+pub(crate) fn rename_path_durably(
+    current_path: &Path,
+    target_path: &Path,
+) -> Result<(), LocalApplyError> {
+    let source_parent_dir = target_parent_dir(current_path);
+    let target_parent_dir = target_parent_dir(target_path);
+    if target_path.exists() {
+        return Err(io_error(
+            "rename_target_path",
+            target_path,
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "target path already exists",
+            ),
+        ));
+    }
+
+    fs::rename(current_path, target_path)
+        .map_err(|source| io_error("rename_target_path", target_path, source))?;
+    sync_parent_dir(target_parent_dir)
+        .map_err(|source| io_error("sync_parent_dir", target_parent_dir, source))?;
+    if source_parent_dir != target_parent_dir {
+        sync_parent_dir(source_parent_dir)
+            .map_err(|source| io_error("sync_parent_dir", source_parent_dir, source))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn stage_file_size(target_path: &Path) -> Result<Option<u64>, LocalApplyError> {
     let stage_path = staging_path_for_target(target_path)?;
     match fs::metadata(&stage_path) {
@@ -157,10 +185,11 @@ fn sync_dir(_path: &Path) -> io::Result<()> {
 mod tests {
     use super::{
         append_stage_bytes, apply_bytes_atomically, create_directory_durably, finalize_stage_file,
-        reset_stage_file, stage_file_size, staging_path_for_target,
+        rename_path_durably, reset_stage_file, stage_file_size, staging_path_for_target,
     };
     use loon_testkit::tempdir::TestDir;
     use std::fs;
+    use std::io;
     use std::path::Path;
 
     #[test]
@@ -216,6 +245,68 @@ mod tests {
         create_directory_durably(&target_path).expect("create directory durably");
 
         assert!(target_path.is_dir(), "target directory should exist");
+    }
+
+    #[test]
+    fn rename_path_durably_moves_file_within_same_directory() {
+        let temp_dir = TestDir::new("local-apply-rename-same-parent");
+        let current_path = temp_dir.path().join("docs/report.txt");
+        let target_path = temp_dir.path().join("docs/report-renamed.txt");
+        fs::create_dir_all(current_path.parent().expect("parent dir")).expect("create parent dir");
+        fs::write(&current_path, "hello from loon").expect("seed current file");
+
+        rename_path_durably(&current_path, &target_path).expect("rename path durably");
+
+        assert!(!current_path.exists(), "current path should be removed");
+        assert_eq!(
+            fs::read_to_string(&target_path).expect("read target path"),
+            "hello from loon"
+        );
+    }
+
+    #[test]
+    fn rename_path_durably_moves_file_across_directories() {
+        let temp_dir = TestDir::new("local-apply-rename-cross-dir");
+        let current_path = temp_dir.path().join("docs/report.txt");
+        let target_path = temp_dir.path().join("archive/report.txt");
+        fs::create_dir_all(current_path.parent().expect("source parent"))
+            .expect("create source parent");
+        fs::create_dir_all(target_path.parent().expect("target parent"))
+            .expect("create target parent");
+        fs::write(&current_path, "hello from loon").expect("seed current file");
+
+        rename_path_durably(&current_path, &target_path).expect("rename path durably");
+
+        assert!(!current_path.exists(), "current path should be removed");
+        assert_eq!(
+            fs::read_to_string(&target_path).expect("read moved target path"),
+            "hello from loon"
+        );
+    }
+
+    #[test]
+    fn rename_path_durably_rejects_existing_destination() {
+        let temp_dir = TestDir::new("local-apply-rename-destination-occupied");
+        let current_path = temp_dir.path().join("docs/report.txt");
+        let target_path = temp_dir.path().join("docs/report-renamed.txt");
+        fs::create_dir_all(current_path.parent().expect("parent dir")).expect("create parent dir");
+        fs::write(&current_path, "hello from loon").expect("seed current file");
+        fs::write(&target_path, "occupied").expect("seed occupied destination");
+
+        let error =
+            rename_path_durably(&current_path, &target_path).expect_err("rename should fail");
+
+        assert_eq!(error.operation, "rename_target_path");
+        assert_eq!(error.path, target_path.display().to_string());
+        assert_eq!(error.source.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            current_path.exists(),
+            "current path should remain after failed rename"
+        );
+        assert_eq!(
+            fs::read_to_string(&target_path).expect("read occupied target path"),
+            "occupied"
+        );
     }
 
     #[test]

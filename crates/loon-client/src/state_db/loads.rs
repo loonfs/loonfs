@@ -420,7 +420,7 @@ pub(super) fn load_next_executable_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'materialize_remote_dir')
+        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -433,7 +433,7 @@ pub(super) fn load_next_deferred_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'materialize_remote_dir')
+        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -663,6 +663,116 @@ pub(super) fn load_bound_download_remote_edit_views_from_conn(
     }
     if remote.content_digest.is_none() {
         return Err(StateDbError::DownloadRemoteEditRemoteDigestMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        });
+    }
+
+    Ok((remote, local, anchor))
+}
+
+pub(super) fn load_bound_apply_remote_rename_views_from_conn(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<(RemoteFileStateRow, LocalFileStateRow, SyncAnchorRow), StateDbError> {
+    let remote = load_remote_file(conn, namespace_id, inode_id)?;
+    let local = load_local_file(conn, namespace_id, inode_id)?;
+    let anchor = load_sync_anchor(conn, namespace_id, inode_id)?;
+    let (remote, local, anchor) = match (remote, local, anchor) {
+        (Some(remote), Some(local), Some(anchor)) => (remote, local, anchor),
+        _ => {
+            return Err(StateDbError::ApplyRemoteRenameStateMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })
+        }
+    };
+
+    if remote.inode_kind != InodeKind::File
+        || local.inode_kind != InodeKind::File
+        || anchor.inode_kind != InodeKind::File
+    {
+        return Err(StateDbError::ApplyRemoteRenameRequiresFile {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            inode_kind: inode_kind_as_str(&local.inode_kind).to_owned(),
+        });
+    }
+
+    ensure_apply_remote_rename_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_digest",
+        format!("{:?}", local.content_digest),
+        format!("{:?}", anchor.content_digest),
+    )?;
+    ensure_apply_remote_rename_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "parent_inode_id",
+        format!("{:?}", local.parent_inode_id),
+        format!("{:?}", anchor.parent_inode_id),
+    )?;
+    ensure_apply_remote_rename_local_anchor_match(
+        namespace_id,
+        inode_id,
+        "display_name",
+        local.display_name.clone(),
+        anchor.display_name.clone(),
+    )?;
+    if !local.exists_on_disk {
+        return Err(StateDbError::ApplyRemoteRenameLocalNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "exists_on_disk",
+            local: "false".to_owned(),
+            anchor: "true".to_owned(),
+        });
+    }
+    if local.dirty {
+        return Err(StateDbError::ApplyRemoteRenameLocalNotConverged {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "dirty",
+            local: "true".to_owned(),
+            anchor: "false".to_owned(),
+        });
+    }
+
+    ensure_apply_remote_rename_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "revision_no",
+        remote.revision_no.0.to_string(),
+        anchor.revision_no.0.to_string(),
+    )?;
+    ensure_apply_remote_rename_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_digest",
+        format!("{:?}", remote.content_digest),
+        format!("{:?}", anchor.content_digest),
+    )?;
+    ensure_apply_remote_rename_remote_anchor_match(
+        namespace_id,
+        inode_id,
+        "content_manifest_digest",
+        format!("{:?}", remote.content_manifest_digest),
+        format!("{:?}", anchor.content_manifest_digest),
+    )?;
+    if remote.is_deleted {
+        return Err(StateDbError::ApplyRemoteRenameRemoteNotPathOnly {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            field: "is_deleted",
+            remote: "true".to_owned(),
+            anchor: "false".to_owned(),
+        });
+    }
+    if remote.parent_inode_id == anchor.parent_inode_id && remote.display_name == anchor.display_name
+    {
+        return Err(StateDbError::ApplyRemoteRenamePathChangeMissing {
             namespace_id: namespace_id.as_str().to_owned(),
             inode_id: inode_id.0,
         });

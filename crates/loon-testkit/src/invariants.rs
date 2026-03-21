@@ -423,6 +423,32 @@ pub struct RemoteOnlyDirectoryMaterializationInvariantInputs<'a> {
     pub issue_kind_after: Option<&'a str>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemotePathChangePlanningInvariantInputs<'a> {
+    pub planned_action_decision_after: Option<&'a str>,
+    pub planned_action_reason_after: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApplyRemoteRenameInvariantInputs<'a> {
+    pub local_exists_on_disk_after: bool,
+    pub local_dirty_after: bool,
+    pub local_parent_inode_after: Option<InodeId>,
+    pub local_display_name_after: &'a str,
+    pub remote_synced_seq_after: ChangeSeq,
+    pub remote_revision_no_after: RevisionNo,
+    pub remote_content_digest_after: Option<&'a str>,
+    pub remote_parent_inode_after: Option<InodeId>,
+    pub remote_display_name_after: &'a str,
+    pub sync_anchor_seq_after: Option<ChangeSeq>,
+    pub sync_anchor_revision_no_after: Option<RevisionNo>,
+    pub sync_anchor_content_digest_after: Option<&'a str>,
+    pub sync_anchor_parent_inode_after: Option<InodeId>,
+    pub sync_anchor_display_name_after: Option<&'a str>,
+    pub planned_action_present_after: bool,
+    pub issue_kind_after: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgressPublishOutcomeKind {
     Created,
@@ -1723,6 +1749,75 @@ pub fn evaluate_remote_only_directory_materialization_invariants(
                 }],
             }
         }
+    }
+}
+
+pub fn evaluate_remote_path_change_planning_invariants(
+    inputs: RemotePathChangePlanningInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    ClientReconciliationInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "remote_path_change_plans_apply_remote_rename".to_owned(),
+            passed: inputs.planned_action_decision_after == Some("apply_remote_rename")
+                && inputs.planned_action_reason_after == Some("remote_path_differs_from_anchor"),
+            detail: format!(
+                "planned_action_decision_after={:?} planned_action_reason_after={:?}",
+                inputs.planned_action_decision_after, inputs.planned_action_reason_after
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_apply_remote_rename_invariants(
+    inputs: ApplyRemoteRenameInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    let updates_local_state_and_sync_anchor = inputs.local_exists_on_disk_after
+        && !inputs.local_dirty_after
+        && inputs.local_parent_inode_after == inputs.remote_parent_inode_after
+        && inputs.local_display_name_after == inputs.remote_display_name_after
+        && inputs.sync_anchor_seq_after == Some(inputs.remote_synced_seq_after)
+        && inputs.sync_anchor_revision_no_after == Some(inputs.remote_revision_no_after)
+        && inputs.sync_anchor_content_digest_after == inputs.remote_content_digest_after
+        && inputs.sync_anchor_parent_inode_after == inputs.remote_parent_inode_after
+        && inputs.sync_anchor_display_name_after == Some(inputs.remote_display_name_after);
+
+    ClientReconciliationInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "apply_remote_rename_updates_local_state_and_sync_anchor".to_owned(),
+                passed: updates_local_state_and_sync_anchor,
+                detail: format!(
+                    "local_exists_on_disk_after={} local_dirty_after={} local_parent_inode_after={:?} local_display_name_after={} remote_seq_after={} remote_revision_after={} remote_content_digest_after={:?} remote_parent_inode_after={:?} remote_display_name_after={} sync_anchor_seq_after={:?} sync_anchor_revision_after={:?} sync_anchor_content_digest_after={:?} sync_anchor_parent_inode_after={:?} sync_anchor_display_name_after={:?}",
+                    inputs.local_exists_on_disk_after,
+                    inputs.local_dirty_after,
+                    inputs.local_parent_inode_after,
+                    inputs.local_display_name_after,
+                    inputs.remote_synced_seq_after.0,
+                    inputs.remote_revision_no_after.0,
+                    inputs.remote_content_digest_after,
+                    inputs.remote_parent_inode_after,
+                    inputs.remote_display_name_after,
+                    inputs.sync_anchor_seq_after.map(|seq| seq.0),
+                    inputs.sync_anchor_revision_no_after.map(|revision| revision.0),
+                    inputs.sync_anchor_content_digest_after,
+                    inputs.sync_anchor_parent_inode_after,
+                    inputs.sync_anchor_display_name_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_rename_clears_planned_action".to_owned(),
+                passed: !inputs.planned_action_present_after,
+                detail: format!(
+                    "planned_action_present_after={}",
+                    inputs.planned_action_present_after
+                ),
+            },
+            InvariantCheck {
+                name: "apply_remote_rename_failure_records_durable_issue".to_owned(),
+                passed: inputs.issue_kind_after == Some("apply_remote_rename_local_apply_failed"),
+                detail: format!("issue_kind_after={:?}", inputs.issue_kind_after),
+            },
+        ],
     }
 }
 

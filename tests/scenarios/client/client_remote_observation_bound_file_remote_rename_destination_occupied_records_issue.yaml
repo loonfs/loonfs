@@ -1,0 +1,128 @@
+schema_version: 1
+scenario_kind: client
+name: client_remote_observation_bound_file_remote_rename_destination_occupied_records_issue
+initial:
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    observed_seq: 41
+    revision_no: 17
+    content_digest: sha256:anchor-17
+    content_manifest_digest: sha256:manifest-anchor-17
+    parent_inode_id: 2
+    display_name: report.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    content_digest: sha256:anchor-17
+    parent_inode_id: 2
+    display_name: report.txt
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700000400000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    synced_seq: 41
+    revision_no: 17
+    content_digest: sha256:anchor-17
+    content_manifest_digest: sha256:manifest-anchor-17
+    parent_inode_id: 2
+    display_name: report.txt
+  local_file:
+    relative_path: reports/report.txt
+    content_utf8: |
+      hello from loon
+  target_relative_path: reports/report-renamed.txt
+  occupied_target_content_utf8: occupied
+actions:
+  - apply_remote_observation:
+      applied_at_ms: 1700000408000
+      remote_observation:
+        namespace_id: ns-1
+        inode_id: 42
+        inode_kind: file
+        observed_seq: 42
+        revision_no: 17
+        content_digest: sha256:anchor-17
+        content_manifest_digest: sha256:manifest-anchor-17
+        parent_inode_id: 2
+        display_name: report-renamed.txt
+        is_deleted: false
+  - restart_client_state_db: true
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 42
+      now_ms: 1700000410000
+  - execute_next_client_action:
+      uploaded_at_ms: 1700000411000
+      created_at_ms: 1700000411000
+  - restart_client_state_db: true
+  - planner_tick:
+      namespace_id: ns-1
+      inode_id: 42
+      now_ms: 1700000412000
+expect:
+  outcome:
+    updated_bound_remote_state:
+      namespace_id: ns-1
+      inode_id: 42
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    observed_seq: 42
+    revision_no: 17
+    content_digest: sha256:anchor-17
+    content_manifest_digest: sha256:manifest-anchor-17
+    parent_inode_id: 2
+    display_name: report-renamed.txt
+    is_deleted: false
+  local_state:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    content_digest: sha256:anchor-17
+    parent_inode_id: 2
+    display_name: report.txt
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700000400000
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 42
+    inode_kind: file
+    synced_seq: 41
+    revision_no: 17
+    content_digest: sha256:anchor-17
+    content_manifest_digest: sha256:manifest-anchor-17
+    parent_inode_id: 2
+    display_name: report.txt
+  planned_action_cleared: false
+  conflicts_and_errors:
+    - kind: apply_remote_rename_local_apply_failed
+      summary: apply_remote_rename found the destination slot already occupied
+      created_at_ms: 1700000411000
+      detail_json:
+        failure: destination_occupied
+  execution:
+    execute_error_kind: destination_occupied
+  first_planner_result:
+    namespace_id: ns-1
+    inode_id: 42
+    decision: apply_remote_rename
+    reason: remote_path_differs_from_anchor
+    created_at_ms: 1700000410000
+  second_planner_result:
+    namespace_id: ns-1
+    inode_id: 42
+    decision: apply_remote_rename
+    reason: remote_path_differs_from_anchor
+    created_at_ms: 1700000412000
+  invariants:
+    - remote_path_change_plans_apply_remote_rename
+    - apply_remote_rename_failure_records_durable_issue

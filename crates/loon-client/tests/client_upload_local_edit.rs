@@ -479,6 +479,7 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
             &store,
             |_client_file_id| None,
             |_namespace_id, _inode_id| None,
+            |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
             execute.uploaded_at_ms,
             execute.created_at_ms,
             |request| {
@@ -1071,6 +1072,7 @@ fn run_execute_next_client_action(
         store,
         |_client_file_id| local_only_source_path.map(Path::to_path_buf),
         |_namespace_id, _inode_id| inode_source_path.map(Path::to_path_buf),
+        |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
         action.uploaded_at_ms,
         action.created_at_ms,
         |request| {

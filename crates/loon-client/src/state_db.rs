@@ -234,6 +234,32 @@ pub enum StateDbError {
         local: String,
         anchor: String,
     },
+    #[error("apply_remote_rename_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    ApplyRemoteRenameStateMissing { namespace_id: String, inode_id: u64 },
+    #[error("apply_remote_rename_requires_file: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
+    ApplyRemoteRenameRequiresFile {
+        namespace_id: String,
+        inode_id: u64,
+        inode_kind: String,
+    },
+    #[error("apply_remote_rename_local_not_converged: namespace `{namespace_id}` inode `{inode_id}` field `{field}` local `{local}` != anchor `{anchor}`")]
+    ApplyRemoteRenameLocalNotConverged {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        local: String,
+        anchor: String,
+    },
+    #[error("apply_remote_rename_remote_not_path_only: namespace `{namespace_id}` inode `{inode_id}` field `{field}` remote `{remote}` != anchor `{anchor}`")]
+    ApplyRemoteRenameRemoteNotPathOnly {
+        namespace_id: String,
+        inode_id: u64,
+        field: &'static str,
+        remote: String,
+        anchor: String,
+    },
+    #[error("apply_remote_rename_path_change_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    ApplyRemoteRenamePathChangeMissing { namespace_id: String, inode_id: u64 },
     #[error("materialize_remote_dir_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
     MaterializeRemoteDirStateMissing { namespace_id: String, inode_id: u64 },
     #[error("materialize_remote_dir_requires_directory: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
@@ -709,6 +735,46 @@ fn ensure_download_remote_edit_local_anchor_match(
         inode_id: inode_id.0,
         field,
         local,
+        anchor,
+    })
+}
+
+fn ensure_apply_remote_rename_local_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    local: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if local == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::ApplyRemoteRenameLocalNotConverged {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        local,
+        anchor,
+    })
+}
+
+fn ensure_apply_remote_rename_remote_anchor_match(
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    field: &'static str,
+    remote: String,
+    anchor: String,
+) -> Result<(), StateDbError> {
+    if remote == anchor {
+        return Ok(());
+    }
+
+    Err(StateDbError::ApplyRemoteRenameRemoteNotPathOnly {
+        namespace_id: namespace_id.as_str().to_owned(),
+        inode_id: inode_id.0,
+        field,
+        remote,
         anchor,
     })
 }

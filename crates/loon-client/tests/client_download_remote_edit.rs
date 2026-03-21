@@ -193,6 +193,7 @@ fn run_execute_next_client_action(
         store,
         |_client_file_id| None,
         |_namespace_id, _inode_id| inode_path.map(Path::to_path_buf),
+        |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
         action.uploaded_at_ms,
         action.created_at_ms,
         |_request| panic!("download_remote_edit should not dispatch a mutation request"),

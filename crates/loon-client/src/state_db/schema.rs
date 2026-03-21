@@ -1,7 +1,7 @@
 use super::{SqliteStateDb, StateDbError};
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const SCHEMA_VERSION: i32 = 11;
+pub(crate) const SCHEMA_VERSION: i32 = 12;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
@@ -720,6 +720,241 @@ DROP TABLE local_only_transfer_ledger_old;
 DROP TABLE local_only_conflicts_and_errors_old;
 "#;
 
+const SCHEMA_V12_RENAME_SQL: &str = r#"
+DROP INDEX IF EXISTS idx_planned_actions_created_at;
+DROP INDEX IF EXISTS idx_planned_local_only_actions_created_at;
+DROP INDEX IF EXISTS idx_transfer_ledger_inode_direction;
+DROP INDEX IF EXISTS idx_local_only_transfer_ledger_client_direction;
+DROP INDEX IF EXISTS idx_conflicts_and_errors_inode_created_at;
+DROP INDEX IF EXISTS idx_local_only_conflicts_and_errors_client_created_at;
+
+ALTER TABLE remote_state RENAME TO remote_state_old;
+ALTER TABLE local_state RENAME TO local_state_old;
+ALTER TABLE sync_anchor RENAME TO sync_anchor_old;
+ALTER TABLE planned_actions RENAME TO planned_actions_old;
+ALTER TABLE transfer_ledger RENAME TO transfer_ledger_old;
+ALTER TABLE conflicts_and_errors RENAME TO conflicts_and_errors_old;
+ALTER TABLE local_only_state RENAME TO local_only_state_old;
+ALTER TABLE planned_local_only_actions RENAME TO planned_local_only_actions_old;
+ALTER TABLE pending_client_mutations RENAME TO pending_client_mutations_old;
+ALTER TABLE local_only_uploads RENAME TO local_only_uploads_old;
+ALTER TABLE inode_uploads RENAME TO inode_uploads_old;
+ALTER TABLE pending_inode_mutations RENAME TO pending_inode_mutations_old;
+ALTER TABLE local_only_transfer_ledger RENAME TO local_only_transfer_ledger_old;
+ALTER TABLE local_only_conflicts_and_errors RENAME TO local_only_conflicts_and_errors_old;
+"#;
+
+const SCHEMA_V12_CREATE_SQL: &str = r#"
+CREATE TABLE remote_state (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    observed_seq INTEGER NOT NULL,
+    revision_no INTEGER NOT NULL,
+    content_digest TEXT,
+    content_manifest_digest TEXT,
+    parent_inode_id INTEGER,
+    display_name TEXT NOT NULL,
+    is_deleted INTEGER NOT NULL,
+    inode_kind TEXT NOT NULL,
+    PRIMARY KEY (namespace_id, inode_id),
+    CHECK (is_deleted IN (0, 1)),
+    CHECK (inode_kind IN ('file', 'dir', 'symlink', 'mount'))
+);
+
+CREATE TABLE local_state (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    content_digest TEXT,
+    parent_inode_id INTEGER,
+    display_name TEXT NOT NULL,
+    exists_on_disk INTEGER NOT NULL,
+    dirty INTEGER NOT NULL,
+    last_local_change_ms INTEGER NOT NULL,
+    inode_kind TEXT NOT NULL,
+    PRIMARY KEY (namespace_id, inode_id),
+    CHECK (exists_on_disk IN (0, 1)),
+    CHECK (dirty IN (0, 1)),
+    CHECK (inode_kind IN ('file', 'dir', 'symlink', 'mount'))
+);
+
+CREATE TABLE sync_anchor (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    synced_seq INTEGER NOT NULL,
+    revision_no INTEGER NOT NULL,
+    content_digest TEXT,
+    parent_inode_id INTEGER,
+    display_name TEXT NOT NULL,
+    inode_kind TEXT NOT NULL,
+    content_manifest_digest TEXT,
+    PRIMARY KEY (namespace_id, inode_id),
+    CHECK (inode_kind IN ('file', 'dir', 'symlink', 'mount'))
+);
+
+CREATE TABLE planned_actions (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace_id, inode_id),
+    FOREIGN KEY (namespace_id, inode_id)
+        REFERENCES local_state(namespace_id, inode_id),
+    CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'download_remote_edit', 'apply_remote_rename', 'materialize_remote_dir', 'create_conflict_copy', 'no_op')),
+    CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'remote_path_differs_from_anchor', 'remote_path_and_content_differ_from_anchor', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))
+);
+
+CREATE TABLE transfer_ledger (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    transfer_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    block_index INTEGER NOT NULL,
+    block_count INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (transfer_id),
+    FOREIGN KEY (namespace_id, inode_id)
+        REFERENCES local_state(namespace_id, inode_id),
+    CHECK (direction IN ('download', 'upload')),
+    CHECK (state IN ('staging', 'uploading'))
+);
+
+CREATE TABLE conflicts_and_errors (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    CHECK (kind IN ('remote_observation_bind_ambiguous', 'download_remote_edit_remote_digest_mismatch', 'download_remote_edit_local_apply_failed', 'download_remote_edit_transfer_reset', 'materialize_remote_dir_local_apply_failed', 'apply_remote_rename_local_apply_failed', 'upload_local_edit_upload_failed', 'upload_local_edit_transfer_reset'))
+);
+
+CREATE TABLE local_only_state (
+    client_file_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    parent_inode_id INTEGER,
+    display_name TEXT NOT NULL,
+    content_digest TEXT,
+    exists_on_disk INTEGER NOT NULL,
+    dirty INTEGER NOT NULL,
+    last_local_change_ms INTEGER NOT NULL,
+    inode_kind TEXT NOT NULL,
+    CHECK (exists_on_disk IN (0, 1)),
+    CHECK (dirty IN (0, 1)),
+    CHECK (inode_kind IN ('file', 'dir', 'symlink', 'mount'))
+);
+
+CREATE TABLE planned_local_only_actions (
+    client_file_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (client_file_id)
+        REFERENCES local_only_state(client_file_id)
+        ON DELETE CASCADE,
+    CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'download_remote_edit', 'materialize_remote_dir', 'create_conflict_copy', 'no_op')),
+    CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))
+);
+
+CREATE TABLE pending_client_mutations (
+    client_request_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    client_file_id TEXT NOT NULL UNIQUE,
+    created_at_ms INTEGER NOT NULL,
+    request_json TEXT
+);
+
+CREATE TABLE local_only_uploads (
+    client_file_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    file_digest_sha256 TEXT NOT NULL,
+    content_manifest_digest TEXT NOT NULL,
+    manifest_object_key TEXT NOT NULL,
+    file_size_bytes INTEGER NOT NULL,
+    uploaded_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (client_file_id)
+        REFERENCES local_only_state(client_file_id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE inode_uploads (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    file_digest_sha256 TEXT NOT NULL,
+    content_manifest_digest TEXT NOT NULL,
+    manifest_object_key TEXT NOT NULL,
+    file_size_bytes INTEGER NOT NULL,
+    uploaded_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace_id, inode_id),
+    FOREIGN KEY (namespace_id, inode_id)
+        REFERENCES local_state(namespace_id, inode_id)
+);
+
+CREATE TABLE pending_inode_mutations (
+    client_request_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    request_json TEXT,
+    created_at_ms INTEGER NOT NULL,
+    UNIQUE (namespace_id, inode_id),
+    FOREIGN KEY (namespace_id, inode_id)
+        REFERENCES local_state(namespace_id, inode_id)
+);
+
+CREATE TABLE local_only_transfer_ledger (
+    client_file_id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    transfer_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    block_index INTEGER NOT NULL,
+    block_count INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (transfer_id),
+    FOREIGN KEY (client_file_id)
+        REFERENCES local_only_state(client_file_id)
+        ON DELETE CASCADE,
+    CHECK (direction IN ('download', 'upload')),
+    CHECK (state IN ('staging', 'uploading'))
+);
+
+CREATE TABLE local_only_conflicts_and_errors (
+    client_file_id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (client_file_id)
+        REFERENCES local_only_state(client_file_id)
+        ON DELETE CASCADE,
+    CHECK (kind IN ('upload_local_create_upload_failed', 'upload_local_create_transfer_reset'))
+);
+
+CREATE INDEX idx_planned_actions_created_at
+    ON planned_actions(created_at_ms, namespace_id, inode_id);
+CREATE INDEX idx_planned_local_only_actions_created_at
+    ON planned_local_only_actions(created_at_ms, client_file_id);
+CREATE INDEX idx_transfer_ledger_inode_direction
+    ON transfer_ledger(namespace_id, inode_id, direction);
+CREATE INDEX idx_local_only_transfer_ledger_client_direction
+    ON local_only_transfer_ledger(client_file_id, direction);
+CREATE INDEX idx_conflicts_and_errors_inode_created_at
+    ON conflicts_and_errors(namespace_id, inode_id, created_at_ms, record_id);
+CREATE INDEX idx_local_only_conflicts_and_errors_client_created_at
+    ON local_only_conflicts_and_errors(client_file_id, created_at_ms, record_id);
+"#;
+
+const SCHEMA_V12_COPY_SQL: &str = SCHEMA_V11_COPY_SQL;
+
+const SCHEMA_V12_DROP_OLD_SQL: &str = SCHEMA_V11_DROP_OLD_SQL;
+
 pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -727,7 +962,7 @@ pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbErro
 
 #[cfg(test)]
 pub(super) fn install_schema_version_for_test(
-    conn: &Connection,
+    conn: &mut Connection,
     target_version: i32,
 ) -> Result<(), StateDbError> {
     if !(0..SCHEMA_VERSION).contains(&target_version) {
@@ -773,6 +1008,9 @@ pub(super) fn install_schema_version_for_test(
     if target_version >= 10 {
         conn.execute_batch(SCHEMA_V10_SQL)?;
         conn.pragma_update(None, "user_version", 10)?;
+    }
+    if target_version >= 11 {
+        apply_v11_hardening(conn)?;
     }
 
     Ok(())
@@ -867,6 +1105,11 @@ impl SqliteStateDb {
 
         if current_version == 10 {
             apply_v11_hardening(&mut self.conn)?;
+            current_version = 11;
+        }
+
+        if current_version == 11 {
+            apply_v12_hardening(&mut self.conn)?;
         }
 
         Ok(())
@@ -881,6 +1124,24 @@ fn apply_v11_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
         tx.execute_batch(SCHEMA_V11_CREATE_SQL)?;
         tx.execute_batch(SCHEMA_V11_COPY_SQL)?;
         tx.execute_batch(SCHEMA_V11_DROP_OLD_SQL)?;
+        tx.pragma_update(None, "user_version", 11)?;
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    result?;
+    ensure_no_foreign_key_violations(conn)?;
+    Ok(())
+}
+
+fn apply_v12_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result: Result<(), StateDbError> = (|| {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA_V12_RENAME_SQL)?;
+        tx.execute_batch(SCHEMA_V12_CREATE_SQL)?;
+        tx.execute_batch(SCHEMA_V12_COPY_SQL)?;
+        tx.execute_batch(SCHEMA_V12_DROP_OLD_SQL)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())

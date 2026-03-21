@@ -1620,6 +1620,124 @@ The client reconciliation invariant IDs for this slice are:
   - `remote_only_directory_materialization_clears_planned_action`
   - `remote_only_directory_materialization_failure_records_durable_issue`
 
+Remote rename/delete reconciliation remained out of scope for Milestone 8.
+
+## First bound-file remote rename observation path
+
+The first remote hierarchy reconciliation slice is bound-file-only.
+
+Rules:
+
+- `apply_remote_observation` remains a durable metadata update; it must not move local files
+  directly
+- a later planner pass may schedule one new inode-keyed decision:
+  - `apply_remote_rename`
+- `apply_remote_rename` is valid only when:
+  - `remote_state(namespace_id, inode_id)` exists
+  - `local_state(namespace_id, inode_id)` exists
+  - `sync_anchor(namespace_id, inode_id)` exists
+  - all three rows have `inode_kind = file`
+  - `local_state` still matches `sync_anchor` on:
+    - `content_digest`
+    - `parent_inode_id`
+    - `display_name`
+    - `exists_on_disk = true`
+    - `dirty = false`
+  - `remote_state` still matches `sync_anchor` on content identity:
+    - `revision_no`
+    - `content_digest`
+    - `content_manifest_digest`
+  - `remote_state.is_deleted = false`
+  - `remote_state` differs from `sync_anchor` only on:
+    - `parent_inode_id`
+    - `display_name`
+- if `remote_state` differs from `sync_anchor` on both path view and content identity while
+  `local_state` still matches the anchor, the planner must fall back to deferred
+  `create_conflict_copy` with reason `remote_path_and_content_differ_from_anchor`
+- the first slice covers:
+  - same-parent rename
+  - moves between already-bound directories
+- the first slice still excludes:
+  - remote directory rename reconciliation
+  - remote delete reconciliation
+  - compound remote path + content application in one executor call
+
+Planner surface additions:
+
+- planner decision:
+  - `apply_remote_rename`
+- planner reasons:
+  - `remote_path_differs_from_anchor`
+  - `remote_path_and_content_differ_from_anchor`
+
+The rename executor takes:
+
+- `namespace_id`
+- `inode_id`
+- one caller-supplied resolver for the current bound local path
+- one caller-supplied resolver for the desired target path view
+- one explicit local apply timestamp
+
+Rules:
+
+- the mixed tick must treat `apply_remote_rename` as an executable inode action
+- the executor must load `planned_actions(namespace_id, inode_id)` and require
+  `decision = apply_remote_rename`
+- the executor must require the bound-file rename preconditions above at execution time, not only
+  at planning time
+- the executor must require the current local path to resolve successfully
+- the executor must require the desired target path to resolve successfully from:
+  - `namespace_id`
+  - `inode_id`
+  - current authoritative `remote_state.parent_inode_id`
+  - current authoritative `remote_state.display_name`
+- if the target path already exists locally, the executor must fail closed and record one durable
+  issue row with `kind = apply_remote_rename_local_apply_failed`
+- after a successful durable local rename, one SQLite transaction must:
+  - update `local_state.parent_inode_id` and `local_state.display_name` from `remote_state`
+  - preserve `local_state.content_digest`
+  - preserve `exists_on_disk = true`
+  - preserve `dirty = false`
+  - advance `sync_anchor` to the current authoritative remote seq/revision/path view
+  - clear `planned_actions(namespace_id, inode_id)`
+  - clear any matching `apply_remote_rename_local_apply_failed` row
+
+The local apply step must:
+
+- move the file with one filesystem rename from current path to target path
+- sync the destination parent directory
+- when the source and destination parents differ, sync the source parent directory too
+
+The first issue kind for this path is:
+
+- `apply_remote_rename_local_apply_failed`
+  - recorded for destination collisions and path-resolution/local-apply failures
+  - `detail_json.failure` must be one of:
+    - `current_path_missing`
+    - `target_path_missing`
+    - `destination_occupied`
+    - `rename_io`
+
+Why this rule exists:
+
+- authoritative remote path changes are real state changes, not generic content drift
+- the client already stores path view durably on inode-keyed rows, so the first hierarchy slice
+  should reconcile those path changes explicitly instead of deferring forever
+
+Failure modes prevented:
+
+- downloading or uploading bytes only to leave a bound file permanently at the wrong local path
+- silently overwriting an occupied local destination slot during authoritative rename apply
+- treating a remote rename-plus-content change as if it were safe to apply through a rename-only
+  executor
+
+Executable invariant IDs for this slice:
+
+- `remote_path_change_plans_apply_remote_rename`
+- `apply_remote_rename_updates_local_state_and_sync_anchor`
+- `apply_remote_rename_clears_planned_action`
+- `apply_remote_rename_failure_records_durable_issue`
+
 ## SQLite hardening boundary (schema v11)
 
 The next schema version does not add new client-truth tables. It hardens the existing durable

@@ -210,6 +210,9 @@ fn execute_next_client_action_returns_none_without_work() {
         |_namespace_id, _inode_id| {
             unreachable!("inode source path resolver should not run without work")
         },
+        |_namespace_id, _inode_id, _parent_inode_id, _display_name| {
+            unreachable!("inode target path resolver should not run without work")
+        },
         1_700_000_500_000,
         1_700_000_501_000,
         |_request| unreachable!("dispatch should not run without work"),
@@ -391,6 +394,7 @@ fn run_execute_next_client_action(
         store,
         |_client_file_id| source_path.map(Path::to_path_buf),
         |_namespace_id, _inode_id| None,
+        |_namespace_id, _inode_id, _parent_inode_id, _display_name| None,
         action.uploaded_at_ms,
         action.created_at_ms,
         |request| {
