@@ -18,6 +18,8 @@ pub enum PlannerDecision {
     ResolveDeleteVsEditConflict,
     ResolveRenameVsEditConflict,
     ResolvePathBindingCollision,
+    ResolveSubtreeDeleteConflict,
+    ResolveSubtreeRenameConflict,
     ApplyRemoteRenameAndReplace,
     ApplyRemoteDelete,
     ApplyRemoteSubtreeDelete,
@@ -464,6 +466,8 @@ impl PlannerDecision {
             Self::ResolveDeleteVsEditConflict => "resolve_delete_vs_edit_conflict",
             Self::ResolveRenameVsEditConflict => "resolve_rename_vs_edit_conflict",
             Self::ResolvePathBindingCollision => "resolve_path_binding_collision",
+            Self::ResolveSubtreeDeleteConflict => "resolve_subtree_delete_conflict",
+            Self::ResolveSubtreeRenameConflict => "resolve_subtree_rename_conflict",
             Self::ApplyRemoteRenameAndReplace => "apply_remote_rename_and_replace",
             Self::ApplyRemoteDelete => "apply_remote_delete",
             Self::ApplyRemoteSubtreeDelete => "apply_remote_subtree_delete",
@@ -485,6 +489,8 @@ impl PlannerDecision {
             "resolve_delete_vs_edit_conflict" => Ok(Self::ResolveDeleteVsEditConflict),
             "resolve_rename_vs_edit_conflict" => Ok(Self::ResolveRenameVsEditConflict),
             "resolve_path_binding_collision" => Ok(Self::ResolvePathBindingCollision),
+            "resolve_subtree_delete_conflict" => Ok(Self::ResolveSubtreeDeleteConflict),
+            "resolve_subtree_rename_conflict" => Ok(Self::ResolveSubtreeRenameConflict),
             "apply_remote_rename_and_replace" => Ok(Self::ApplyRemoteRenameAndReplace),
             "apply_remote_delete" => Ok(Self::ApplyRemoteDelete),
             "apply_remote_subtree_delete" => Ok(Self::ApplyRemoteSubtreeDelete),
@@ -879,11 +885,11 @@ fn decide_remote_subtree_delete_action(
             PlannerReason::RemoteSubtreeDeletedFromAnchor,
         ),
         RemoteSubtreeDeleteAssessment::DeferredRootLocalDiffers => (
-            PlannerDecision::CreateConflictCopy,
+            PlannerDecision::ResolveSubtreeDeleteConflict,
             PlannerReason::RemoteSubtreeDeletedWhileLocalDiffersFromAnchor,
         ),
         RemoteSubtreeDeleteAssessment::DeferredDescendantsDiffer => (
-            PlannerDecision::CreateConflictCopy,
+            PlannerDecision::ResolveSubtreeDeleteConflict,
             PlannerReason::RemoteSubtreeDeletedWhileDescendantsDifferFromAnchor,
         ),
         RemoteSubtreeDeleteAssessment::DeferredDescendantsBusy => (
@@ -926,11 +932,11 @@ fn decide_remote_subtree_rename_action(
             PlannerReason::RemoteSubtreePathDiffersFromAnchor,
         ),
         RemoteSubtreeRenameAssessment::DeferredRootLocalDiffers => (
-            PlannerDecision::CreateConflictCopy,
+            PlannerDecision::ResolveSubtreeRenameConflict,
             PlannerReason::RemoteSubtreePathDiffersWhileLocalDiffersFromAnchor,
         ),
         RemoteSubtreeRenameAssessment::DeferredDescendantsDiffer => (
-            PlannerDecision::CreateConflictCopy,
+            PlannerDecision::ResolveSubtreeRenameConflict,
             PlannerReason::RemoteSubtreePathDiffersWhileDescendantsDifferFromAnchor,
         ),
         RemoteSubtreeRenameAssessment::DeferredDescendantsBusy => (
@@ -1336,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_prefers_conflict_copy_for_remote_subtree_delete_when_descendant_diverges() {
+    fn planner_marks_remote_subtree_delete_descendant_divergence_for_explicit_resolution() {
         let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
         let namespace_id = NamespaceId::from("ns-1");
         let root_inode_id = InodeId(10);
@@ -1418,7 +1424,10 @@ mod tests {
         let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
             .expect("plan subtree delete conflict");
 
-        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.decision,
+            PlannerDecision::ResolveSubtreeDeleteConflict
+        );
         assert_eq!(
             planned.reason,
             PlannerReason::RemoteSubtreeDeletedWhileDescendantsDifferFromAnchor
@@ -1696,7 +1705,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_defers_subtree_rename_when_descendant_differs_from_anchor() {
+    fn planner_marks_subtree_rename_descendant_divergence_for_explicit_resolution() {
         let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
         let namespace_id = NamespaceId::from("ns-1");
         let root_inode_id = InodeId(10);
@@ -1730,7 +1739,10 @@ mod tests {
         let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
             .expect("plan subtree rename descendant conflict");
 
-        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.decision,
+            PlannerDecision::ResolveSubtreeRenameConflict
+        );
         assert_eq!(
             planned.reason,
             PlannerReason::RemoteSubtreePathDiffersWhileDescendantsDifferFromAnchor
@@ -1777,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_defers_subtree_rename_when_root_local_differs_from_anchor() {
+    fn planner_marks_subtree_rename_root_divergence_for_explicit_resolution() {
         let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
         let namespace_id = NamespaceId::from("ns-1");
         let root_inode_id = InodeId(10);
@@ -1811,7 +1823,10 @@ mod tests {
         let planned = plan_file(&mut db, &namespace_id, root_inode_id, 1_700_000_002_000)
             .expect("plan subtree rename root conflict");
 
-        assert_eq!(planned.decision, PlannerDecision::CreateConflictCopy);
+        assert_eq!(
+            planned.decision,
+            PlannerDecision::ResolveSubtreeRenameConflict
+        );
         assert_eq!(
             planned.reason,
             PlannerReason::RemoteSubtreePathDiffersWhileLocalDiffersFromAnchor

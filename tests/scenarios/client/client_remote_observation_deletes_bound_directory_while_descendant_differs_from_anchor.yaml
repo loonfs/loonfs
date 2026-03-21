@@ -96,7 +96,7 @@ expect:
   planner_result:
     namespace_id: ns-1
     inode_id: 10
-    decision: create_conflict_copy
+    decision: resolve_subtree_delete_conflict
     reason: remote_subtree_deleted_while_descendants_differ_from_anchor
     created_at_ms: 1700000950000
   path_expectations:

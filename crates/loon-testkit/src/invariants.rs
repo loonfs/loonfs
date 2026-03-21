@@ -255,6 +255,28 @@ pub struct FileConflictResolutionInvariantInputs<'a> {
     pub sync_anchor_display_name_after: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtreeConflictResolutionKind {
+    Delete,
+    Rename,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubtreeConflictResolutionInvariantInputs<'a> {
+    pub conflict_kind: SubtreeConflictResolutionKind,
+    pub namespace_id: &'a NamespaceId,
+    pub artifact_conflict_id: Option<&'a str>,
+    pub artifact_object_key: Option<&'a str>,
+    pub artifact_entry_count: usize,
+    pub expected_artifact_entry_count: usize,
+    pub artifact_entries_durable: bool,
+    pub preserved_temp_rows_after: usize,
+    pub final_root_exists: bool,
+    pub final_target_exists: bool,
+    pub bound_descendants_match_winner_after: bool,
+    pub final_visible_sibling_tree_exists: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredContentBlockSnapshot {
     pub object_key: String,
@@ -2322,6 +2344,111 @@ pub fn evaluate_file_conflict_resolution_invariants(
                     inputs.local_content_digest_after,
                     inputs.remote_content_digest_after,
                     inputs.sync_anchor_content_digest_after
+                ),
+            });
+        }
+    }
+
+    ClientReconciliationInvariantReport { checks }
+}
+
+pub fn evaluate_subtree_conflict_resolution_invariants(
+    inputs: SubtreeConflictResolutionInvariantInputs<'_>,
+) -> ClientReconciliationInvariantReport {
+    let artifact_present =
+        inputs.artifact_conflict_id.is_some() && inputs.artifact_object_key.is_some();
+    let artifact_key_matches = inputs.artifact_conflict_id.is_some_and(|conflict_id| {
+        inputs.artifact_object_key
+            == Some(conflict_artifact(inputs.namespace_id.as_str(), conflict_id).as_str())
+    });
+    let full_entry_count_matches =
+        inputs.artifact_entry_count == inputs.expected_artifact_entry_count;
+
+    let mut checks = vec![
+        InvariantCheck {
+            name: "subtree_conflict_artifact_key_matches_namespace_and_id".to_owned(),
+            passed: artifact_key_matches,
+            detail: format!(
+                "conflict_id={:?} object_key={:?}",
+                inputs.artifact_conflict_id, inputs.artifact_object_key
+            ),
+        },
+        InvariantCheck {
+            name: "subtree_conflict_artifact_entries_are_durable".to_owned(),
+            passed: artifact_present && inputs.artifact_entries_durable,
+            detail: format!(
+                "artifact_present={} artifact_entries_durable={} entry_count={}",
+                artifact_present, inputs.artifact_entries_durable, inputs.artifact_entry_count
+            ),
+        },
+        InvariantCheck {
+            name: "stable_paths_default_does_not_materialize_visible_sibling_tree".to_owned(),
+            passed: !inputs.final_visible_sibling_tree_exists,
+            detail: format!(
+                "final_visible_sibling_tree_exists={}",
+                inputs.final_visible_sibling_tree_exists
+            ),
+        },
+    ];
+
+    match inputs.conflict_kind {
+        SubtreeConflictResolutionKind::Delete => {
+            checks.push(InvariantCheck {
+                name: "subtree_delete_conflict_preserves_loser_artifact".to_owned(),
+                passed: artifact_present,
+                detail: format!("artifact_present={artifact_present}"),
+            });
+            checks.push(InvariantCheck {
+                name: "subtree_delete_conflict_preserves_full_subtree_entries".to_owned(),
+                passed: artifact_present && full_entry_count_matches,
+                detail: format!(
+                    "artifact_entry_count={} expected_artifact_entry_count={}",
+                    inputs.artifact_entry_count, inputs.expected_artifact_entry_count
+                ),
+            });
+            checks.push(InvariantCheck {
+                name: "subtree_delete_conflict_removes_canonical_path".to_owned(),
+                passed: !inputs.final_root_exists,
+                detail: format!("final_root_exists={}", inputs.final_root_exists),
+            });
+            checks.push(InvariantCheck {
+                name: "subtree_delete_conflict_clears_preserved_temp_rows".to_owned(),
+                passed: inputs.preserved_temp_rows_after == 0,
+                detail: format!(
+                    "preserved_temp_rows_after={}",
+                    inputs.preserved_temp_rows_after
+                ),
+            });
+        }
+        SubtreeConflictResolutionKind::Rename => {
+            checks.push(InvariantCheck {
+                name: "subtree_rename_conflict_preserves_loser_artifact".to_owned(),
+                passed: artifact_present,
+                detail: format!("artifact_present={artifact_present}"),
+            });
+            checks.push(InvariantCheck {
+                name: "subtree_rename_conflict_reverts_bound_descendants_to_winner_state"
+                    .to_owned(),
+                passed: inputs.bound_descendants_match_winner_after,
+                detail: format!(
+                    "bound_descendants_match_winner_after={}",
+                    inputs.bound_descendants_match_winner_after
+                ),
+            });
+            checks.push(InvariantCheck {
+                name: "subtree_rename_conflict_keeps_winner_canonical_path".to_owned(),
+                passed: inputs.final_target_exists && !inputs.final_root_exists,
+                detail: format!(
+                    "final_root_exists={} final_target_exists={}",
+                    inputs.final_root_exists, inputs.final_target_exists
+                ),
+            });
+            checks.push(InvariantCheck {
+                name: "subtree_rename_conflict_clears_preserved_temp_rows".to_owned(),
+                passed: inputs.preserved_temp_rows_after == 0,
+                detail: format!(
+                    "preserved_temp_rows_after={}",
+                    inputs.preserved_temp_rows_after
                 ),
             });
         }

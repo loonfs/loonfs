@@ -537,9 +537,13 @@ Deliverables:
 
 - explicit file conflict classes for same-inode stale-base edit, path binding collision,
   delete-vs-edit, and rename-vs-edit
+- explicit subtree conflict classes for subtree delete-vs-local-changes and subtree
+  rename-vs-local-changes
 - canonical immutable conflict artifact objects under the namespace keyspace
 - executable client decisions for file conflict resolution and direct remote
   rename-and-replace apply
+- executable subtree conflict resolution decisions that preserve the loser subtree before applying
+  the authoritative winner
 - durable client cache/indexing for created conflict artifacts
 - readable fixtures and executable invariants proving loser preservation and canonical-path
   stability
@@ -550,8 +554,10 @@ Required rules:
 - authoritative namespace commit remains strict CAS for stale-base writes
 - file conflict resolution preserves the loser as an artifact instead of renaming the canonical
   winner
-- `create_conflict_copy` remains only for unsupported directory and subtree conflict classes after
-  the file taxonomy cleanup
+- subtree conflict resolution preserves the full loser subtree as a deterministic artifact instead
+  of creating a visible sibling tree
+- `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree rename,
+  and still-unsupported future hierarchy classes after the stable-path taxonomy cleanup
 
 ## Historical slice order
 

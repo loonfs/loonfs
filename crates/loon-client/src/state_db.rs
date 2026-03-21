@@ -1,6 +1,7 @@
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
-    ConflictArtifactEnvelope, ConflictClass, InodeId, InodeKind, NamespaceId, RevisionNo,
+    ConflictArtifactEnvelope, ConflictArtifactKind, ConflictClass, InodeId, InodeKind, NamespaceId,
+    RevisionNo, SubtreeConflictArtifactEnvelope,
 };
 use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
@@ -531,6 +532,8 @@ pub struct BoundApplyRemoteSubtreeDeleteViews {
     pub root_anchor: SyncAnchorRow,
     pub subtree_inode_ids: Vec<InodeId>,
     pub descendant_remote_inode_ids: Vec<InodeId>,
+    pub bound_descendants: Vec<ConflictBoundSubtreeEntry>,
+    pub local_only_descendants: Vec<ConflictLocalOnlySubtreeEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -550,6 +553,36 @@ pub struct BoundApplyRemoteSubtreeRenameViews {
     pub root_remote: RemoteFileStateRow,
     pub root_local: LocalFileStateRow,
     pub root_anchor: SyncAnchorRow,
+    pub subtree_inode_ids: Vec<InodeId>,
+    pub descendant_remote_inode_ids: Vec<InodeId>,
+    pub bound_descendants: Vec<ConflictBoundSubtreeEntry>,
+    pub local_only_descendants: Vec<ConflictLocalOnlySubtreeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundResolveSubtreeDeleteConflictViews {
+    pub namespace_id: NamespaceId,
+    pub root_inode_id: InodeId,
+    pub root_remote: RemoteFileStateRow,
+    pub root_local: LocalFileStateRow,
+    pub root_anchor: SyncAnchorRow,
+    pub subtree_inode_ids: Vec<InodeId>,
+    pub descendant_remote_inode_ids: Vec<InodeId>,
+    pub bound_descendants: Vec<ConflictBoundSubtreeEntry>,
+    pub local_only_descendants: Vec<ConflictLocalOnlySubtreeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundResolveSubtreeRenameConflictViews {
+    pub namespace_id: NamespaceId,
+    pub root_inode_id: InodeId,
+    pub root_remote: RemoteFileStateRow,
+    pub root_local: LocalFileStateRow,
+    pub root_anchor: SyncAnchorRow,
+    pub subtree_inode_ids: Vec<InodeId>,
+    pub descendant_remote_inode_ids: Vec<InodeId>,
+    pub bound_descendants: Vec<ConflictBoundSubtreeEntry>,
+    pub local_only_descendants: Vec<ConflictLocalOnlySubtreeEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -716,13 +749,55 @@ pub struct ConflictOrErrorRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictBoundSubtreeEntry {
+    pub inode_id: InodeId,
+    pub remote: Option<RemoteFileStateRow>,
+    pub local: LocalFileStateRow,
+    pub sync_anchor: Option<SyncAnchorRow>,
+    pub current_relative_path: String,
+    pub authoritative_relative_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictLocalOnlySubtreeEntry {
+    pub local_only: LocalOnlyFileStateRow,
+    pub current_relative_path: String,
+    pub upload: Option<LocalOnlyUploadRow>,
+    pub transfer: Option<LocalOnlyTransferLedgerRow>,
+    pub pending_client_mutation: Option<PendingClientMutationRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictArtifactEnvelopeRecord {
+    File(ConflictArtifactEnvelope),
+    Subtree(SubtreeConflictArtifactEnvelope),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictArtifactRow {
     pub namespace_id: NamespaceId,
     pub conflict_id: String,
     pub object_key: String,
+    pub artifact_kind: ConflictArtifactKind,
     pub conflict_class: ConflictClass,
-    pub envelope: ConflictArtifactEnvelope,
+    pub envelope: ConflictArtifactEnvelopeRecord,
     pub created_at_ms: u64,
+}
+
+impl ConflictArtifactRow {
+    pub fn file_envelope(&self) -> Option<&ConflictArtifactEnvelope> {
+        match &self.envelope {
+            ConflictArtifactEnvelopeRecord::File(envelope) => Some(envelope),
+            ConflictArtifactEnvelopeRecord::Subtree(_) => None,
+        }
+    }
+
+    pub fn subtree_envelope(&self) -> Option<&SubtreeConflictArtifactEnvelope> {
+        match &self.envelope {
+            ConflictArtifactEnvelopeRecord::File(_) => None,
+            ConflictArtifactEnvelopeRecord::Subtree(envelope) => Some(envelope),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

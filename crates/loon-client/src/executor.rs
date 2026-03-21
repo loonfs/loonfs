@@ -224,6 +224,18 @@ pub struct ExecutedResolvePathBindingCollision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedResolveSubtreeDeleteConflict {
+    pub applied: AppliedInodeMutation,
+    pub conflict_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedResolveSubtreeRenameConflict {
+    pub applied: AppliedInodeMutation,
+    pub conflict_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutedApplyRemoteSubtreeDelete {
     pub applied: AppliedInodeMutation,
 }
@@ -602,6 +614,69 @@ impl From<LocalApplyError> for ExecuteResolveFileConflictError {
 }
 
 #[derive(Debug, Error)]
+pub enum ExecuteResolveSubtreeConflictError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Planner(#[from] PlannerError),
+    #[error(transparent)]
+    Executor(#[from] ExecutorError),
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+    #[error(transparent)]
+    ConflictArtifact(#[from] ConflictArtifactError),
+    #[error(
+        "resolve_subtree_conflict_decision_missing: namespace `{namespace_id}` inode `{inode_id}` decision `{decision:?}`"
+    )]
+    DecisionMissing {
+        namespace_id: String,
+        inode_id: u64,
+        decision: PlannerDecision,
+    },
+    #[error(
+        "resolve_subtree_conflict_current_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    CurrentPathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "resolve_subtree_conflict_target_path_missing: namespace `{namespace_id}` inode `{inode_id}`"
+    )]
+    TargetPathMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "resolve_subtree_conflict_destination_occupied: namespace `{namespace_id}` inode `{inode_id}` path `{path}`"
+    )]
+    DestinationOccupied {
+        namespace_id: String,
+        inode_id: u64,
+        path: String,
+    },
+    #[error(
+        "resolve_subtree_conflict_winner_restore_io: operation `{operation}` path `{path}` {source}"
+    )]
+    WinnerRestoreIo {
+        operation: &'static str,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "resolve_subtree_conflict_recursive_remove_io: operation `{operation}` path `{path}` {source}"
+    )]
+    RecursiveRemoveIo {
+        operation: &'static str,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("resolve_subtree_conflict_rename_io: operation `{operation}` path `{path}` {source}")]
+    RenameIo {
+        operation: &'static str,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, Error)]
 pub enum ExecuteApplyRemoteSubtreeDeleteError {
     #[error(transparent)]
     StateDb(#[from] StateDbError),
@@ -759,6 +834,8 @@ pub enum NextClientAction {
     ExecutedResolveDeleteVsEditConflict(ExecutedResolveDeleteVsEditConflict),
     ExecutedResolveRenameVsEditConflict(ExecutedResolveRenameVsEditConflict),
     ExecutedResolvePathBindingCollision(ExecutedResolvePathBindingCollision),
+    ExecutedResolveSubtreeDeleteConflict(ExecutedResolveSubtreeDeleteConflict),
+    ExecutedResolveSubtreeRenameConflict(ExecutedResolveSubtreeRenameConflict),
     ExecutedApplyRemoteRenameAndReplace(ExecutedApplyRemoteRenameAndReplace),
     ExecutedApplyRemoteDelete(ExecutedApplyRemoteDelete),
     ExecutedApplyRemoteSubtreeDelete(ExecutedApplyRemoteSubtreeDelete),
@@ -780,6 +857,8 @@ pub enum ExecuteNextClientActionError {
     DownloadRemoteEdit(#[from] ExecuteDownloadRemoteEditError),
     #[error(transparent)]
     ResolveFileConflict(#[from] ExecuteResolveFileConflictError),
+    #[error(transparent)]
+    ResolveSubtreeConflict(#[from] ExecuteResolveSubtreeConflictError),
     #[error(transparent)]
     ApplyRemoteRenameAndReplace(#[from] ExecuteApplyRemoteRenameAndReplaceError),
     #[error(transparent)]

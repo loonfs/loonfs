@@ -128,6 +128,9 @@ fn same_inode_conflict_preserves_artifact_and_keeps_canonical_path() {
         artifact.conflict_class,
         ConflictClass::SameInodeStaleBaseEdit
     );
+    let artifact_envelope = artifact
+        .file_envelope()
+        .expect("file conflict artifact envelope");
     assert!(conflict_artifact_is_durable(
         &fixture.store,
         &namespace_id,
@@ -140,7 +143,7 @@ fn same_inode_conflict_preserves_artifact_and_keeps_canonical_path() {
             artifact_conflict_id: Some(artifact.conflict_id.as_str()),
             artifact_object_key: Some(artifact.object_key.as_str()),
             artifact_loser_manifest_digest: Some(
-                artifact.envelope.loser.content_manifest_digest.as_str(),
+                artifact_envelope.loser.content_manifest_digest.as_str(),
             ),
             artifact_loser_content_durable: true,
             local_present_after: views.local.is_some(),
@@ -284,6 +287,9 @@ fn delete_vs_edit_conflict_preserves_artifact_and_removes_canonical_path() {
     let artifact = &artifacts[0];
     assert_eq!(artifact.conflict_id, conflict_id);
     assert_eq!(artifact.conflict_class, ConflictClass::DeleteVsEdit);
+    let artifact_envelope = artifact
+        .file_envelope()
+        .expect("file conflict artifact envelope");
     assert!(conflict_artifact_is_durable(
         &fixture.store,
         &namespace_id,
@@ -296,7 +302,7 @@ fn delete_vs_edit_conflict_preserves_artifact_and_removes_canonical_path() {
             artifact_conflict_id: Some(artifact.conflict_id.as_str()),
             artifact_object_key: Some(artifact.object_key.as_str()),
             artifact_loser_manifest_digest: Some(
-                artifact.envelope.loser.content_manifest_digest.as_str(),
+                artifact_envelope.loser.content_manifest_digest.as_str(),
             ),
             artifact_loser_content_durable: true,
             local_present_after: views.local.is_some(),
@@ -434,6 +440,9 @@ fn rename_vs_edit_conflict_preserves_artifact_and_converges_remote_winner() {
     let artifact = &artifacts[0];
     assert_eq!(artifact.conflict_id, conflict_id);
     assert_eq!(artifact.conflict_class, ConflictClass::RenameVsEdit);
+    let artifact_envelope = artifact
+        .file_envelope()
+        .expect("file conflict artifact envelope");
     let report =
         evaluate_file_conflict_resolution_invariants(FileConflictResolutionInvariantInputs {
             conflict_kind: FileConflictResolutionKind::RenameVsEdit,
@@ -441,7 +450,7 @@ fn rename_vs_edit_conflict_preserves_artifact_and_converges_remote_winner() {
             artifact_conflict_id: Some(artifact.conflict_id.as_str()),
             artifact_object_key: Some(artifact.object_key.as_str()),
             artifact_loser_manifest_digest: Some(
-                artifact.envelope.loser.content_manifest_digest.as_str(),
+                artifact_envelope.loser.content_manifest_digest.as_str(),
             ),
             artifact_loser_content_durable: conflict_artifact_is_durable(
                 &fixture.store,
@@ -592,6 +601,9 @@ fn path_binding_collision_preserves_loser_artifact_and_keeps_winner_path() {
     let artifact = &artifacts[0];
     assert_eq!(artifact.conflict_id, conflict_id);
     assert_eq!(artifact.conflict_class, ConflictClass::PathBindingCollision);
+    let artifact_envelope = artifact
+        .file_envelope()
+        .expect("file conflict artifact envelope");
     let report =
         evaluate_file_conflict_resolution_invariants(FileConflictResolutionInvariantInputs {
             conflict_kind: FileConflictResolutionKind::PathBindingCollision,
@@ -599,7 +611,7 @@ fn path_binding_collision_preserves_loser_artifact_and_keeps_winner_path() {
             artifact_conflict_id: Some(artifact.conflict_id.as_str()),
             artifact_object_key: Some(artifact.object_key.as_str()),
             artifact_loser_manifest_digest: Some(
-                artifact.envelope.loser.content_manifest_digest.as_str(),
+                artifact_envelope.loser.content_manifest_digest.as_str(),
             ),
             artifact_loser_content_durable: conflict_artifact_is_durable(
                 &fixture.store,
@@ -834,7 +846,12 @@ fn conflict_artifact_is_durable(
     namespace_id: &NamespaceId,
     artifact: &ConflictArtifactRow,
 ) -> bool {
-    let manifest_digest = artifact.envelope.loser.content_manifest_digest.as_str();
+    let manifest_digest = artifact
+        .file_envelope()
+        .expect("file conflict artifact envelope")
+        .loser
+        .content_manifest_digest
+        .as_str();
     let Some(manifest_bytes) = store
         .get(
             &content_manifest(namespace_id.as_str(), manifest_digest),

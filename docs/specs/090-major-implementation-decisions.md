@@ -552,11 +552,11 @@ Milestone 10 rules:
   recursively create missing authoritative ancestors
 - waiting for parent materialization is a named `no_op` planner state, not deferred conflict work
 
-## Decision 12: stable paths are the default file-conflict policy
+## Decision 12: stable paths are the default conflict-artifact policy
 
 Problem:
-the old `create_conflict_copy` bucket collapses different file-conflict classes into one deferred
-label and makes canonical-path behavior harder to reason about.
+the old `create_conflict_copy` bucket collapses different file and subtree conflict classes into
+one deferred label and makes canonical-path behavior harder to reason about.
 
 Recommendation:
 
@@ -565,9 +565,13 @@ Recommendation:
   - `path_binding_collision`
   - `delete_vs_edit`
   - `rename_vs_edit`
+- split supported subtree conflict handling into:
+  - `subtree_delete_vs_local_changes`
+  - `subtree_rename_vs_local_changes`
 - keep `stable_paths` as the hardcoded v1 default
 - preserve losing content as immutable conflict artifacts
 - keep visible suffixed conflict files as optional presentation, not canonical storage
+- keep visible suffixed conflict trees as optional presentation, not canonical storage
 - keep strict authoritative CAS behavior in namespace commit
 
 Why:
@@ -578,6 +582,8 @@ Why:
 - remote-only descendants are allowed during subtree rename/delete when they remain clean
   placeholders with no anchor, transfer state, or pending mutation state
 - dirty, temp/local-only, or busy descendants still block subtree rename/delete
+- `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree rename,
+  and still-unsupported future hierarchy classes
 
 ### Why
 

@@ -127,6 +127,8 @@ Rules:
   commit-side implicit merge
 - the v1 default policy is `stable_paths`: keep the canonical winner path stable and preserve the
   loser as a durable conflict artifact
+- that stable-path preservation applies to both file and subtree client reconciliation artifacts;
+  it does not widen authoritative namespace commit into an implicit merge protocol
 
 Why it exists:
 the commit protocol should stay small and explicit even while client reconciliation grows richer

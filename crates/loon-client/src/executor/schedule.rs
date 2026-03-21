@@ -4,7 +4,8 @@ use super::inode::{
     execute_apply_remote_subtree_rename, execute_download_remote_edit,
     execute_materialize_remote_dir, execute_resolve_delete_vs_edit_conflict,
     execute_resolve_path_binding_collision, execute_resolve_rename_vs_edit_conflict,
-    execute_resolve_same_inode_conflict, execute_upload_local_edit,
+    execute_resolve_same_inode_conflict, execute_resolve_subtree_delete_conflict,
+    execute_resolve_subtree_rename_conflict, execute_upload_local_edit,
 };
 use super::local_only::execute_local_only_create;
 use super::*;
@@ -282,6 +283,45 @@ where
                         executed,
                     )))
                 }
+                value if value == PlannerDecision::ResolveSubtreeDeleteConflict.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let executed = execute_resolve_subtree_delete_conflict(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(
+                        NextClientAction::ExecutedResolveSubtreeDeleteConflict(executed),
+                    ))
+                }
+                value if value == PlannerDecision::ResolveSubtreeRenameConflict.as_str() => {
+                    let current_path = resolve_inode_source_path(&namespace_id, inode_id);
+                    let views = db.load_bound_resolve_subtree_rename_conflict_views(
+                        &namespace_id,
+                        inode_id,
+                    )?;
+                    let target_path = resolve_inode_target_path(
+                        &namespace_id,
+                        inode_id,
+                        views.root_remote.parent_inode_id,
+                        &views.root_remote.display_name,
+                    );
+                    let executed = execute_resolve_subtree_rename_conflict(
+                        db,
+                        store,
+                        &namespace_id,
+                        inode_id,
+                        current_path.as_deref(),
+                        target_path.as_deref(),
+                        created_at_ms,
+                    )?;
+                    Ok(Some(
+                        NextClientAction::ExecutedResolveSubtreeRenameConflict(executed),
+                    ))
+                }
                 value if value == PlannerDecision::MaterializeRemoteDir.as_str() => {
                     let target_path = resolve_inode_source_path(&namespace_id, inode_id);
                     let executed = execute_materialize_remote_dir(
@@ -344,6 +384,19 @@ fn select_next_client_action_candidate(
     next_executable_planned_action: Option<PlannedActionRow>,
     next_deferred_planned_action: Option<PlannedActionRow>,
 ) -> Option<NextClientActionCandidate> {
+    if let Some(planned_action) = next_executable_planned_action.as_ref() {
+        if matches!(
+            planned_action.decision.as_str(),
+            value
+                if value == PlannerDecision::ResolveSubtreeDeleteConflict.as_str()
+                    || value == PlannerDecision::ResolveSubtreeRenameConflict.as_str()
+        ) {
+            return Some(NextClientActionCandidate::ExecutablePlannedAction(
+                planned_action.clone(),
+            ));
+        }
+    }
+
     match (
         next_local_only,
         next_executable_planned_action,

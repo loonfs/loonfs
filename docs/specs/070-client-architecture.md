@@ -207,8 +207,8 @@ Rules:
 - the authoritative winner keeps the canonical path
 - the loser is preserved as a deterministic immutable conflict artifact object
 - visible suffixed conflict files are not canonical storage semantics
-- `create_conflict_copy` remains only for unsupported directory/subtree conflict classes after the
-  file taxonomy cleanup
+- `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree
+  rename, and still-unsupported future hierarchy classes after the stable-path conflict cleanup
 
 Canonical conflict artifacts are stored under:
 
@@ -1932,15 +1932,17 @@ Rules:
   - for files, `content_digest` still matches the anchor
 - if the root is tombstoned but the durable state is `(remote tombstone, no local, no anchor)`,
   the planner must return `no_op` with reason `remote_subtree_deleted_without_anchor`
-- if any rooted descendant is dirty, missing its anchor, is only a remote-only placeholder, or is
-  a temp/local-only inode, the planner must fall back to deferred `create_conflict_copy` with
-  reason `remote_subtree_deleted_while_descendants_differ_from_anchor`
+- if the root itself no longer matches the anchor while the remote row is tombstoned, the planner
+  must schedule `resolve_subtree_delete_conflict` with reason
+  `remote_subtree_deleted_while_local_differs_from_anchor`
+- if any rooted descendant is dirty, missing its anchor, or is a temp/local-only inode, the
+  planner must schedule `resolve_subtree_delete_conflict` with reason
+  `remote_subtree_deleted_while_descendants_differ_from_anchor`
+- clean remote-only descendant placeholders do not block subtree delete; they are preserved in the
+  conflict artifact and cleared when the authoritative delete wins
 - if any rooted descendant has transfer-ledger or pending-mutation state, the planner must fall
   back to deferred `create_conflict_copy` with reason
   `remote_subtree_deleted_while_descendants_busy`
-- if the root itself no longer matches the anchor while the remote row is tombstoned, the planner
-  must fall back to deferred `create_conflict_copy` with reason
-  `remote_subtree_deleted_while_local_differs_from_anchor`
 - the first slice still excludes:
   - remote directory rename reconciliation
   - mixed subtree delete with descendant uploads/downloads still in flight
@@ -1949,6 +1951,7 @@ Planner surface additions:
 
 - planner decision:
   - `apply_remote_subtree_delete`
+  - `resolve_subtree_delete_conflict`
 - planner reasons:
   - `remote_subtree_deleted_from_anchor`
   - `remote_subtree_deleted_while_local_differs_from_anchor`
@@ -2057,11 +2060,13 @@ Rules:
     - the target parent must itself still be locally converged
     - the target parent must not be the renamed root or any descendant of that root
 - if the root path changed remotely but the root itself no longer matches the anchor, the planner
-  must fall back to deferred `create_conflict_copy` with reason
+  must schedule `resolve_subtree_rename_conflict` with reason
   `remote_subtree_path_differs_while_local_differs_from_anchor`
-- if any rooted descendant is dirty, missing its anchor, remote-only, or temp/local-only, the
-  planner must fall back to deferred `create_conflict_copy` with reason
+- if any rooted descendant is dirty, missing its anchor, or is a temp/local-only inode, the
+  planner must schedule `resolve_subtree_rename_conflict` with reason
   `remote_subtree_path_differs_while_descendants_differ_from_anchor`
+- clean remote-only descendant placeholders do not block subtree rename; they remain unchanged
+  under the moved authoritative root
 - if any rooted descendant has active transfer or pending mutation state, the planner must fall
   back to deferred `create_conflict_copy` with reason
   `remote_subtree_path_differs_while_descendants_busy`
@@ -2077,6 +2082,7 @@ Planner surface additions:
 
 - planner decision:
   - `apply_remote_subtree_rename`
+  - `resolve_subtree_rename_conflict`
 - planner reasons:
   - `remote_subtree_path_differs_from_anchor`
   - `remote_subtree_path_differs_while_local_differs_from_anchor`
@@ -2198,7 +2204,8 @@ Rules:
   - no `sync_anchor`
   - no transfer-ledger or pending-mutation state
 - dirty bound descendants, bound descendants missing or diverging from their anchor, temp/local-only
-  descendants, and busy descendants still block mixed-state subtree reconciliation
+  descendants, and busy descendants still block mixed-state direct subtree reconciliation and are
+  routed into explicit subtree conflict handling instead
 - after successful `apply_remote_subtree_rename`, descendant remote-only placeholders remain
   unchanged; path resolution continues to work because subtree state is inode-keyed through parent
   chains
@@ -2228,6 +2235,125 @@ Executable invariant IDs for this tranche:
 - `materialized_target_parent_unblocks_apply_remote_subtree_rename`
 - `apply_remote_subtree_rename_preserves_remote_only_descendants`
 - `apply_remote_subtree_delete_clears_remote_only_descendants`
+
+## Subtree stable-path conflict artifacts
+
+The next stable-path slice finishes the supported subtree conflict classes that previously shared
+the generic deferred `create_conflict_copy` bucket.
+
+Supported classes:
+
+- `subtree_delete_vs_local_changes`
+- `subtree_rename_vs_local_changes`
+
+Rules:
+
+- the hardcoded v1 policy is still `stable_paths`
+- the authoritative winner keeps the canonical path
+- the loser subtree is preserved as one deterministic immutable conflict artifact
+- no visible suffixed sibling tree is created automatically
+- `create_conflict_copy` remains only for:
+  - busy descendants
+  - target-parent-unusable subtree rename
+  - still-unsupported future hierarchy classes
+
+Durable artifact shape:
+
+- `conflict_artifacts(namespace_id, conflict_id)` now stores `artifact_kind = file | subtree`
+- subtree artifacts are stored under:
+  - `namespaces/{namespace_id}/conflicts/{conflict_id}.json`
+- each subtree artifact records:
+  - root winner summary
+  - root loser summary
+  - ordered subtree entries derived from durable relative paths, not filesystem enumeration
+  - `policy_applied`
+  - `detected_seq`
+  - deterministic `conflict_id`
+- each subtree entry records:
+  - `relative_path`
+  - `inode_kind`
+  - optional `inode_id`
+  - optional `client_file_id`
+  - optional `base_revision_no`
+  - optional preserved `content_manifest_digest`
+  - optional preserved `content_digest`
+  - contested `parent_inode_id`
+  - contested `display_name`
+
+Recoverability rules:
+
+- bound clean files may reuse already-durable authoritative content references
+- bound dirty files and temp/local-only files must upload current local bytes before the subtree
+  artifact object is written
+- directories are preserved as metadata entries only
+- retries must be idempotent: if the artifact object already exists, the client caches it locally
+  and continues instead of minting a duplicate
+
+Planner decisions:
+
+- `resolve_subtree_delete_conflict`
+- `resolve_subtree_rename_conflict`
+
+Mapping rules:
+
+- `remote_subtree_deleted_while_local_differs_from_anchor` and
+  `remote_subtree_deleted_while_descendants_differ_from_anchor` schedule
+  `resolve_subtree_delete_conflict`
+- `remote_subtree_path_differs_while_local_differs_from_anchor` and
+  `remote_subtree_path_differs_while_descendants_differ_from_anchor` schedule
+  `resolve_subtree_rename_conflict`
+- busy descendants still defer to `create_conflict_copy`
+- subtree rename with an unusable target parent still defers to `create_conflict_copy`
+
+Executor rules:
+
+- `resolve_subtree_delete_conflict` must:
+  - preserve the full pre-resolution local subtree as one subtree artifact
+  - recursively remove the canonical local subtree
+  - preserve the root remote tombstone
+  - delete descendant remote rows
+  - clear subtree `local_state`, `sync_anchor`, and `planned_actions`
+  - clear preserved temp/local-only rows and their related planned, transfer, and pending-create
+    state
+- `resolve_subtree_rename_conflict` must:
+  - require the target parent chain to already be usable/materialized
+  - preserve the full pre-resolution local subtree as one subtree artifact
+  - remove preserved temp/local-only descendants from the live subtree
+  - restore bound descendants to the authoritative winner state under the current root before the
+    final root rename
+  - perform one durable root rename to the authoritative target path
+  - update the root `local_state` and root `sync_anchor` path view to the authoritative winner
+  - clear loser planned rows that referred to the preserved local changes
+
+Issue kinds:
+
+- `resolve_subtree_delete_conflict_failed`
+- `resolve_subtree_rename_conflict_failed`
+
+`detail_json.failure` must be one of:
+
+- `artifact_upload`
+- `artifact_write`
+- `current_path_missing`
+- `target_path_missing`
+- `destination_occupied`
+- `winner_restore_io`
+- `recursive_remove_io`
+- `rename_io`
+
+Executable invariant IDs for this slice:
+
+- `subtree_delete_conflict_preserves_loser_artifact`
+- `subtree_delete_conflict_preserves_full_subtree_entries`
+- `subtree_delete_conflict_removes_canonical_path`
+- `subtree_delete_conflict_clears_preserved_temp_rows`
+- `subtree_rename_conflict_preserves_loser_artifact`
+- `subtree_rename_conflict_reverts_bound_descendants_to_winner_state`
+- `subtree_rename_conflict_keeps_winner_canonical_path`
+- `subtree_rename_conflict_clears_preserved_temp_rows`
+- `subtree_conflict_artifact_key_matches_namespace_and_id`
+- `subtree_conflict_artifact_entries_are_durable`
+- `stable_paths_default_does_not_materialize_visible_sibling_tree`
 
 ## SQLite hardening boundary (schema v11)
 

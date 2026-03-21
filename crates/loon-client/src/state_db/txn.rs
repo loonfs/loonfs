@@ -4,9 +4,12 @@ use super::loads::{
     load_bound_apply_remote_rename_views_from_conn,
     load_bound_apply_remote_subtree_delete_views_from_conn,
     load_bound_apply_remote_subtree_rename_views_from_conn,
-    load_bound_download_remote_edit_views_from_conn, load_bound_upload_local_edit_views_from_conn,
-    load_conflict_artifact, load_conflict_artifacts_for_namespace, load_conflicts_and_errors,
-    load_inode_upload, load_local_file, load_local_only_candidates_for_namespace,
+    load_bound_download_remote_edit_views_from_conn,
+    load_bound_resolve_subtree_delete_conflict_views_from_conn,
+    load_bound_resolve_subtree_rename_conflict_views_from_conn,
+    load_bound_upload_local_edit_views_from_conn, load_conflict_artifact,
+    load_conflict_artifacts_for_namespace, load_conflicts_and_errors, load_inode_upload,
+    load_local_file, load_local_only_candidates_for_namespace,
     load_local_only_conflicts_and_errors, load_local_only_file, load_local_only_transfer_ledger,
     load_local_only_upload, load_next_deferred_planned_action, load_next_executable_planned_action,
     load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
@@ -152,6 +155,30 @@ impl SqliteStateDb {
         inode_id: InodeId,
     ) -> Result<BoundApplyRemoteSubtreeRenameViews, StateDbError> {
         load_bound_apply_remote_subtree_rename_views_from_conn(&self.conn, namespace_id, inode_id)
+    }
+
+    pub fn load_bound_resolve_subtree_delete_conflict_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<BoundResolveSubtreeDeleteConflictViews, StateDbError> {
+        load_bound_resolve_subtree_delete_conflict_views_from_conn(
+            &self.conn,
+            namespace_id,
+            inode_id,
+        )
+    }
+
+    pub fn load_bound_resolve_subtree_rename_conflict_views(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<BoundResolveSubtreeRenameConflictViews, StateDbError> {
+        load_bound_resolve_subtree_rename_conflict_views_from_conn(
+            &self.conn,
+            namespace_id,
+            inode_id,
+        )
     }
 
     pub fn load_planned_action(
@@ -553,6 +580,28 @@ impl SqliteStateDb {
     ) -> Result<AppliedInodeMutation, StateDbError> {
         self.planner_transaction("apply_remote_subtree_rename", |tx| {
             tx.apply_remote_subtree_rename(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_resolved_subtree_delete_conflict(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_resolved_subtree_delete_conflict", |tx| {
+            tx.apply_resolved_subtree_delete_conflict(namespace_id, inode_id, applied_at_ms)
+        })
+    }
+
+    pub fn apply_resolved_subtree_rename_conflict(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        self.planner_transaction("apply_resolved_subtree_rename_conflict", |tx| {
+            tx.apply_resolved_subtree_rename_conflict(namespace_id, inode_id, applied_at_ms)
         })
     }
 
@@ -2305,6 +2354,111 @@ impl PlannerTxn<'_> {
         })
     }
 
+    pub fn apply_resolved_subtree_delete_conflict(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        _applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = load_bound_resolve_subtree_delete_conflict_views_from_conn(
+            &self.tx,
+            namespace_id,
+            inode_id,
+        )?;
+
+        self.delete_planned_actions_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        self.delete_conflicts_and_errors_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        self.delete_remote_files_for_inodes(namespace_id, &views.descendant_remote_inode_ids)?;
+        self.delete_local_files_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        self.delete_sync_anchors_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        self.cleanup_local_only_subtree_entries(&views.local_only_descendants)?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
+    pub fn apply_resolved_subtree_rename_conflict(
+        &mut self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        applied_at_ms: u64,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = load_bound_resolve_subtree_rename_conflict_views_from_conn(
+            &self.tx,
+            namespace_id,
+            inode_id,
+        )?;
+
+        let next_root_local = LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: views.root_local.inode_kind,
+            content_digest: views.root_local.content_digest.clone(),
+            parent_inode_id: views.root_remote.parent_inode_id,
+            display_name: views.root_remote.display_name.clone(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: applied_at_ms,
+        };
+        let next_root_anchor = SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: views.root_remote.inode_kind.clone(),
+            synced_seq: views.root_remote.observed_seq,
+            revision_no: views.root_remote.revision_no,
+            content_digest: views.root_remote.content_digest.clone(),
+            content_manifest_digest: views.root_remote.content_manifest_digest.clone(),
+            parent_inode_id: views.root_remote.parent_inode_id,
+            display_name: views.root_remote.display_name.clone(),
+        };
+
+        self.upsert_local_file(&next_root_local)?;
+        self.upsert_sync_anchor(&next_root_anchor)?;
+
+        for entry in &views.bound_descendants {
+            self.delete_planned_action(namespace_id, entry.inode_id)?;
+            self.delete_inode_upload(namespace_id, entry.inode_id)?;
+            self.delete_transfer_ledger_for_inode(
+                namespace_id,
+                entry.inode_id,
+                TransferDirection::Upload,
+            )?;
+            if let Some(pending) =
+                load_pending_inode_mutation_for_inode(&self.tx, namespace_id, entry.inode_id)?
+            {
+                self.delete_pending_inode_mutation(&pending.client_request_id)?;
+            }
+
+            if entry.inode_id == inode_id {
+                continue;
+            }
+            if let Some(anchor) = entry.sync_anchor.as_ref() {
+                let next_local = LocalFileStateRow {
+                    namespace_id: namespace_id.clone(),
+                    inode_id: entry.inode_id,
+                    inode_kind: anchor.inode_kind.clone(),
+                    content_digest: anchor.content_digest.clone(),
+                    parent_inode_id: anchor.parent_inode_id,
+                    display_name: anchor.display_name.clone(),
+                    exists_on_disk: true,
+                    dirty: false,
+                    last_local_change_ms: applied_at_ms,
+                };
+                self.upsert_local_file(&next_local)?;
+            }
+        }
+
+        self.delete_conflicts_and_errors_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        self.cleanup_local_only_subtree_entries(&views.local_only_descendants)?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+        })
+    }
+
     pub fn apply_remote_observation(
         &mut self,
         observed: &ObservedRemoteInode,
@@ -2791,6 +2945,24 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    fn cleanup_local_only_subtree_entries(
+        &mut self,
+        entries: &[ConflictLocalOnlySubtreeEntry],
+    ) -> Result<(), StateDbError> {
+        for entry in entries {
+            let client_file_id = &entry.local_only.client_file_id;
+            self.delete_planned_local_only_action(client_file_id)?;
+            self.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
+            self.delete_local_only_upload(client_file_id)?;
+            if let Some(pending) = entry.pending_client_mutation.as_ref() {
+                self.delete_pending_client_mutation(&pending.client_request_id)?;
+            }
+            self.delete_local_only_conflicts_and_errors(client_file_id)?;
+            self.delete_local_only_file(client_file_id)?;
+        }
+        Ok(())
+    }
+
     pub fn delete_planned_actions_for_inodes(
         &mut self,
         namespace_id: &NamespaceId,
@@ -2893,12 +3065,14 @@ impl PlannerTxn<'_> {
                 namespace_id,
                 conflict_id,
                 object_key,
+                artifact_kind,
                 conflict_class,
                 artifact_json,
                 created_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(namespace_id, conflict_id) DO UPDATE SET
                 object_key = excluded.object_key,
+                artifact_kind = excluded.artifact_kind,
                 conflict_class = excluded.conflict_class,
                 artifact_json = excluded.artifact_json,
                 created_at_ms = excluded.created_at_ms",
@@ -2906,9 +3080,16 @@ impl PlannerTxn<'_> {
                 row.namespace_id.as_str(),
                 &row.conflict_id,
                 &row.object_key,
+                row.artifact_kind.as_str(),
                 row.conflict_class.as_str(),
-                serde_json::to_string(&row.envelope)
-                    .map_err(StateDbError::ConflictArtifactCodec)?,
+                match &row.envelope {
+                    ConflictArtifactEnvelopeRecord::File(envelope) =>
+                        serde_json::to_string(envelope),
+                    ConflictArtifactEnvelopeRecord::Subtree(envelope) => {
+                        serde_json::to_string(envelope)
+                    }
+                }
+                .map_err(StateDbError::ConflictArtifactCodec)?,
                 to_sql_u64(row.created_at_ms, "created_at_ms")?,
             ],
         )?;

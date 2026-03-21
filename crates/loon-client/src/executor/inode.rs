@@ -1,8 +1,10 @@
 use super::dispatch::dispatch_inode_mutation_from_state;
 use super::*;
 use crate::conflict::{
-    load_conflict_artifact, prepare_conflict_artifact, upload_loser_content_from_path,
-    write_conflict_artifact_if_absent,
+    load_conflict_artifact, load_subtree_conflict_artifact, prepare_conflict_artifact,
+    prepare_subtree_conflict_artifact, upload_loser_content_from_path,
+    write_conflict_artifact_if_absent, write_subtree_conflict_artifact_if_absent,
+    ConflictArtifactError,
 };
 use crate::download::{
     download_file_to_bytes, expected_staged_file_size, load_content_manifest,
@@ -15,9 +17,11 @@ use crate::local_apply::{
 };
 use crate::planner::{PlannedActionRecord, PlannerDecision};
 use crate::state_db::{
-    BoundApplyRemoteSubtreeDeleteViews, BoundApplyRemoteSubtreeRenameViews, ConflictArtifactRow,
-    InodeUploadRow, LocalOnlyFileStateRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
-    TransferDirection, TransferLedgerRow, TransferState,
+    BoundApplyRemoteSubtreeDeleteViews, BoundApplyRemoteSubtreeRenameViews,
+    BoundResolveSubtreeDeleteConflictViews, BoundResolveSubtreeRenameConflictViews,
+    ConflictArtifactEnvelopeRecord, ConflictArtifactRow, InodeUploadRow, LocalOnlyFileStateRow,
+    RemoteFileStateRow, SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow,
+    TransferState,
 };
 use crate::upload::{
     finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
@@ -25,8 +29,9 @@ use crate::upload::{
 use loon_objectstore::keys::conflict_artifact as conflict_artifact_key;
 use loon_objectstore::ObjectStore;
 use loon_types::{
-    sha256_digest, ClientMutationRequest, ClientMutationResponse, ConflictArtifactLoserSummary,
-    ConflictArtifactWinnerSummary, ConflictClass, InodeId, InodeKind, NamespaceId, RevisionNo,
+    sha256_digest, ClientMutationRequest, ClientMutationResponse, ConflictArtifactKind,
+    ConflictArtifactLoserSummary, ConflictArtifactWinnerSummary, ConflictClass, InodeId, InodeKind,
+    NamespaceId, RevisionNo, SubtreeConflictArtifactEntry, SubtreeConflictArtifactRootSummary,
 };
 use serde_json::json;
 use std::fs;
@@ -124,6 +129,30 @@ impl From<WinnerApplyError> for ExecuteResolveFileConflictError {
             },
             WinnerApplyError::LocalApply(error) => Self::from(error),
         }
+    }
+}
+
+fn winner_restore_error(error: LocalApplyError) -> ExecuteResolveSubtreeConflictError {
+    ExecuteResolveSubtreeConflictError::WinnerRestoreIo {
+        operation: error.operation,
+        path: error.path,
+        source: error.source,
+    }
+}
+
+fn recursive_remove_error(error: LocalApplyError) -> ExecuteResolveSubtreeConflictError {
+    ExecuteResolveSubtreeConflictError::RecursiveRemoveIo {
+        operation: error.operation,
+        path: error.path,
+        source: error.source,
+    }
+}
+
+fn rename_error(error: LocalApplyError) -> ExecuteResolveSubtreeConflictError {
+    ExecuteResolveSubtreeConflictError::RenameIo {
+        operation: error.operation,
+        path: error.path,
+        source: error.source,
     }
 }
 
@@ -632,6 +661,144 @@ pub(super) fn execute_resolve_path_binding_collision<S: ObjectStore>(
             namespace_id,
             inode_id,
             "resolve_path_binding_collision_local_apply_failed",
+            error,
+            applied_at_ms,
+        );
+    }
+
+    result
+}
+
+pub(super) fn execute_resolve_subtree_delete_conflict<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    applied_at_ms: u64,
+) -> Result<ExecutedResolveSubtreeDeleteConflict, ExecuteResolveSubtreeConflictError> {
+    let result = (|| {
+        let views = ensure_subtree_delete_conflict_ready(db, namespace_id, inode_id)?;
+        let current_path =
+            current_path.ok_or_else(|| ExecuteResolveSubtreeConflictError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+        if !current_path.exists() {
+            return Err(ExecuteResolveSubtreeConflictError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+
+        let artifact = ensure_subtree_delete_conflict_artifact(
+            db,
+            store,
+            namespace_id,
+            &views,
+            current_path,
+            applied_at_ms,
+        )?;
+
+        remove_tree_durably(current_path).map_err(recursive_remove_error)?;
+        let applied =
+            db.apply_resolved_subtree_delete_conflict(namespace_id, inode_id, applied_at_ms)?;
+        Ok(ExecutedResolveSubtreeDeleteConflict {
+            applied,
+            conflict_id: artifact.conflict_id,
+        })
+    })();
+
+    if let Err(error) = &result {
+        record_resolve_subtree_conflict_issue(
+            db,
+            namespace_id,
+            inode_id,
+            "resolve_subtree_delete_conflict_failed",
+            error,
+            applied_at_ms,
+        );
+    }
+
+    result
+}
+
+pub(super) fn execute_resolve_subtree_rename_conflict<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+) -> Result<ExecutedResolveSubtreeRenameConflict, ExecuteResolveSubtreeConflictError> {
+    let result = (|| {
+        let views = ensure_subtree_rename_conflict_ready(db, namespace_id, inode_id)?;
+        let current_path =
+            current_path.ok_or_else(|| ExecuteResolveSubtreeConflictError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+        if !current_path.exists() {
+            return Err(ExecuteResolveSubtreeConflictError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+        let target_path =
+            target_path.ok_or_else(|| ExecuteResolveSubtreeConflictError::TargetPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            })?;
+        let target_parent_exists = target_path.parent().is_some_and(|parent| parent.exists());
+        if !target_parent_exists || target_path == current_path {
+            return Err(ExecuteResolveSubtreeConflictError::TargetPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
+        if target_path.exists() {
+            return Err(ExecuteResolveSubtreeConflictError::DestinationOccupied {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+                path: target_path.display().to_string(),
+            });
+        }
+
+        let artifact = ensure_subtree_rename_conflict_artifact(
+            db,
+            store,
+            namespace_id,
+            &views,
+            current_path,
+            applied_at_ms,
+        )?;
+
+        remove_tree_durably(current_path).map_err(recursive_remove_error)?;
+        create_directory_durably(current_path).map_err(winner_restore_error)?;
+        rebuild_authoritative_subtree_under_root(
+            store,
+            namespace_id,
+            current_path,
+            &views.bound_descendants,
+            inode_id,
+        )?;
+        rename_path_durably(current_path, target_path).map_err(rename_error)?;
+
+        let applied =
+            db.apply_resolved_subtree_rename_conflict(namespace_id, inode_id, applied_at_ms)?;
+        Ok(ExecutedResolveSubtreeRenameConflict {
+            applied,
+            conflict_id: artifact.conflict_id,
+        })
+    })();
+
+    if let Err(error) = &result {
+        record_resolve_subtree_conflict_issue(
+            db,
+            namespace_id,
+            inode_id,
+            "resolve_subtree_rename_conflict_failed",
             error,
             applied_at_ms,
         );
@@ -1357,6 +1524,50 @@ fn ensure_path_binding_collision_ready(
     Ok((remote, collision.clone()))
 }
 
+fn ensure_subtree_delete_conflict_ready(
+    db: &SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<BoundResolveSubtreeDeleteConflictViews, ExecuteResolveSubtreeConflictError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::ResolveSubtreeDeleteConflict {
+        return Err(ExecuteResolveSubtreeConflictError::DecisionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            decision: planned.decision,
+        });
+    }
+    Ok(db.load_bound_resolve_subtree_delete_conflict_views(namespace_id, inode_id)?)
+}
+
+fn ensure_subtree_rename_conflict_ready(
+    db: &SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<BoundResolveSubtreeRenameConflictViews, ExecuteResolveSubtreeConflictError> {
+    let planned_row = db
+        .load_planned_action(namespace_id, inode_id)?
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let planned = PlannedActionRecord::try_from(planned_row)?;
+    if planned.decision != PlannerDecision::ResolveSubtreeRenameConflict {
+        return Err(ExecuteResolveSubtreeConflictError::DecisionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+            decision: planned.decision,
+        });
+    }
+    Ok(db.load_bound_resolve_subtree_rename_conflict_views(namespace_id, inode_id)?)
+}
+
 fn ensure_conflict_artifact_for_bound_file<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -1466,9 +1677,10 @@ fn ensure_conflict_artifact<S: ObjectStore>(
             namespace_id: namespace_id.clone(),
             conflict_id: conflict_id.clone(),
             object_key: conflict_artifact_key(namespace_id.as_str(), &conflict_id),
+            artifact_kind: ConflictArtifactKind::File,
             conflict_class: existing.conflict_class,
             created_at_ms: existing.created_at_ms,
-            envelope: existing,
+            envelope: ConflictArtifactEnvelopeRecord::File(existing),
         };
         db.planner_transaction("cache_conflict_artifact", |tx| {
             tx.upsert_conflict_artifact(&row)?;
@@ -1493,15 +1705,344 @@ fn ensure_conflict_artifact<S: ObjectStore>(
         namespace_id: namespace_id.clone(),
         conflict_id: artifact.envelope.conflict_id.clone(),
         object_key: artifact.object_key.clone(),
+        artifact_kind: ConflictArtifactKind::File,
         conflict_class: artifact.envelope.conflict_class,
         created_at_ms: artifact.envelope.created_at_ms,
-        envelope: artifact.envelope.clone(),
+        envelope: ConflictArtifactEnvelopeRecord::File(artifact.envelope.clone()),
     };
     db.planner_transaction("persist_conflict_artifact", |tx| {
         tx.upsert_conflict_artifact(&row)?;
         Ok(())
     })?;
     Ok(row)
+}
+
+fn ensure_subtree_delete_conflict_artifact<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    views: &BoundResolveSubtreeDeleteConflictViews,
+    current_root_path: &Path,
+    created_at_ms: u64,
+) -> Result<ConflictArtifactRow, ExecuteResolveSubtreeConflictError> {
+    ensure_subtree_conflict_artifact_inner(
+        db,
+        store,
+        namespace_id,
+        ConflictClass::SubtreeDeleteVsLocalChanges,
+        &views.root_remote,
+        &views.root_local,
+        &views.root_anchor,
+        &views.bound_descendants,
+        &views.local_only_descendants,
+        current_root_path,
+        created_at_ms,
+    )
+}
+
+fn ensure_subtree_rename_conflict_artifact<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    views: &BoundResolveSubtreeRenameConflictViews,
+    current_root_path: &Path,
+    created_at_ms: u64,
+) -> Result<ConflictArtifactRow, ExecuteResolveSubtreeConflictError> {
+    ensure_subtree_conflict_artifact_inner(
+        db,
+        store,
+        namespace_id,
+        ConflictClass::SubtreeRenameVsLocalChanges,
+        &views.root_remote,
+        &views.root_local,
+        &views.root_anchor,
+        &views.bound_descendants,
+        &views.local_only_descendants,
+        current_root_path,
+        created_at_ms,
+    )
+}
+
+fn ensure_subtree_conflict_artifact_inner<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_class: ConflictClass,
+    root_remote: &RemoteFileStateRow,
+    root_local: &crate::state_db::LocalFileStateRow,
+    root_anchor: &SyncAnchorRow,
+    bound_descendants: &[crate::state_db::ConflictBoundSubtreeEntry],
+    local_only_descendants: &[crate::state_db::ConflictLocalOnlySubtreeEntry],
+    current_root_path: &Path,
+    created_at_ms: u64,
+) -> Result<ConflictArtifactRow, ExecuteResolveSubtreeConflictError> {
+    let winner = ConflictArtifactWinnerSummary {
+        inode_id: root_remote.inode_id,
+        parent_inode_id: root_remote.parent_inode_id,
+        display_name: root_remote.display_name.clone(),
+        revision_no: root_remote.revision_no,
+        content_manifest_digest: root_remote.content_manifest_digest.clone(),
+    };
+    let loser_root = SubtreeConflictArtifactRootSummary {
+        inode_id: root_local.inode_id,
+        parent_inode_id: root_local.parent_inode_id,
+        display_name: root_local.display_name.clone(),
+        revision_no: Some(root_anchor.revision_no),
+    };
+    let entries = build_subtree_conflict_entries(
+        store,
+        namespace_id,
+        bound_descendants,
+        local_only_descendants,
+        current_root_path,
+    )?;
+    let conflict_id = loon_types::deterministic_subtree_conflict_id(
+        namespace_id,
+        conflict_class,
+        &winner,
+        &loser_root,
+        &entries,
+        root_remote.observed_seq,
+    );
+    if let Some(existing) = db.load_conflict_artifact(namespace_id, &conflict_id)? {
+        return Ok(existing);
+    }
+    if let Some(existing) = load_subtree_conflict_artifact(store, namespace_id, &conflict_id)? {
+        let row = ConflictArtifactRow {
+            namespace_id: namespace_id.clone(),
+            conflict_id: conflict_id.clone(),
+            object_key: conflict_artifact_key(namespace_id.as_str(), &conflict_id),
+            artifact_kind: ConflictArtifactKind::Subtree,
+            conflict_class: existing.conflict_class,
+            created_at_ms: existing.created_at_ms,
+            envelope: ConflictArtifactEnvelopeRecord::Subtree(existing),
+        };
+        db.planner_transaction("cache_subtree_conflict_artifact", |tx| {
+            tx.upsert_conflict_artifact(&row)?;
+            Ok(())
+        })?;
+        return Ok(row);
+    }
+
+    let artifact = prepare_subtree_conflict_artifact(
+        namespace_id,
+        conflict_class,
+        root_remote.observed_seq,
+        winner,
+        loser_root,
+        entries,
+        created_at_ms,
+    );
+    write_subtree_conflict_artifact_if_absent(store, &artifact)?;
+    let row = ConflictArtifactRow {
+        namespace_id: namespace_id.clone(),
+        conflict_id: artifact.envelope.conflict_id.clone(),
+        object_key: artifact.object_key.clone(),
+        artifact_kind: ConflictArtifactKind::Subtree,
+        conflict_class: artifact.envelope.conflict_class,
+        created_at_ms: artifact.envelope.created_at_ms,
+        envelope: ConflictArtifactEnvelopeRecord::Subtree(artifact.envelope.clone()),
+    };
+    db.planner_transaction("persist_subtree_conflict_artifact", |tx| {
+        tx.upsert_conflict_artifact(&row)?;
+        Ok(())
+    })?;
+    Ok(row)
+}
+
+fn build_subtree_conflict_entries<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    bound_descendants: &[crate::state_db::ConflictBoundSubtreeEntry],
+    local_only_descendants: &[crate::state_db::ConflictLocalOnlySubtreeEntry],
+    current_root_path: &Path,
+) -> Result<Vec<SubtreeConflictArtifactEntry>, ExecuteResolveSubtreeConflictError> {
+    let mut entries = Vec::new();
+
+    for entry in bound_descendants {
+        if entry.current_relative_path.is_empty() {
+            continue;
+        }
+        let (content_manifest_digest, content_digest) = match entry.local.inode_kind {
+            InodeKind::File => {
+                if entry.local.dirty {
+                    let uploaded = upload_loser_content_from_path(
+                        store,
+                        namespace_id,
+                        &subtree_entry_path(current_root_path, &entry.current_relative_path),
+                    )?;
+                    (
+                        Some(uploaded.content_manifest_digest),
+                        Some(uploaded.file_digest_sha256),
+                    )
+                } else if let Some(anchor) = entry.sync_anchor.as_ref() {
+                    (
+                        anchor.content_manifest_digest.clone(),
+                        anchor
+                            .content_digest
+                            .clone()
+                            .or(entry.local.content_digest.clone()),
+                    )
+                } else if let Some(remote) = entry.remote.as_ref() {
+                    (
+                        remote.content_manifest_digest.clone(),
+                        remote
+                            .content_digest
+                            .clone()
+                            .or(entry.local.content_digest.clone()),
+                    )
+                } else {
+                    (None, entry.local.content_digest.clone())
+                }
+            }
+            _ => (None, None),
+        };
+        entries.push(SubtreeConflictArtifactEntry {
+            relative_path: entry.current_relative_path.clone(),
+            inode_kind: entry.local.inode_kind.clone(),
+            inode_id: Some(entry.inode_id),
+            client_file_id: None,
+            base_revision_no: entry.sync_anchor.as_ref().map(|anchor| anchor.revision_no),
+            content_manifest_digest,
+            content_digest,
+            parent_inode_id: entry.local.parent_inode_id,
+            display_name: entry.local.display_name.clone(),
+        });
+    }
+
+    for entry in local_only_descendants {
+        let (content_manifest_digest, content_digest) = match entry.local_only.inode_kind {
+            InodeKind::File => {
+                if let Some(upload) = entry.upload.as_ref() {
+                    if entry.local_only.content_digest.as_deref()
+                        == Some(upload.file_digest_sha256.as_str())
+                    {
+                        (
+                            Some(upload.content_manifest_digest.clone()),
+                            Some(upload.file_digest_sha256.clone()),
+                        )
+                    } else {
+                        let uploaded = upload_loser_content_from_path(
+                            store,
+                            namespace_id,
+                            &subtree_entry_path(current_root_path, &entry.current_relative_path),
+                        )?;
+                        (
+                            Some(uploaded.content_manifest_digest),
+                            Some(uploaded.file_digest_sha256),
+                        )
+                    }
+                } else {
+                    let uploaded = upload_loser_content_from_path(
+                        store,
+                        namespace_id,
+                        &subtree_entry_path(current_root_path, &entry.current_relative_path),
+                    )?;
+                    (
+                        Some(uploaded.content_manifest_digest),
+                        Some(uploaded.file_digest_sha256),
+                    )
+                }
+            }
+            _ => (None, None),
+        };
+        entries.push(SubtreeConflictArtifactEntry {
+            relative_path: entry.current_relative_path.clone(),
+            inode_kind: entry.local_only.inode_kind.clone(),
+            inode_id: None,
+            client_file_id: Some(entry.local_only.client_file_id.as_str().to_owned()),
+            base_revision_no: None,
+            content_manifest_digest,
+            content_digest,
+            parent_inode_id: entry.local_only.parent_inode_id,
+            display_name: entry.local_only.display_name.clone(),
+        });
+    }
+
+    entries.sort_by(|left, right| {
+        left.relative_path
+            .cmp(&right.relative_path)
+            .then_with(|| left.client_file_id.cmp(&right.client_file_id))
+            .then_with(|| left.inode_id.cmp(&right.inode_id))
+    });
+    Ok(entries)
+}
+
+fn subtree_entry_path(root_path: &Path, relative_path: &str) -> std::path::PathBuf {
+    if relative_path.is_empty() {
+        root_path.to_path_buf()
+    } else {
+        root_path.join(relative_path)
+    }
+}
+
+fn rebuild_authoritative_subtree_under_root<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    current_root_path: &Path,
+    bound_descendants: &[crate::state_db::ConflictBoundSubtreeEntry],
+    root_inode_id: InodeId,
+) -> Result<(), ExecuteResolveSubtreeConflictError> {
+    let mut directory_entries = Vec::new();
+    let mut file_entries = Vec::new();
+    for entry in bound_descendants {
+        if entry.inode_id == root_inode_id {
+            continue;
+        }
+        let Some(anchor) = entry.sync_anchor.as_ref() else {
+            continue;
+        };
+        let Some(authoritative_relative_path) = entry.authoritative_relative_path.as_ref() else {
+            continue;
+        };
+        match anchor.inode_kind {
+            InodeKind::Dir => directory_entries.push(authoritative_relative_path.clone()),
+            InodeKind::File => {
+                file_entries.push((entry, anchor, authoritative_relative_path.clone()))
+            }
+            _ => {}
+        }
+    }
+
+    directory_entries.sort_by(|left, right| {
+        left.matches('/')
+            .count()
+            .cmp(&right.matches('/').count())
+            .then_with(|| left.cmp(right))
+    });
+    for relative_path in directory_entries {
+        create_directory_durably(&subtree_entry_path(current_root_path, &relative_path))
+            .map_err(winner_restore_error)?;
+    }
+
+    file_entries.sort_by(|(left_entry, _, left_path), (right_entry, _, right_path)| {
+        left_path
+            .cmp(right_path)
+            .then_with(|| left_entry.inode_id.0.cmp(&right_entry.inode_id.0))
+    });
+    for (entry, anchor, relative_path) in file_entries {
+        let manifest_digest = anchor
+            .content_manifest_digest
+            .as_deref()
+            .or_else(|| {
+                entry
+                    .remote
+                    .as_ref()
+                    .and_then(|remote| remote.content_manifest_digest.as_deref())
+            })
+            .ok_or_else(|| StateDbError::DownloadRemoteEditManifestMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: entry.inode_id.0,
+            })?;
+        let downloaded = download_file_to_bytes(store, namespace_id, manifest_digest)?;
+        apply_bytes_atomically(
+            &subtree_entry_path(current_root_path, &relative_path),
+            &downloaded.bytes,
+        )
+        .map_err(winner_restore_error)?;
+    }
+
+    Ok(())
 }
 
 fn apply_remote_bytes_in_place(
@@ -2395,6 +2936,96 @@ fn record_resolve_file_conflict_issue(
             "resolve file conflict failed while loading the authoritative winner",
             json!({
                 "failure": "winner_download_failed",
+                "source": error.to_string(),
+            }),
+        ),
+        _ => return,
+    };
+
+    let _ = db.record_conflict_or_error(
+        namespace_id,
+        inode_id,
+        kind,
+        summary,
+        &detail_json,
+        created_at_ms,
+    );
+}
+
+fn record_resolve_subtree_conflict_issue(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    kind: &'static str,
+    error: &ExecuteResolveSubtreeConflictError,
+    created_at_ms: u64,
+) {
+    let (summary, detail_json) = match error {
+        ExecuteResolveSubtreeConflictError::CurrentPathMissing { .. } => (
+            "resolve subtree conflict could not resolve the current local path",
+            json!({ "failure": "current_path_missing" }),
+        ),
+        ExecuteResolveSubtreeConflictError::TargetPathMissing { .. } => (
+            "resolve subtree conflict could not resolve the target local path",
+            json!({ "failure": "target_path_missing" }),
+        ),
+        ExecuteResolveSubtreeConflictError::DestinationOccupied { .. } => (
+            "resolve subtree conflict found the destination slot already occupied",
+            json!({ "failure": "destination_occupied" }),
+        ),
+        ExecuteResolveSubtreeConflictError::WinnerRestoreIo {
+            operation,
+            path,
+            source,
+        } => (
+            "resolve subtree conflict failed while restoring the authoritative winner subtree",
+            json!({
+                "failure": "winner_restore_io",
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        ),
+        ExecuteResolveSubtreeConflictError::RecursiveRemoveIo {
+            operation,
+            path,
+            source,
+        } => (
+            "resolve subtree conflict failed while removing the loser subtree",
+            json!({
+                "failure": "recursive_remove_io",
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        ),
+        ExecuteResolveSubtreeConflictError::RenameIo {
+            operation,
+            path,
+            source,
+        } => (
+            "resolve subtree conflict failed during the final authoritative rename",
+            json!({
+                "failure": "rename_io",
+                "operation": operation,
+                "path": path,
+                "source": source.to_string(),
+            }),
+        ),
+        ExecuteResolveSubtreeConflictError::ConflictArtifact(error) => (
+            "resolve subtree conflict failed while preserving the loser subtree artifact",
+            json!({
+                "failure": match error {
+                    ConflictArtifactError::Upload(_) => "artifact_upload",
+                    _ => "artifact_write",
+                },
+                "source": error.to_string(),
+            }),
+        ),
+        ExecuteResolveSubtreeConflictError::Download(error) => (
+            "resolve subtree conflict failed while loading authoritative winner content",
+            json!({
+                "failure": "winner_restore_io",
                 "source": error.to_string(),
             }),
         ),
