@@ -4,17 +4,21 @@ use crate::local_apply::{
     rename_path_durably, LocalApplyError,
 };
 use crate::state_db::{
-    ConflictArtifactEnvelopeRecord, ConflictArtifactRow, SqliteStateDb, StateDbError,
+    ConflictArtifactArchiveRow, ConflictArtifactEnvelopeRecord, ConflictArtifactRow, SqliteStateDb,
+    StateDbError,
 };
 use crate::upload::{upload_small_file_from_path, UploadError, UploadedContent};
 use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::keys::{conflict_artifact, conflict_artifact_prefix};
+use loon_objectstore::keys::{
+    conflict_artifact, conflict_artifact_archive, conflict_artifact_archive_prefix,
+    conflict_artifact_prefix,
+};
 use loon_objectstore::ObjectStore;
 use loon_types::{
     deterministic_conflict_id, deterministic_subtree_conflict_id, ChangeSeq,
-    ConflictArtifactEnvelope, ConflictArtifactKind, ConflictArtifactLoserSummary,
-    ConflictArtifactWinnerSummary, ConflictClass, ConflictPolicy, InodeKind, NamespaceId,
-    SubtreeConflictArtifactEntry, SubtreeConflictArtifactEnvelope,
+    ConflictArtifactArchiveEnvelope, ConflictArtifactEnvelope, ConflictArtifactKind,
+    ConflictArtifactLoserSummary, ConflictArtifactWinnerSummary, ConflictClass, ConflictPolicy,
+    InodeKind, NamespaceId, SubtreeConflictArtifactEntry, SubtreeConflictArtifactEnvelope,
     SubtreeConflictArtifactRootSummary,
 };
 use serde_json::{Error as JsonError, Value};
@@ -39,6 +43,12 @@ pub enum ConflictArtifactError {
         #[source]
         source: JsonError,
     },
+    #[error("failed to encode conflict artifact archive `{conflict_id}`: {source}")]
+    EncodeArchive {
+        conflict_id: String,
+        #[source]
+        source: JsonError,
+    },
     #[error("failed to decode conflict artifact `{conflict_id}`: {source}")]
     Decode {
         conflict_id: String,
@@ -51,8 +61,20 @@ pub enum ConflictArtifactError {
         #[source]
         source: JsonError,
     },
+    #[error("failed to decode conflict artifact archive object `{object_key}`: {source}")]
+    DecodeArchiveObject {
+        object_key: String,
+        #[source]
+        source: JsonError,
+    },
     #[error("failed to write conflict artifact `{object_key}`: {source}")]
     StoreWrite {
+        object_key: String,
+        #[source]
+        source: ObjectStoreError,
+    },
+    #[error("failed to delete conflict artifact `{object_key}`: {source}")]
+    StoreDelete {
         object_key: String,
         #[source]
         source: ObjectStoreError,
@@ -84,6 +106,8 @@ pub enum ConflictArtifactError {
     },
     #[error("conflict artifact `{object_key}` failed validation: {detail}")]
     InvalidArtifact { object_key: String, detail: String },
+    #[error("conflict artifact archive `{object_key}` failed validation: {detail}")]
+    InvalidArchive { object_key: String, detail: String },
     #[error("restore destination already exists: `{path}`")]
     DestinationExists { path: String },
     #[error("restore destination parent does not exist: `{path}`")]
@@ -94,6 +118,8 @@ pub enum ConflictArtifactError {
     DestinationPathMissingLeaf { path: String },
     #[error("existing conflict artifact `{object_key}` does not match expected bytes")]
     ExistingArtifactMismatch { object_key: String },
+    #[error("existing conflict artifact archive `{object_key}` does not match expected bytes")]
+    ExistingArchiveMismatch { object_key: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +350,180 @@ pub fn load_or_discover_conflict_artifact<S: ObjectStore>(
     Ok(Some(row))
 }
 
+pub fn discover_conflict_artifact_archives_for_namespace<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<ConflictArtifactArchiveRow>, ConflictArtifactError> {
+    let prefix = conflict_artifact_archive_prefix(namespace_id.as_str());
+    let mut object_keys =
+        store
+            .list_prefix(&prefix)
+            .map_err(|source| ConflictArtifactError::StoreList {
+                prefix: prefix.clone(),
+                source,
+            })?;
+    object_keys.sort();
+
+    let cached_artifacts = db.load_conflict_artifacts_for_namespace(namespace_id)?;
+    let cached_conflict_ids: std::collections::BTreeSet<&str> = cached_artifacts
+        .iter()
+        .map(|row| row.conflict_id.as_str())
+        .collect();
+
+    let mut rows = Vec::with_capacity(object_keys.len());
+    for object_key in object_keys {
+        let Some(row) =
+            load_conflict_artifact_archive_row_from_store(store, namespace_id, &object_key)?
+        else {
+            return Err(ConflictArtifactError::ArtifactNotFound {
+                conflict_id: object_key.clone(),
+                object_key,
+            });
+        };
+        if !cached_conflict_ids.contains(row.conflict_id.as_str()) {
+            return Err(ConflictArtifactError::InvalidArchive {
+                object_key: row.object_key.clone(),
+                detail: format!(
+                    "archive sidecar references missing cached artifact `{}`",
+                    row.conflict_id
+                ),
+            });
+        }
+        rows.push(row);
+    }
+    rows.sort_by(|left, right| {
+        left.archived_at_ms
+            .cmp(&right.archived_at_ms)
+            .then_with(|| left.conflict_id.cmp(&right.conflict_id))
+    });
+
+    db.planner_transaction("cache_discovered_conflict_artifact_archives", |tx| {
+        tx.delete_conflict_artifact_archives_for_namespace(namespace_id)?;
+        for row in &rows {
+            tx.upsert_conflict_artifact_archive(row)?;
+        }
+        Ok(())
+    })?;
+    Ok(rows)
+}
+
+pub fn load_or_discover_conflict_artifact_archive<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+) -> Result<Option<ConflictArtifactArchiveRow>, ConflictArtifactError> {
+    let Some(_artifact_row) =
+        load_or_discover_conflict_artifact(db, store, namespace_id, conflict_id)?
+    else {
+        return Err(ConflictArtifactError::ArtifactNotFound {
+            conflict_id: conflict_id.to_owned(),
+            object_key: conflict_artifact(namespace_id.as_str(), conflict_id),
+        });
+    };
+
+    if let Some(row) = db.load_conflict_artifact_archive(namespace_id, conflict_id)? {
+        return Ok(Some(row));
+    }
+
+    let object_key = conflict_artifact_archive(namespace_id.as_str(), conflict_id);
+    let Some(row) =
+        load_conflict_artifact_archive_row_from_store(store, namespace_id, &object_key)?
+    else {
+        return Ok(None);
+    };
+    db.planner_transaction("cache_discovered_conflict_artifact_archive", |tx| {
+        tx.upsert_conflict_artifact_archive(&row)?;
+        Ok(())
+    })?;
+    Ok(Some(row))
+}
+
+pub fn archive_conflict_artifact<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+    archived_at_ms: u64,
+) -> Result<ConflictArtifactArchiveRow, ConflictArtifactError> {
+    let Some(_artifact_row) =
+        load_or_discover_conflict_artifact(db, store, namespace_id, conflict_id)?
+    else {
+        return Err(ConflictArtifactError::ArtifactNotFound {
+            conflict_id: conflict_id.to_owned(),
+            object_key: conflict_artifact(namespace_id.as_str(), conflict_id),
+        });
+    };
+
+    if let Some(row) = db.load_conflict_artifact_archive(namespace_id, conflict_id)? {
+        return Ok(row);
+    }
+
+    let object_key = conflict_artifact_archive(namespace_id.as_str(), conflict_id);
+    if let Some(row) =
+        load_conflict_artifact_archive_row_from_store(store, namespace_id, &object_key)?
+    {
+        db.planner_transaction("cache_existing_conflict_artifact_archive", |tx| {
+            tx.upsert_conflict_artifact_archive(&row)?;
+            Ok(())
+        })?;
+        return Ok(row);
+    }
+
+    let envelope = ConflictArtifactArchiveEnvelope {
+        namespace_id: namespace_id.clone(),
+        conflict_id: conflict_id.to_owned(),
+        archived_at_ms,
+    };
+    let bytes =
+        serde_json::to_vec(&envelope).map_err(|source| ConflictArtifactError::EncodeArchive {
+            conflict_id: conflict_id.to_owned(),
+            source,
+        })?;
+    write_archive_bytes_if_absent(store, &object_key, &bytes)?;
+
+    let row = load_conflict_artifact_archive_row_from_store(store, namespace_id, &object_key)?
+        .ok_or_else(|| ConflictArtifactError::ArtifactNotFound {
+            conflict_id: conflict_id.to_owned(),
+            object_key: object_key.clone(),
+        })?;
+    db.planner_transaction("cache_archived_conflict_artifact", |tx| {
+        tx.upsert_conflict_artifact_archive(&row)?;
+        Ok(())
+    })?;
+    Ok(row)
+}
+
+pub fn unarchive_conflict_artifact<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+) -> Result<(), ConflictArtifactError> {
+    let Some(_artifact_row) =
+        load_or_discover_conflict_artifact(db, store, namespace_id, conflict_id)?
+    else {
+        return Err(ConflictArtifactError::ArtifactNotFound {
+            conflict_id: conflict_id.to_owned(),
+            object_key: conflict_artifact(namespace_id.as_str(), conflict_id),
+        });
+    };
+
+    let object_key = conflict_artifact_archive(namespace_id.as_str(), conflict_id);
+    store
+        .delete(&object_key)
+        .map_err(|source| ConflictArtifactError::StoreDelete {
+            object_key: object_key.clone(),
+            source,
+        })?;
+    db.planner_transaction("uncache_conflict_artifact_archive", |tx| {
+        tx.delete_conflict_artifact_archive(namespace_id, conflict_id)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
 pub fn restore_conflict_artifact_to_path<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -421,6 +621,39 @@ fn write_artifact_bytes_if_absent<S: ObjectStore>(
     }
 }
 
+fn write_archive_bytes_if_absent<S: ObjectStore>(
+    store: &S,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<(), ConflictArtifactError> {
+    match store.put_if_absent(object_key, bytes) {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed) => {
+            let existing =
+                store
+                    .get(object_key, None)
+                    .map_err(|source| ConflictArtifactError::StoreRead {
+                        object_key: object_key.to_owned(),
+                        source,
+                    })?;
+            match existing {
+                Some(existing) if existing == bytes => Ok(()),
+                Some(_) => Err(ConflictArtifactError::ExistingArchiveMismatch {
+                    object_key: object_key.to_owned(),
+                }),
+                None => Err(ConflictArtifactError::StoreRead {
+                    object_key: object_key.to_owned(),
+                    source: ObjectStoreError::NotFound,
+                }),
+            }
+        }
+        Err(source) => Err(ConflictArtifactError::StoreWrite {
+            object_key: object_key.to_owned(),
+            source,
+        }),
+    }
+}
+
 fn load_conflict_artifact_row_from_store<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -437,6 +670,24 @@ fn load_conflict_artifact_row_from_store<S: ObjectStore>(
         return Ok(None);
     };
     decode_conflict_artifact_row(namespace_id, object_key, &bytes).map(Some)
+}
+
+fn load_conflict_artifact_archive_row_from_store<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    object_key: &str,
+) -> Result<Option<ConflictArtifactArchiveRow>, ConflictArtifactError> {
+    let Some(bytes) =
+        store
+            .get(object_key, None)
+            .map_err(|source| ConflictArtifactError::StoreRead {
+                object_key: object_key.to_owned(),
+                source,
+            })?
+    else {
+        return Ok(None);
+    };
+    decode_conflict_artifact_archive_row(namespace_id, object_key, &bytes).map(Some)
 }
 
 fn decode_conflict_artifact_row(
@@ -499,6 +750,27 @@ fn decode_conflict_artifact_row(
     };
 
     Ok(row)
+}
+
+fn decode_conflict_artifact_archive_row(
+    namespace_id: &NamespaceId,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<ConflictArtifactArchiveRow, ConflictArtifactError> {
+    let envelope: ConflictArtifactArchiveEnvelope =
+        serde_json::from_slice(bytes).map_err(|source| {
+            ConflictArtifactError::DecodeArchiveObject {
+                object_key: object_key.to_owned(),
+                source,
+            }
+        })?;
+    validate_conflict_artifact_archive(namespace_id, object_key, &envelope)?;
+    Ok(ConflictArtifactArchiveRow {
+        namespace_id: namespace_id.clone(),
+        conflict_id: envelope.conflict_id,
+        object_key: object_key.to_owned(),
+        archived_at_ms: envelope.archived_at_ms,
+    })
 }
 
 fn validate_file_conflict_artifact(
@@ -616,6 +888,33 @@ fn validate_common_conflict_artifact(
         return Err(ConflictArtifactError::InvalidArtifact {
             object_key: object_key.to_owned(),
             detail: format!("unsupported conflict policy `{}`", policy_applied.as_str()),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_conflict_artifact_archive(
+    namespace_id: &NamespaceId,
+    object_key: &str,
+    envelope: &ConflictArtifactArchiveEnvelope,
+) -> Result<(), ConflictArtifactError> {
+    if envelope.namespace_id != *namespace_id {
+        return Err(ConflictArtifactError::InvalidArchive {
+            object_key: object_key.to_owned(),
+            detail: format!(
+                "archive namespace mismatch: expected `{}`, actual `{}`",
+                namespace_id.as_str(),
+                envelope.namespace_id.as_str()
+            ),
+        });
+    }
+
+    let expected_key = conflict_artifact_archive(namespace_id.as_str(), &envelope.conflict_id);
+    if object_key != expected_key {
+        return Err(ConflictArtifactError::InvalidArchive {
+            object_key: object_key.to_owned(),
+            detail: format!("archive key mismatch: expected `{expected_key}`"),
         });
     }
 

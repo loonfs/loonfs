@@ -1,20 +1,30 @@
 use anyhow::{anyhow, bail, Result};
-use loon_client::state_db::{ConflictArtifactRow, SqliteStateDb};
+use loon_client::state_db::{ConflictArtifactArchiveRow, ConflictArtifactRow, SqliteStateDb};
 use loon_client::{
+    archive_conflict_artifact, discover_conflict_artifact_archives_for_namespace,
     discover_conflict_artifacts_for_namespace, load_or_discover_conflict_artifact,
-    restore_conflict_artifact_to_path, RestoredConflictArtifact,
+    restore_conflict_artifact_to_path, unarchive_conflict_artifact, RestoredConflictArtifact,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_testkit::render::render_yaml;
-use loon_types::NamespaceId;
+use loon_types::{ConflictArtifactArchiveEnvelope, ConflictArtifactLifecycleState, NamespaceId};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictListFilter {
+    Active,
+    All,
+    Archived,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictListArgs {
     pub namespace_id: NamespaceId,
     pub db_path: PathBuf,
     pub store_root: PathBuf,
+    pub filter: ConflictListFilter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,29 +44,60 @@ pub struct ConflictRestoreArgs {
     pub destination_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictArchiveArgs {
+    pub namespace_id: NamespaceId,
+    pub conflict_id: String,
+    pub db_path: PathBuf,
+    pub store_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictUnarchiveArgs {
+    pub namespace_id: NamespaceId,
+    pub conflict_id: String,
+    pub db_path: PathBuf,
+    pub store_root: PathBuf,
+}
+
 struct ConflictCommandContext {
     db: SqliteStateDb,
     store: LocalFsStore,
+}
+
+#[derive(Debug, Clone)]
+struct RefreshedConflictCache {
+    artifacts: Vec<ConflictArtifactRow>,
+    archives_by_conflict_id: BTreeMap<String, ConflictArtifactArchiveRow>,
+}
+
+#[derive(Debug)]
+struct ParsedConflictFlags {
+    db_path: PathBuf,
+    store_root: PathBuf,
+    destination_path: Option<PathBuf>,
+    list_filter: ConflictListFilter,
 }
 
 pub fn parse_conflict_list_args(
     mut args: impl Iterator<Item = String>,
 ) -> Result<ConflictListArgs> {
     let namespace_id = args.next().map(NamespaceId::from).ok_or_else(|| {
-        anyhow!("usage: conflict-list <namespace_id> --db <path> --store-root <path>")
+        anyhow!(
+            "usage: conflict-list <namespace_id> --db <path> --store-root <path> [--all|--archived]"
+        )
     })?;
-    let (db_path, store_root, destination_path) = parse_conflict_flags(
+    let parsed = parse_conflict_flags(
         args,
-        "usage: conflict-list <namespace_id> --db <path> --store-root <path>",
+        "usage: conflict-list <namespace_id> --db <path> --store-root <path> [--all|--archived]",
         false,
+        true,
     )?;
-    if destination_path.is_some() {
-        bail!("unexpected --to argument for conflict-list");
-    }
     Ok(ConflictListArgs {
         namespace_id,
-        db_path,
-        store_root,
+        db_path: parsed.db_path,
+        store_root: parsed.store_root,
+        filter: parsed.list_filter,
     })
 }
 
@@ -69,19 +110,17 @@ pub fn parse_conflict_show_args(
     let conflict_id = args.next().ok_or_else(|| {
         anyhow!("usage: conflict-show <namespace_id> <conflict_id> --db <path> --store-root <path>")
     })?;
-    let (db_path, store_root, destination_path) = parse_conflict_flags(
+    let parsed = parse_conflict_flags(
         args,
         "usage: conflict-show <namespace_id> <conflict_id> --db <path> --store-root <path>",
         false,
+        false,
     )?;
-    if destination_path.is_some() {
-        bail!("unexpected --to argument for conflict-show");
-    }
     Ok(ConflictShowArgs {
         namespace_id,
         conflict_id,
-        db_path,
-        store_root,
+        db_path: parsed.db_path,
+        store_root: parsed.store_root,
     })
 }
 
@@ -97,49 +136,97 @@ pub fn parse_conflict_restore_args(
             "usage: conflict-restore <namespace_id> <conflict_id> --db <path> --store-root <path> --to <path>"
         )
     })?;
-    let (db_path, store_root, destination_path) = parse_conflict_flags(
+    let parsed = parse_conflict_flags(
         args,
         "usage: conflict-restore <namespace_id> <conflict_id> --db <path> --store-root <path> --to <path>",
         true,
+        false,
     )?;
     Ok(ConflictRestoreArgs {
         namespace_id,
         conflict_id,
-        db_path,
-        store_root,
-        destination_path: destination_path.expect("conflict-restore requires destination"),
+        db_path: parsed.db_path,
+        store_root: parsed.store_root,
+        destination_path: parsed
+            .destination_path
+            .expect("conflict-restore requires destination"),
+    })
+}
+
+pub fn parse_conflict_archive_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<ConflictArchiveArgs> {
+    let namespace_id = args.next().map(NamespaceId::from).ok_or_else(|| {
+        anyhow!(
+            "usage: conflict-archive <namespace_id> <conflict_id> --db <path> --store-root <path>"
+        )
+    })?;
+    let conflict_id = args.next().ok_or_else(|| {
+        anyhow!(
+            "usage: conflict-archive <namespace_id> <conflict_id> --db <path> --store-root <path>"
+        )
+    })?;
+    let parsed = parse_conflict_flags(
+        args,
+        "usage: conflict-archive <namespace_id> <conflict_id> --db <path> --store-root <path>",
+        false,
+        false,
+    )?;
+    Ok(ConflictArchiveArgs {
+        namespace_id,
+        conflict_id,
+        db_path: parsed.db_path,
+        store_root: parsed.store_root,
+    })
+}
+
+pub fn parse_conflict_unarchive_args(
+    mut args: impl Iterator<Item = String>,
+) -> Result<ConflictUnarchiveArgs> {
+    let namespace_id = args
+        .next()
+        .map(NamespaceId::from)
+        .ok_or_else(|| anyhow!("usage: conflict-unarchive <namespace_id> <conflict_id> --db <path> --store-root <path>"))?;
+    let conflict_id = args.next().ok_or_else(|| {
+        anyhow!("usage: conflict-unarchive <namespace_id> <conflict_id> --db <path> --store-root <path>")
+    })?;
+    let parsed = parse_conflict_flags(
+        args,
+        "usage: conflict-unarchive <namespace_id> <conflict_id> --db <path> --store-root <path>",
+        false,
+        false,
+    )?;
+    Ok(ConflictUnarchiveArgs {
+        namespace_id,
+        conflict_id,
+        db_path: parsed.db_path,
+        store_root: parsed.store_root,
     })
 }
 
 pub fn run_conflict_list(args: ConflictListArgs) -> Result<String> {
     let mut context = open_conflict_command_context(&args.db_path, &args.store_root)?;
-    let discovered_rows = discover_conflict_artifacts_for_namespace(
-        &mut context.db,
-        &context.store,
-        &args.namespace_id,
-    )?;
-    let cached_rows = context
-        .db
-        .load_conflict_artifacts_for_namespace(&args.namespace_id)?;
+    let cache = refresh_conflict_cache(&mut context, &args.namespace_id)?;
+    let visible_rows = filter_artifact_rows(
+        &cache.artifacts,
+        &cache.archives_by_conflict_id,
+        args.filter,
+    );
 
     let mut rendered = String::new();
     let _ = writeln!(
         &mut rendered,
         "namespace={} discovered_count={} cached_count_after={}",
         args.namespace_id.as_str(),
-        discovered_rows.len(),
-        cached_rows.len()
+        cache.artifacts.len(),
+        cache.artifacts.len()
     );
-    for (index, row) in cached_rows.iter().enumerate() {
+    for (index, row) in visible_rows.iter().enumerate() {
+        let archive = cache.archives_by_conflict_id.get(row.conflict_id.as_str());
         let _ = writeln!(
             &mut rendered,
-            "index={} conflict_id={} artifact_kind={} conflict_class={} created_at_ms={} object_key={}",
-            index + 1,
-            row.conflict_id,
-            row.artifact_kind.as_str(),
-            row.conflict_class.as_str(),
-            row.created_at_ms,
-            row.object_key
+            "{}",
+            render_list_line(index + 1, row, archive)
         );
     }
     Ok(rendered)
@@ -160,21 +247,31 @@ pub fn run_conflict_show(args: ConflictShowArgs) -> Result<String> {
             args.conflict_id
         );
     };
+    let cache = refresh_conflict_cache(&mut context, &args.namespace_id)?;
+    let archive = cache.archives_by_conflict_id.get(row.conflict_id.as_str());
+    let lifecycle_state = lifecycle_state_for_archive(archive);
 
     let yaml = render_conflict_artifact_yaml(&row)?;
+    let archive_yaml = render_conflict_archive_yaml(&row, archive)?;
     let mut rendered = String::new();
     let _ = writeln!(
         &mut rendered,
-        "namespace={} conflict_id={} artifact_kind={} conflict_class={} created_at_ms={} object_key={}",
+        "namespace={} conflict_id={} artifact_kind={} conflict_class={} created_at_ms={} object_key={} lifecycle_state={}{}",
         row.namespace_id.as_str(),
         row.conflict_id,
         row.artifact_kind.as_str(),
         row.conflict_class.as_str(),
         row.created_at_ms,
-        row.object_key
+        row.object_key,
+        lifecycle_state.as_str(),
+        archive
+            .map(|row| format!(" archived_at_ms={}", row.archived_at_ms))
+            .unwrap_or_default()
     );
     let _ = writeln!(&mut rendered, "[artifact]");
     rendered.push_str(&yaml);
+    let _ = writeln!(&mut rendered, "[archive]");
+    rendered.push_str(&archive_yaml);
     Ok(rendered)
 }
 
@@ -223,14 +320,53 @@ pub fn run_conflict_restore(args: ConflictRestoreArgs) -> Result<String> {
     Ok(rendered)
 }
 
+pub fn run_conflict_archive(args: ConflictArchiveArgs, archived_at_ms: u64) -> Result<String> {
+    let mut context = open_conflict_command_context(&args.db_path, &args.store_root)?;
+    let archive = archive_conflict_artifact(
+        &mut context.db,
+        &context.store,
+        &args.namespace_id,
+        &args.conflict_id,
+        archived_at_ms,
+    )?;
+
+    Ok(format!(
+        "namespace={} conflict_id={} lifecycle_state={} sidecar_key={}\n",
+        archive.namespace_id.as_str(),
+        archive.conflict_id,
+        ConflictArtifactLifecycleState::Archived.as_str(),
+        archive.object_key
+    ))
+}
+
+pub fn run_conflict_unarchive(args: ConflictUnarchiveArgs) -> Result<String> {
+    let mut context = open_conflict_command_context(&args.db_path, &args.store_root)?;
+    unarchive_conflict_artifact(
+        &mut context.db,
+        &context.store,
+        &args.namespace_id,
+        &args.conflict_id,
+    )?;
+
+    Ok(format!(
+        "namespace={} conflict_id={} lifecycle_state={}\n",
+        args.namespace_id.as_str(),
+        args.conflict_id,
+        ConflictArtifactLifecycleState::Active.as_str()
+    ))
+}
+
 fn parse_conflict_flags(
     mut args: impl Iterator<Item = String>,
     usage: &'static str,
     require_destination: bool,
-) -> Result<(PathBuf, PathBuf, Option<PathBuf>)> {
+    allow_list_filters: bool,
+) -> Result<ParsedConflictFlags> {
     let mut db_path = None;
     let mut store_root = None;
     let mut destination_path = None;
+    let mut list_filter = ConflictListFilter::Active;
+    let mut saw_filter_flag = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -252,6 +388,26 @@ fn parse_conflict_flags(
                     .ok_or_else(|| anyhow!("missing value for --to\n{usage}"))?;
                 destination_path = Some(PathBuf::from(value));
             }
+            "--all" => {
+                if !allow_list_filters {
+                    bail!("unexpected argument `--all`\n{usage}");
+                }
+                if saw_filter_flag {
+                    bail!("conflict-list accepts at most one of --all or --archived\n{usage}");
+                }
+                saw_filter_flag = true;
+                list_filter = ConflictListFilter::All;
+            }
+            "--archived" => {
+                if !allow_list_filters {
+                    bail!("unexpected argument `--archived`\n{usage}");
+                }
+                if saw_filter_flag {
+                    bail!("conflict-list accepts at most one of --all or --archived\n{usage}");
+                }
+                saw_filter_flag = true;
+                list_filter = ConflictListFilter::Archived;
+            }
             other => bail!("unexpected argument `{other}`\n{usage}"),
         }
     }
@@ -265,7 +421,81 @@ fn parse_conflict_flags(
         (false, None) => None,
     };
 
-    Ok((db_path, store_root, destination_path))
+    Ok(ParsedConflictFlags {
+        db_path,
+        store_root,
+        destination_path,
+        list_filter,
+    })
+}
+
+fn refresh_conflict_cache(
+    context: &mut ConflictCommandContext,
+    namespace_id: &NamespaceId,
+) -> Result<RefreshedConflictCache> {
+    let artifacts =
+        discover_conflict_artifacts_for_namespace(&mut context.db, &context.store, namespace_id)?;
+    let archives = discover_conflict_artifact_archives_for_namespace(
+        &mut context.db,
+        &context.store,
+        namespace_id,
+    )?;
+    let archives_by_conflict_id = archives
+        .into_iter()
+        .map(|row| (row.conflict_id.clone(), row))
+        .collect();
+    Ok(RefreshedConflictCache {
+        artifacts,
+        archives_by_conflict_id,
+    })
+}
+
+fn filter_artifact_rows<'a>(
+    rows: &'a [ConflictArtifactRow],
+    archives_by_conflict_id: &BTreeMap<String, ConflictArtifactArchiveRow>,
+    filter: ConflictListFilter,
+) -> Vec<&'a ConflictArtifactRow> {
+    rows.iter()
+        .filter(|row| {
+            let archive = archives_by_conflict_id.get(row.conflict_id.as_str());
+            match filter {
+                ConflictListFilter::Active => archive.is_none(),
+                ConflictListFilter::All => true,
+                ConflictListFilter::Archived => archive.is_some(),
+            }
+        })
+        .collect()
+}
+
+fn lifecycle_state_for_archive(
+    archive: Option<&ConflictArtifactArchiveRow>,
+) -> ConflictArtifactLifecycleState {
+    match archive {
+        Some(_) => ConflictArtifactLifecycleState::Archived,
+        None => ConflictArtifactLifecycleState::Active,
+    }
+}
+
+fn render_list_line(
+    index: usize,
+    row: &ConflictArtifactRow,
+    archive: Option<&ConflictArtifactArchiveRow>,
+) -> String {
+    let lifecycle_state = lifecycle_state_for_archive(archive);
+    let mut rendered = format!(
+        "index={} conflict_id={} artifact_kind={} conflict_class={} created_at_ms={} object_key={} lifecycle_state={}",
+        index,
+        row.conflict_id,
+        row.artifact_kind.as_str(),
+        row.conflict_class.as_str(),
+        row.created_at_ms,
+        row.object_key,
+        lifecycle_state.as_str(),
+    );
+    if let Some(archive) = archive {
+        let _ = write!(&mut rendered, " archived_at_ms={}", archive.archived_at_ms);
+    }
+    rendered
 }
 
 fn render_conflict_artifact_yaml(row: &ConflictArtifactRow) -> Result<String> {
@@ -275,6 +505,24 @@ fn render_conflict_artifact_yaml(row: &ConflictArtifactRow) -> Result<String> {
             row.subtree_envelope()
                 .expect("subtree artifact row should have subtree envelope"),
         )
+        .map_err(|err| anyhow!("{err}")),
+    }
+}
+
+fn render_conflict_archive_yaml(
+    row: &ConflictArtifactRow,
+    archive: Option<&ConflictArtifactArchiveRow>,
+) -> Result<String> {
+    match archive {
+        Some(archive) => render_yaml(&ConflictArtifactArchiveEnvelope {
+            namespace_id: row.namespace_id.clone(),
+            conflict_id: row.conflict_id.clone(),
+            archived_at_ms: archive.archived_at_ms,
+        })
+        .map_err(|err| anyhow!("{err}")),
+        None => render_yaml(&serde_json::json!({
+            "lifecycle_state": ConflictArtifactLifecycleState::Active.as_str(),
+        }))
         .map_err(|err| anyhow!("{err}")),
     }
 }
@@ -313,8 +561,9 @@ fn validate_store_root(store_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        run_conflict_list, run_conflict_restore, run_conflict_show, ConflictListArgs,
-        ConflictRestoreArgs, ConflictShowArgs,
+        run_conflict_archive, run_conflict_list, run_conflict_restore, run_conflict_show,
+        run_conflict_unarchive, ConflictArchiveArgs, ConflictListArgs, ConflictListFilter,
+        ConflictRestoreArgs, ConflictShowArgs, ConflictUnarchiveArgs,
     };
     use loon_client::state_db::SqliteStateDb;
     use loon_client::upload::{upload_small_file_from_path, UploadedContent};
@@ -323,13 +572,13 @@ mod tests {
         write_conflict_artifact_if_absent, write_subtree_conflict_artifact_if_absent,
     };
     use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{blob, content_manifest};
+    use loon_objectstore::keys::{blob, conflict_artifact_archive, content_manifest};
     use loon_objectstore::ObjectStore;
     use loon_testkit::tempdir::TestDir;
     use loon_types::{
-        ChangeSeq, ConflictArtifactLoserSummary, ConflictArtifactWinnerSummary, ConflictClass,
-        InodeId, InodeKind, NamespaceId, RevisionNo, SubtreeConflictArtifactEntry,
-        SubtreeConflictArtifactRootSummary,
+        ChangeSeq, ConflictArtifactArchiveEnvelope, ConflictArtifactLoserSummary,
+        ConflictArtifactWinnerSummary, ConflictClass, InodeId, InodeKind, NamespaceId, RevisionNo,
+        SubtreeConflictArtifactEntry, SubtreeConflictArtifactRootSummary,
     };
     use std::collections::BTreeMap;
     use std::fs;
@@ -367,11 +616,18 @@ mod tests {
                 },
             ],
         );
+        seed_archive_sidecar(
+            &fixture,
+            &namespace_id,
+            &subtree_artifact.envelope.conflict_id,
+            1_700_000_000_900,
+        );
 
         let output = run_conflict_list(ConflictListArgs {
             namespace_id: namespace_id.clone(),
             db_path: fixture.db_path.clone(),
             store_root: fixture.store_root.clone(),
+            filter: ConflictListFilter::Active,
         })
         .expect("run conflict-list");
 
@@ -379,7 +635,11 @@ mod tests {
         let cached_rows = db
             .load_conflict_artifacts_for_namespace(&namespace_id)
             .expect("load cached artifacts");
+        let cached_archives = db
+            .load_conflict_artifact_archives_for_namespace(&namespace_id)
+            .expect("load cached archives");
         assert_eq!(cached_rows.len(), 2);
+        assert_eq!(cached_archives.len(), 1);
         assert_eq!(
             cached_rows
                 .iter()
@@ -419,12 +679,14 @@ mod tests {
 
         assert!(output.contains("artifact_kind=file"));
         assert!(output.contains("conflict_class=same_inode_stale_base_edit"));
+        assert!(output.contains("lifecycle_state=active"));
         assert!(output.contains("display_name: report.txt"));
         assert!(output.contains("content_manifest_digest:"));
+        assert!(output.contains("[archive]"));
     }
 
     #[test]
-    fn conflict_show_renders_subtree_artifact_details() {
+    fn conflict_show_renders_archived_subtree_artifact_details() {
         let fixture = ConflictArtifactFixture::new("xtask-conflict-show-subtree");
         let namespace_id = NamespaceId::from("ns-xtask-conflicts");
         let artifact = seed_subtree_conflict_artifact(
@@ -447,6 +709,12 @@ mod tests {
                 },
             ],
         );
+        seed_archive_sidecar(
+            &fixture,
+            &namespace_id,
+            &artifact.envelope.conflict_id,
+            1_700_000_000_950,
+        );
 
         let output = run_conflict_show(ConflictShowArgs {
             namespace_id,
@@ -460,6 +728,55 @@ mod tests {
             output,
             include_str!("../../tests/snapshots/conflict-show/conflict_show_subtree.txt")
         );
+    }
+
+    #[test]
+    fn conflict_list_supports_all_and_archived_filters() {
+        let fixture = ConflictArtifactFixture::new("xtask-conflict-list-filters");
+        let namespace_id = NamespaceId::from("ns-xtask-conflicts");
+        let active_artifact = seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "active.txt",
+            "active loser",
+            ChangeSeq(44),
+            1_700_000_000_004,
+        );
+        let archived_artifact = seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "archived.txt",
+            "archived loser",
+            ChangeSeq(45),
+            1_700_000_000_005,
+        );
+        seed_archive_sidecar(
+            &fixture,
+            &namespace_id,
+            &archived_artifact.envelope.conflict_id,
+            1_700_000_000_990,
+        );
+
+        let all_output = run_conflict_list(ConflictListArgs {
+            namespace_id: namespace_id.clone(),
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+            filter: ConflictListFilter::All,
+        })
+        .expect("run conflict-list --all");
+        assert!(all_output.contains(&active_artifact.envelope.conflict_id));
+        assert!(all_output.contains(&archived_artifact.envelope.conflict_id));
+        assert!(all_output.contains("lifecycle_state=archived archived_at_ms=1700000000990"));
+
+        let archived_output = run_conflict_list(ConflictListArgs {
+            namespace_id,
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+            filter: ConflictListFilter::Archived,
+        })
+        .expect("run conflict-list --archived");
+        assert!(!archived_output.contains(&active_artifact.envelope.conflict_id));
+        assert!(archived_output.contains(&archived_artifact.envelope.conflict_id));
     }
 
     #[test]
@@ -562,6 +879,159 @@ mod tests {
     }
 
     #[test]
+    fn conflict_archive_creates_sidecar_and_updates_cache() {
+        let fixture = ConflictArtifactFixture::new("xtask-conflict-archive");
+        let namespace_id = NamespaceId::from("ns-xtask-conflicts");
+        let artifact = seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "report.txt",
+            "local loser",
+            ChangeSeq(62),
+            1_700_000_020_100,
+        );
+
+        let output = run_conflict_archive(
+            ConflictArchiveArgs {
+                namespace_id: namespace_id.clone(),
+                conflict_id: artifact.envelope.conflict_id.clone(),
+                db_path: fixture.db_path.clone(),
+                store_root: fixture.store_root.clone(),
+            },
+            1_700_000_020_500,
+        )
+        .expect("run conflict-archive");
+
+        let db = SqliteStateDb::open(&fixture.db_path).expect("open db");
+        let archive = db
+            .load_conflict_artifact_archive(&namespace_id, &artifact.envelope.conflict_id)
+            .expect("load cached archive")
+            .expect("archive row should exist");
+        assert_eq!(archive.archived_at_ms, 1_700_000_020_500);
+        assert_eq!(
+            output,
+            include_str!("../../tests/snapshots/conflict-archive/conflict_archive.txt")
+        );
+    }
+
+    #[test]
+    fn conflict_unarchive_deletes_sidecar_and_clears_cache() {
+        let fixture = ConflictArtifactFixture::new("xtask-conflict-unarchive");
+        let namespace_id = NamespaceId::from("ns-xtask-conflicts");
+        let artifact = seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "report.txt",
+            "local loser",
+            ChangeSeq(63),
+            1_700_000_020_200,
+        );
+        seed_archive_sidecar(
+            &fixture,
+            &namespace_id,
+            &artifact.envelope.conflict_id,
+            1_700_000_020_700,
+        );
+
+        let output = run_conflict_unarchive(ConflictUnarchiveArgs {
+            namespace_id: namespace_id.clone(),
+            conflict_id: artifact.envelope.conflict_id.clone(),
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+        })
+        .expect("run conflict-unarchive");
+
+        let db = SqliteStateDb::open(&fixture.db_path).expect("open db");
+        assert!(db
+            .load_conflict_artifact_archive(&namespace_id, &artifact.envelope.conflict_id)
+            .expect("load cached archive after unarchive")
+            .is_none());
+        let sidecar_path = fixture.store_root.join(conflict_artifact_archive(
+            namespace_id.as_str(),
+            &artifact.envelope.conflict_id,
+        ));
+        assert!(!sidecar_path.exists(), "sidecar should be deleted");
+        assert_eq!(
+            output,
+            include_str!("../../tests/snapshots/conflict-unarchive/conflict_unarchive.txt")
+        );
+    }
+
+    #[test]
+    fn conflict_archive_is_idempotent() {
+        let fixture = ConflictArtifactFixture::new("xtask-conflict-archive-idempotent");
+        let namespace_id = NamespaceId::from("ns-xtask-conflicts");
+        let artifact = seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "report.txt",
+            "local loser",
+            ChangeSeq(64),
+            1_700_000_020_300,
+        );
+
+        let first = run_conflict_archive(
+            ConflictArchiveArgs {
+                namespace_id: namespace_id.clone(),
+                conflict_id: artifact.envelope.conflict_id.clone(),
+                db_path: fixture.db_path.clone(),
+                store_root: fixture.store_root.clone(),
+            },
+            1_700_000_021_000,
+        )
+        .expect("first archive");
+        let second = run_conflict_archive(
+            ConflictArchiveArgs {
+                namespace_id: namespace_id.clone(),
+                conflict_id: artifact.envelope.conflict_id.clone(),
+                db_path: fixture.db_path.clone(),
+                store_root: fixture.store_root.clone(),
+            },
+            1_700_000_021_999,
+        )
+        .expect("second archive");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn conflict_unarchive_is_idempotent() {
+        let fixture = ConflictArtifactFixture::new("xtask-conflict-unarchive-idempotent");
+        let namespace_id = NamespaceId::from("ns-xtask-conflicts");
+        let artifact = seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "report.txt",
+            "local loser",
+            ChangeSeq(65),
+            1_700_000_020_400,
+        );
+        seed_archive_sidecar(
+            &fixture,
+            &namespace_id,
+            &artifact.envelope.conflict_id,
+            1_700_000_021_100,
+        );
+
+        let first = run_conflict_unarchive(ConflictUnarchiveArgs {
+            namespace_id: namespace_id.clone(),
+            conflict_id: artifact.envelope.conflict_id.clone(),
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+        })
+        .expect("first unarchive");
+        let second = run_conflict_unarchive(ConflictUnarchiveArgs {
+            namespace_id,
+            conflict_id: artifact.envelope.conflict_id.clone(),
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+        })
+        .expect("second unarchive");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
     fn conflict_list_rejects_missing_db_path() {
         let fixture = ConflictArtifactFixture::new("xtask-conflict-missing-db");
         let missing_db_path = fixture.temp_dir.path().join("missing.sqlite3");
@@ -569,6 +1039,7 @@ mod tests {
             namespace_id: NamespaceId::from("ns-xtask-conflicts"),
             db_path: missing_db_path.clone(),
             store_root: fixture.store_root.clone(),
+            filter: ConflictListFilter::Active,
         })
         .expect_err("missing db path should fail");
         assert_eq!(
@@ -585,6 +1056,7 @@ mod tests {
             namespace_id: NamespaceId::from("ns-xtask-conflicts"),
             db_path: fixture.db_path.clone(),
             store_root: missing_store_root.clone(),
+            filter: ConflictListFilter::Active,
         })
         .expect_err("missing store root should fail");
         assert_eq!(
@@ -629,6 +1101,54 @@ mod tests {
                 destination_path.display()
             )
         );
+    }
+
+    #[test]
+    fn conflict_restore_of_archived_artifact_preserves_archive_state() {
+        let fixture = ConflictArtifactFixture::new("xtask-conflict-restore-archived");
+        let namespace_id = NamespaceId::from("ns-xtask-conflicts");
+        let canonical_path = fixture.mirror_root.join("workspace/report.txt");
+        let destination_path = fixture.mirror_root.join("recovery/report-conflict.txt");
+        write_file(&canonical_path, "authoritative winner");
+        fs::create_dir_all(destination_path.parent().expect("destination parent"))
+            .expect("create destination parent");
+        let artifact = seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "report.txt",
+            "local loser",
+            ChangeSeq(71),
+            1_700_000_030_500,
+        );
+        seed_archive_sidecar(
+            &fixture,
+            &namespace_id,
+            &artifact.envelope.conflict_id,
+            1_700_000_030_900,
+        );
+        let _ = run_conflict_show(ConflictShowArgs {
+            namespace_id: namespace_id.clone(),
+            conflict_id: artifact.envelope.conflict_id.clone(),
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+        })
+        .expect("discover archive state before restore");
+
+        let _output = run_conflict_restore(ConflictRestoreArgs {
+            namespace_id: namespace_id.clone(),
+            conflict_id: artifact.envelope.conflict_id.clone(),
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+            destination_path,
+        })
+        .expect("restore archived conflict artifact");
+
+        let db = SqliteStateDb::open(&fixture.db_path).expect("open db");
+        let archive = db
+            .load_conflict_artifact_archive(&namespace_id, &artifact.envelope.conflict_id)
+            .expect("load cached archive after restore")
+            .expect("archive should still exist after restore");
+        assert_eq!(archive.archived_at_ms, 1_700_000_030_900);
     }
 
     #[test]
@@ -701,6 +1221,7 @@ mod tests {
             namespace_id: namespace_id.clone(),
             db_path: fixture.db_path.clone(),
             store_root: fixture.store_root.clone(),
+            filter: ConflictListFilter::Active,
         })
         .expect_err("malformed artifact should fail");
 
@@ -717,6 +1238,95 @@ mod tests {
                 .expect("load cached artifacts")
                 .is_empty(),
             "discovery failure should not partially update the cache"
+        );
+    }
+
+    #[test]
+    fn conflict_list_fails_on_malformed_archive_sidecar_without_partial_cache_update() {
+        let fixture = ConflictArtifactFixture::new("xtask-conflict-malformed-archive");
+        let namespace_id = NamespaceId::from("ns-xtask-conflicts");
+        let good_artifact = seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "report.txt",
+            "local loser",
+            ChangeSeq(82),
+            1_700_000_050_100,
+        );
+        let malformed_path = fixture
+            .store_root
+            .join("namespaces")
+            .join(namespace_id.as_str())
+            .join("conflict-archives")
+            .join(format!("{}.json", good_artifact.envelope.conflict_id));
+        fs::create_dir_all(malformed_path.parent().expect("archive parent"))
+            .expect("create archive parent");
+        fs::write(&malformed_path, b"{not-json").expect("write malformed archive");
+
+        let error = run_conflict_list(ConflictListArgs {
+            namespace_id: namespace_id.clone(),
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+            filter: ConflictListFilter::Active,
+        })
+        .expect_err("malformed archive sidecar should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to decode conflict artifact archive object"),
+            "unexpected malformed archive error: {error}"
+        );
+
+        let db = SqliteStateDb::open(&fixture.db_path).expect("open db");
+        assert!(
+            db.load_conflict_artifact_archives_for_namespace(&namespace_id)
+                .expect("load cached archives")
+                .is_empty(),
+            "archive discovery failure should not partially update the archive cache"
+        );
+    }
+
+    #[test]
+    fn conflict_list_fails_on_orphan_archive_sidecar_without_partial_cache_update() {
+        let fixture = ConflictArtifactFixture::new("xtask-conflict-orphan-archive");
+        let namespace_id = NamespaceId::from("ns-xtask-conflicts");
+        seed_file_conflict_artifact(
+            &fixture,
+            &namespace_id,
+            "report.txt",
+            "local loser",
+            ChangeSeq(83),
+            1_700_000_050_200,
+        );
+        seed_archive_sidecar(
+            &fixture,
+            &namespace_id,
+            "conflict-orphaned",
+            1_700_000_050_900,
+        );
+
+        let error = run_conflict_list(ConflictListArgs {
+            namespace_id: namespace_id.clone(),
+            db_path: fixture.db_path.clone(),
+            store_root: fixture.store_root.clone(),
+            filter: ConflictListFilter::Active,
+        })
+        .expect_err("orphan archive sidecar should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("archive sidecar references missing cached artifact"),
+            "unexpected orphan archive error: {error}"
+        );
+
+        let db = SqliteStateDb::open(&fixture.db_path).expect("open db");
+        assert!(
+            db.load_conflict_artifact_archives_for_namespace(&namespace_id)
+                .expect("load cached archives")
+                .is_empty(),
+            "orphan archive failure should not partially update the archive cache"
         );
     }
 
@@ -872,6 +1482,25 @@ mod tests {
         write_subtree_conflict_artifact_if_absent(&fixture.store, &artifact)
             .expect("write subtree artifact");
         artifact
+    }
+
+    fn seed_archive_sidecar(
+        fixture: &ConflictArtifactFixture,
+        namespace_id: &NamespaceId,
+        conflict_id: &str,
+        archived_at_ms: u64,
+    ) {
+        let object_key = conflict_artifact_archive(namespace_id.as_str(), conflict_id);
+        let bytes = serde_json::to_vec(&ConflictArtifactArchiveEnvelope {
+            namespace_id: namespace_id.clone(),
+            conflict_id: conflict_id.to_owned(),
+            archived_at_ms,
+        })
+        .expect("encode archive sidecar");
+        fixture
+            .store
+            .put_if_absent(&object_key, &bytes)
+            .expect("write archive sidecar");
     }
 
     fn remove_manifest_and_blocks(

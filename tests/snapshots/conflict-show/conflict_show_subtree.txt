@@ -1,4 +1,4 @@
-namespace=ns-xtask-conflicts conflict_id=conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2 artifact_kind=subtree conflict_class=subtree_rename_vs_local_changes created_at_ms=1700000000002 object_key=namespaces/ns-xtask-conflicts/conflicts/conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2.json
+namespace=ns-xtask-conflicts conflict_id=conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2 artifact_kind=subtree conflict_class=subtree_rename_vs_local_changes created_at_ms=1700000000002 object_key=namespaces/ns-xtask-conflicts/conflicts/conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2.json lifecycle_state=archived archived_at_ms=1700000000950
 [artifact]
 conflict_id: conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2
 namespace_id: ns-xtask-conflicts
@@ -31,3 +31,7 @@ entries:
   parent_inode_id: 10
   display_name: report.txt
 created_at_ms: 1700000000002
+[archive]
+namespace_id: ns-xtask-conflicts
+conflict_id: conflict-3dc9f36fce9d42fc7f44316c5a8df472fd39713eacf2b2c9318d6069b27d31e2
+archived_at_ms: 1700000000950

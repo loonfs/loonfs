@@ -23,8 +23,8 @@ You need all of the following before running any command:
 The current shell does not support:
 
 - provider credentials or non-local object stores
-- acknowledge/archive/delete lifecycle
 - automatic restore destinations
+- destructive delete/GC
 
 ## List artifacts
 
@@ -34,10 +34,24 @@ Refresh the namespace cache from object storage, then print the cached rows:
 cargo run -p xtask -- conflict-list ns-123 --db /path/to/client.sqlite3 --store-root /path/to/store
 ```
 
+Show both active and archived artifacts:
+
+```bash
+cargo run -p xtask -- conflict-list ns-123 --db /path/to/client.sqlite3 --store-root /path/to/store --all
+```
+
+Show archived artifacts only:
+
+```bash
+cargo run -p xtask -- conflict-list ns-123 --db /path/to/client.sqlite3 --store-root /path/to/store --archived
+```
+
 Output is deterministic:
 
 - first line shows `namespace`, `discovered_count`, and `cached_count_after`
 - following lines are ordered by `created_at_ms ASC, conflict_id ASC`
+- rows render `lifecycle_state=active|archived`
+- archived rows also render `archived_at_ms`
 
 ## Show one artifact
 
@@ -51,6 +65,8 @@ The command prints:
 
 - a stable summary header
 - one YAML rendering of the cached artifact envelope
+- one YAML rendering of the archive state
+- active artifacts report lifecycle explicitly as implicit `active`
 
 ## Restore one artifact
 
@@ -84,6 +100,27 @@ Subtree restore prints:
 - `destination`
 - `restored_entry_count`
 
+## Archive and unarchive
+
+Archive one artifact without changing the immutable artifact envelope:
+
+```bash
+cargo run -p xtask -- conflict-archive ns-123 conflict-abc --db /path/to/client.sqlite3 --store-root /path/to/store
+```
+
+Unarchive one artifact and return it to the default active backlog:
+
+```bash
+cargo run -p xtask -- conflict-unarchive ns-123 conflict-abc --db /path/to/client.sqlite3 --store-root /path/to/store
+```
+
+Rules:
+
+- archive state is out of band operator metadata, not planner truth
+- archive writes or deletes only the sidecar object
+- archived artifacts remain discoverable, inspectable, and restorable
+- restore does not change archive state
+
 ## Failure behavior
 
 The commands fail closed and exit non-zero.
@@ -93,6 +130,7 @@ Common failures:
 - missing DB path
 - missing store root
 - malformed artifact object in the namespace prefix
+- malformed archive sidecar in the namespace prefix
 - absent artifact
 - occupied restore destination
 - missing preserved manifest or block content

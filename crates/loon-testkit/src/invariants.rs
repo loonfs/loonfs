@@ -318,6 +318,18 @@ pub struct ConflictArtifactDiscoveryInvariantInputs {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct ConflictArtifactArchiveInvariantInputs {
+    pub archive_sidecar_matches_namespace_and_id: bool,
+    pub discovered_archive_count: usize,
+    pub cached_archive_count_after: usize,
+    pub expected_archived_count: usize,
+    pub archived_hidden_from_default_active_list: bool,
+    pub implicit_active_state_reported: bool,
+    pub unarchive_restores_active_visibility: bool,
+    pub restore_preserved_archive_state: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct FileConflictArtifactRestoreInvariantInputs {
     pub destination_was_absent_before: bool,
     pub restored_content_matches_loser: bool,
@@ -2530,6 +2542,66 @@ pub fn evaluate_conflict_artifact_discovery_invariants(
     }
 }
 
+pub fn evaluate_conflict_artifact_archive_invariants(
+    inputs: ConflictArtifactArchiveInvariantInputs,
+) -> ConflictArtifactRecoveryInvariantReport {
+    ConflictArtifactRecoveryInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "conflict_artifact_archive_sidecar_matches_namespace_and_id".to_owned(),
+                passed: inputs.archive_sidecar_matches_namespace_and_id,
+                detail: format!(
+                    "archive_sidecar_matches_namespace_and_id={}",
+                    inputs.archive_sidecar_matches_namespace_and_id
+                ),
+            },
+            InvariantCheck {
+                name: "conflict_artifact_archive_discovery_caches_archived_state".to_owned(),
+                passed: inputs.discovered_archive_count == inputs.expected_archived_count
+                    && inputs.cached_archive_count_after == inputs.expected_archived_count,
+                detail: format!(
+                    "discovered_archive_count={} cached_archive_count_after={} expected_archived_count={}",
+                    inputs.discovered_archive_count,
+                    inputs.cached_archive_count_after,
+                    inputs.expected_archived_count
+                ),
+            },
+            InvariantCheck {
+                name: "conflict_artifact_archive_hides_item_from_default_active_list".to_owned(),
+                passed: inputs.archived_hidden_from_default_active_list,
+                detail: format!(
+                    "archived_hidden_from_default_active_list={}",
+                    inputs.archived_hidden_from_default_active_list
+                ),
+            },
+            InvariantCheck {
+                name: "conflict_artifact_show_reports_implicit_active_state".to_owned(),
+                passed: inputs.implicit_active_state_reported,
+                detail: format!(
+                    "implicit_active_state_reported={}",
+                    inputs.implicit_active_state_reported
+                ),
+            },
+            InvariantCheck {
+                name: "conflict_artifact_unarchive_restores_active_visibility".to_owned(),
+                passed: inputs.unarchive_restores_active_visibility,
+                detail: format!(
+                    "unarchive_restores_active_visibility={}",
+                    inputs.unarchive_restores_active_visibility
+                ),
+            },
+            InvariantCheck {
+                name: "conflict_artifact_restore_does_not_change_archive_state".to_owned(),
+                passed: inputs.restore_preserved_archive_state,
+                detail: format!(
+                    "restore_preserved_archive_state={}",
+                    inputs.restore_preserved_archive_state
+                ),
+            },
+        ],
+    }
+}
+
 pub fn evaluate_file_conflict_artifact_restore_invariants(
     inputs: FileConflictArtifactRestoreInvariantInputs,
 ) -> ConflictArtifactRecoveryInvariantReport {
@@ -4154,6 +4226,7 @@ mod tests {
         evaluate_apply_remote_delete_invariants, evaluate_apply_remote_subtree_delete_invariants,
         evaluate_apply_remote_subtree_rename_invariants,
         evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
+        evaluate_conflict_artifact_archive_invariants,
         evaluate_conflict_artifact_discovery_invariants, evaluate_content_object_invariants,
         evaluate_download_transfer_invariants, evaluate_file_conflict_artifact_restore_invariants,
         evaluate_file_conflict_resolution_invariants, evaluate_inode_upload_transfer_invariants,
@@ -4173,16 +4246,16 @@ mod tests {
         CheckpointHeadPublishInvariantInputs, CheckpointObjectInvariantInputs,
         CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
         CheckpointReplayInvariantInputs, CommitInvariantInputs,
-        ConflictArtifactDiscoveryInvariantInputs, ContentObjectInvariantInputs,
-        ContentObjectInvariantSnapshot, DownloadTransferInvariantInputs,
-        DownloadTransferOutcomeKind, FileConflictArtifactRestoreInvariantInputs,
-        FileConflictResolutionInvariantInputs, FileConflictResolutionKind,
-        InodeUploadTransferInvariantInputs, InodeUploadTransferOutcomeKind,
-        LocalOnlyUploadTransferInvariantInputs, LocalOnlyUploadTransferOutcomeKind,
-        ProgressInvariantSnapshot, ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
-        QueueCompleteInvariantInputs, QueueCompleteOutcomeKind,
-        RemoteDeletePlanningInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
-        RemoteObservationConvergenceInvariantInputs,
+        ConflictArtifactArchiveInvariantInputs, ConflictArtifactDiscoveryInvariantInputs,
+        ContentObjectInvariantInputs, ContentObjectInvariantSnapshot,
+        DownloadTransferInvariantInputs, DownloadTransferOutcomeKind,
+        FileConflictArtifactRestoreInvariantInputs, FileConflictResolutionInvariantInputs,
+        FileConflictResolutionKind, InodeUploadTransferInvariantInputs,
+        InodeUploadTransferOutcomeKind, LocalOnlyUploadTransferInvariantInputs,
+        LocalOnlyUploadTransferOutcomeKind, ProgressInvariantSnapshot,
+        ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
+        QueueCompleteOutcomeKind, RemoteDeletePlanningInvariantInputs,
+        RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
         RemoteOnlyDirectoryMaterializationInvariantInputs,
         RemoteOnlyDirectoryMaterializationOutcomeKind,
         RemoteOnlyParentMaterializationWaitInvariantInputs,
@@ -5829,6 +5902,35 @@ mod tests {
                 .expect("check should exist")
                 .passed
         );
+    }
+
+    #[test]
+    fn conflict_artifact_archive_invariants_pass_for_archived_and_restored_state() {
+        let report =
+            evaluate_conflict_artifact_archive_invariants(ConflictArtifactArchiveInvariantInputs {
+                archive_sidecar_matches_namespace_and_id: true,
+                discovered_archive_count: 1,
+                cached_archive_count_after: 1,
+                expected_archived_count: 1,
+                archived_hidden_from_default_active_list: true,
+                implicit_active_state_reported: true,
+                unarchive_restores_active_visibility: true,
+                restore_preserved_archive_state: true,
+            });
+
+        for name in [
+            "conflict_artifact_archive_sidecar_matches_namespace_and_id",
+            "conflict_artifact_archive_discovery_caches_archived_state",
+            "conflict_artifact_archive_hides_item_from_default_active_list",
+            "conflict_artifact_show_reports_implicit_active_state",
+            "conflict_artifact_unarchive_restores_active_visibility",
+            "conflict_artifact_restore_does_not_change_archive_state",
+        ] {
+            assert!(
+                report.check(name).expect("check should exist").passed,
+                "{name} should pass"
+            );
+        }
     }
 
     #[test]

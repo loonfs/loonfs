@@ -43,15 +43,21 @@ Current real delivery surfaces:
 Current operator-facing recovery shell:
 
 - `xtask conflict-list <namespace_id> --db <path> --store-root <path>`
+- `xtask conflict-list <namespace_id> --db <path> --store-root <path> --all`
+- `xtask conflict-list <namespace_id> --db <path> --store-root <path> --archived`
 - `xtask conflict-show <namespace_id> <conflict_id> --db <path> --store-root <path>`
 - `xtask conflict-restore <namespace_id> <conflict_id> --db <path> --store-root <path> --to <path>`
+- `xtask conflict-archive <namespace_id> <conflict_id> --db <path> --store-root <path>`
+- `xtask conflict-unarchive <namespace_id> <conflict_id> --db <path> --store-root <path>`
 
 Constraints for that shell:
 
 - it requires an existing client SQLite DB path and an existing local-fs object-store root
-- it may refresh only the local `conflict_artifacts` cache during discovery
+- it may refresh only the local `conflict_artifacts` and `conflict_artifact_archives` caches
+  during discovery
 - restore is out-of-band and does not rebind recovered content into sync state
-- there is no acknowledge/archive/delete lifecycle yet
+- archive state is canonical in object storage via per-artifact sidecars
+- there is still no destructive delete/GC lifecycle
 
 Current quarantined delivery surfaces:
 

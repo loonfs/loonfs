@@ -332,6 +332,58 @@ pub(super) fn load_conflict_artifacts_for_namespace(
     Ok(artifacts)
 }
 
+pub(super) fn load_conflict_artifact_archive(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+) -> Result<Option<ConflictArtifactArchiveRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT object_key, archived_at_ms
+            FROM conflict_artifact_archives
+            WHERE namespace_id = ?1 AND conflict_id = ?2",
+            params![namespace_id.as_str(), conflict_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+
+    raw.map(|(object_key, archived_at_ms)| {
+        Ok(ConflictArtifactArchiveRow {
+            namespace_id: namespace_id.clone(),
+            conflict_id: conflict_id.to_owned(),
+            object_key,
+            archived_at_ms: from_sql_u64(archived_at_ms, "archived_at_ms")?,
+        })
+    })
+    .transpose()
+}
+
+pub(super) fn load_conflict_artifact_archives_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<ConflictArtifactArchiveRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT conflict_id, object_key, archived_at_ms
+        FROM conflict_artifact_archives
+        WHERE namespace_id = ?1
+        ORDER BY archived_at_ms ASC, conflict_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut archives = Vec::new();
+    while let Some(row) = rows.next()? {
+        let conflict_id = row.get::<_, String>(0)?;
+        let object_key = row.get::<_, String>(1)?;
+        let archived_at_ms = row.get::<_, i64>(2)?;
+        archives.push(ConflictArtifactArchiveRow {
+            namespace_id: namespace_id.clone(),
+            conflict_id,
+            object_key,
+            archived_at_ms: from_sql_u64(archived_at_ms, "archived_at_ms")?,
+        });
+    }
+    Ok(archives)
+}
+
 fn parse_conflict_artifact_kind(value: &str) -> Result<ConflictArtifactKind, StateDbError> {
     match value {
         "file" => Ok(ConflictArtifactKind::File),

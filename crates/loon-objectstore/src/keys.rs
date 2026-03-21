@@ -45,6 +45,14 @@ pub fn conflict_artifact_prefix(namespace: &str) -> String {
     format!("namespaces/{namespace}/conflicts/")
 }
 
+pub fn conflict_artifact_archive(namespace: &str, conflict_id: &str) -> String {
+    format!("namespaces/{namespace}/conflict-archives/{conflict_id}.json")
+}
+
+pub fn conflict_artifact_archive_prefix(namespace: &str) -> String {
+    format!("namespaces/{namespace}/conflict-archives/")
+}
+
 pub fn snapshot_manifest(namespace: &str, seq: u64) -> String {
     format!("namespaces/{namespace}/snapshots/{seq:020}/manifest.json")
 }
@@ -72,9 +80,10 @@ pub fn queue_shard(shard_index: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        blob, conflict_artifact, conflict_artifact_prefix, content_manifest, derived_progress,
-        namespace_head, namespace_lease, queue_shard, snapshot_manifest, snapshot_table,
-        wal_commit, SnapshotTableFamily,
+        blob, conflict_artifact, conflict_artifact_archive, conflict_artifact_archive_prefix,
+        conflict_artifact_prefix, content_manifest, derived_progress, namespace_head,
+        namespace_lease, queue_shard, snapshot_manifest, snapshot_table, wal_commit,
+        SnapshotTableFamily,
     };
 
     #[test]
@@ -113,6 +122,14 @@ mod tests {
         assert_eq!(
             conflict_artifact_prefix("ns-1"),
             "namespaces/ns-1/conflicts/"
+        );
+        assert_eq!(
+            conflict_artifact_archive("ns-1", "conflict-deadbeef"),
+            "namespaces/ns-1/conflict-archives/conflict-deadbeef.json"
+        );
+        assert_eq!(
+            conflict_artifact_archive_prefix("ns-1"),
+            "namespaces/ns-1/conflict-archives/"
         );
     }
 }

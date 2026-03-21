@@ -2023,6 +2023,7 @@ dependencies = [
  "loon-objectstore",
  "loon-testkit",
  "loon-types",
+ "serde_json",
 ]
 
 [[package]]

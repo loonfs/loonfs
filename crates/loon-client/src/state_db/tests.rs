@@ -14,7 +14,7 @@ use loon_types::{
 use serde_json::json;
 
 #[test]
-fn sqlite_state_db_applies_schema_v13() {
+fn sqlite_state_db_applies_latest_schema() {
     let db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
 
     assert_eq!(
@@ -38,6 +38,8 @@ fn sqlite_state_db_applies_schema_v13() {
         "pending_inode_mutations",
         "transfer_ledger",
         "conflicts_and_errors",
+        "conflict_artifacts",
+        "conflict_artifact_archives",
     ] {
         let exists: i64 = db
             .conn
@@ -81,6 +83,36 @@ fn sqlite_state_db_migrates_every_historical_schema_version_to_latest() {
             "expected migrated schema version {version} to have no foreign-key violations"
         );
     }
+}
+
+#[test]
+fn sqlite_state_db_v18_to_v19_migration_creates_empty_conflict_archive_cache() {
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open historical schema DB");
+    super::schema::initialize_connection(&conn).expect("initialize historical schema DB");
+    super::schema::install_schema_version_for_test(&mut conn, 18)
+        .expect("install schema version 18");
+
+    let count_before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conflict_artifact_archives'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query sqlite_master before migration");
+    assert_eq!(count_before, 0, "v18 should not have archive cache table");
+
+    let mut db = SqliteStateDb { conn };
+    db.apply_migrations().expect("migrate schema version 18");
+
+    let count_after: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM conflict_artifact_archives",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count conflict artifact archives after migration");
+    assert_eq!(count_after, 0, "archive cache should start empty");
 }
 
 #[test]

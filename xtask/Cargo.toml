@@ -11,3 +11,4 @@ loon-client = { path = "../crates/loon-client" }
 loon-objectstore = { path = "../crates/loon-objectstore" }
 loon-testkit = { path = "../crates/loon-testkit" }
 loon-types = { path = "../crates/loon-types" }
+serde_json.workspace = true

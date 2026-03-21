@@ -54,6 +54,22 @@ impl ConflictArtifactKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictArtifactLifecycleState {
+    Active,
+    Archived,
+}
+
+impl ConflictArtifactLifecycleState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Archived => "archived",
+        }
+    }
+}
+
 fn inode_kind_token(inode_kind: InodeKind) -> &'static str {
     match inode_kind {
         InodeKind::File => "file",
@@ -150,6 +166,13 @@ pub struct SubtreeConflictArtifactEnvelope {
     pub loser_root: SubtreeConflictArtifactRootSummary,
     pub entries: Vec<SubtreeConflictArtifactEntry>,
     pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictArtifactArchiveEnvelope {
+    pub namespace_id: NamespaceId,
+    pub conflict_id: String,
+    pub archived_at_ms: u64,
 }
 
 pub fn deterministic_conflict_id(

@@ -1,8 +1,9 @@
 use crate::{
-    ModelClientIssue, ModelConflictArtifactRestoreError, ModelLocalOnlyIssue,
-    ModelLocalOnlyObservationCandidate, ModelObservedRemoteInode, ModelPlannedInodeAction,
-    ModelPlannedLocalOnlyAction, ModelRemoteObservationSelectionError, ModelRestoredConflictFile,
-    ModelRestoredConflictSubtree, ModelRestoredConflictSubtreeEntry, ModelScheduledClientAction,
+    ModelClientIssue, ModelConflictArtifactLifecycleState, ModelConflictArtifactListFilter,
+    ModelConflictArtifactRestoreError, ModelLocalOnlyIssue, ModelLocalOnlyObservationCandidate,
+    ModelObservedRemoteInode, ModelPlannedInodeAction, ModelPlannedLocalOnlyAction,
+    ModelRemoteObservationSelectionError, ModelRestoredConflictFile, ModelRestoredConflictSubtree,
+    ModelRestoredConflictSubtreeEntry, ModelScheduledClientAction,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, SubtreeConflictArtifactEntry};
 use serde_json::json;
@@ -269,6 +270,38 @@ pub fn model_restore_file_conflict_artifact(
         destination_path: destination_path.to_owned(),
         content_manifest_digest: content_manifest_digest.to_owned(),
     })
+}
+
+pub fn model_conflict_artifact_lifecycle_state(
+    archived_at_ms: Option<u64>,
+) -> ModelConflictArtifactLifecycleState {
+    match archived_at_ms {
+        Some(_) => ModelConflictArtifactLifecycleState::Archived,
+        None => ModelConflictArtifactLifecycleState::Active,
+    }
+}
+
+pub fn model_archive_conflict_artifact() -> ModelConflictArtifactLifecycleState {
+    ModelConflictArtifactLifecycleState::Archived
+}
+
+pub fn model_unarchive_conflict_artifact() -> ModelConflictArtifactLifecycleState {
+    ModelConflictArtifactLifecycleState::Active
+}
+
+pub fn model_conflict_artifact_matches_filter(
+    lifecycle_state: ModelConflictArtifactLifecycleState,
+    filter: ModelConflictArtifactListFilter,
+) -> bool {
+    match filter {
+        ModelConflictArtifactListFilter::Active => {
+            lifecycle_state == ModelConflictArtifactLifecycleState::Active
+        }
+        ModelConflictArtifactListFilter::All => true,
+        ModelConflictArtifactListFilter::Archived => {
+            lifecycle_state == ModelConflictArtifactLifecycleState::Archived
+        }
+    }
 }
 
 pub fn model_restore_subtree_conflict_artifact(

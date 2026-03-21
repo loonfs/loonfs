@@ -1,7 +1,7 @@
 use super::{SqliteStateDb, StateDbError};
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const SCHEMA_VERSION: i32 = 18;
+pub(crate) const SCHEMA_VERSION: i32 = 19;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
@@ -1092,6 +1092,21 @@ fn schema_v18_create_sql() -> String {
         )
 }
 
+const SCHEMA_V19_SQL: &str = r#"
+CREATE TABLE conflict_artifact_archives (
+    namespace_id TEXT NOT NULL,
+    conflict_id TEXT NOT NULL,
+    object_key TEXT NOT NULL,
+    archived_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace_id, conflict_id),
+    FOREIGN KEY (namespace_id, conflict_id)
+        REFERENCES conflict_artifacts(namespace_id, conflict_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX idx_conflict_artifact_archives_namespace_archived_at
+    ON conflict_artifact_archives(namespace_id, archived_at_ms, conflict_id);
+"#;
+
 pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -1166,6 +1181,9 @@ pub(super) fn install_schema_version_for_test(
     }
     if target_version >= 17 {
         apply_v17_hardening(conn)?;
+    }
+    if target_version >= 18 {
+        apply_v18_hardening(conn)?;
     }
 
     Ok(())
@@ -1295,6 +1313,11 @@ impl SqliteStateDb {
 
         if current_version == 17 {
             apply_v18_hardening(&mut self.conn)?;
+            current_version = 18;
+        }
+
+        if current_version == 18 {
+            apply_v19_hardening(&mut self.conn)?;
         }
 
         Ok(())
@@ -1444,6 +1467,14 @@ fn apply_v18_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     result?;
     ensure_no_foreign_key_violations(conn)?;
+    Ok(())
+}
+
+fn apply_v19_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(SCHEMA_V19_SQL)?;
+    tx.pragma_update(None, "user_version", 19)?;
+    tx.commit()?;
     Ok(())
 }
 

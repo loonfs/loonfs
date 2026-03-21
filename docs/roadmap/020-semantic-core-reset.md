@@ -562,7 +562,7 @@ Required rules:
 - conflict artifact restore is out-of-band recovery into an explicit caller destination and does
   not mutate sync planner state
 - the first operator-facing shell is `xtask`, using explicit `--db` and `--store-root` paths and
-  no acknowledge/archive/delete lifecycle yet
+  binary `active`/`archived` lifecycle sidecars instead of envelope rewrites or destructive GC
 - `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree rename,
   and still-unsupported future hierarchy classes after the stable-path taxonomy cleanup
 

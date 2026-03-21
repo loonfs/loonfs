@@ -8,6 +8,7 @@ use super::loads::{
     load_bound_resolve_subtree_delete_conflict_views_from_conn,
     load_bound_resolve_subtree_rename_conflict_views_from_conn,
     load_bound_upload_local_edit_views_from_conn, load_conflict_artifact,
+    load_conflict_artifact_archive, load_conflict_artifact_archives_for_namespace,
     load_conflict_artifacts_for_namespace, load_conflicts_and_errors, load_inode_upload,
     load_local_file, load_local_only_candidates_for_namespace,
     load_local_only_conflicts_and_errors, load_local_only_file, load_local_only_transfer_ledger,
@@ -320,6 +321,21 @@ impl SqliteStateDb {
         namespace_id: &NamespaceId,
     ) -> Result<Vec<ConflictArtifactRow>, StateDbError> {
         load_conflict_artifacts_for_namespace(&self.conn, namespace_id)
+    }
+
+    pub fn load_conflict_artifact_archive(
+        &self,
+        namespace_id: &NamespaceId,
+        conflict_id: &str,
+    ) -> Result<Option<ConflictArtifactArchiveRow>, StateDbError> {
+        load_conflict_artifact_archive(&self.conn, namespace_id, conflict_id)
+    }
+
+    pub fn load_conflict_artifact_archives_for_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Vec<ConflictArtifactArchiveRow>, StateDbError> {
+        load_conflict_artifact_archives_for_namespace(&self.conn, namespace_id)
     }
 
     pub fn load_local_only_conflicts_and_errors(
@@ -3092,6 +3108,55 @@ impl PlannerTxn<'_> {
                 .map_err(StateDbError::ConflictArtifactCodec)?,
                 to_sql_u64(row.created_at_ms, "created_at_ms")?,
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_conflict_artifact_archive(
+        &mut self,
+        row: &ConflictArtifactArchiveRow,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "INSERT INTO conflict_artifact_archives (
+                namespace_id,
+                conflict_id,
+                object_key,
+                archived_at_ms
+            ) VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(namespace_id, conflict_id) DO UPDATE SET
+                object_key = excluded.object_key,
+                archived_at_ms = excluded.archived_at_ms",
+            params![
+                row.namespace_id.as_str(),
+                &row.conflict_id,
+                &row.object_key,
+                to_sql_u64(row.archived_at_ms, "archived_at_ms")?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_conflict_artifact_archive(
+        &mut self,
+        namespace_id: &NamespaceId,
+        conflict_id: &str,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM conflict_artifact_archives
+            WHERE namespace_id = ?1 AND conflict_id = ?2",
+            params![namespace_id.as_str(), conflict_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_conflict_artifact_archives_for_namespace(
+        &mut self,
+        namespace_id: &NamespaceId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM conflict_artifact_archives
+            WHERE namespace_id = ?1",
+            params![namespace_id.as_str()],
         )?;
         Ok(())
     }

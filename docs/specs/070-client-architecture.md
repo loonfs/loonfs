@@ -2260,8 +2260,12 @@ Rules:
 Durable artifact shape:
 
 - `conflict_artifacts(namespace_id, conflict_id)` now stores `artifact_kind = file | subtree`
+- `conflict_artifact_archives(namespace_id, conflict_id)` caches archive sidecars with
+  `object_key` and `archived_at_ms`
 - subtree artifacts are stored under:
   - `namespaces/{namespace_id}/conflicts/{conflict_id}.json`
+- archive sidecars are stored under:
+  - `namespaces/{namespace_id}/conflict-archives/{conflict_id}.json`
 - each subtree artifact records:
   - root winner summary
   - root loser summary
@@ -2365,13 +2369,25 @@ Rules:
 - discovery lists `namespaces/{namespace_id}/conflicts/` from object storage, decodes every
   artifact object strictly, and upserts the validated rows into the local `conflict_artifacts`
   cache in one transaction
+- archive discovery lists `namespaces/{namespace_id}/conflict-archives/`, decodes every archive
+  sidecar strictly, validates that each sidecar matches an existing artifact, and replaces the
+  local `conflict_artifact_archives` cache for that namespace in one transaction
+- archive state is binary only:
+  - `active` when no archive sidecar exists
+  - `archived` when an archive sidecar exists
+- archive state is out-of-band operator metadata; it never rewrites the immutable artifact object
 - malformed or mismatched artifact objects fail discovery closed; the client does not partially
   update the namespace cache
+- malformed, mismatched, or orphan archive sidecars also fail discovery closed without partially
+  updating the archive cache
 - restore is out-of-band recovery, not a planner decision
 - restore always targets an explicit caller-supplied destination path or root
 - restore never mutates `remote_state`, `local_state`, `sync_anchor`, `planned_actions`,
   `conflicts_and_errors`, transfer ledgers, or pending mutation rows
 - restore never consumes, deletes, or rewrites the immutable artifact object or its cached row
+- archive and unarchive mutate only the archive sidecar object plus the local
+  `conflict_artifact_archives` cache row
+- archived artifacts remain discoverable, inspectable, and restorable
 - file restore requires the destination parent to already exist and the destination file to be
   absent
 - subtree restore requires the destination parent to already exist and the destination root to be
@@ -2393,6 +2409,12 @@ Failure modes:
 Executable invariant IDs for this slice:
 
 - `conflict_artifact_discovery_caches_namespace_artifacts`
+- `conflict_artifact_archive_sidecar_matches_namespace_and_id`
+- `conflict_artifact_archive_discovery_caches_archived_state`
+- `conflict_artifact_archive_hides_item_from_default_active_list`
+- `conflict_artifact_show_reports_implicit_active_state`
+- `conflict_artifact_unarchive_restores_active_visibility`
+- `conflict_artifact_restore_does_not_change_archive_state`
 - `file_conflict_artifact_restore_reproduces_loser_content`
 - `file_conflict_artifact_restore_keeps_canonical_path_untouched`
 - `subtree_conflict_artifact_restore_reproduces_full_loser_tree`

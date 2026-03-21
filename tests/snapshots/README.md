@@ -8,5 +8,7 @@ Rendered scenario traces and summaries live here, grouped by the xtask command t
 - `conflict-list/`
 - `conflict-show/`
 - `conflict-restore/`
+- `conflict-archive/`
+- `conflict-unarchive/`
 
 The intention is that reviewers can diff scenario output without reading Rust code.

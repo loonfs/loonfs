@@ -801,6 +801,14 @@ impl ConflictArtifactRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictArtifactArchiveRow {
+    pub namespace_id: NamespaceId,
+    pub conflict_id: String,
+    pub object_key: String,
+    pub archived_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundLocalOnlyFile {
     pub client_file_id: ClientFileId,
     pub namespace_id: NamespaceId,

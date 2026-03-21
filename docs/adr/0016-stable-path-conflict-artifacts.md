@@ -29,8 +29,13 @@ Rules:
 - artifact discovery and restore are library-first and out of band
 - restore always targets an explicit caller-supplied destination and never mutates sync planner
   state
-- the first operator-facing shell is `xtask` against explicit local DB/store paths; acknowledge,
-  archive, and delete lifecycle controls remain deferred
+- archive state is binary only in v1: implicit `active` by sidecar absence or `archived` by sidecar
+  presence
+- archive state lives in immutable sidecar objects under
+  `namespaces/{namespace_id}/conflict-archives/{conflict_id}.json`
+- the first operator-facing shell is `xtask` against explicit local DB/store paths with
+  list/show/restore/archive/unarchive
+- destructive delete/GC lifecycle controls remain deferred
 
 ## Consequences
 

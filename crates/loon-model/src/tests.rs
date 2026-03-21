@@ -305,6 +305,50 @@ fn model_file_conflict_restore_rejects_occupied_destination() {
 }
 
 #[test]
+fn model_conflict_artifacts_are_implicitly_active_without_archive_sidecar() {
+    assert_eq!(
+        model_conflict_artifact_lifecycle_state(None),
+        ModelConflictArtifactLifecycleState::Active
+    );
+}
+
+#[test]
+fn model_archive_transition_marks_conflict_artifact_archived() {
+    assert_eq!(
+        model_archive_conflict_artifact(),
+        ModelConflictArtifactLifecycleState::Archived
+    );
+    assert_eq!(
+        model_conflict_artifact_lifecycle_state(Some(1_700_000_000_000)),
+        ModelConflictArtifactLifecycleState::Archived
+    );
+}
+
+#[test]
+fn model_unarchive_transition_restores_active_visibility() {
+    assert_eq!(
+        model_unarchive_conflict_artifact(),
+        ModelConflictArtifactLifecycleState::Active
+    );
+    assert!(model_conflict_artifact_matches_filter(
+        ModelConflictArtifactLifecycleState::Active,
+        ModelConflictArtifactListFilter::Active
+    ));
+    assert!(!model_conflict_artifact_matches_filter(
+        ModelConflictArtifactLifecycleState::Archived,
+        ModelConflictArtifactListFilter::Active
+    ));
+    assert!(model_conflict_artifact_matches_filter(
+        ModelConflictArtifactLifecycleState::Archived,
+        ModelConflictArtifactListFilter::Archived
+    ));
+    assert!(model_conflict_artifact_matches_filter(
+        ModelConflictArtifactLifecycleState::Archived,
+        ModelConflictArtifactListFilter::All
+    ));
+}
+
+#[test]
 fn model_restores_subtree_conflict_artifact_in_deterministic_entry_order() {
     let restored = model_restore_subtree_conflict_artifact(
         "/tmp/recovered/reports-restored",
@@ -384,6 +428,28 @@ fn model_subtree_conflict_restore_rejects_unsorted_entries() {
             previous_relative_path: "docs/report.txt".to_owned(),
             current_relative_path: "docs".to_owned(),
         }
+    );
+}
+
+#[test]
+fn model_restore_does_not_change_conflict_artifact_archive_state() {
+    let lifecycle_before = model_conflict_artifact_lifecycle_state(Some(1_700_000_000_000));
+    let _restored = model_restore_file_conflict_artifact(
+        "/tmp/recovered/report.txt",
+        false,
+        true,
+        true,
+        Some("sha256:loser-manifest"),
+    )
+    .expect("restore file conflict artifact");
+
+    assert_eq!(
+        lifecycle_before,
+        ModelConflictArtifactLifecycleState::Archived
+    );
+    assert_eq!(
+        lifecycle_before,
+        model_conflict_artifact_lifecycle_state(Some(1_700_000_000_000))
     );
 }
 

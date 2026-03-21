@@ -184,10 +184,29 @@ fn run() -> Result<()> {
             print!("{}", conflicts::run_conflict_restore(conflict_args)?);
             Ok(())
         }
+        Some("conflict-archive") => {
+            let conflict_args = conflicts::parse_conflict_archive_args(args)?;
+            print!(
+                "{}",
+                conflicts::run_conflict_archive(
+                    conflict_args,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("wall clock should be after unix epoch")
+                        .as_millis() as u64,
+                )?
+            );
+            Ok(())
+        }
+        Some("conflict-unarchive") => {
+            let conflict_args = conflicts::parse_conflict_unarchive_args(args)?;
+            print!("{}", conflicts::run_conflict_unarchive(conflict_args)?);
+            Ok(())
+        }
         Some(other) => bail!("unknown xtask command: {other}"),
         None => {
             println!(
-                "xtask commands: render-case | render-kind | validate-fixtures | replay-seed | minimize-case | conflict-list | conflict-show | conflict-restore"
+                "xtask commands: render-case | render-kind | validate-fixtures | replay-seed | minimize-case | conflict-list | conflict-show | conflict-restore | conflict-archive | conflict-unarchive"
             );
             Ok(())
         }
