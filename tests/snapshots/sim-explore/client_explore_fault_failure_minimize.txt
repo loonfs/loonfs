@@ -1,0 +1,125 @@
+harness=client_server scenario=client_explore_fault_failure_minimize seed=Some(3408) total_candidate_cases=12 selected_candidate_cases=6 executed_cases=1 skipped_cases=5
+  case=1 status=not_executable reason=retry exploration requires restart_client -> client_tick -> deliver_next_response fault=dispatch_error_once checkpoint_id=dispatch.client.never_used message=inert dispatch fault permuted_actions=[{"client_tick":{"created_at_ms":1700000206010}} | {"deliver_next_response":true} | {"restart_client":true}]
+  case=2 status=not_executable reason=retry exploration requires restart_client -> client_tick -> deliver_next_response fault=dispatch_error_once checkpoint_id=dispatch.client.never_used message=inert dispatch fault permuted_actions=[{"restart_client":true} | {"deliver_next_response":true} | {"client_tick":{"created_at_ms":1700000206010}}]
+  case=3 status=not_executable reason=retry exploration requires restart_client -> client_tick -> deliver_next_response fault=none permuted_actions=[{"client_tick":{"created_at_ms":1700000206010}} | {"restart_client":true} | {"deliver_next_response":true}]
+  case=4 status=not_executable reason=retry exploration requires restart_client -> client_tick -> deliver_next_response fault=dispatch_error_once checkpoint_id=dispatch.client.never_used message=inert dispatch fault permuted_actions=[{"deliver_next_response":true} | {"client_tick":{"created_at_ms":1700000206010}} | {"restart_client":true}]
+  case=5 status=not_executable reason=retry exploration requires restart_client -> client_tick -> deliver_next_response fault=none permuted_actions=[{"deliver_next_response":true} | {"restart_client":true} | {"client_tick":{"created_at_ms":1700000206010}}]
+  case=6 status=failed headline=missing expected invariant `late_remote_observation_does_not_duplicate_winner_apply`: fault=dispatch_error_once checkpoint_id=dispatch.client.never_used message=inert dispatch fault permuted_actions=[{"restart_client":true} | {"client_tick":{"created_at_ms":1700000206010}} | {"deliver_next_response":true}]
+first_failure_case=6 headline=missing expected invariant `late_remote_observation_does_not_duplicate_winner_apply`:
+first_failure_fault=dispatch_error_once checkpoint_id=dispatch.client.never_used message=inert dispatch fault
+[trace]
+scenario=client_explore_fault_failure_minimize kind=sim schema_version=1 seed=Some(3408) actions=6 faults=1 expect_keys=6
+  1. exploration_case_started case_index=6 seed=Some(3408) now_ms=0 fault=dispatch_error_once checkpoint_id=dispatch.client.never_used message=inert dispatch fault permuted_actions=[{"restart_client":true} | {"client_tick":{"created_at_ms":1700000206010}} | {"deliver_next_response":true}]
+  2. actor_step actor=fixture now_ms=0 initial client_state=local_only_present=true planned_local_only_present=true bound_present=false seeded_network_responses=0 seeded_observations=0
+  3. delivery_enqueued delivery_id=1 kind=client_request sender=client recipient=server enqueued_at_ms=0 deliver_at_ms=0
+  4. actor_step actor=client now_ms=0 tick result=enqueued_request request_id=client-req-00000000000000000001 generation=0
+  5. delivery_delivered now_ms=0 delivery_id=1 kind=client_request sender=client recipient=server enqueued_at_ms=0 deliver_at_ms=0
+  6. actor_step actor=network now_ms=0 deliver_next_request request_id=client-req-00000000000000000001 delivery_id=1
+  7. delivery_enqueued delivery_id=2 kind=client_response sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  8. delivery_enqueued delivery_id=3 kind=remote_observation sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  9. actor_step actor=server now_ms=0 handle_next_request request_id=client-req-00000000000000000001 committed_seq=42 writer_id=writer-a writer_version=loon-server-test
+  10. actor_restarted actor=client now_ms=0
+  11. actor_step actor=client now_ms=0 tick result=reused_pending_request_waiting request_id=client-req-00000000000000000001 generation=1
+  12. delivery_delivered now_ms=0 delivery_id=2 kind=client_response sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  13. actor_step actor=client now_ms=0 deliver_next_response request_id=client-req-00000000000000000001 changed=true bound inode_id=501
+  14. invariants[sim] client_retry_reuses_pending_request_after_delayed_response=pass detail=pending_request_id_before_restart=Some("client-req-00000000000000000001") pending_request_id_after_retry=Some("client-req-00000000000000000001") retried_request_id=Some("client-req-00000000000000000001") converged_once=true
+  15. invariants[sim] late_remote_observation_does_not_duplicate_winner_apply=fail detail=response_apply_succeeded=true observation_apply_succeeded=false winner_apply_count=1
+
+[minimized_report]
+failure_headline=missing expected invariant `late_remote_observation_does_not_duplicate_winner_apply`:
+removed_fault=false
+original_permuted_action_count=3
+minimized_permuted_action_count=3
+[minimized]
+schema_version: 1
+scenario_kind: sim
+name: client_explore_fault_failure_minimize_minimized
+seed: 3408
+initial:
+  client_state:
+    head:
+      namespace_id: ns-1
+      seq: 41
+      active_fence_token: 8
+      next_inode_id: 501
+      snapshot_hint_seq: 40
+      retention_floor_seq: 40
+    lease:
+      namespace_id: ns-1
+      holder_id: writer-a
+      fence_token: 8
+      lease_expires_at_ms: 1700000215000
+    local_only_state:
+      client_file_id: tmp:ns-1:00000000000000000002
+      namespace_id: ns-1
+      inode_kind: dir
+      parent_inode_id: 2
+      display_name: drafts
+      content_digest: null
+      exists_on_disk: true
+      dirty: true
+      last_local_change_ms: 1700000200000
+    planned_local_only_action:
+      client_file_id: tmp:ns-1:00000000000000000002
+      namespace_id: ns-1
+      decision: create_remote_dir
+      reason: local_only_directory_without_remote_identity
+      created_at_ms: 1700000205000
+  server_basis:
+    writer_id: writer-a
+    writer_version: loon-server-test
+actions:
+- client_tick:
+    created_at_ms: 1700000206000
+- deliver_next_request: true
+- server_handle_next_request:
+    now_ms: 1700000207000
+- restart_client: true
+- client_tick:
+    created_at_ms: 1700000206010
+- deliver_next_response: true
+faults:
+- checkpoint_id: dispatch.client.never_used
+  kind: dispatch_error_once
+  message: inert dispatch fault
+explore: null
+expect:
+  invariants:
+  - client_retry_reuses_pending_request_after_delayed_response
+  - late_remote_observation_does_not_duplicate_winner_apply
+  local_state:
+    namespace_id: ns-1
+    inode_id: 501
+    inode_kind: dir
+    content_digest: null
+    parent_inode_id: 2
+    display_name: drafts
+    exists_on_disk: true
+    dirty: false
+    last_local_change_ms: 1700000200000
+  pending_client_mutation_present: false
+  planner_result:
+    namespace_id: ns-1
+    inode_id: 501
+    decision: no_op
+    reason: already_converged
+    created_at_ms: 1700000210000
+  remote_state:
+    namespace_id: ns-1
+    inode_id: 501
+    inode_kind: dir
+    observed_seq: 42
+    revision_no: 1
+    content_digest: null
+    parent_inode_id: 2
+    display_name: drafts
+    is_deleted: false
+  sync_anchor:
+    namespace_id: ns-1
+    inode_id: 501
+    inode_kind: dir
+    synced_seq: 42
+    revision_no: 1
+    content_digest: null
+    parent_inode_id: 2
+    display_name: drafts

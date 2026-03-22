@@ -13,4 +13,7 @@ Rendered scenario traces and summaries live here, grouped by the xtask command t
 - `sim-interleavings/`
 - `sim-explore/`
 
+`sim-explore/` contains deterministic exploration summaries and minimized plain sim repros across
+the scheduler-backed harnesses.
+
 The intention is that reviewers can diff scenario output without reading Rust code.

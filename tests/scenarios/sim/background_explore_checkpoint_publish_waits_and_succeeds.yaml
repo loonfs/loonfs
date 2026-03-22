@@ -1,0 +1,99 @@
+schema_version: 1
+scenario_kind: sim
+name: background_explore_checkpoint_publish_waits_and_succeeds
+seed: 3410
+initial:
+  head:
+    namespace_id: ns-1
+    seq: 42
+    active_fence_token: 9
+    next_inode_id: 777
+    snapshot_hint_seq: 40
+    retention_floor_seq: 40
+  lease:
+    namespace_id: ns-1
+    holder_id: writer-a
+    fence_token: 9
+    lease_expires_at_ms: 2000
+  metadata_state:
+    inodes:
+      - inode_id: 2
+        inode_kind: dir
+        created_seq: 1
+      - inode_id: 9
+        inode_kind: file
+        created_seq: 42
+    direntries:
+      - parent_inode_id: 2
+        name_key: report.txt
+        display_name: report.txt
+        child_inode_id: 9
+        bind_seq: 42
+        bind_op_index: 0
+    revisions:
+      - inode_id: 9
+        revision_no: 1
+        committed_seq: 42
+        revision_op_index: 0
+        content_manifest_digest: sha256:checkpoint
+  progress_objects:
+    - key: namespaces/ns-1/derived/BuildListingIndex/progress.json
+      payload:
+        namespace_id: ns-1
+        work_class: BuildListingIndex
+        through_seq: 40
+    - key: namespaces/ns-1/derived/RetentionPolicy/progress.json
+      payload:
+        namespace_id: ns-1
+        work_class: RetentionPolicy
+        through_seq: 42
+explore:
+  strategy: bounded_interleavings
+  max_cases: 24
+  permuted_actions:
+    - checkpoint_build: true
+    - checkpoint_publish:
+        requested_retention_floor_seq: 42
+        required_progress_work_classes:
+          - BuildListingIndex
+        retention_policy_work_class: RetentionPolicy
+    - publish_progress:
+        namespace_id: ns-1
+        work_class: BuildListingIndex
+        through_seq: 42
+    - checkpoint_publish:
+        requested_retention_floor_seq: 42
+        required_progress_work_classes:
+          - BuildListingIndex
+        retention_policy_work_class: RetentionPolicy
+expect:
+  head:
+    namespace_id: ns-1
+    seq: 42
+    active_fence_token: 9
+    next_inode_id: 777
+    snapshot_hint_seq: 42
+    retention_floor_seq: 42
+  progress_objects:
+    - key: namespaces/ns-1/derived/BuildListingIndex/progress.json
+      payload:
+        namespace_id: ns-1
+        work_class: BuildListingIndex
+        through_seq: 42
+    - key: namespaces/ns-1/derived/RetentionPolicy/progress.json
+      payload:
+        namespace_id: ns-1
+        work_class: RetentionPolicy
+        through_seq: 42
+  invariants:
+    - progress_object_checksum_matches_payload
+    - progress_object_key_matches_namespace_and_work_class
+    - progress_through_seq_advances_monotonically
+    - checkpoint_publish_requires_verified_checkpoint
+    - snapshot_hint_seq_advances_monotonically
+    - retention_floor_seq_advances_monotonically
+    - retention_floor_seq_requires_checkpoint_coverage
+    - retention_floor_seq_requires_derived_progress
+    - retention_floor_seq_respects_policy_gate
+    - checkpoint_publish_waits_for_required_progress_under_interleaving
+    - checkpoint_publish_preserves_monotonic_head_summary_under_interleaving

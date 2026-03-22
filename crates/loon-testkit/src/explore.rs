@@ -9,6 +9,25 @@ use std::collections::BTreeMap;
 
 pub type ScenarioFragment = BTreeMap<String, Value>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplorationHarnessKind {
+    UnifiedNamespace,
+    ClientServer,
+    Background,
+    Queue,
+}
+
+impl ExplorationHarnessKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UnifiedNamespace => "unified_namespace",
+            Self::ClientServer => "client_server",
+            Self::Background => "background",
+            Self::Queue => "queue",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConcreteExplorationCase {
     pub case_index: usize,
@@ -72,6 +91,7 @@ pub struct FailedExplorationCaseReport {
 
 #[derive(Debug, Clone)]
 pub struct ExplorationRunReport {
+    pub harness_kind: ExplorationHarnessKind,
     pub scenario_name: String,
     pub effective_seed: Option<Seed>,
     pub total_candidate_cases: usize,
@@ -85,7 +105,8 @@ pub struct ExplorationRunReport {
 impl ExplorationRunReport {
     pub fn render_summary(&self) -> String {
         let mut lines = vec![format!(
-            "scenario={} seed={:?} total_candidate_cases={} selected_candidate_cases={} executed_cases={} skipped_cases={}",
+            "harness={} scenario={} seed={:?} total_candidate_cases={} selected_candidate_cases={} executed_cases={} skipped_cases={}",
+            self.harness_kind.as_str(),
             self.scenario_name,
             self.effective_seed.map(|seed| seed.0),
             self.total_candidate_cases,
@@ -183,6 +204,82 @@ struct MaterializedExplorationCase {
 pub fn run_unified_namespace_exploration_scenario<F>(
     scenario: &Scenario,
     seed_override: Option<Seed>,
+    execute_case: F,
+) -> Result<ExplorationRunReport>
+where
+    F: FnMut(&ConcreteExplorationCase) -> Result<ExplorationExecutionOutcome>,
+{
+    run_exploration_scenario(
+        ExplorationHarnessKind::UnifiedNamespace,
+        FaultSupport::ClientOnly,
+        scenario,
+        seed_override,
+        execute_case,
+    )
+}
+
+pub fn run_client_server_exploration_scenario<F>(
+    scenario: &Scenario,
+    seed_override: Option<Seed>,
+    execute_case: F,
+) -> Result<ExplorationRunReport>
+where
+    F: FnMut(&ConcreteExplorationCase) -> Result<ExplorationExecutionOutcome>,
+{
+    run_exploration_scenario(
+        ExplorationHarnessKind::ClientServer,
+        FaultSupport::ClientOnly,
+        scenario,
+        seed_override,
+        execute_case,
+    )
+}
+
+pub fn run_background_exploration_scenario<F>(
+    scenario: &Scenario,
+    seed_override: Option<Seed>,
+    execute_case: F,
+) -> Result<ExplorationRunReport>
+where
+    F: FnMut(&ConcreteExplorationCase) -> Result<ExplorationExecutionOutcome>,
+{
+    run_exploration_scenario(
+        ExplorationHarnessKind::Background,
+        FaultSupport::None,
+        scenario,
+        seed_override,
+        execute_case,
+    )
+}
+
+pub fn run_queue_exploration_scenario<F>(
+    scenario: &Scenario,
+    seed_override: Option<Seed>,
+    execute_case: F,
+) -> Result<ExplorationRunReport>
+where
+    F: FnMut(&ConcreteExplorationCase) -> Result<ExplorationExecutionOutcome>,
+{
+    run_exploration_scenario(
+        ExplorationHarnessKind::Queue,
+        FaultSupport::None,
+        scenario,
+        seed_override,
+        execute_case,
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FaultSupport {
+    ClientOnly,
+    None,
+}
+
+fn run_exploration_scenario<F>(
+    harness_kind: ExplorationHarnessKind,
+    fault_support: FaultSupport,
+    scenario: &Scenario,
+    seed_override: Option<Seed>,
     mut execute_case: F,
 ) -> Result<ExplorationRunReport>
 where
@@ -198,7 +295,7 @@ where
         .ok_or_else(|| anyhow::anyhow!("sim exploration requires an `explore` section"))?;
     explore.validate()?;
 
-    let fault_variants = build_fault_variants(&working)?;
+    let fault_variants = build_fault_variants(&working, fault_support)?;
     let permutations = permute_indices(explore.permuted_actions.len());
     let total_candidate_cases = fault_variants.len() * permutations.len();
 
@@ -311,6 +408,7 @@ where
     }
 
     Ok(ExplorationRunReport {
+        harness_kind,
         scenario_name: working.name.clone(),
         effective_seed: working.seed.map(Seed),
         total_candidate_cases,
@@ -411,7 +509,13 @@ fn matches_failure_headline(outcome: ExplorationExecutionOutcome, target_headlin
     }
 }
 
-fn build_fault_variants(scenario: &Scenario) -> Result<Vec<FaultVariant>> {
+fn build_fault_variants(
+    scenario: &Scenario,
+    fault_support: FaultSupport,
+) -> Result<Vec<FaultVariant>> {
+    if matches!(fault_support, FaultSupport::None) && !scenario.faults.is_empty() {
+        bail!("this exploration harness does not support `faults`");
+    }
     let parsed_faults: Vec<InjectedClientFault> = scenario.decode_faults()?;
     let mut variants = vec![FaultVariant {
         raw: None,
@@ -620,9 +724,10 @@ fn failure_signature(error: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_concrete_case, minimize_failed_case, run_unified_namespace_exploration_scenario,
+        build_concrete_case, minimize_failed_case, run_background_exploration_scenario,
+        run_queue_exploration_scenario, run_unified_namespace_exploration_scenario,
         BoundedInterleavingsExploreConfig, ConcreteExplorationCase, ExplorationCaseOutcomeKind,
-        ExplorationExecutionOutcome, InjectedClientFault,
+        ExplorationExecutionOutcome, ExplorationHarnessKind, InjectedClientFault,
     };
     use crate::scenario::{Scenario, ScenarioKind};
     use crate::seed::Seed;
@@ -703,6 +808,7 @@ expect: {}
             .collect::<Vec<_>>();
 
         assert_eq!(first_order, second_order);
+        assert_eq!(first.harness_kind, ExplorationHarnessKind::UnifiedNamespace);
     }
 
     #[test]
@@ -867,5 +973,27 @@ permuted_actions:
         .expect("minimize failing exploration case");
 
         assert!(minimized.removed_fault);
+    }
+
+    #[test]
+    fn background_exploration_rejects_fault_pools() {
+        let scenario = synthetic_scenario();
+        let error = run_background_exploration_scenario(&scenario, None, |_case| {
+            Ok(ExplorationExecutionOutcome::Passed)
+        })
+        .expect_err("background exploration should reject faults");
+
+        assert!(error.to_string().contains("does not support `faults`"));
+    }
+
+    #[test]
+    fn queue_exploration_rejects_fault_pools() {
+        let scenario = synthetic_scenario();
+        let error = run_queue_exploration_scenario(&scenario, None, |_case| {
+            Ok(ExplorationExecutionOutcome::Passed)
+        })
+        .expect_err("queue exploration should reject faults");
+
+        assert!(error.to_string().contains("does not support `faults`"));
     }
 }

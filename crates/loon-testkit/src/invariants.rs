@@ -446,6 +446,12 @@ pub struct BackgroundSimTraceDeterminismInvariantInputs<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct QueueSimTraceDeterminismInvariantInputs<'a> {
+    pub first_rendered_trace: &'a str,
+    pub second_rendered_trace: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct NamespaceCheckpointLatestHeadInvariantInputs {
     pub published_snapshot_hint_seq: Option<ChangeSeq>,
     pub latest_visible_head_seq: ChangeSeq,
@@ -3012,6 +3018,25 @@ pub fn evaluate_background_sim_trace_determinism_invariants(
     }
 }
 
+pub fn evaluate_queue_sim_trace_determinism_invariants(
+    inputs: QueueSimTraceDeterminismInvariantInputs<'_>,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "queue_sim_trace_order_is_seed_stable".to_owned(),
+            passed: loon_model::delivery_order_is_seed_stable(
+                &[inputs.first_rendered_trace],
+                &[inputs.second_rendered_trace],
+            ),
+            detail: format!(
+                "first_trace_len={} second_trace_len={}",
+                inputs.first_rendered_trace.len(),
+                inputs.second_rendered_trace.len()
+            ),
+        }],
+    }
+}
+
 pub fn evaluate_namespace_checkpoint_latest_head_invariants(
     inputs: NamespaceCheckpointLatestHeadInvariantInputs,
 ) -> SimInvariantReport {
@@ -4654,7 +4679,8 @@ mod tests {
         evaluate_namespace_repair_latest_head_invariants,
         evaluate_namespace_stale_writer_inflight_request_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
-        evaluate_queue_complete_invariants, evaluate_remote_delete_planning_invariants,
+        evaluate_queue_complete_invariants, evaluate_queue_sim_trace_determinism_invariants,
+        evaluate_remote_delete_planning_invariants,
         evaluate_remote_observation_ambiguous_bind_invariants,
         evaluate_remote_observation_convergence_invariants,
         evaluate_remote_only_directory_materialization_invariants,
@@ -4684,8 +4710,9 @@ mod tests {
         NamespaceRepairLatestHeadInvariantInputs,
         NamespaceStaleWriterInflightRequestInvariantInputs, ProgressInvariantSnapshot,
         ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
-        QueueCompleteOutcomeKind, RemoteDeletePlanningInvariantInputs,
-        RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
+        QueueCompleteOutcomeKind, QueueSimTraceDeterminismInvariantInputs,
+        RemoteDeletePlanningInvariantInputs, RemoteObservationAmbiguousBindInvariantInputs,
+        RemoteObservationConvergenceInvariantInputs,
         RemoteOnlyDirectoryMaterializationInvariantInputs,
         RemoteOnlyDirectoryMaterializationOutcomeKind,
         RemoteOnlyParentMaterializationWaitInvariantInputs,
@@ -6640,6 +6667,23 @@ mod tests {
         assert!(
             report
                 .check("background_sim_trace_order_is_seed_stable")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn queue_sim_trace_determinism_invariant_requires_exact_trace_match() {
+        let report = evaluate_queue_sim_trace_determinism_invariants(
+            QueueSimTraceDeterminismInvariantInputs {
+                first_rendered_trace: "trace-a",
+                second_rendered_trace: "trace-a",
+            },
+        );
+
+        assert!(
+            report
+                .check("queue_sim_trace_order_is_seed_stable")
                 .expect("check should exist")
                 .passed
         );

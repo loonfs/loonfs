@@ -206,6 +206,7 @@ pub const SIM_INTERLEAVING_INVARIANTS: &[&str] = &[
     "repair_lost_enqueue_tracks_latest_visible_head_seq",
     "checkpoint_publish_uses_latest_visible_head_after_client_server_advance",
     "repair_lost_enqueue_tracks_latest_visible_head_after_client_server_advance",
+    "queue_sim_trace_order_is_seed_stable",
     "background_sim_trace_order_is_seed_stable",
     "unified_namespace_sim_trace_order_is_seed_stable",
 ];
@@ -362,6 +363,7 @@ pub const INVARIANTS: &[&str] = &[
     "repair_lost_enqueue_tracks_latest_visible_head_seq",
     "checkpoint_publish_uses_latest_visible_head_after_client_server_advance",
     "repair_lost_enqueue_tracks_latest_visible_head_after_client_server_advance",
+    "queue_sim_trace_order_is_seed_stable",
     "background_sim_trace_order_is_seed_stable",
     "unified_namespace_sim_trace_order_is_seed_stable",
     "subtree_tombstone_blocks_descendant_mutation",
