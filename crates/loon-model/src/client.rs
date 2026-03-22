@@ -50,6 +50,18 @@ pub fn late_remote_observation_converges_once(
     response_apply_succeeded && observation_apply_succeeded && winner_apply_count == 1
 }
 
+pub fn response_after_newer_observation_is_idempotent(
+    observation_apply_succeeded: bool,
+    delayed_response_applied_cleanly: bool,
+    delayed_response_changed_state: bool,
+    winner_apply_count: u64,
+) -> bool {
+    observation_apply_succeeded
+        && delayed_response_applied_cleanly
+        && !delayed_response_changed_state
+        && winner_apply_count == 1
+}
+
 pub fn delivery_order_is_seed_stable<T>(first: &[T], second: &[T]) -> bool
 where
     T: PartialEq,
@@ -94,6 +106,21 @@ pub fn snapshot_repair_tracks_latest_visible_head_seq(
     latest_visible_head_seq: ChangeSeq,
 ) -> bool {
     repaired_through_seq == Some(latest_visible_head_seq)
+}
+
+pub fn checkpoint_publish_uses_latest_visible_head(
+    published_snapshot_hint_seq: Option<ChangeSeq>,
+    latest_visible_head_seq: ChangeSeq,
+) -> bool {
+    published_snapshot_hint_seq == Some(latest_visible_head_seq)
+}
+
+pub fn stale_writer_fence_survives_inflight_client_request(
+    stale_publish_rejected: bool,
+    inflight_client_request_present: bool,
+    delayed_client_response_converged: bool,
+) -> bool {
+    stale_publish_rejected && inflight_client_request_present && delayed_client_response_converged
 }
 
 pub fn download_transfer_id(

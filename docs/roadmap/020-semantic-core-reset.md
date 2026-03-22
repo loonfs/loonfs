@@ -610,6 +610,9 @@ Deliverables:
   idempotence, and remote-observation-before-response ordering
 - background `sim` fixtures cover writer handover, checkpoint build/publish wait behavior,
   progress advancement, and snapshot-repair observation of the latest visible head seq
+- unified namespace `sim` fixtures compose client/server delivery with writer handover,
+  checkpoint/progress publication, and snapshot repair against one shared head/lease/object-store
+  timeline
 - the existing once-only client fault plan is consumable from `tests/scenarios/sim/`
 - seed-stable sim traces are checked in as readable artifacts
 
@@ -619,6 +622,8 @@ Required rules:
 - scheduler order is explicit and deterministic
 - `loon-sim` owns scheduling and trace primitives; actor-family harnesses live above it in
   `loon-testkit`
+- the narrower client/server and background scheduler harnesses stay in place as lower-level proofs
+  even after unified namespace interleaving coverage exists
 - stale-writer/checkpoint/progress native differentials remain as lower-level semantic proofs even
   after scheduler-backed background sim coverage exists
 - no second bespoke scheduler appears inside `loon-client` or `loon-queue`

@@ -400,6 +400,14 @@ pub struct LateRemoteObservationInvariantInputs {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct ResponseAfterNewerObservationInvariantInputs {
+    pub observation_apply_succeeded: bool,
+    pub delayed_response_applied_cleanly: bool,
+    pub delayed_response_changed_state: bool,
+    pub winner_apply_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct SimTraceDeterminismInvariantInputs<'a> {
     pub first_rendered_trace: &'a str,
     pub second_rendered_trace: &'a str,
@@ -433,6 +441,31 @@ pub struct BackgroundRepairInvariantInputs {
 
 #[derive(Debug, Clone, Copy)]
 pub struct BackgroundSimTraceDeterminismInvariantInputs<'a> {
+    pub first_rendered_trace: &'a str,
+    pub second_rendered_trace: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NamespaceCheckpointLatestHeadInvariantInputs {
+    pub published_snapshot_hint_seq: Option<ChangeSeq>,
+    pub latest_visible_head_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NamespaceRepairLatestHeadInvariantInputs {
+    pub repaired_through_seq: Option<ChangeSeq>,
+    pub latest_visible_head_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NamespaceStaleWriterInflightRequestInvariantInputs {
+    pub stale_publish_rejected: bool,
+    pub inflight_client_request_present: bool,
+    pub delayed_client_response_converged: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UnifiedNamespaceSimTraceDeterminismInvariantInputs<'a> {
     pub first_rendered_trace: &'a str,
     pub second_rendered_trace: &'a str,
 }
@@ -2835,6 +2868,29 @@ pub fn evaluate_late_remote_observation_invariants(
     }
 }
 
+pub fn evaluate_response_after_newer_observation_invariants(
+    inputs: ResponseAfterNewerObservationInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "response_after_newer_observation_is_idempotent".to_owned(),
+            passed: loon_model::response_after_newer_observation_is_idempotent(
+                inputs.observation_apply_succeeded,
+                inputs.delayed_response_applied_cleanly,
+                inputs.delayed_response_changed_state,
+                inputs.winner_apply_count,
+            ),
+            detail: format!(
+                "observation_apply_succeeded={} delayed_response_applied_cleanly={} delayed_response_changed_state={} winner_apply_count={}",
+                inputs.observation_apply_succeeded,
+                inputs.delayed_response_applied_cleanly,
+                inputs.delayed_response_changed_state,
+                inputs.winner_apply_count
+            ),
+        }],
+    }
+}
+
 pub fn evaluate_sim_trace_determinism_invariants(
     inputs: SimTraceDeterminismInvariantInputs<'_>,
 ) -> SimInvariantReport {
@@ -2943,6 +2999,84 @@ pub fn evaluate_background_sim_trace_determinism_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "background_sim_trace_order_is_seed_stable".to_owned(),
+            passed: loon_model::delivery_order_is_seed_stable(
+                &[inputs.first_rendered_trace],
+                &[inputs.second_rendered_trace],
+            ),
+            detail: format!(
+                "first_trace_len={} second_trace_len={}",
+                inputs.first_rendered_trace.len(),
+                inputs.second_rendered_trace.len()
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_namespace_checkpoint_latest_head_invariants(
+    inputs: NamespaceCheckpointLatestHeadInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "checkpoint_publish_uses_latest_visible_head_after_client_server_advance"
+                .to_owned(),
+            passed: loon_model::checkpoint_publish_uses_latest_visible_head(
+                inputs.published_snapshot_hint_seq,
+                inputs.latest_visible_head_seq,
+            ),
+            detail: format!(
+                "published_snapshot_hint_seq={:?} latest_visible_head_seq={}",
+                inputs.published_snapshot_hint_seq, inputs.latest_visible_head_seq.0
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_namespace_repair_latest_head_invariants(
+    inputs: NamespaceRepairLatestHeadInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "repair_lost_enqueue_tracks_latest_visible_head_after_client_server_advance"
+                .to_owned(),
+            passed: loon_model::snapshot_repair_tracks_latest_visible_head_seq(
+                inputs.repaired_through_seq,
+                inputs.latest_visible_head_seq,
+            ),
+            detail: format!(
+                "repaired_through_seq={:?} latest_visible_head_seq={}",
+                inputs.repaired_through_seq, inputs.latest_visible_head_seq.0
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_namespace_stale_writer_inflight_request_invariants(
+    inputs: NamespaceStaleWriterInflightRequestInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "stale_writer_fence_survives_inflight_client_request".to_owned(),
+            passed: loon_model::stale_writer_fence_survives_inflight_client_request(
+                inputs.stale_publish_rejected,
+                inputs.inflight_client_request_present,
+                inputs.delayed_client_response_converged,
+            ),
+            detail: format!(
+                "stale_publish_rejected={} inflight_client_request_present={} delayed_client_response_converged={}",
+                inputs.stale_publish_rejected,
+                inputs.inflight_client_request_present,
+                inputs.delayed_client_response_converged
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_unified_namespace_sim_trace_determinism_invariants(
+    inputs: UnifiedNamespaceSimTraceDeterminismInvariantInputs<'_>,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "unified_namespace_sim_trace_order_is_seed_stable".to_owned(),
             passed: loon_model::delivery_order_is_seed_stable(
                 &[inputs.first_rendered_trace],
                 &[inputs.second_rendered_trace],
@@ -4515,7 +4649,10 @@ mod tests {
         evaluate_file_conflict_resolution_invariants, evaluate_inode_upload_transfer_invariants,
         evaluate_late_remote_observation_invariants,
         evaluate_local_only_upload_transfer_invariants,
+        evaluate_namespace_checkpoint_latest_head_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
+        evaluate_namespace_repair_latest_head_invariants,
+        evaluate_namespace_stale_writer_inflight_request_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
         evaluate_queue_complete_invariants, evaluate_remote_delete_planning_invariants,
         evaluate_remote_observation_ambiguous_bind_invariants,
@@ -4525,14 +4662,17 @@ mod tests {
         evaluate_remote_path_change_planning_invariants,
         evaluate_remote_subtree_delete_planning_invariants,
         evaluate_remote_subtree_rename_planning_invariants,
+        evaluate_response_after_newer_observation_invariants,
         evaluate_sim_trace_determinism_invariants,
-        evaluate_subtree_conflict_artifact_restore_invariants, ApplyRemoteDeleteInvariantInputs,
-        ApplyRemoteSubtreeDeleteInvariantInputs, ApplyRemoteSubtreeRenameInvariantInputs,
-        BackgroundCheckpointPublishInvariantInputs, BackgroundRepairInvariantInputs,
-        BackgroundSimTraceDeterminismInvariantInputs, BackgroundStaleWriterInvariantInputs,
-        CheckpointHeadPublishInvariantInputs, CheckpointObjectInvariantInputs,
-        CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
-        CheckpointReplayInvariantInputs, ClientRetryReuseInvariantInputs, CommitInvariantInputs,
+        evaluate_subtree_conflict_artifact_restore_invariants,
+        evaluate_unified_namespace_sim_trace_determinism_invariants,
+        ApplyRemoteDeleteInvariantInputs, ApplyRemoteSubtreeDeleteInvariantInputs,
+        ApplyRemoteSubtreeRenameInvariantInputs, BackgroundCheckpointPublishInvariantInputs,
+        BackgroundRepairInvariantInputs, BackgroundSimTraceDeterminismInvariantInputs,
+        BackgroundStaleWriterInvariantInputs, CheckpointHeadPublishInvariantInputs,
+        CheckpointObjectInvariantInputs, CheckpointObjectInvariantSnapshot,
+        CheckpointProgressAuthorizer, CheckpointReplayInvariantInputs,
+        ClientRetryReuseInvariantInputs, CommitInvariantInputs,
         ConflictArtifactArchiveInvariantInputs, ConflictArtifactDiscoveryInvariantInputs,
         ContentObjectInvariantInputs, ContentObjectInvariantSnapshot,
         DownloadTransferInvariantInputs, DownloadTransferOutcomeKind,
@@ -4540,7 +4680,9 @@ mod tests {
         FileConflictResolutionInvariantInputs, FileConflictResolutionKind,
         InodeUploadTransferInvariantInputs, InodeUploadTransferOutcomeKind,
         LateRemoteObservationInvariantInputs, LocalOnlyUploadTransferInvariantInputs,
-        LocalOnlyUploadTransferOutcomeKind, ProgressInvariantSnapshot,
+        LocalOnlyUploadTransferOutcomeKind, NamespaceCheckpointLatestHeadInvariantInputs,
+        NamespaceRepairLatestHeadInvariantInputs,
+        NamespaceStaleWriterInflightRequestInvariantInputs, ProgressInvariantSnapshot,
         ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
         QueueCompleteOutcomeKind, RemoteDeletePlanningInvariantInputs,
         RemoteObservationAmbiguousBindInvariantInputs, RemoteObservationConvergenceInvariantInputs,
@@ -4548,9 +4690,10 @@ mod tests {
         RemoteOnlyDirectoryMaterializationOutcomeKind,
         RemoteOnlyParentMaterializationWaitInvariantInputs,
         RemotePathChangePlanningInvariantInputs, RemoteSubtreeDeletePlanningInvariantInputs,
-        RemoteSubtreeRenamePlanningInvariantInputs, SimTraceDeterminismInvariantInputs,
-        StoredCheckpointSegmentSnapshot, StoredContentBlockSnapshot,
-        SubtreeConflictArtifactRestoreInvariantInputs, WalReplayInvariantInputs,
+        RemoteSubtreeRenamePlanningInvariantInputs, ResponseAfterNewerObservationInvariantInputs,
+        SimTraceDeterminismInvariantInputs, StoredCheckpointSegmentSnapshot,
+        StoredContentBlockSnapshot, SubtreeConflictArtifactRestoreInvariantInputs,
+        UnifiedNamespaceSimTraceDeterminismInvariantInputs, WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
     use loon_core::commit::{
@@ -6323,6 +6466,25 @@ mod tests {
     }
 
     #[test]
+    fn sim_response_after_newer_observation_is_idempotent() {
+        let report = evaluate_response_after_newer_observation_invariants(
+            ResponseAfterNewerObservationInvariantInputs {
+                observation_apply_succeeded: true,
+                delayed_response_applied_cleanly: true,
+                delayed_response_changed_state: false,
+                winner_apply_count: 1,
+            },
+        );
+
+        assert!(
+            report
+                .check("response_after_newer_observation_is_idempotent")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
     fn sim_trace_determinism_invariant_requires_exact_trace_match() {
         let report =
             evaluate_sim_trace_determinism_invariants(SimTraceDeterminismInvariantInputs {
@@ -6333,6 +6495,75 @@ mod tests {
         assert!(
             report
                 .check("sim_trace_order_is_seed_stable")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn unified_namespace_checkpoint_invariant_requires_latest_visible_head_seq() {
+        let report = evaluate_namespace_checkpoint_latest_head_invariants(
+            NamespaceCheckpointLatestHeadInvariantInputs {
+                published_snapshot_hint_seq: Some(ChangeSeq(42)),
+                latest_visible_head_seq: ChangeSeq(42),
+            },
+        );
+
+        assert!(
+            report
+                .check("checkpoint_publish_uses_latest_visible_head_after_client_server_advance")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn unified_namespace_repair_invariant_requires_latest_visible_head_seq() {
+        let report = evaluate_namespace_repair_latest_head_invariants(
+            NamespaceRepairLatestHeadInvariantInputs {
+                repaired_through_seq: Some(ChangeSeq(42)),
+                latest_visible_head_seq: ChangeSeq(42),
+            },
+        );
+
+        assert!(
+            report
+                .check("repair_lost_enqueue_tracks_latest_visible_head_after_client_server_advance")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn unified_namespace_stale_writer_inflight_request_invariant_requires_clean_convergence() {
+        let report = evaluate_namespace_stale_writer_inflight_request_invariants(
+            NamespaceStaleWriterInflightRequestInvariantInputs {
+                stale_publish_rejected: true,
+                inflight_client_request_present: true,
+                delayed_client_response_converged: true,
+            },
+        );
+
+        assert!(
+            report
+                .check("stale_writer_fence_survives_inflight_client_request")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn unified_namespace_sim_trace_determinism_invariant_requires_exact_trace_match() {
+        let report = evaluate_unified_namespace_sim_trace_determinism_invariants(
+            UnifiedNamespaceSimTraceDeterminismInvariantInputs {
+                first_rendered_trace: "trace-a",
+                second_rendered_trace: "trace-a",
+            },
+        );
+
+        assert!(
+            report
+                .check("unified_namespace_sim_trace_order_is_seed_stable")
                 .expect("check should exist")
                 .passed
         );

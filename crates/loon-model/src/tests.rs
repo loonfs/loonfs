@@ -685,6 +685,38 @@ fn model_snapshot_repair_targets_latest_visible_head_seq() {
 }
 
 #[test]
+fn model_response_after_newer_observation_is_idempotent() {
+    assert!(response_after_newer_observation_is_idempotent(
+        true, true, false, 1,
+    ));
+    assert!(!response_after_newer_observation_is_idempotent(
+        true, true, true, 1,
+    ));
+}
+
+#[test]
+fn model_checkpoint_publish_uses_latest_visible_head_seq() {
+    assert!(checkpoint_publish_uses_latest_visible_head(
+        Some(ChangeSeq(42)),
+        ChangeSeq(42),
+    ));
+    assert!(!checkpoint_publish_uses_latest_visible_head(
+        Some(ChangeSeq(41)),
+        ChangeSeq(42),
+    ));
+}
+
+#[test]
+fn model_stale_writer_fence_survives_inflight_client_request() {
+    assert!(stale_writer_fence_survives_inflight_client_request(
+        true, true, true,
+    ));
+    assert!(!stale_writer_fence_survives_inflight_client_request(
+        false, true, true,
+    ));
+}
+
+#[test]
 fn model_builds_deterministic_download_transfer_id() {
     assert_eq!(
         download_transfer_id(

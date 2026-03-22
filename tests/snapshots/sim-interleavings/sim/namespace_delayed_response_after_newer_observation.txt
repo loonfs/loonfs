@@ -1,0 +1,17 @@
+scenario=namespace_delayed_response_after_newer_observation kind=sim schema_version=1 seed=Some(2401) actions=6 faults=0 expect_keys=7
+  1. actor_step actor=fixture now_ms=0 initial client_state=local_only_present=true planned_local_only_present=true bound_present=false seeded_network_responses=0 seeded_observations=1 progress_objects=0 queue_shard_present=false metadata_rows=(inodes=0, direntries=0, revisions=0, tombstones=0) mirror_root_ready=true
+  2. delivery_enqueued delivery_id=1 kind=remote_observation sender=seed recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  3. delivery_enqueued delivery_id=2 kind=client_request sender=client recipient=server enqueued_at_ms=0 deliver_at_ms=0
+  4. actor_step actor=client now_ms=0 tick result=enqueued_request request_id=client-req-00000000000000000001 generation=0
+  5. delivery_delivered now_ms=0 delivery_id=2 kind=client_request sender=client recipient=server enqueued_at_ms=0 deliver_at_ms=0
+  6. actor_step actor=network now_ms=0 deliver_next_request request_id=client-req-00000000000000000001 delivery_id=2
+  7. delivery_enqueued delivery_id=3 kind=client_response sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  8. delivery_enqueued delivery_id=4 kind=remote_observation sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  9. actor_step actor=server now_ms=0 handle_next_request request_id=client-req-00000000000000000001 committed_seq=42 writer_id=writer-a writer_version=loon-server-test resulting_head=(seq=42, fence=8, next_inode=502)
+  10. actor_step actor=writer now_ms=0 step=4 action=writer_publish_head(seq=43, active_fence_token=8, next_inode_id=502) resulting_head=(seq=43, fence=8, next_inode=502)
+  11. delivery_delivered now_ms=0 delivery_id=1 kind=remote_observation sender=seed recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  12. actor_step actor=client now_ms=0 deliver_remote_observation inode_id=501 applied=BoundLocalOnly(BoundLocalOnlyFile { client_file_id: ClientFileId("tmp:ns-1:00000000000000000002"), namespace_id: NamespaceId("ns-1"), inode_id: InodeId(501) }) applied_at_ms=1700000207100
+  13. delivery_delivered now_ms=0 delivery_id=3 kind=client_response sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  14. actor_step actor=client now_ms=0 deliver_next_response request_id=client-req-00000000000000000001 changed=false bound inode_id=501
+  15. invariants[namespace-sim] late_remote_observation_does_not_duplicate_winner_apply=pass detail=response_apply_succeeded=true observation_apply_succeeded=true winner_apply_count=1
+  16. invariants[namespace-sim] response_after_newer_observation_is_idempotent=pass detail=observation_apply_succeeded=true delayed_response_applied_cleanly=true delayed_response_changed_state=false winner_apply_count=1

@@ -1,0 +1,17 @@
+scenario=namespace_stale_writer_fence_survives_inflight_client_request kind=sim schema_version=1 seed=Some(2404) actions=8 faults=0 expect_keys=7
+  1. actor_step actor=fixture now_ms=0 initial client_state=local_only_present=true planned_local_only_present=true bound_present=false seeded_network_responses=0 seeded_observations=0 progress_objects=0 queue_shard_present=false metadata_rows=(inodes=0, direntries=0, revisions=0, tombstones=0) mirror_root_ready=true
+  2. actor_step actor=stale_writer now_ms=0 step=1 action=writer_read_current_head cached_view=(writer_id=writer-a, planned_head_seq=41, writer_fence_token=8)
+  3. delivery_enqueued delivery_id=1 kind=client_request sender=client recipient=server enqueued_at_ms=0 deliver_at_ms=0
+  4. actor_step actor=client now_ms=0 tick result=enqueued_request request_id=client-req-00000000000000000001 generation=0
+  5. delivery_delivered now_ms=0 delivery_id=1 kind=client_request sender=client recipient=server enqueued_at_ms=0 deliver_at_ms=0
+  6. actor_step actor=network now_ms=0 deliver_next_request request_id=client-req-00000000000000000001 delivery_id=1
+  7. delivery_enqueued delivery_id=2 kind=client_response sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  8. delivery_enqueued delivery_id=3 kind=remote_observation sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  9. actor_step actor=server now_ms=0 handle_next_request request_id=client-req-00000000000000000001 committed_seq=42 writer_id=writer-a writer_version=loon-server-test resulting_head=(seq=42, fence=8, next_inode=502)
+  10. actor_step actor=writer now_ms=0 step=5 action=lease_handover(new_holder_id=writer-b, new_fence_token=9, lease_expires_at_ms=1700000218000) resulting_lease=(holder=writer-b, fence=9, expires_at_ms=1700000218000)
+  11. actor_step actor=writer now_ms=0 step=6 action=writer_publish_head(seq=43, active_fence_token=9, next_inode_id=502) resulting_head=(seq=43, fence=9, next_inode=502)
+  12. actor_step actor=stale_writer now_ms=0 step=7 action=writer_attempt_commit(planned_head_seq=41, writer_fence_token=8) model_outcome=Rejected(PlannedHeadSeqMismatch { expected: ChangeSeq(43), actual: ChangeSeq(41) }) core_outcome=Rejected(PlannedHeadSeqMismatch { expected: ChangeSeq(43), actual: ChangeSeq(41) }) now_ms=1700000217999 head=(seq=43, fence=9) lease=(holder=writer-b, fence=9)
+  13. delivery_delivered now_ms=0 delivery_id=2 kind=client_response sender=server recipient=client enqueued_at_ms=0 deliver_at_ms=0
+  14. actor_step actor=client now_ms=0 deliver_next_response request_id=client-req-00000000000000000001 changed=true bound inode_id=501
+  15. invariants[namespace-sim] stale_writer_publish_remains_fenced_after_handover=pass detail=stale_publish_rejected=true head_fence_matches_lease=true stale_writer_fence_token=8 active_fence_token=9
+  16. invariants[namespace-sim] stale_writer_fence_survives_inflight_client_request=pass detail=stale_publish_rejected=true inflight_client_request_present=true delayed_client_response_converged=true
