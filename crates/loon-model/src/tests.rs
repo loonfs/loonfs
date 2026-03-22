@@ -593,6 +593,44 @@ fn model_reuses_existing_client_request_id_for_retry() {
 }
 
 #[test]
+fn model_retry_reuse_requires_stable_pending_request_id() {
+    assert!(retry_reuses_pending_request_id(
+        Some("client-req-00000000000000000007"),
+        Some("client-req-00000000000000000007"),
+        Some("client-req-00000000000000000007"),
+    ));
+    assert!(!retry_reuses_pending_request_id(
+        Some("client-req-00000000000000000007"),
+        Some("client-req-00000000000000000008"),
+        Some("client-req-00000000000000000008"),
+    ));
+}
+
+#[test]
+fn model_duplicate_response_idempotence_requires_no_duplicate_winner_apply() {
+    assert!(duplicate_response_delivery_is_idempotent(true, true, 0));
+    assert!(!duplicate_response_delivery_is_idempotent(true, true, 1));
+}
+
+#[test]
+fn model_late_remote_observation_converges_once() {
+    assert!(late_remote_observation_converges_once(true, true, 1));
+    assert!(!late_remote_observation_converges_once(true, true, 2));
+}
+
+#[test]
+fn model_delivery_order_stability_is_exact_match() {
+    assert!(delivery_order_is_seed_stable(
+        &[1_u64, 2, 3],
+        &[1_u64, 2, 3]
+    ));
+    assert!(!delivery_order_is_seed_stable(
+        &[1_u64, 3, 2],
+        &[1_u64, 2, 3]
+    ));
+}
+
+#[test]
 fn model_builds_deterministic_download_transfer_id() {
     assert_eq!(
         download_transfer_id(

@@ -45,17 +45,39 @@ it catches logic drift.
 
 ### 4. Deterministic simulator
 
-`crates/loon-sim/` owns the shared deterministic fault vocabulary.
+`crates/loon-sim/` owns the shared deterministic scheduler runtime, delivery ordering, restart
+events, and fault vocabulary.
 
-Today it provides the once-only client fault plan used by `loon-client` and `loon-testkit`:
+The current shared simulator surface includes:
+
+- `SimRuntime`
+- `SimActorId`
+- `SimDelivery`
+- `SimTraceEvent`
+- `FaultPlan`
+
+Current once-only client fault kinds used by `loon-client` and `loon-testkit` are:
 
 - `crash_after_step_once`
 - `store_error_once`
 - `dispatch_error_once`
 - `local_apply_error_once`
 
-A full scheduler can come later; the current hardening rule is that once-only injected faults must
-still produce a deterministic rendered trace and a retryable postcondition.
+Current scheduling rule:
+
+- delivery order is sorted by `(deliver_at_ms, delivery_id)`
+- actor steps are driven by the readable fixture action stream, not ambient timing
+- traces are rendered from structured sim events, not ad hoc harness-local string logs
+
+`tests/scenarios/sim/` is now the shared home for multi-actor interleaving fixtures.
+
+`loon-testkit` owns the actor-family harnesses layered on top of the shared scheduler:
+
+- queue broker/worker/repair interleavings
+- client/server request-response-observation interleavings
+
+The hardening rule is that once-only injected faults must still produce a deterministic rendered
+trace and a retryable postcondition.
 
 Why it exists:
 concurrency bugs are hard to find with normal tests and hard to debug without determinism.
@@ -111,6 +133,8 @@ The current executable-invariant rollout is:
 - slice 5a: client transfer invariants for file download/upload flows
 - slice 5b: client reconciliation invariants for late authoritative observation, remote-only
   discovery, and remote-only directory materialization
+- slice 6: scheduler-backed sim invariants for delayed response retry reuse, duplicate response
+  idempotence, late observation ordering, and seed-stable traces
 
 Provider conformance cases now live under `tests/conformance/objectstore/`, and the real-provider
 AWS S3 plus Cloudflare R2 runs are required as an external CI gate documented in

@@ -257,6 +257,39 @@ impl ConflictArtifactRecoveryInvariantReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SimInvariantReport {
+    pub checks: Vec<InvariantCheck>,
+}
+
+impl SimInvariantReport {
+    pub fn check(&self, name: &str) -> Option<&InvariantCheck> {
+        self.checks.iter().find(|check| check.name == name)
+    }
+
+    pub fn passed_names(&self) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|check| check.passed)
+            .map(|check| check.name.clone())
+            .collect()
+    }
+
+    pub fn render_trace_lines(&self, label: &str) -> Vec<String> {
+        self.checks
+            .iter()
+            .map(|check| {
+                format!(
+                    "invariants[{label}] {}={} detail={}",
+                    check.name,
+                    if check.passed { "pass" } else { "fail" },
+                    check.detail
+                )
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileConflictResolutionKind {
     SameInode,
@@ -342,6 +375,34 @@ pub struct SubtreeConflictArtifactRestoreInvariantInputs {
     pub restored_tree_matches_loser: bool,
     pub deterministic_entry_order_preserved: bool,
     pub canonical_tree_untouched: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ClientRetryReuseInvariantInputs<'a> {
+    pub pending_request_id_before_restart: Option<&'a str>,
+    pub pending_request_id_after_retry: Option<&'a str>,
+    pub retried_request_id: Option<&'a str>,
+    pub converged_once: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DuplicateResponseInvariantInputs {
+    pub winner_already_durable: bool,
+    pub second_delivery_applied_cleanly: bool,
+    pub duplicate_winner_apply_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LateRemoteObservationInvariantInputs {
+    pub response_apply_succeeded: bool,
+    pub observation_apply_succeeded: bool,
+    pub winner_apply_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SimTraceDeterminismInvariantInputs<'a> {
+    pub first_rendered_trace: &'a str,
+    pub second_rendered_trace: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2677,6 +2738,90 @@ pub fn evaluate_subtree_conflict_artifact_restore_invariants(
     }
 }
 
+pub fn evaluate_client_retry_reuse_invariants(
+    inputs: ClientRetryReuseInvariantInputs<'_>,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "client_retry_reuses_pending_request_after_delayed_response".to_owned(),
+            passed: inputs.converged_once
+                && loon_model::retry_reuses_pending_request_id(
+                    inputs.pending_request_id_before_restart,
+                    inputs.pending_request_id_after_retry,
+                    inputs.retried_request_id,
+                ),
+            detail: format!(
+                "pending_request_id_before_restart={:?} pending_request_id_after_retry={:?} retried_request_id={:?} converged_once={}",
+                inputs.pending_request_id_before_restart,
+                inputs.pending_request_id_after_retry,
+                inputs.retried_request_id,
+                inputs.converged_once
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_duplicate_response_invariants(
+    inputs: DuplicateResponseInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "duplicate_response_is_idempotent".to_owned(),
+            passed: loon_model::duplicate_response_delivery_is_idempotent(
+                inputs.winner_already_durable,
+                inputs.second_delivery_applied_cleanly,
+                inputs.duplicate_winner_apply_count,
+            ),
+            detail: format!(
+                "winner_already_durable={} second_delivery_applied_cleanly={} duplicate_winner_apply_count={}",
+                inputs.winner_already_durable,
+                inputs.second_delivery_applied_cleanly,
+                inputs.duplicate_winner_apply_count
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_late_remote_observation_invariants(
+    inputs: LateRemoteObservationInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "late_remote_observation_does_not_duplicate_winner_apply".to_owned(),
+            passed: loon_model::late_remote_observation_converges_once(
+                inputs.response_apply_succeeded,
+                inputs.observation_apply_succeeded,
+                inputs.winner_apply_count,
+            ),
+            detail: format!(
+                "response_apply_succeeded={} observation_apply_succeeded={} winner_apply_count={}",
+                inputs.response_apply_succeeded,
+                inputs.observation_apply_succeeded,
+                inputs.winner_apply_count
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_sim_trace_determinism_invariants(
+    inputs: SimTraceDeterminismInvariantInputs<'_>,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "sim_trace_order_is_seed_stable".to_owned(),
+            passed: loon_model::delivery_order_is_seed_stable(
+                &[inputs.first_rendered_trace],
+                &[inputs.second_rendered_trace],
+            ),
+            detail: format!(
+                "first_trace_len={} second_trace_len={}",
+                inputs.first_rendered_trace.len(),
+                inputs.second_rendered_trace.len()
+            ),
+        }],
+    }
+}
+
 pub fn evaluate_queue_shard_object_invariants(
     inputs: QueueShardObjectInvariantInputs<'_>,
 ) -> BackgroundWorkInvariantReport {
@@ -4226,10 +4371,12 @@ mod tests {
         evaluate_apply_remote_delete_invariants, evaluate_apply_remote_subtree_delete_invariants,
         evaluate_apply_remote_subtree_rename_invariants,
         evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
-        evaluate_conflict_artifact_archive_invariants,
+        evaluate_client_retry_reuse_invariants, evaluate_conflict_artifact_archive_invariants,
         evaluate_conflict_artifact_discovery_invariants, evaluate_content_object_invariants,
-        evaluate_download_transfer_invariants, evaluate_file_conflict_artifact_restore_invariants,
+        evaluate_download_transfer_invariants, evaluate_duplicate_response_invariants,
+        evaluate_file_conflict_artifact_restore_invariants,
         evaluate_file_conflict_resolution_invariants, evaluate_inode_upload_transfer_invariants,
+        evaluate_late_remote_observation_invariants,
         evaluate_local_only_upload_transfer_invariants,
         evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_commit_invariants,
         evaluate_namespace_wal_replay_invariants, evaluate_progress_publish_invariants,
@@ -4241,17 +4388,19 @@ mod tests {
         evaluate_remote_path_change_planning_invariants,
         evaluate_remote_subtree_delete_planning_invariants,
         evaluate_remote_subtree_rename_planning_invariants,
+        evaluate_sim_trace_determinism_invariants,
         evaluate_subtree_conflict_artifact_restore_invariants, ApplyRemoteDeleteInvariantInputs,
         ApplyRemoteSubtreeDeleteInvariantInputs, ApplyRemoteSubtreeRenameInvariantInputs,
         CheckpointHeadPublishInvariantInputs, CheckpointObjectInvariantInputs,
         CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
-        CheckpointReplayInvariantInputs, CommitInvariantInputs,
+        CheckpointReplayInvariantInputs, ClientRetryReuseInvariantInputs, CommitInvariantInputs,
         ConflictArtifactArchiveInvariantInputs, ConflictArtifactDiscoveryInvariantInputs,
         ContentObjectInvariantInputs, ContentObjectInvariantSnapshot,
         DownloadTransferInvariantInputs, DownloadTransferOutcomeKind,
-        FileConflictArtifactRestoreInvariantInputs, FileConflictResolutionInvariantInputs,
-        FileConflictResolutionKind, InodeUploadTransferInvariantInputs,
-        InodeUploadTransferOutcomeKind, LocalOnlyUploadTransferInvariantInputs,
+        DuplicateResponseInvariantInputs, FileConflictArtifactRestoreInvariantInputs,
+        FileConflictResolutionInvariantInputs, FileConflictResolutionKind,
+        InodeUploadTransferInvariantInputs, InodeUploadTransferOutcomeKind,
+        LateRemoteObservationInvariantInputs, LocalOnlyUploadTransferInvariantInputs,
         LocalOnlyUploadTransferOutcomeKind, ProgressInvariantSnapshot,
         ProgressPublishInvariantInputs, ProgressPublishOutcomeKind, QueueCompleteInvariantInputs,
         QueueCompleteOutcomeKind, RemoteDeletePlanningInvariantInputs,
@@ -4260,9 +4409,9 @@ mod tests {
         RemoteOnlyDirectoryMaterializationOutcomeKind,
         RemoteOnlyParentMaterializationWaitInvariantInputs,
         RemotePathChangePlanningInvariantInputs, RemoteSubtreeDeletePlanningInvariantInputs,
-        RemoteSubtreeRenamePlanningInvariantInputs, StoredCheckpointSegmentSnapshot,
-        StoredContentBlockSnapshot, SubtreeConflictArtifactRestoreInvariantInputs,
-        WalReplayInvariantInputs,
+        RemoteSubtreeRenamePlanningInvariantInputs, SimTraceDeterminismInvariantInputs,
+        StoredCheckpointSegmentSnapshot, StoredContentBlockSnapshot,
+        SubtreeConflictArtifactRestoreInvariantInputs, WalReplayInvariantInputs,
     };
     use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
     use loon_core::commit::{
@@ -5982,5 +6131,71 @@ mod tests {
                 "{name} should pass"
             );
         }
+    }
+
+    #[test]
+    fn sim_retry_reuse_invariant_requires_stable_request_id() {
+        let report = evaluate_client_retry_reuse_invariants(ClientRetryReuseInvariantInputs {
+            pending_request_id_before_restart: Some("client-req-1"),
+            pending_request_id_after_retry: Some("client-req-1"),
+            retried_request_id: Some("client-req-1"),
+            converged_once: true,
+        });
+
+        assert!(
+            report
+                .check("client_retry_reuses_pending_request_after_delayed_response")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn sim_duplicate_response_invariant_fails_when_winner_applies_twice() {
+        let report = evaluate_duplicate_response_invariants(DuplicateResponseInvariantInputs {
+            winner_already_durable: true,
+            second_delivery_applied_cleanly: true,
+            duplicate_winner_apply_count: 1,
+        });
+
+        assert!(
+            !report
+                .check("duplicate_response_is_idempotent")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn sim_late_remote_observation_invariant_passes_for_single_winner_apply() {
+        let report =
+            evaluate_late_remote_observation_invariants(LateRemoteObservationInvariantInputs {
+                response_apply_succeeded: true,
+                observation_apply_succeeded: true,
+                winner_apply_count: 1,
+            });
+
+        assert!(
+            report
+                .check("late_remote_observation_does_not_duplicate_winner_apply")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn sim_trace_determinism_invariant_requires_exact_trace_match() {
+        let report =
+            evaluate_sim_trace_determinism_invariants(SimTraceDeterminismInvariantInputs {
+                first_rendered_trace: "trace-a",
+                second_rendered_trace: "trace-a",
+            });
+
+        assert!(
+            report
+                .check("sim_trace_order_is_seed_stable")
+                .expect("check should exist")
+                .passed
+        );
     }
 }

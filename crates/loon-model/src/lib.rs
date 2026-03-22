@@ -770,18 +770,20 @@ mod namespace;
 mod queue;
 
 pub use client::{
-    allocate_client_request_id, bound_local_matches_remote_observation, download_transfer_id,
-    expected_download_staged_size, local_apply_failed_issue, local_only_matches_remote_observation,
+    allocate_client_request_id, bound_local_matches_remote_observation,
+    delivery_order_is_seed_stable, download_transfer_id, duplicate_response_delivery_is_idempotent,
+    expected_download_staged_size, late_remote_observation_converges_once,
+    local_apply_failed_issue, local_only_matches_remote_observation,
     local_only_upload_failed_issue, local_only_upload_transfer_id, model_archive_conflict_artifact,
     model_conflict_artifact_lifecycle_state, model_conflict_artifact_matches_filter,
     model_restore_file_conflict_artifact, model_restore_subtree_conflict_artifact,
     model_unarchive_conflict_artifact, reconcile_download_resume_block_index,
     reconcile_upload_resume_block_index, remote_observation_bind_ambiguous_issue,
     remote_observation_is_stale, remote_only_discovery_supported,
-    remote_only_placeholder_matches_remote_observation, reuse_or_allocate_client_request_id,
-    select_local_only_observation_bind_candidate, select_next_client_action,
-    select_next_local_only_action, upload_failed_issue, upload_transfer_id, upsert_client_issue,
-    upsert_local_only_issue,
+    remote_only_placeholder_matches_remote_observation, retry_reuses_pending_request_id,
+    reuse_or_allocate_client_request_id, select_local_only_observation_bind_candidate,
+    select_next_client_action, select_next_local_only_action, upload_failed_issue,
+    upload_transfer_id, upsert_client_issue, upsert_local_only_issue,
 };
 pub use content::{
     build_uploaded_content, decide_inode_upload_action, decide_local_only_upload_action,

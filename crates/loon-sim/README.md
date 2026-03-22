@@ -1,3 +1,4 @@
 # loon-sim
 
-Deterministic simulator scaffolding for fault injection, schedule control, and replay.
+Deterministic simulator runtime for fault injection, actor stepping, delivery ordering,
+restart events, and replay traces.

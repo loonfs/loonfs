@@ -16,6 +16,7 @@ use loon_queue::worker::{
     claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobCompleteOutcome,
     WorkerMutationError,
 };
+use loon_sim::SimRuntime;
 use loon_testkit::invariants::{
     evaluate_progress_publish_invariants, evaluate_queue_broker_lease_invariants,
     evaluate_queue_claim_invariants, evaluate_queue_complete_invariants,
@@ -54,6 +55,17 @@ fn queue_claim_timeout_then_steal_snapshot_matches_checked_in_artifact() {
     );
 }
 
+#[test]
+fn lost_enqueue_repair_snapshot_matches_checked_in_artifact() {
+    let report = run_queue_fixture_report("sim/lost_enqueue_repair_recreates_snapshot_job.yaml");
+    assert_eq!(
+        report.rendered_trace,
+        include_str!(
+            "../../../tests/snapshots/queue-differential/sim/lost_enqueue_repair_recreates_snapshot_job.txt"
+        )
+    );
+}
+
 struct QueueFixtureRunReport {
     rendered_trace: String,
 }
@@ -79,13 +91,17 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
             .expect("queue fixture should contain initial queue state"),
     );
 
-    let mut now_ms = 0_u64;
-    let mut trace = vec![format!(
-        "initial now_ms={} model_queue={:?} queue={:?}",
-        now_ms,
-        snapshot_from_model_queue(&model_queue),
-        snapshot_from_queue(&queue)
-    )];
+    let mut runtime = SimRuntime::new();
+    let mut trace = Vec::new();
+    runtime.record_actor_step(
+        "fixture",
+        format!(
+            "initial model_queue={:?} queue={:?}",
+            snapshot_from_model_queue(&model_queue),
+            snapshot_from_queue(&queue)
+        ),
+    );
+    push_latest_runtime_trace_line(&mut trace, &runtime);
     let mut observed_invariants = Vec::new();
     let mut saw_stolen_claim = false;
 
@@ -153,7 +169,8 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
             }
             QueueActionRef::BrokerRenewLease(action) => {
                 assert_eq!(
-                    action.now_ms, now_ms,
+                    action.now_ms,
+                    runtime.now_ms(),
                     "broker renewal should use the scenario's current simulated time"
                 );
 
@@ -174,7 +191,8 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
             }
             QueueActionRef::WorkerClaim(action) => {
                 assert_eq!(
-                    action.now_ms, now_ms,
+                    action.now_ms,
+                    runtime.now_ms(),
                     "worker claim should use the scenario's current simulated time"
                 );
 
@@ -214,7 +232,8 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
             }
             QueueActionRef::WorkerHeartbeat(action) => {
                 assert_eq!(
-                    action.now_ms, now_ms,
+                    action.now_ms,
+                    runtime.now_ms(),
                     "worker heartbeat should use the scenario's current simulated time"
                 );
 
@@ -260,7 +279,7 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
                         action.broker_epoch,
                         &action.job_id,
                         &action.claim_token,
-                        now_ms,
+                        runtime.now_ms(),
                     )
                     .map(QueueOutcome::from)
                     .unwrap_or_else(|err| QueueOutcome::Error(normalize_model_error(err)));
@@ -270,7 +289,7 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
                     action.broker_epoch,
                     &action.job_id,
                     &action.claim_token,
-                    now_ms,
+                    runtime.now_ms(),
                 )
                 .map(QueueOutcome::from)
                 .unwrap_or_else(|err| QueueOutcome::Error(normalize_worker_error(err)));
@@ -278,22 +297,29 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
                 (model_result, queue_result)
             }
             QueueActionRef::AdvanceTimeMs(delta_ms) => {
-                now_ms = now_ms.saturating_add(delta_ms);
-                let outcome = QueueOutcome::TimeAdvanced { now_ms };
+                runtime.advance_time(delta_ms);
+                push_latest_runtime_trace_line(&mut trace, &runtime);
+                let outcome = QueueOutcome::TimeAdvanced {
+                    now_ms: runtime.now_ms(),
+                };
                 (outcome.clone(), outcome)
             }
         };
 
-        trace.push(format!(
-            "step={} action={} model_outcome={:?} queue_outcome={:?} now_ms={} model_queue={:?} queue={:?}",
-            index + 1,
-            action.describe(),
-            model_outcome,
-            queue_outcome,
-            now_ms,
-            snapshot_from_model_queue(&model_queue),
-            snapshot_from_queue(&queue),
-        ));
+        runtime.record_actor_step(
+            queue_actor_id_for(action_ref),
+            format!(
+                "step={} action={} model_outcome={:?} queue_outcome={:?} now_ms={} model_queue={:?} queue={:?}",
+                index + 1,
+                action.describe(),
+                model_outcome,
+                queue_outcome,
+                runtime.now_ms(),
+                snapshot_from_model_queue(&model_queue),
+                snapshot_from_queue(&queue)
+            ),
+        );
+        push_latest_runtime_trace_line(&mut trace, &runtime);
 
         if model_outcome != queue_outcome {
             panic!(
@@ -309,7 +335,7 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
         let model_report = evaluate_queue_step_invariants(
             action_ref,
             &initial,
-            now_ms,
+            runtime.now_ms(),
             &model_before,
             &model_after,
             &model_outcome,
@@ -318,7 +344,7 @@ fn run_queue_fixture_report(relative_path: &str) -> QueueFixtureRunReport {
         let queue_report = evaluate_queue_step_invariants(
             action_ref,
             &initial,
-            now_ms,
+            runtime.now_ms(),
             &queue_before,
             &queue_after,
             &queue_outcome,
@@ -573,6 +599,26 @@ impl QueueActionEnvelope {
             }
         }
     }
+}
+
+fn queue_actor_id_for(action: QueueActionRef<'_>) -> String {
+    match action {
+        QueueActionRef::RepairLostEnqueue(_) => "repair".to_owned(),
+        QueueActionRef::BrokerRenewLease(action) => format!("broker:{}", action.broker),
+        QueueActionRef::WorkerClaim(action) => format!("worker:{}", action.worker),
+        QueueActionRef::WorkerHeartbeat(action) => format!("worker:{}", action.worker),
+        QueueActionRef::WorkerComplete(action) => format!("worker:{}", action.worker),
+        QueueActionRef::AdvanceTimeMs(_) => "clock".to_owned(),
+    }
+}
+
+fn push_latest_runtime_trace_line(trace: &mut Vec<String>, runtime: &SimRuntime) {
+    let line = runtime
+        .trace()
+        .last()
+        .expect("runtime should contain at least one trace event")
+        .render_line();
+    trace.push(line);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

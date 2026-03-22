@@ -599,6 +599,26 @@ Project policy after this milestone:
 - AWS S3 and Cloudflare R2 real-provider conformance is a required external CI gate
 - no provider workflow YAML is committed in-repo; the contract lives in docs and tests
 
+## Milestone 14: scheduler-backed deterministic multi-actor simulation
+
+Deliverables:
+
+- `loon-sim` owns a real deterministic scheduler runtime instead of only a fault vocabulary
+- queue `sim` fixtures run through the shared scheduler shell with structured actor/time trace
+  events
+- first client/server `sim` fixtures cover delayed response retry reuse, duplicate response
+  idempotence, and remote-observation-before-response ordering
+- the existing once-only client fault plan is consumable from `tests/scenarios/sim/`
+- seed-stable sim traces are checked in as readable artifacts
+
+Required rules:
+
+- multi-actor interleavings live under `tests/scenarios/sim/`
+- scheduler order is explicit and deterministic
+- `loon-sim` owns scheduling and trace primitives; actor-family harnesses live above it in
+  `loon-testkit`
+- no second bespoke scheduler appears inside `loon-client` or `loon-queue`
+
 ## Historical slice order
 
 Milestones 1 through 7 were executed through the following ordered slices.

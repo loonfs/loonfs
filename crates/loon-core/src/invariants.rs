@@ -193,6 +193,13 @@ pub const CLIENT_CONFLICT_ARTIFACT_RECOVERY_INVARIANTS: &[&str] = &[
     "conflict_artifact_restore_requires_explicit_absent_destination",
 ];
 
+pub const SIM_INTERLEAVING_INVARIANTS: &[&str] = &[
+    "client_retry_reuses_pending_request_after_delayed_response",
+    "duplicate_response_is_idempotent",
+    "late_remote_observation_does_not_duplicate_winner_apply",
+    "sim_trace_order_is_seed_stable",
+];
+
 pub const INVARIANTS: &[&str] = &[
     "no_orphaned_live_entry",
     "visible_revision_points_to_durable_content",
@@ -333,6 +340,10 @@ pub const INVARIANTS: &[&str] = &[
     "subtree_conflict_artifact_restore_uses_deterministic_entry_order",
     "subtree_conflict_artifact_restore_keeps_canonical_tree_untouched",
     "conflict_artifact_restore_requires_explicit_absent_destination",
+    "client_retry_reuses_pending_request_after_delayed_response",
+    "duplicate_response_is_idempotent",
+    "late_remote_observation_does_not_duplicate_winner_apply",
+    "sim_trace_order_is_seed_stable",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

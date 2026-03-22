@@ -24,6 +24,39 @@ pub fn reuse_or_allocate_client_request_id(
     }
 }
 
+pub fn retry_reuses_pending_request_id(
+    pending_request_id_before_restart: Option<&str>,
+    pending_request_id_after_retry: Option<&str>,
+    retried_request_id: Option<&str>,
+) -> bool {
+    pending_request_id_before_restart.is_some()
+        && pending_request_id_before_restart == pending_request_id_after_retry
+        && pending_request_id_before_restart == retried_request_id
+}
+
+pub fn duplicate_response_delivery_is_idempotent(
+    winner_already_durable: bool,
+    second_delivery_applied_cleanly: bool,
+    duplicate_winner_apply_count: u64,
+) -> bool {
+    winner_already_durable && second_delivery_applied_cleanly && duplicate_winner_apply_count == 0
+}
+
+pub fn late_remote_observation_converges_once(
+    response_apply_succeeded: bool,
+    observation_apply_succeeded: bool,
+    winner_apply_count: u64,
+) -> bool {
+    response_apply_succeeded && observation_apply_succeeded && winner_apply_count == 1
+}
+
+pub fn delivery_order_is_seed_stable<T>(first: &[T], second: &[T]) -> bool
+where
+    T: PartialEq,
+{
+    first == second
+}
+
 pub fn download_transfer_id(
     namespace_id: &NamespaceId,
     inode_id: InodeId,
