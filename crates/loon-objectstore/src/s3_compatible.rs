@@ -134,7 +134,7 @@ impl S3CompatibleStore {
         bytes: &[u8],
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let result = match mode {
+        let result = match &mode {
             PutMode::Overwrite => {
                 self.client
                     .put_object()
@@ -164,7 +164,7 @@ impl S3CompatibleStore {
                     .await
             }
             PutMode::CompareAndSwap { expected_etag } => {
-                let if_match = HeaderValue::from_str(&expected_etag).map_err(|err| {
+                let if_match = HeaderValue::from_str(expected_etag).map_err(|err| {
                     ObjectStoreError::Transport(format!(
                         "invalid expected etag for If-Match header: {err}"
                     ))
@@ -194,7 +194,9 @@ impl S3CompatibleStore {
                     self.provider_name, scoped_key
                 ))
             }),
-            Err(err) if is_precondition_failure(&err) => Err(ObjectStoreError::PreconditionFailed),
+            Err(err) if put_error_maps_to_precondition_failed(&mode, &err) => {
+                Err(ObjectStoreError::PreconditionFailed)
+            }
             Err(err) => Err(map_sdk_error(err)),
         }
     }
@@ -359,10 +361,7 @@ fn is_precondition_failure<E, R>(err: &SdkError<E, R>) -> bool
 where
     E: ProvideErrorMetadata,
 {
-    matches!(
-        service_error_code(err),
-        Some("PreconditionFailed" | "ConditionalRequestConflict")
-    )
+    put_error_code_maps_to_precondition_failed(&PutMode::Overwrite, service_error_code(err))
 }
 
 fn service_error_code<'a, E, R>(err: &'a SdkError<E, R>) -> Option<&'a str>
@@ -370,6 +369,21 @@ where
     E: ProvideErrorMetadata,
 {
     err.code()
+}
+
+fn put_error_maps_to_precondition_failed<E, R>(mode: &PutMode, err: &SdkError<E, R>) -> bool
+where
+    E: ProvideErrorMetadata,
+{
+    put_error_code_maps_to_precondition_failed(mode, service_error_code(err))
+}
+
+fn put_error_code_maps_to_precondition_failed(mode: &PutMode, code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("PreconditionFailed" | "ConditionalRequestConflict")
+    ) || (matches!(mode, PutMode::CompareAndSwap { .. })
+        && matches!(code, Some("NotFound" | "NoSuchKey" | "404")))
 }
 
 fn map_sdk_error<E, R>(err: SdkError<E, R>) -> ObjectStoreError
@@ -402,4 +416,33 @@ where
     };
 
     ObjectStoreError::Transport(format!("{err:?}{detail_suffix}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::put_error_code_maps_to_precondition_failed;
+    use crate::PutMode;
+
+    #[test]
+    fn compare_and_swap_maps_missing_object_codes_to_precondition_failed() {
+        let mode = PutMode::CompareAndSwap {
+            expected_etag: "etag".to_owned(),
+        };
+        for code in ["NotFound", "NoSuchKey", "404"] {
+            assert!(
+                put_error_code_maps_to_precondition_failed(&mode, Some(code)),
+                "expected CAS missing-object code {code} to map to PreconditionFailed"
+            );
+        }
+    }
+
+    #[test]
+    fn overwrite_does_not_map_missing_object_codes_to_precondition_failed() {
+        for code in ["NotFound", "NoSuchKey", "404"] {
+            assert!(
+                !put_error_code_maps_to_precondition_failed(&PutMode::Overwrite, Some(code)),
+                "did not expect overwrite missing-object code {code} to map to PreconditionFailed"
+            );
+        }
+    }
 }
