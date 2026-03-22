@@ -1,0 +1,9 @@
+schema_version: 1
+scenario_kind: client
+name: client_fault_dispatch_after_response_once
+initial: {}
+actions: []
+faults:
+  - kind: crash_after_step_once
+    checkpoint_id: dispatch.client.after_response
+expect: {}

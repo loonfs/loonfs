@@ -1,12 +1,23 @@
 # Object-store conformance
 
-This directory is for provider-agnostic conformance cases.
+This directory holds the readable provider-agnostic case list for the active `loon-objectstore`
+contract.
 
-Providers under test:
+Current providers under test:
+- local FS
 - AWS S3
 - Cloudflare R2
-- Google Cloud Storage (later)
-- Azure Blob Storage (later)
+
+Future providers:
+- Google Cloud Storage
+- Azure Blob Storage
 
 Core rule:
-`loon-core` may rely only on behavior proven here.
+semantic crates may rely only on behavior that appears here and is proven by the matching
+conformance suite.
+
+Current active case matrix is recorded in:
+
+```text
+tests/conformance/objectstore/cases.yaml
+```

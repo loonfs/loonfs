@@ -1,4 +1,3 @@
-use super::dispatch::dispatch_inode_mutation_from_state;
 use super::*;
 use crate::conflict::{
     load_conflict_artifact, load_subtree_conflict_artifact, prepare_conflict_artifact,
@@ -11,8 +10,10 @@ use crate::download::{
     load_validated_content_block, verify_downloaded_file_path,
 };
 use crate::local_apply::{
-    append_stage_bytes, apply_bytes_atomically, create_directory_durably, finalize_stage_file,
-    remove_path_durably, remove_tree_durably, rename_path_durably, reset_stage_file,
+    append_stage_bytes_with_hooks, apply_bytes_atomically_with_hooks, clear_delete_marker,
+    create_directory_durably_with_hooks, delete_marker_exists, finalize_stage_file_with_hooks,
+    remove_path_durably_with_hooks, remove_stage_file_if_present_with_hooks,
+    remove_tree_durably_with_hooks, rename_path_durably_with_hooks, reset_stage_file_with_hooks,
     stage_file_size, staging_path_for_target, LocalApplyError,
 };
 use crate::planner::{PlannedActionRecord, PlannerDecision};
@@ -23,6 +24,7 @@ use crate::state_db::{
     RemoteFileStateRow, SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow,
     TransferState,
 };
+use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use crate::upload::{
     finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
 };
@@ -287,6 +289,26 @@ pub(super) fn execute_apply_remote_rename(
     target_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedApplyRemoteRename, ExecuteApplyRemoteRenameError> {
+    execute_apply_remote_rename_with_hooks(
+        db,
+        namespace_id,
+        inode_id,
+        current_path,
+        target_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_apply_remote_rename_with_hooks(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedApplyRemoteRename, ExecuteApplyRemoteRenameError> {
     let result = (|| {
         let (remote, _local, _anchor) =
             ensure_apply_remote_rename_ready(db, namespace_id, inode_id)?;
@@ -295,13 +317,6 @@ pub(super) fn execute_apply_remote_rename(
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
             })?;
-        if !current_path.exists() {
-            return Err(ExecuteApplyRemoteRenameError::CurrentPathMissing {
-                namespace_id: namespace_id.as_str().to_owned(),
-                inode_id: inode_id.0,
-            });
-        }
-
         let target_path =
             target_path.ok_or_else(|| ExecuteApplyRemoteRenameError::TargetPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
@@ -314,7 +329,7 @@ pub(super) fn execute_apply_remote_rename(
                 inode_id: inode_id.0,
             });
         }
-        if target_path.exists() {
+        if current_path.exists() && target_path.exists() {
             return Err(ExecuteApplyRemoteRenameError::DestinationOccupied {
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
@@ -322,7 +337,17 @@ pub(super) fn execute_apply_remote_rename(
             });
         }
 
-        rename_path_durably(current_path, target_path)?;
+        if !current_path.exists() {
+            if !target_path.exists() {
+                return Err(ExecuteApplyRemoteRenameError::CurrentPathMissing {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    inode_id: inode_id.0,
+                });
+            }
+        } else {
+            rename_path_durably_with_hooks(current_path, target_path, hooks)?;
+        }
+        hooks.checkpoint("client.apply_remote_rename.after_local_apply");
 
         let applied = db.apply_remote_rename(namespace_id, inode_id, applied_at_ms)?;
         debug_assert_eq!(applied.namespace_id, remote.namespace_id);
@@ -345,6 +370,28 @@ pub(super) fn execute_apply_remote_rename_and_replace<S: ObjectStore>(
     current_path: Option<&Path>,
     target_path: Option<&Path>,
     applied_at_ms: u64,
+) -> Result<ExecutedApplyRemoteRenameAndReplace, ExecuteApplyRemoteRenameAndReplaceError> {
+    execute_apply_remote_rename_and_replace_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        current_path,
+        target_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_apply_remote_rename_and_replace_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<ExecutedApplyRemoteRenameAndReplace, ExecuteApplyRemoteRenameAndReplaceError> {
     let result = (|| {
         let (remote, local, anchor) =
@@ -378,7 +425,9 @@ pub(super) fn execute_apply_remote_rename_and_replace<S: ObjectStore>(
             &downloaded.file_digest_sha256,
             namespace_id,
             inode_id,
+            hooks,
         )?;
+        hooks.checkpoint("client.apply_remote_rename_and_replace.after_local_apply");
         let applied = db.apply_remote_rename_and_replace(namespace_id, inode_id, applied_at_ms)?;
         debug_assert_eq!(applied.namespace_id, local.namespace_id);
         debug_assert_eq!(applied.inode_id, anchor.inode_id);
@@ -406,6 +455,26 @@ pub(super) fn execute_resolve_same_inode_conflict<S: ObjectStore>(
     current_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedResolveSameInodeConflict, ExecuteResolveFileConflictError> {
+    execute_resolve_same_inode_conflict_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        current_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_resolve_same_inode_conflict_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedResolveSameInodeConflict, ExecuteResolveFileConflictError> {
     let result = (|| {
         let (remote, local, anchor) = ensure_same_inode_conflict_ready(db, namespace_id, inode_id)?;
         let current_path =
@@ -427,6 +496,7 @@ pub(super) fn execute_resolve_same_inode_conflict<S: ObjectStore>(
             local.display_name.clone(),
             current_path,
             applied_at_ms,
+            hooks,
         )?;
         let downloaded = download_file_to_bytes(
             store,
@@ -444,7 +514,9 @@ pub(super) fn execute_resolve_same_inode_conflict<S: ObjectStore>(
             &downloaded.file_digest_sha256,
             namespace_id,
             inode_id,
+            hooks,
         )?;
+        hooks.checkpoint("client.resolve_same_inode_conflict.after_local_apply");
         let applied =
             db.apply_same_inode_conflict_resolution(namespace_id, inode_id, applied_at_ms)?;
         Ok(ExecutedResolveSameInodeConflict {
@@ -475,6 +547,26 @@ pub(super) fn execute_resolve_delete_vs_edit_conflict<S: ObjectStore>(
     current_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedResolveDeleteVsEditConflict, ExecuteResolveFileConflictError> {
+    execute_resolve_delete_vs_edit_conflict_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        current_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_resolve_delete_vs_edit_conflict_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedResolveDeleteVsEditConflict, ExecuteResolveFileConflictError> {
     let result = (|| {
         let (remote, local, anchor) =
             ensure_delete_vs_edit_conflict_ready(db, namespace_id, inode_id)?;
@@ -497,12 +589,20 @@ pub(super) fn execute_resolve_delete_vs_edit_conflict<S: ObjectStore>(
             local.display_name.clone(),
             current_path,
             applied_at_ms,
+            hooks,
         )?;
         if current_path.exists() {
-            remove_path_durably(current_path)?;
+            remove_path_durably_with_hooks(current_path, hooks)?;
+            hooks.checkpoint("client.resolve_delete_vs_edit_conflict.after_local_apply");
+        } else if !delete_marker_exists(current_path)? {
+            return Err(ExecuteResolveFileConflictError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
         }
         let applied =
             db.apply_delete_vs_edit_conflict_resolution(namespace_id, inode_id, applied_at_ms)?;
+        let _ = clear_delete_marker(current_path);
         Ok(ExecutedResolveDeleteVsEditConflict {
             applied,
             conflict_id: artifact.conflict_id,
@@ -532,6 +632,28 @@ pub(super) fn execute_resolve_rename_vs_edit_conflict<S: ObjectStore>(
     target_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedResolveRenameVsEditConflict, ExecuteResolveFileConflictError> {
+    execute_resolve_rename_vs_edit_conflict_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        current_path,
+        target_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_resolve_rename_vs_edit_conflict_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedResolveRenameVsEditConflict, ExecuteResolveFileConflictError> {
     let result = (|| {
         let (remote, local, anchor) =
             ensure_rename_vs_edit_conflict_ready(db, namespace_id, inode_id)?;
@@ -559,6 +681,7 @@ pub(super) fn execute_resolve_rename_vs_edit_conflict<S: ObjectStore>(
             local.display_name.clone(),
             current_path,
             applied_at_ms,
+            hooks,
         )?;
         let downloaded = download_file_to_bytes(
             store,
@@ -577,7 +700,9 @@ pub(super) fn execute_resolve_rename_vs_edit_conflict<S: ObjectStore>(
             &downloaded.file_digest_sha256,
             namespace_id,
             inode_id,
+            hooks,
         )?;
+        hooks.checkpoint("client.resolve_rename_vs_edit_conflict.after_local_apply");
         let applied =
             db.apply_rename_vs_edit_conflict_resolution(namespace_id, inode_id, applied_at_ms)?;
         Ok(ExecutedResolveRenameVsEditConflict {
@@ -608,6 +733,26 @@ pub(super) fn execute_resolve_path_binding_collision<S: ObjectStore>(
     source_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedResolvePathBindingCollision, ExecuteResolveFileConflictError> {
+    execute_resolve_path_binding_collision_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        source_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_resolve_path_binding_collision_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    source_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedResolvePathBindingCollision, ExecuteResolveFileConflictError> {
     let result = (|| {
         let (remote, local_only) = ensure_path_binding_collision_ready(db, namespace_id, inode_id)?;
         let target_path = source_path.ok_or_else(|| {
@@ -625,6 +770,7 @@ pub(super) fn execute_resolve_path_binding_collision<S: ObjectStore>(
             &local_only,
             target_path,
             applied_at_ms,
+            hooks,
         )?;
         let downloaded = download_file_to_bytes(
             store,
@@ -642,7 +788,9 @@ pub(super) fn execute_resolve_path_binding_collision<S: ObjectStore>(
             &downloaded.file_digest_sha256,
             namespace_id,
             inode_id,
+            hooks,
         )?;
+        hooks.checkpoint("client.resolve_path_binding_collision.after_local_apply");
         let applied = db.apply_path_binding_collision_resolution(
             namespace_id,
             inode_id,
@@ -677,6 +825,26 @@ pub(super) fn execute_resolve_subtree_delete_conflict<S: ObjectStore>(
     current_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedResolveSubtreeDeleteConflict, ExecuteResolveSubtreeConflictError> {
+    execute_resolve_subtree_delete_conflict_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        current_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_resolve_subtree_delete_conflict_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedResolveSubtreeDeleteConflict, ExecuteResolveSubtreeConflictError> {
     let result = (|| {
         let views = ensure_subtree_delete_conflict_ready(db, namespace_id, inode_id)?;
         let current_path =
@@ -684,7 +852,9 @@ pub(super) fn execute_resolve_subtree_delete_conflict<S: ObjectStore>(
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
             })?;
-        if !current_path.exists() {
+        if !current_path.exists()
+            && !delete_marker_exists(current_path).map_err(recursive_remove_error)?
+        {
             return Err(ExecuteResolveSubtreeConflictError::CurrentPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
@@ -698,11 +868,16 @@ pub(super) fn execute_resolve_subtree_delete_conflict<S: ObjectStore>(
             &views,
             current_path,
             applied_at_ms,
+            hooks,
         )?;
 
-        remove_tree_durably(current_path).map_err(recursive_remove_error)?;
+        if current_path.exists() {
+            remove_tree_durably_with_hooks(current_path, hooks).map_err(recursive_remove_error)?;
+            hooks.checkpoint("client.resolve_subtree_delete_conflict.after_local_apply");
+        }
         let applied =
             db.apply_resolved_subtree_delete_conflict(namespace_id, inode_id, applied_at_ms)?;
+        let _ = clear_delete_marker(current_path);
         Ok(ExecutedResolveSubtreeDeleteConflict {
             applied,
             conflict_id: artifact.conflict_id,
@@ -732,6 +907,28 @@ pub(super) fn execute_resolve_subtree_rename_conflict<S: ObjectStore>(
     target_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedResolveSubtreeRenameConflict, ExecuteResolveSubtreeConflictError> {
+    execute_resolve_subtree_rename_conflict_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        current_path,
+        target_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_resolve_subtree_rename_conflict_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedResolveSubtreeRenameConflict, ExecuteResolveSubtreeConflictError> {
     let result = (|| {
         let views = ensure_subtree_rename_conflict_ready(db, namespace_id, inode_id)?;
         let current_path =
@@ -739,12 +936,6 @@ pub(super) fn execute_resolve_subtree_rename_conflict<S: ObjectStore>(
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
             })?;
-        if !current_path.exists() {
-            return Err(ExecuteResolveSubtreeConflictError::CurrentPathMissing {
-                namespace_id: namespace_id.as_str().to_owned(),
-                inode_id: inode_id.0,
-            });
-        }
         let target_path =
             target_path.ok_or_else(|| ExecuteResolveSubtreeConflictError::TargetPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
@@ -772,18 +963,30 @@ pub(super) fn execute_resolve_subtree_rename_conflict<S: ObjectStore>(
             &views,
             current_path,
             applied_at_ms,
+            hooks,
         )?;
 
-        remove_tree_durably(current_path).map_err(recursive_remove_error)?;
-        create_directory_durably(current_path).map_err(winner_restore_error)?;
-        rebuild_authoritative_subtree_under_root(
-            store,
-            namespace_id,
-            current_path,
-            &views.bound_descendants,
-            inode_id,
-        )?;
-        rename_path_durably(current_path, target_path).map_err(rename_error)?;
+        if current_path.exists() {
+            remove_tree_durably_with_hooks(current_path, hooks).map_err(recursive_remove_error)?;
+            create_directory_durably_with_hooks(current_path, hooks)
+                .map_err(winner_restore_error)?;
+            rebuild_authoritative_subtree_under_root(
+                store,
+                namespace_id,
+                current_path,
+                &views.bound_descendants,
+                inode_id,
+                hooks,
+            )?;
+            rename_path_durably_with_hooks(current_path, target_path, hooks)
+                .map_err(rename_error)?;
+            hooks.checkpoint("client.resolve_subtree_rename_conflict.after_local_apply");
+        } else if !target_path.exists() {
+            return Err(ExecuteResolveSubtreeConflictError::CurrentPathMissing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                inode_id: inode_id.0,
+            });
+        }
 
         let applied =
             db.apply_resolved_subtree_rename_conflict(namespace_id, inode_id, applied_at_ms)?;
@@ -814,6 +1017,24 @@ pub(super) fn execute_apply_remote_delete(
     current_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedApplyRemoteDelete, ExecuteApplyRemoteDeleteError> {
+    execute_apply_remote_delete_with_hooks(
+        db,
+        namespace_id,
+        inode_id,
+        current_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_apply_remote_delete_with_hooks(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedApplyRemoteDelete, ExecuteApplyRemoteDeleteError> {
     let result = (|| {
         let (remote, _local, _anchor) =
             ensure_apply_remote_delete_ready(db, namespace_id, inode_id)?;
@@ -822,16 +1043,20 @@ pub(super) fn execute_apply_remote_delete(
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
             })?;
-        if !current_path.exists() {
+        if !current_path.exists() && !delete_marker_exists(current_path)? {
             return Err(ExecuteApplyRemoteDeleteError::CurrentPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
             });
         }
 
-        remove_path_durably(current_path)?;
+        if current_path.exists() {
+            remove_path_durably_with_hooks(current_path, hooks)?;
+            hooks.checkpoint("client.apply_remote_delete.after_local_apply");
+        }
 
         let applied = db.apply_remote_delete(namespace_id, inode_id, applied_at_ms)?;
+        let _ = clear_delete_marker(current_path);
         debug_assert_eq!(applied.namespace_id, remote.namespace_id);
         debug_assert_eq!(applied.inode_id, remote.inode_id);
         Ok(ExecutedApplyRemoteDelete { applied })
@@ -851,6 +1076,24 @@ pub(super) fn execute_apply_remote_subtree_delete(
     current_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedApplyRemoteSubtreeDelete, ExecuteApplyRemoteSubtreeDeleteError> {
+    execute_apply_remote_subtree_delete_with_hooks(
+        db,
+        namespace_id,
+        inode_id,
+        current_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_apply_remote_subtree_delete_with_hooks(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedApplyRemoteSubtreeDelete, ExecuteApplyRemoteSubtreeDeleteError> {
     let result = (|| {
         let BoundApplyRemoteSubtreeDeleteViews { root_remote, .. } =
             ensure_apply_remote_subtree_delete_ready(db, namespace_id, inode_id)?;
@@ -860,16 +1103,20 @@ pub(super) fn execute_apply_remote_subtree_delete(
                 inode_id: inode_id.0,
             }
         })?;
-        if !current_path.exists() {
+        if !current_path.exists() && !delete_marker_exists(current_path)? {
             return Err(ExecuteApplyRemoteSubtreeDeleteError::CurrentPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
                 inode_id: inode_id.0,
             });
         }
 
-        remove_tree_durably(current_path)?;
+        if current_path.exists() {
+            remove_tree_durably_with_hooks(current_path, hooks)?;
+            hooks.checkpoint("client.apply_remote_subtree_delete.after_local_apply");
+        }
 
         let applied = db.apply_remote_subtree_delete(namespace_id, inode_id, applied_at_ms)?;
+        let _ = clear_delete_marker(current_path);
         debug_assert_eq!(applied.namespace_id, root_remote.namespace_id);
         debug_assert_eq!(applied.inode_id, root_remote.inode_id);
         Ok(ExecutedApplyRemoteSubtreeDelete { applied })
@@ -890,6 +1137,26 @@ pub(super) fn execute_apply_remote_subtree_rename(
     target_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedApplyRemoteSubtreeRename, ExecuteApplyRemoteSubtreeRenameError> {
+    execute_apply_remote_subtree_rename_with_hooks(
+        db,
+        namespace_id,
+        inode_id,
+        current_path,
+        target_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_apply_remote_subtree_rename_with_hooks(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    current_path: Option<&Path>,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedApplyRemoteSubtreeRename, ExecuteApplyRemoteSubtreeRenameError> {
     let result = (|| {
         let BoundApplyRemoteSubtreeRenameViews { root_remote, .. } =
             ensure_apply_remote_subtree_rename_ready(db, namespace_id, inode_id)?;
@@ -899,13 +1166,6 @@ pub(super) fn execute_apply_remote_subtree_rename(
                 inode_id: inode_id.0,
             }
         })?;
-        if !current_path.exists() {
-            return Err(ExecuteApplyRemoteSubtreeRenameError::CurrentPathMissing {
-                namespace_id: namespace_id.as_str().to_owned(),
-                inode_id: inode_id.0,
-            });
-        }
-
         let target_path =
             target_path.ok_or_else(|| ExecuteApplyRemoteSubtreeRenameError::TargetPathMissing {
                 namespace_id: namespace_id.as_str().to_owned(),
@@ -926,7 +1186,17 @@ pub(super) fn execute_apply_remote_subtree_rename(
             });
         }
 
-        rename_path_durably(current_path, target_path)?;
+        if !current_path.exists() {
+            if !target_path.exists() {
+                return Err(ExecuteApplyRemoteSubtreeRenameError::CurrentPathMissing {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    inode_id: inode_id.0,
+                });
+            }
+        } else {
+            rename_path_durably_with_hooks(current_path, target_path, hooks)?;
+        }
+        hooks.checkpoint("client.apply_remote_subtree_rename.after_local_apply");
 
         let applied = db.apply_remote_subtree_rename(namespace_id, inode_id, applied_at_ms)?;
         debug_assert_eq!(applied.namespace_id, root_remote.namespace_id);
@@ -954,6 +1224,33 @@ pub(super) fn execute_upload_local_edit<S: ObjectStore, F>(
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
+    execute_upload_local_edit_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        source_path,
+        uploaded_at_ms,
+        created_at_ms,
+        &NoopClientExecutionHooks,
+        dispatch,
+    )
+}
+
+pub(crate) fn execute_upload_local_edit_with_hooks<S: ObjectStore, F>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    source_path: Option<&Path>,
+    uploaded_at_ms: u64,
+    created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+    dispatch: F,
+) -> Result<UploadLocalEditExecution, ExecuteUploadLocalEditError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
     let result = (|| {
         let had_pending_request = db
             .load_pending_inode_mutation_for_inode(namespace_id, inode_id)?
@@ -976,6 +1273,7 @@ where
                 uploaded_at_ms,
             )?
         };
+        hooks.checkpoint("client.upload_local_edit.upload_ready");
 
         let (ensured_upload, upload_reused) = match prepared {
             PreparedUploadLocalEdit::Ready {
@@ -989,11 +1287,12 @@ where
             }
         };
 
-        let dispatched = dispatch_inode_mutation_from_state(
+        let dispatched = super::dispatch::dispatch_inode_mutation_from_state_with_hooks(
             db,
             namespace_id,
             inode_id,
             created_at_ms,
+            hooks,
             dispatch,
         )?;
 
@@ -1029,6 +1328,26 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
     target_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<DownloadRemoteEditExecution, ExecuteDownloadRemoteEditError> {
+    execute_download_remote_edit_with_hooks(
+        db,
+        store,
+        namespace_id,
+        inode_id,
+        target_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_download_remote_edit_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<DownloadRemoteEditExecution, ExecuteDownloadRemoteEditError> {
     let result = (|| {
         let remote = ensure_download_remote_edit_ready(db, namespace_id, inode_id)?;
         let target_path =
@@ -1046,11 +1365,31 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
             .content_manifest_digest
             .as_deref()
             .expect("download_remote_edit should require manifest digest");
-        let loaded_manifest = load_content_manifest(store, namespace_id, manifest_digest)?;
         let remote_content_digest = remote
             .content_digest
             .as_deref()
             .expect("download_remote_edit should require remote content digest");
+        if target_path.exists() {
+            let existing = fs::read(target_path).map_err(|source| LocalApplyError {
+                operation: "read_existing_file",
+                path: target_path.display().to_string(),
+                source,
+            })?;
+            if sha256_digest(&existing) == remote_content_digest {
+                remove_stage_file_if_present_with_hooks(target_path, hooks)?;
+                hooks.checkpoint("client.download_remote_edit.after_local_apply");
+                let applied =
+                    db.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)?;
+                return Ok(DownloadRemoteEditExecution::Completed(
+                    ExecutedDownloadRemoteEdit {
+                        downloaded_content_manifest_digest: manifest_digest.to_owned(),
+                        downloaded_file_digest_sha256: remote_content_digest.to_owned(),
+                        applied,
+                    },
+                ));
+            }
+        }
+        let loaded_manifest = load_content_manifest(store, namespace_id, manifest_digest)?;
         let block_count = u64::try_from(loaded_manifest.manifest_envelope.payload.blocks.len())
             .expect("block count should fit in u64");
         let transfer_id = download_transfer_id(namespace_id, inode_id, manifest_digest);
@@ -1080,7 +1419,7 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
         };
 
         if resume_block_index == 0 && (existing_transfer.is_some() || staged_size_bytes != 0) {
-            reset_stage_file(target_path)?;
+            reset_stage_file_with_hooks(target_path, hooks)?;
         }
 
         if let Some(reason) = effective_reset_reason {
@@ -1110,7 +1449,7 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
             let block = &loaded_manifest.manifest_envelope.payload.blocks
                 [usize::try_from(resume_block_index).expect("resume block index should fit")];
             let block_bytes = load_validated_content_block(store, namespace_id, block)?;
-            append_stage_bytes(target_path, &block_bytes)?;
+            append_stage_bytes_with_hooks(target_path, &block_bytes, hooks)?;
             let next_block_index = resume_block_index.saturating_add(1);
             let next_transfer = download_transfer_row(
                 namespace_id,
@@ -1143,7 +1482,8 @@ pub(super) fn execute_download_remote_edit<S: ObjectStore>(
             });
         }
 
-        finalize_stage_file(target_path)?;
+        finalize_stage_file_with_hooks(target_path, hooks)?;
+        hooks.checkpoint("client.download_remote_edit.after_local_apply");
 
         let applied = db.apply_download_remote_edit(namespace_id, inode_id, applied_at_ms)?;
         Ok(DownloadRemoteEditExecution::Completed(
@@ -1204,6 +1544,24 @@ pub(super) fn execute_materialize_remote_dir(
     target_path: Option<&Path>,
     applied_at_ms: u64,
 ) -> Result<ExecutedMaterializeRemoteDir, ExecuteMaterializeRemoteDirError> {
+    execute_materialize_remote_dir_with_hooks(
+        db,
+        namespace_id,
+        inode_id,
+        target_path,
+        applied_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn execute_materialize_remote_dir_with_hooks(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    target_path: Option<&Path>,
+    applied_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ExecutedMaterializeRemoteDir, ExecuteMaterializeRemoteDirError> {
     let result = (|| {
         ensure_materialize_remote_dir_ready(db, namespace_id, inode_id)?;
         let target_path =
@@ -1218,7 +1576,12 @@ pub(super) fn execute_materialize_remote_dir(
             });
         }
 
-        create_directory_durably(target_path)?;
+        if target_path.exists() && !target_path.is_dir() {
+            create_directory_durably_with_hooks(target_path, hooks)?;
+        } else if !target_path.exists() {
+            create_directory_durably_with_hooks(target_path, hooks)?;
+        }
+        hooks.checkpoint("client.materialize_remote_dir.after_local_apply");
 
         let applied = db.apply_materialize_remote_dir(namespace_id, inode_id, applied_at_ms)?;
         Ok(ExecutedMaterializeRemoteDir { applied })
@@ -1582,6 +1945,7 @@ fn ensure_conflict_artifact_for_bound_file<S: ObjectStore>(
     loser_display_name: String,
     source_path: &Path,
     created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<ConflictArtifactRow, ExecuteResolveFileConflictError> {
     let winner = ConflictArtifactWinnerSummary {
         inode_id: remote.inode_id,
@@ -1609,6 +1973,7 @@ fn ensure_conflict_artifact_for_bound_file<S: ObjectStore>(
         loser,
         source_path,
         created_at_ms,
+        hooks,
     )
 }
 
@@ -1620,6 +1985,7 @@ fn ensure_conflict_artifact_for_local_only<S: ObjectStore>(
     local_only: &LocalOnlyFileStateRow,
     source_path: &Path,
     created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<ConflictArtifactRow, ExecuteResolveFileConflictError> {
     let winner = ConflictArtifactWinnerSummary {
         inode_id: remote.inode_id,
@@ -1647,6 +2013,7 @@ fn ensure_conflict_artifact_for_local_only<S: ObjectStore>(
         loser,
         source_path,
         created_at_ms,
+        hooks,
     )
 }
 
@@ -1660,6 +2027,7 @@ fn ensure_conflict_artifact<S: ObjectStore>(
     mut loser: ConflictArtifactLoserSummary,
     source_path: &Path,
     created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<ConflictArtifactRow, ExecuteResolveFileConflictError> {
     let conflict_id = loon_types::deterministic_conflict_id(
         namespace_id,
@@ -1701,6 +2069,7 @@ fn ensure_conflict_artifact<S: ObjectStore>(
         created_at_ms,
     );
     write_conflict_artifact_if_absent(store, &artifact)?;
+    hooks.checkpoint("client.conflict_artifact.after_store_write");
     let row = ConflictArtifactRow {
         namespace_id: namespace_id.clone(),
         conflict_id: artifact.envelope.conflict_id.clone(),
@@ -1714,6 +2083,7 @@ fn ensure_conflict_artifact<S: ObjectStore>(
         tx.upsert_conflict_artifact(&row)?;
         Ok(())
     })?;
+    hooks.checkpoint("client.conflict_artifact.after_cache");
     Ok(row)
 }
 
@@ -1724,6 +2094,7 @@ fn ensure_subtree_delete_conflict_artifact<S: ObjectStore>(
     views: &BoundResolveSubtreeDeleteConflictViews,
     current_root_path: &Path,
     created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<ConflictArtifactRow, ExecuteResolveSubtreeConflictError> {
     ensure_subtree_conflict_artifact_inner(
         db,
@@ -1737,6 +2108,7 @@ fn ensure_subtree_delete_conflict_artifact<S: ObjectStore>(
         &views.local_only_descendants,
         current_root_path,
         created_at_ms,
+        hooks,
     )
 }
 
@@ -1747,6 +2119,7 @@ fn ensure_subtree_rename_conflict_artifact<S: ObjectStore>(
     views: &BoundResolveSubtreeRenameConflictViews,
     current_root_path: &Path,
     created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<ConflictArtifactRow, ExecuteResolveSubtreeConflictError> {
     ensure_subtree_conflict_artifact_inner(
         db,
@@ -1760,6 +2133,7 @@ fn ensure_subtree_rename_conflict_artifact<S: ObjectStore>(
         &views.local_only_descendants,
         current_root_path,
         created_at_ms,
+        hooks,
     )
 }
 
@@ -1775,6 +2149,7 @@ fn ensure_subtree_conflict_artifact_inner<S: ObjectStore>(
     local_only_descendants: &[crate::state_db::ConflictLocalOnlySubtreeEntry],
     current_root_path: &Path,
     created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<ConflictArtifactRow, ExecuteResolveSubtreeConflictError> {
     let winner = ConflictArtifactWinnerSummary {
         inode_id: root_remote.inode_id,
@@ -1834,6 +2209,7 @@ fn ensure_subtree_conflict_artifact_inner<S: ObjectStore>(
         created_at_ms,
     );
     write_subtree_conflict_artifact_if_absent(store, &artifact)?;
+    hooks.checkpoint("client.subtree_conflict_artifact.after_store_write");
     let row = ConflictArtifactRow {
         namespace_id: namespace_id.clone(),
         conflict_id: artifact.envelope.conflict_id.clone(),
@@ -1847,6 +2223,7 @@ fn ensure_subtree_conflict_artifact_inner<S: ObjectStore>(
         tx.upsert_conflict_artifact(&row)?;
         Ok(())
     })?;
+    hooks.checkpoint("client.subtree_conflict_artifact.after_cache");
     Ok(row)
 }
 
@@ -1982,6 +2359,7 @@ fn rebuild_authoritative_subtree_under_root<S: ObjectStore>(
     current_root_path: &Path,
     bound_descendants: &[crate::state_db::ConflictBoundSubtreeEntry],
     root_inode_id: InodeId,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<(), ExecuteResolveSubtreeConflictError> {
     let mut directory_entries = Vec::new();
     let mut file_entries = Vec::new();
@@ -2011,8 +2389,11 @@ fn rebuild_authoritative_subtree_under_root<S: ObjectStore>(
             .then_with(|| left.cmp(right))
     });
     for relative_path in directory_entries {
-        create_directory_durably(&subtree_entry_path(current_root_path, &relative_path))
-            .map_err(winner_restore_error)?;
+        create_directory_durably_with_hooks(
+            &subtree_entry_path(current_root_path, &relative_path),
+            hooks,
+        )
+        .map_err(winner_restore_error)?;
     }
 
     file_entries.sort_by(|(left_entry, _, left_path), (right_entry, _, right_path)| {
@@ -2035,9 +2416,10 @@ fn rebuild_authoritative_subtree_under_root<S: ObjectStore>(
                 inode_id: entry.inode_id.0,
             })?;
         let downloaded = download_file_to_bytes(store, namespace_id, manifest_digest)?;
-        apply_bytes_atomically(
+        apply_bytes_atomically_with_hooks(
             &subtree_entry_path(current_root_path, &relative_path),
             &downloaded.bytes,
+            hooks,
         )
         .map_err(winner_restore_error)?;
     }
@@ -2051,6 +2433,7 @@ fn apply_remote_bytes_in_place(
     expected_digest: &str,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<(), WinnerApplyError> {
     if target_path.exists() {
         let existing = fs::read(target_path).map_err(|source| {
@@ -2073,7 +2456,7 @@ fn apply_remote_bytes_in_place(
         });
     }
 
-    apply_bytes_atomically(target_path, bytes)?;
+    apply_bytes_atomically_with_hooks(target_path, bytes, hooks)?;
     Ok(())
 }
 
@@ -2084,6 +2467,7 @@ fn apply_remote_winner_at_target(
     expected_digest: &str,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<(), WinnerApplyError> {
     if current_path == target_path {
         return apply_remote_bytes_in_place(
@@ -2092,6 +2476,7 @@ fn apply_remote_winner_at_target(
             expected_digest,
             namespace_id,
             inode_id,
+            hooks,
         );
     }
 
@@ -2119,7 +2504,7 @@ fn apply_remote_winner_at_target(
             });
         }
         if current_path.exists() {
-            remove_path_durably(current_path)?;
+            remove_path_durably_with_hooks(current_path, hooks)?;
         }
         return Ok(());
     }
@@ -2131,9 +2516,16 @@ fn apply_remote_winner_at_target(
         });
     }
 
-    apply_remote_bytes_in_place(target_path, bytes, expected_digest, namespace_id, inode_id)?;
+    apply_remote_bytes_in_place(
+        target_path,
+        bytes,
+        expected_digest,
+        namespace_id,
+        inode_id,
+        hooks,
+    )?;
     if current_path.exists() {
-        remove_path_durably(current_path)?;
+        remove_path_durably_with_hooks(current_path, hooks)?;
     }
     Ok(())
 }

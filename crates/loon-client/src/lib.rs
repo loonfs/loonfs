@@ -2,6 +2,7 @@
 
 mod conflict;
 mod local_apply;
+pub mod testing;
 
 pub use conflict::{
     archive_conflict_artifact, discover_conflict_artifact_archives_for_namespace,

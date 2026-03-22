@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use loon_sim::faults::{FaultPlan, InjectedClientFault};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -97,6 +98,11 @@ impl Scenario {
         T: DeserializeOwned,
     {
         decode_fragment(&self.expect)
+    }
+
+    pub fn decode_fault_plan(&self) -> Result<FaultPlan> {
+        let faults: Vec<InjectedClientFault> = self.decode_faults()?;
+        Ok(FaultPlan::new(faults))
     }
 
     fn validate(&self, path: &Path) -> Result<()> {

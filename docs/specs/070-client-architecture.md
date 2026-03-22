@@ -2533,3 +2533,25 @@ conflict reasoning and convergence are much easier when directionality is explic
 
 Online-only placeholders must use the same canonical inode and revision semantics as full mirror mode.
 The platform integration layer must not invent a different sync model.
+
+## Crash/restart checkpoint rule
+
+Every multi-step client executor path must name stable durable-boundary checkpoints.
+
+Rules:
+
+- retries may not assume SQLite is the only proof of prior progress
+- if the intended winner state is already visible on disk, the retry path must skip duplicate local
+  apply and commit only the missing durable state transition
+- if a conflict artifact or archive sidecar already exists and validates, retries must cache and
+  reuse it instead of writing a duplicate object
+- subtree restore retries may clean only internal staging paths automatically; the explicit caller
+  destination must still obey absent-or-complete semantics
+
+Current checkpointed client families include:
+
+- dispatch from durable state
+- bound upload/download/materialize flows
+- bound authoritative rename/delete/subtree rename/subtree delete
+- file and subtree conflict resolution
+- conflict artifact discovery, archive, unarchive, and restore

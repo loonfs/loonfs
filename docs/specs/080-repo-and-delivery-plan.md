@@ -59,6 +59,14 @@ Constraints for that shell:
 - archive state is canonical in object storage via per-artifact sidecars
 - there is still no destructive delete/GC lifecycle
 
+Current delivery gates:
+
+- object-store contract changes require the local FS conformance suite in-repo
+- object-store contract changes also require the external AWS S3 and Cloudflare R2 conformance jobs
+  documented in `docs/runbooks/provider-conformance.md`
+- no provider CI workflow config lives in-repo; only the contract, path filters, commands, and env
+  requirements are tracked here
+
 Current quarantined delivery surfaces:
 
 - `loon-cli`

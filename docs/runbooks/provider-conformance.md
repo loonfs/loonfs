@@ -80,9 +80,14 @@ The current suite proves the active v1 contract only:
 
 - create-if-absent
 - compare-and-swap on small mutable objects
+- compare-and-swap on a missing object returns `PreconditionFailed`
 - immediate visibility after write and delete
+- overwrite visibility plus `head` freshness
+- delete of a missing key is idempotent
 - range reads
-- key scoping/traversal rejection
+- sorted `list_prefix`
+- invalid-key and traversal rejection across all trait methods
+- scoped key-prefix isolation for providers that support `key_prefix`
 
 `future_capabilities.multipart_upload` still exists in provider profiles as a future-facing flag,
 but it is not part of the active v1 `ObjectStore` trait surface and is not yet a correctness
@@ -107,14 +112,43 @@ cargo test -p loon-objectstore --test conformance cloudflare_r2_real_provider_co
 Today those ignored tests execute the same conformance assertions the local FS adapter runs, using
 real AWS S3 and Cloudflare R2 resources.
 
+## External CI gate
+
+Required external jobs:
+
+- `objectstore-conformance-localfs`
+- `objectstore-conformance-aws-s3`
+- `objectstore-conformance-cloudflare-r2`
+
+Minimum required path filters:
+
+- `crates/loon-objectstore/**`
+- `docs/specs/020-objectstore-contract.md`
+- `docs/runbooks/provider-conformance.md`
+- `crates/loon-objectstore/tests/provider-conformance.env.example`
+
+Required commands:
+
+```bash
+cargo test -p loon-objectstore --test conformance
+cargo test -p loon-objectstore --test conformance aws_s3_real_provider_conformance -- --ignored --exact
+cargo test -p loon-objectstore --test conformance cloudflare_r2_real_provider_conformance -- --ignored --exact
+```
+
+Rules:
+
+- real-provider jobs use pre-provisioned buckets or containers only
+- tests must not create or destroy buckets
+- each job must inject a unique `LOON_TEST_S3_PREFIX` or `LOON_TEST_R2_PREFIX`
+- provider credentials stay in the external CI secret store, not in-repo
+
 ## CI guidance
 
-When CI is wired:
+When external CI is wired:
 
-- create a dedicated real-provider conformance job
-- inject the `LOON_TEST_*` variables only into that job
-- require the job for changes under `crates/loon-objectstore/`
-- keep the job allowed to run slower than the default workspace test path
+- inject the `LOON_TEST_*` variables only into the provider jobs
+- require the provider jobs for the path filters above
+- allow the real-provider jobs to run slower than the default workspace path
 
 The important split is:
 

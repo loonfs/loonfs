@@ -29,12 +29,85 @@ fn provider_profiles_exist() {
         Expectation::VerifyByConformance
     );
     assert_eq!(
+        LOCAL_FS.active_contract.overwrite,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        LOCAL_FS.active_contract.delete_idempotent,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        LOCAL_FS
+            .active_contract
+            .head_reflects_latest_write_and_delete,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        LOCAL_FS.active_contract.scoped_key_prefixing,
+        Expectation::ExpectedNo
+    );
+    assert_eq!(
+        LOCAL_FS.active_contract.traversal_rejection,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        LOCAL_FS.active_contract.sorted_list_prefix,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
         AWS_S3.active_contract.opaque_compare_token_for_cas,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(AWS_S3.active_contract.overwrite, Expectation::ExpectedYes);
+    assert_eq!(
+        AWS_S3.active_contract.delete_idempotent,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        AWS_S3.active_contract.head_reflects_latest_write_and_delete,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        AWS_S3.active_contract.scoped_key_prefixing,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        AWS_S3.active_contract.traversal_rejection,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        AWS_S3.active_contract.sorted_list_prefix,
         Expectation::ExpectedYes
     );
     assert_eq!(
         CLOUDFLARE_R2.active_contract.opaque_compare_token_for_cas,
         Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        CLOUDFLARE_R2.active_contract.overwrite,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        CLOUDFLARE_R2.active_contract.delete_idempotent,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        CLOUDFLARE_R2
+            .active_contract
+            .head_reflects_latest_write_and_delete,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        CLOUDFLARE_R2.active_contract.scoped_key_prefixing,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        CLOUDFLARE_R2.active_contract.traversal_rejection,
+        Expectation::ExpectedYes
+    );
+    assert_eq!(
+        CLOUDFLARE_R2.active_contract.sorted_list_prefix,
+        Expectation::ExpectedYes
     );
     assert_eq!(
         LOCAL_FS.future_capabilities.multipart_upload,
@@ -104,10 +177,19 @@ fn local_fs_compare_and_swap_rejects_stale_writer() {
 }
 
 #[test]
+fn local_fs_overwrite_visibility_and_delete_idempotence() {
+    let temp_dir = TestDir::new("overwrite-delete");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_overwrite_updates_head_and_body(&store);
+    assert_delete_missing_is_idempotent(&store);
+}
+
+#[test]
 fn local_fs_lists_immediately_after_write_and_delete() {
     let temp_dir = TestDir::new("listing");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_lists_immediately_after_write_and_delete(&store);
+    assert_sorted_list_prefix(&store);
 }
 
 #[test]
@@ -121,7 +203,14 @@ fn local_fs_supports_range_reads() {
 fn local_fs_rejects_path_traversal_keys() {
     let temp_dir = TestDir::new("invalid-key");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_rejects_path_traversal_keys(&store);
+    assert_rejects_invalid_keys_consistently(&store);
+}
+
+#[test]
+fn local_fs_compare_and_swap_missing_object_rejects_writer() {
+    let temp_dir = TestDir::new("cas-missing");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_compare_and_swap_missing_object_rejects_writer(&store);
 }
 
 #[test]
@@ -165,9 +254,13 @@ fn cloudflare_r2_real_provider_conformance() {
 fn assert_provider_conformance<S: ObjectStore>(store: &S) {
     assert_create_if_absent_is_enforced(store);
     assert_compare_and_swap_rejects_stale_writer(store);
+    assert_compare_and_swap_missing_object_rejects_writer(store);
+    assert_overwrite_updates_head_and_body(store);
+    assert_delete_missing_is_idempotent(store);
     assert_lists_immediately_after_write_and_delete(store);
+    assert_sorted_list_prefix(store);
     assert_supports_range_reads(store);
-    assert_rejects_path_traversal_keys(store);
+    assert_rejects_invalid_keys_consistently(store);
 }
 
 fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {
@@ -224,6 +317,49 @@ fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S) {
     store.delete(&key).expect("cleanup CAS object");
 }
 
+fn assert_compare_and_swap_missing_object_rejects_writer<S: ObjectStore>(store: &S) {
+    let key = namespace_head("ns-cas-missing");
+    let _ = store.delete(&key);
+    assert_precondition_failed(store.compare_and_swap(&key, "missing-etag", br#"{"seq":1}"#));
+}
+
+fn assert_overwrite_updates_head_and_body<S: ObjectStore>(store: &S) {
+    let key = namespace_head("ns-overwrite");
+    let _ = store.delete(&key);
+
+    let first = store
+        .put_overwrite(&key, br#"{"seq":41}"#)
+        .expect("initial overwrite should succeed");
+    let second = store
+        .put_overwrite(&key, br#"{"seq":42}"#)
+        .expect("second overwrite should succeed");
+
+    assert_eq!(
+        store
+            .get(&key, None)
+            .expect("read overwritten body")
+            .expect("overwritten body exists"),
+        br#"{"seq":42}"#
+    );
+    assert_eq!(
+        store.head(&key).expect("head after overwrite"),
+        Some(second.clone())
+    );
+    assert_ne!(first, second, "overwrite should refresh visible metadata");
+
+    store.delete(&key).expect("cleanup overwritten object");
+    assert_eq!(store.head(&key).expect("head after delete"), None);
+}
+
+fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
+    let key = namespace_head("ns-delete-missing");
+    let _ = store.delete(&key);
+    store
+        .delete(&key)
+        .expect("delete missing object should succeed");
+    assert_eq!(store.head(&key).expect("head missing object"), None);
+}
+
 fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
     let key = derived_progress("ns-1", "BuildSnapshot");
     let _ = store.delete(&key);
@@ -243,6 +379,38 @@ fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
         .list_prefix("namespaces/ns-1/derived/")
         .expect("list after delete")
         .is_empty());
+}
+
+fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
+    let keys = vec![
+        derived_progress("ns-sort", "BuildSnapshot"),
+        namespace_head("ns-sort"),
+        namespace_lease("ns-sort"),
+    ];
+    for key in &keys {
+        let _ = store.delete(key);
+    }
+
+    store
+        .put_if_absent(&keys[1], br#"{"seq":1}"#)
+        .expect("seed second sort key");
+    store
+        .put_if_absent(&keys[2], br#"{"lease":1}"#)
+        .expect("seed third sort key");
+    store
+        .put_if_absent(&keys[0], br#"{"through_seq":1}"#)
+        .expect("seed first sort key");
+
+    let listed = store
+        .list_prefix("namespaces/ns-sort/")
+        .expect("list sorted keys");
+    let mut expected = keys.clone();
+    expected.sort();
+    assert_eq!(listed, expected);
+
+    for key in &keys {
+        store.delete(key).expect("cleanup sort key");
+    }
 }
 
 fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
@@ -269,9 +437,37 @@ fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
     store.delete(&key).expect("cleanup range object");
 }
 
-fn assert_rejects_path_traversal_keys<S: ObjectStore>(store: &S) {
-    let result = store.put_if_absent("../escape", b"oops");
-    assert!(matches!(result, Err(ObjectStoreError::InvalidKey(_))));
+fn assert_rejects_invalid_keys_consistently<S: ObjectStore>(store: &S) {
+    for key in ["../escape", "namespaces//bad", "./escape"] {
+        assert!(matches!(
+            store.head(key),
+            Err(ObjectStoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.get(key, None),
+            Err(ObjectStoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.put_if_absent(key, b"oops"),
+            Err(ObjectStoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.put_overwrite(key, b"oops"),
+            Err(ObjectStoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.compare_and_swap(key, "etag", b"oops"),
+            Err(ObjectStoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.delete(key),
+            Err(ObjectStoreError::InvalidKey(_))
+        ));
+        assert!(matches!(
+            store.list_prefix(key),
+            Err(ObjectStoreError::InvalidKey(_))
+        ));
+    }
 }
 
 fn assert_precondition_failed<T>(result: Result<T, ObjectStoreError>) {

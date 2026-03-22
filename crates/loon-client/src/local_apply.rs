@@ -1,3 +1,4 @@
+use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,15 @@ pub(crate) fn apply_bytes_atomically(
     target_path: &Path,
     bytes: &[u8],
 ) -> Result<(), LocalApplyError> {
+    apply_bytes_atomically_with_hooks(target_path, bytes, &NoopClientExecutionHooks)
+}
+
+pub(crate) fn apply_bytes_atomically_with_hooks(
+    target_path: &Path,
+    bytes: &[u8],
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("apply_bytes_atomically", target_path)?;
     let parent_dir = target_parent_dir(target_path);
     fs::create_dir_all(parent_dir)
         .map_err(|source| io_error("create_parent_dir", parent_dir, source))?;
@@ -41,6 +51,14 @@ pub(crate) fn apply_bytes_atomically(
 }
 
 pub(crate) fn create_directory_durably(target_path: &Path) -> Result<(), LocalApplyError> {
+    create_directory_durably_with_hooks(target_path, &NoopClientExecutionHooks)
+}
+
+pub(crate) fn create_directory_durably_with_hooks(
+    target_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("create_directory_durably", target_path)?;
     let parent_dir = target_parent_dir(target_path);
     fs::create_dir(target_path)
         .map_err(|source| io_error("create_target_dir", target_path, source))?;
@@ -54,6 +72,15 @@ pub(crate) fn rename_path_durably(
     current_path: &Path,
     target_path: &Path,
 ) -> Result<(), LocalApplyError> {
+    rename_path_durably_with_hooks(current_path, target_path, &NoopClientExecutionHooks)
+}
+
+pub(crate) fn rename_path_durably_with_hooks(
+    current_path: &Path,
+    target_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("rename_path_durably", target_path)?;
     let source_parent_dir = target_parent_dir(current_path);
     let target_parent_dir = target_parent_dir(target_path);
     if target_path.exists() {
@@ -76,7 +103,16 @@ pub(crate) fn rename_path_durably(
 }
 
 pub(crate) fn remove_path_durably(target_path: &Path) -> Result<(), LocalApplyError> {
+    remove_path_durably_with_hooks(target_path, &NoopClientExecutionHooks)
+}
+
+pub(crate) fn remove_path_durably_with_hooks(
+    target_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("remove_path_durably", target_path)?;
     let parent_dir = target_parent_dir(target_path);
+    touch_delete_marker(delete_marker_path_for_target(target_path)?)?;
     fs::remove_file(target_path).map_err(|source| io_error("remove_file", target_path, source))?;
     sync_parent_dir(parent_dir)
         .map_err(|source| io_error("sync_parent_dir", parent_dir, source))?;
@@ -84,7 +120,16 @@ pub(crate) fn remove_path_durably(target_path: &Path) -> Result<(), LocalApplyEr
 }
 
 pub(crate) fn remove_tree_durably(target_path: &Path) -> Result<(), LocalApplyError> {
+    remove_tree_durably_with_hooks(target_path, &NoopClientExecutionHooks)
+}
+
+pub(crate) fn remove_tree_durably_with_hooks(
+    target_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("remove_tree_durably", target_path)?;
     let parent_dir = target_parent_dir(target_path);
+    touch_delete_marker(delete_marker_path_for_target(target_path)?)?;
     fs::remove_dir_all(target_path)
         .map_err(|source| io_error("remove_dir_all", target_path, source))?;
     sync_parent_dir(parent_dir)
@@ -102,6 +147,14 @@ pub(crate) fn stage_file_size(target_path: &Path) -> Result<Option<u64>, LocalAp
 }
 
 pub(crate) fn reset_stage_file(target_path: &Path) -> Result<(), LocalApplyError> {
+    reset_stage_file_with_hooks(target_path, &NoopClientExecutionHooks)
+}
+
+pub(crate) fn reset_stage_file_with_hooks(
+    target_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("reset_stage_file", target_path)?;
     let parent_dir = target_parent_dir(target_path);
     fs::create_dir_all(parent_dir)
         .map_err(|source| io_error("create_parent_dir", parent_dir, source))?;
@@ -116,6 +169,15 @@ pub(crate) fn reset_stage_file(target_path: &Path) -> Result<(), LocalApplyError
 }
 
 pub(crate) fn append_stage_bytes(target_path: &Path, bytes: &[u8]) -> Result<(), LocalApplyError> {
+    append_stage_bytes_with_hooks(target_path, bytes, &NoopClientExecutionHooks)
+}
+
+pub(crate) fn append_stage_bytes_with_hooks(
+    target_path: &Path,
+    bytes: &[u8],
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("append_stage_bytes", target_path)?;
     let parent_dir = target_parent_dir(target_path);
     fs::create_dir_all(parent_dir)
         .map_err(|source| io_error("create_parent_dir", parent_dir, source))?;
@@ -136,6 +198,14 @@ pub(crate) fn append_stage_bytes(target_path: &Path, bytes: &[u8]) -> Result<(),
 }
 
 pub(crate) fn finalize_stage_file(target_path: &Path) -> Result<(), LocalApplyError> {
+    finalize_stage_file_with_hooks(target_path, &NoopClientExecutionHooks)
+}
+
+pub(crate) fn finalize_stage_file_with_hooks(
+    target_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("finalize_stage_file", target_path)?;
     let parent_dir = target_parent_dir(target_path);
     let stage_path = staging_path_for_target(target_path)?;
     fs::rename(&stage_path, target_path)
@@ -143,6 +213,61 @@ pub(crate) fn finalize_stage_file(target_path: &Path) -> Result<(), LocalApplyEr
     sync_parent_dir(parent_dir)
         .map_err(|source| io_error("sync_parent_dir", parent_dir, source))?;
     Ok(())
+}
+
+pub(crate) fn remove_stage_file_if_present_with_hooks(
+    target_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<(), LocalApplyError> {
+    hooks.local_apply_error("remove_stage_file_if_present", target_path)?;
+    let parent_dir = target_parent_dir(target_path);
+    let stage_path = staging_path_for_target(target_path)?;
+    match fs::remove_file(&stage_path) {
+        Ok(()) => {
+            sync_parent_dir(parent_dir)
+                .map_err(|source| io_error("sync_parent_dir", parent_dir, source))?;
+            Ok(())
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_error("remove_stage_file", &stage_path, source)),
+    }
+}
+
+pub(crate) fn delete_marker_path_for_target(
+    target_path: &Path,
+) -> Result<PathBuf, LocalApplyError> {
+    let file_name = target_path.file_name().ok_or_else(|| {
+        io_error(
+            "derive_delete_marker_path",
+            target_path,
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "target path must include a file or directory name",
+            ),
+        )
+    })?;
+    Ok(
+        target_parent_dir(target_path)
+            .join(format!(".{}.loon-delete", file_name.to_string_lossy())),
+    )
+}
+
+pub(crate) fn delete_marker_exists(target_path: &Path) -> Result<bool, LocalApplyError> {
+    let marker_path = delete_marker_path_for_target(target_path)?;
+    match fs::metadata(&marker_path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io_error("stat_delete_marker", &marker_path, source)),
+    }
+}
+
+pub(crate) fn clear_delete_marker(target_path: &Path) -> Result<(), LocalApplyError> {
+    let marker_path = delete_marker_path_for_target(target_path)?;
+    match fs::remove_file(&marker_path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_error("clear_delete_marker", &marker_path, source)),
+    }
 }
 
 pub(crate) fn staging_path_for_target(target_path: &Path) -> Result<PathBuf, LocalApplyError> {
@@ -165,6 +290,20 @@ fn target_parent_dir(target_path: &Path) -> &Path {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
+}
+
+fn touch_delete_marker(marker_path: PathBuf) -> Result<(), LocalApplyError> {
+    let mut marker_file = File::create(&marker_path)
+        .map_err(|source| io_error("create_delete_marker", &marker_path, source))?;
+    marker_file
+        .write_all(b"delete-pending")
+        .map_err(|source| io_error("write_delete_marker", &marker_path, source))?;
+    marker_file
+        .sync_all()
+        .map_err(|source| io_error("sync_delete_marker", &marker_path, source))?;
+    sync_parent_dir(target_parent_dir(&marker_path))
+        .map_err(|source| io_error("sync_parent_dir", target_parent_dir(&marker_path), source))?;
+    Ok(())
 }
 
 #[cfg(unix)]

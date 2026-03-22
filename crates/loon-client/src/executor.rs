@@ -32,6 +32,7 @@ pub use request::{
     build_client_mutation_request, build_client_mutation_request_from_state,
     build_inode_mutation_request, build_inode_mutation_request_from_state,
 };
+pub(crate) use schedule::execute_next_client_action_with_hooks;
 pub use schedule::{execute_next_client_action, execute_next_local_only_create};
 
 #[derive(Debug, Error)]

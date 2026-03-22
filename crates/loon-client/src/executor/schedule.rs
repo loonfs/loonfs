@@ -1,15 +1,18 @@
 use super::inode::{
-    execute_apply_remote_delete, execute_apply_remote_rename,
-    execute_apply_remote_rename_and_replace, execute_apply_remote_subtree_delete,
-    execute_apply_remote_subtree_rename, execute_download_remote_edit,
-    execute_materialize_remote_dir, execute_resolve_delete_vs_edit_conflict,
-    execute_resolve_path_binding_collision, execute_resolve_rename_vs_edit_conflict,
-    execute_resolve_same_inode_conflict, execute_resolve_subtree_delete_conflict,
-    execute_resolve_subtree_rename_conflict, execute_upload_local_edit,
+    execute_apply_remote_delete_with_hooks, execute_apply_remote_rename_and_replace_with_hooks,
+    execute_apply_remote_rename_with_hooks, execute_apply_remote_subtree_delete_with_hooks,
+    execute_apply_remote_subtree_rename_with_hooks, execute_download_remote_edit_with_hooks,
+    execute_materialize_remote_dir_with_hooks, execute_resolve_delete_vs_edit_conflict_with_hooks,
+    execute_resolve_path_binding_collision_with_hooks,
+    execute_resolve_rename_vs_edit_conflict_with_hooks,
+    execute_resolve_same_inode_conflict_with_hooks,
+    execute_resolve_subtree_delete_conflict_with_hooks,
+    execute_resolve_subtree_rename_conflict_with_hooks, execute_upload_local_edit_with_hooks,
 };
-use super::local_only::execute_local_only_create;
+use super::local_only::{execute_local_only_create, execute_local_only_create_with_hooks};
 use super::*;
 use crate::state_db::{ClientFileId, SqliteStateDb};
+use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use loon_objectstore::ObjectStore;
 use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, NamespaceId};
 use std::path::PathBuf;
@@ -38,6 +41,37 @@ where
     ITP: FnOnce(&NamespaceId, InodeId, Option<InodeId>, &str) -> Option<PathBuf>,
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
+    execute_next_client_action_with_hooks(
+        db,
+        store,
+        resolve_local_only_source_path,
+        resolve_inode_source_path,
+        resolve_inode_target_path,
+        uploaded_at_ms,
+        created_at_ms,
+        &NoopClientExecutionHooks,
+        dispatch,
+    )
+}
+
+pub(crate) fn execute_next_client_action_with_hooks<S, LP, IP, ITP, F>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    resolve_local_only_source_path: LP,
+    resolve_inode_source_path: IP,
+    resolve_inode_target_path: ITP,
+    uploaded_at_ms: u64,
+    created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+    dispatch: F,
+) -> Result<Option<NextClientAction>, ExecuteNextClientActionError>
+where
+    S: ObjectStore,
+    LP: FnOnce(&ClientFileId) -> Option<PathBuf>,
+    IP: FnOnce(&NamespaceId, InodeId) -> Option<PathBuf>,
+    ITP: FnOnce(&NamespaceId, InodeId, Option<InodeId>, &str) -> Option<PathBuf>,
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
     let next_action = match select_next_client_action_candidate(
         db.load_next_planned_local_only_action()?,
         db.load_next_executable_planned_action()?,
@@ -51,13 +85,14 @@ where
         NextClientActionCandidate::LocalOnlyCreate(planned_action) => {
             let client_file_id = planned_action.client_file_id.clone();
             let source_path = resolve_local_only_source_path(&client_file_id);
-            let executed = execute_local_only_create(
+            let executed = execute_local_only_create_with_hooks(
                 db,
                 store,
                 &client_file_id,
                 source_path.as_deref(),
                 uploaded_at_ms,
                 created_at_ms,
+                hooks,
                 dispatch,
             )?;
 
@@ -75,7 +110,7 @@ where
             match planned_action.decision.as_str() {
                 value if value == PlannerDecision::UploadLocalEdit.as_str() => {
                     let source_path = resolve_inode_source_path(&namespace_id, inode_id);
-                    let executed = execute_upload_local_edit(
+                    let executed = execute_upload_local_edit_with_hooks(
                         db,
                         store,
                         &namespace_id,
@@ -83,41 +118,45 @@ where
                         source_path.as_deref(),
                         uploaded_at_ms,
                         created_at_ms,
+                        hooks,
                         dispatch,
                     )?;
                     Ok(Some(NextClientAction::ExecutedUploadLocalEdit(executed)))
                 }
                 value if value == PlannerDecision::DownloadRemoteEdit.as_str() => {
                     let target_path = resolve_inode_source_path(&namespace_id, inode_id);
-                    let executed = execute_download_remote_edit(
+                    let executed = execute_download_remote_edit_with_hooks(
                         db,
                         store,
                         &namespace_id,
                         inode_id,
                         target_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedDownloadRemoteEdit(executed)))
                 }
                 value if value == PlannerDecision::ApplyRemoteDelete.as_str() => {
                     let current_path = resolve_inode_source_path(&namespace_id, inode_id);
-                    let executed = execute_apply_remote_delete(
+                    let executed = execute_apply_remote_delete_with_hooks(
                         db,
                         &namespace_id,
                         inode_id,
                         current_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedApplyRemoteDelete(executed)))
                 }
                 value if value == PlannerDecision::ApplyRemoteSubtreeDelete.as_str() => {
                     let current_path = resolve_inode_source_path(&namespace_id, inode_id);
-                    let executed = execute_apply_remote_subtree_delete(
+                    let executed = execute_apply_remote_subtree_delete_with_hooks(
                         db,
                         &namespace_id,
                         inode_id,
                         current_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedApplyRemoteSubtreeDelete(
                         executed,
@@ -133,13 +172,14 @@ where
                         views.root_remote.parent_inode_id,
                         &views.root_remote.display_name,
                     );
-                    let executed = execute_apply_remote_subtree_rename(
+                    let executed = execute_apply_remote_subtree_rename_with_hooks(
                         db,
                         &namespace_id,
                         inode_id,
                         current_path.as_deref(),
                         target_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedApplyRemoteSubtreeRename(
                         executed,
@@ -155,13 +195,14 @@ where
                         remote.parent_inode_id,
                         &remote.display_name,
                     );
-                    let executed = execute_apply_remote_rename(
+                    let executed = execute_apply_remote_rename_with_hooks(
                         db,
                         &namespace_id,
                         inode_id,
                         current_path.as_deref(),
                         target_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedApplyRemoteRename(executed)))
                 }
@@ -180,7 +221,7 @@ where
                         remote.parent_inode_id,
                         &remote.display_name,
                     );
-                    let executed = execute_apply_remote_rename_and_replace(
+                    let executed = execute_apply_remote_rename_and_replace_with_hooks(
                         db,
                         store,
                         &namespace_id,
@@ -188,6 +229,7 @@ where
                         current_path.as_deref(),
                         target_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedApplyRemoteRenameAndReplace(
                         executed,
@@ -195,13 +237,14 @@ where
                 }
                 value if value == PlannerDecision::ResolveSameInodeConflict.as_str() => {
                     let current_path = resolve_inode_source_path(&namespace_id, inode_id);
-                    let executed = execute_resolve_same_inode_conflict(
+                    let executed = execute_resolve_same_inode_conflict_with_hooks(
                         db,
                         store,
                         &namespace_id,
                         inode_id,
                         current_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedResolveSameInodeConflict(
                         executed,
@@ -209,13 +252,14 @@ where
                 }
                 value if value == PlannerDecision::ResolveDeleteVsEditConflict.as_str() => {
                     let current_path = resolve_inode_source_path(&namespace_id, inode_id);
-                    let executed = execute_resolve_delete_vs_edit_conflict(
+                    let executed = execute_resolve_delete_vs_edit_conflict_with_hooks(
                         db,
                         store,
                         &namespace_id,
                         inode_id,
                         current_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedResolveDeleteVsEditConflict(
                         executed,
@@ -236,7 +280,7 @@ where
                         remote.parent_inode_id,
                         &remote.display_name,
                     );
-                    let executed = execute_resolve_rename_vs_edit_conflict(
+                    let executed = execute_resolve_rename_vs_edit_conflict_with_hooks(
                         db,
                         store,
                         &namespace_id,
@@ -244,6 +288,7 @@ where
                         current_path.as_deref(),
                         target_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedResolveRenameVsEditConflict(
                         executed,
@@ -271,13 +316,14 @@ where
                         [candidate] => resolve_local_only_source_path(&candidate.client_file_id),
                         _ => None,
                     };
-                    let executed = execute_resolve_path_binding_collision(
+                    let executed = execute_resolve_path_binding_collision_with_hooks(
                         db,
                         store,
                         &namespace_id,
                         inode_id,
                         source_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedResolvePathBindingCollision(
                         executed,
@@ -285,13 +331,14 @@ where
                 }
                 value if value == PlannerDecision::ResolveSubtreeDeleteConflict.as_str() => {
                     let current_path = resolve_inode_source_path(&namespace_id, inode_id);
-                    let executed = execute_resolve_subtree_delete_conflict(
+                    let executed = execute_resolve_subtree_delete_conflict_with_hooks(
                         db,
                         store,
                         &namespace_id,
                         inode_id,
                         current_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(
                         NextClientAction::ExecutedResolveSubtreeDeleteConflict(executed),
@@ -309,7 +356,7 @@ where
                         views.root_remote.parent_inode_id,
                         &views.root_remote.display_name,
                     );
-                    let executed = execute_resolve_subtree_rename_conflict(
+                    let executed = execute_resolve_subtree_rename_conflict_with_hooks(
                         db,
                         store,
                         &namespace_id,
@@ -317,6 +364,7 @@ where
                         current_path.as_deref(),
                         target_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(
                         NextClientAction::ExecutedResolveSubtreeRenameConflict(executed),
@@ -324,12 +372,13 @@ where
                 }
                 value if value == PlannerDecision::MaterializeRemoteDir.as_str() => {
                     let target_path = resolve_inode_source_path(&namespace_id, inode_id);
-                    let executed = execute_materialize_remote_dir(
+                    let executed = execute_materialize_remote_dir_with_hooks(
                         db,
                         &namespace_id,
                         inode_id,
                         target_path.as_deref(),
                         created_at_ms,
+                        hooks,
                     )?;
                     Ok(Some(NextClientAction::ExecutedMaterializeRemoteDir(
                         executed,

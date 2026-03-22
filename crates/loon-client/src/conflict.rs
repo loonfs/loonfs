@@ -1,12 +1,13 @@
 use crate::download::{download_file_to_bytes, DownloadError};
 use crate::local_apply::{
-    apply_bytes_atomically, create_directory_durably, remove_path_durably, remove_tree_durably,
-    rename_path_durably, LocalApplyError,
+    apply_bytes_atomically_with_hooks, create_directory_durably_with_hooks, remove_path_durably,
+    remove_tree_durably, rename_path_durably_with_hooks, LocalApplyError,
 };
 use crate::state_db::{
     ConflictArtifactArchiveRow, ConflictArtifactEnvelopeRecord, ConflictArtifactRow, SqliteStateDb,
     StateDbError,
 };
+use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use crate::upload::{upload_small_file_from_path, UploadError, UploadedContent};
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::{
@@ -293,6 +294,20 @@ pub fn discover_conflict_artifacts_for_namespace<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<Vec<ConflictArtifactRow>, ConflictArtifactError> {
+    discover_conflict_artifacts_for_namespace_with_hooks(
+        db,
+        store,
+        namespace_id,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn discover_conflict_artifacts_for_namespace_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<Vec<ConflictArtifactRow>, ConflictArtifactError> {
     let prefix = conflict_artifact_prefix(namespace_id.as_str());
     let mut object_keys =
         store
@@ -326,6 +341,7 @@ pub fn discover_conflict_artifacts_for_namespace<S: ObjectStore>(
         }
         Ok(())
     })?;
+    hooks.checkpoint("conflict.discover_artifacts.after_cache");
     Ok(rows)
 }
 
@@ -354,6 +370,20 @@ pub fn discover_conflict_artifact_archives_for_namespace<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
     namespace_id: &NamespaceId,
+) -> Result<Vec<ConflictArtifactArchiveRow>, ConflictArtifactError> {
+    discover_conflict_artifact_archives_for_namespace_with_hooks(
+        db,
+        store,
+        namespace_id,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn discover_conflict_artifact_archives_for_namespace_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<Vec<ConflictArtifactArchiveRow>, ConflictArtifactError> {
     let prefix = conflict_artifact_archive_prefix(namespace_id.as_str());
     let mut object_keys =
@@ -405,6 +435,7 @@ pub fn discover_conflict_artifact_archives_for_namespace<S: ObjectStore>(
         }
         Ok(())
     })?;
+    hooks.checkpoint("conflict.discover_archives.after_cache");
     Ok(rows)
 }
 
@@ -447,6 +478,24 @@ pub fn archive_conflict_artifact<S: ObjectStore>(
     conflict_id: &str,
     archived_at_ms: u64,
 ) -> Result<ConflictArtifactArchiveRow, ConflictArtifactError> {
+    archive_conflict_artifact_with_hooks(
+        db,
+        store,
+        namespace_id,
+        conflict_id,
+        archived_at_ms,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn archive_conflict_artifact_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+    archived_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<ConflictArtifactArchiveRow, ConflictArtifactError> {
     let Some(_artifact_row) =
         load_or_discover_conflict_artifact(db, store, namespace_id, conflict_id)?
     else {
@@ -482,6 +531,7 @@ pub fn archive_conflict_artifact<S: ObjectStore>(
             source,
         })?;
     write_archive_bytes_if_absent(store, &object_key, &bytes)?;
+    hooks.checkpoint("conflict.archive.after_store_write");
 
     let row = load_conflict_artifact_archive_row_from_store(store, namespace_id, &object_key)?
         .ok_or_else(|| ConflictArtifactError::ArtifactNotFound {
@@ -492,6 +542,7 @@ pub fn archive_conflict_artifact<S: ObjectStore>(
         tx.upsert_conflict_artifact_archive(&row)?;
         Ok(())
     })?;
+    hooks.checkpoint("conflict.archive.after_cache");
     Ok(row)
 }
 
@@ -500,6 +551,22 @@ pub fn unarchive_conflict_artifact<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     conflict_id: &str,
+) -> Result<(), ConflictArtifactError> {
+    unarchive_conflict_artifact_with_hooks(
+        db,
+        store,
+        namespace_id,
+        conflict_id,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn unarchive_conflict_artifact_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<(), ConflictArtifactError> {
     let Some(_artifact_row) =
         load_or_discover_conflict_artifact(db, store, namespace_id, conflict_id)?
@@ -517,10 +584,12 @@ pub fn unarchive_conflict_artifact<S: ObjectStore>(
             object_key: object_key.clone(),
             source,
         })?;
+    hooks.checkpoint("conflict.unarchive.after_store_delete");
     db.planner_transaction("uncache_conflict_artifact_archive", |tx| {
         tx.delete_conflict_artifact_archive(namespace_id, conflict_id)?;
         Ok(())
     })?;
+    hooks.checkpoint("conflict.unarchive.after_cache");
     Ok(())
 }
 
@@ -531,6 +600,24 @@ pub fn restore_conflict_artifact_to_path<S: ObjectStore>(
     conflict_id: &str,
     destination_path: &Path,
 ) -> Result<RestoredConflictArtifact, ConflictArtifactError> {
+    restore_conflict_artifact_to_path_with_hooks(
+        db,
+        store,
+        namespace_id,
+        conflict_id,
+        destination_path,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn restore_conflict_artifact_to_path_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+    destination_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<RestoredConflictArtifact, ConflictArtifactError> {
     let Some(row) = load_or_discover_conflict_artifact(db, store, namespace_id, conflict_id)?
     else {
         return Err(ConflictArtifactError::ArtifactNotFound {
@@ -540,15 +627,20 @@ pub fn restore_conflict_artifact_to_path<S: ObjectStore>(
     };
 
     match row.artifact_kind {
-        ConflictArtifactKind::File => {
-            restore_file_conflict_artifact_row_to_path(store, namespace_id, &row, destination_path)
-                .map(RestoredConflictArtifact::File)
-        }
-        ConflictArtifactKind::Subtree => restore_subtree_conflict_artifact_row_to_path(
+        ConflictArtifactKind::File => restore_file_conflict_artifact_row_to_path_with_hooks(
             store,
             namespace_id,
             &row,
             destination_path,
+            hooks,
+        )
+        .map(RestoredConflictArtifact::File),
+        ConflictArtifactKind::Subtree => restore_subtree_conflict_artifact_row_to_path_with_hooks(
+            store,
+            namespace_id,
+            &row,
+            destination_path,
+            hooks,
         )
         .map(RestoredConflictArtifact::Subtree),
     }
@@ -561,6 +653,24 @@ pub fn restore_file_conflict_artifact_to_path<S: ObjectStore>(
     conflict_id: &str,
     destination_path: &Path,
 ) -> Result<RestoredFileConflictArtifact, ConflictArtifactError> {
+    restore_file_conflict_artifact_to_path_with_hooks(
+        db,
+        store,
+        namespace_id,
+        conflict_id,
+        destination_path,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn restore_file_conflict_artifact_to_path_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+    destination_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<RestoredFileConflictArtifact, ConflictArtifactError> {
     let Some(row) = load_or_discover_conflict_artifact(db, store, namespace_id, conflict_id)?
     else {
         return Err(ConflictArtifactError::ArtifactNotFound {
@@ -568,7 +678,13 @@ pub fn restore_file_conflict_artifact_to_path<S: ObjectStore>(
             object_key: conflict_artifact(namespace_id.as_str(), conflict_id),
         });
     };
-    restore_file_conflict_artifact_row_to_path(store, namespace_id, &row, destination_path)
+    restore_file_conflict_artifact_row_to_path_with_hooks(
+        store,
+        namespace_id,
+        &row,
+        destination_path,
+        hooks,
+    )
 }
 
 pub fn restore_subtree_conflict_artifact_to_path<S: ObjectStore>(
@@ -578,6 +694,24 @@ pub fn restore_subtree_conflict_artifact_to_path<S: ObjectStore>(
     conflict_id: &str,
     destination_root: &Path,
 ) -> Result<RestoredSubtreeConflictArtifact, ConflictArtifactError> {
+    restore_subtree_conflict_artifact_to_path_with_hooks(
+        db,
+        store,
+        namespace_id,
+        conflict_id,
+        destination_root,
+        &NoopClientExecutionHooks,
+    )
+}
+
+pub(crate) fn restore_subtree_conflict_artifact_to_path_with_hooks<S: ObjectStore>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    namespace_id: &NamespaceId,
+    conflict_id: &str,
+    destination_root: &Path,
+    hooks: &dyn ClientExecutionHooks,
+) -> Result<RestoredSubtreeConflictArtifact, ConflictArtifactError> {
     let Some(row) = load_or_discover_conflict_artifact(db, store, namespace_id, conflict_id)?
     else {
         return Err(ConflictArtifactError::ArtifactNotFound {
@@ -585,7 +719,13 @@ pub fn restore_subtree_conflict_artifact_to_path<S: ObjectStore>(
             object_key: conflict_artifact(namespace_id.as_str(), conflict_id),
         });
     };
-    restore_subtree_conflict_artifact_row_to_path(store, namespace_id, &row, destination_root)
+    restore_subtree_conflict_artifact_row_to_path_with_hooks(
+        store,
+        namespace_id,
+        &row,
+        destination_root,
+        hooks,
+    )
 }
 
 fn write_artifact_bytes_if_absent<S: ObjectStore>(
@@ -921,11 +1061,12 @@ fn validate_conflict_artifact_archive(
     Ok(())
 }
 
-fn restore_file_conflict_artifact_row_to_path<S: ObjectStore>(
+fn restore_file_conflict_artifact_row_to_path_with_hooks<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     row: &ConflictArtifactRow,
     destination_path: &Path,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<RestoredFileConflictArtifact, ConflictArtifactError> {
     let actual = row.artifact_kind.as_str();
     let Some(envelope) = row.file_envelope() else {
@@ -951,7 +1092,8 @@ fn restore_file_conflict_artifact_row_to_path<S: ObjectStore>(
             });
         }
     }
-    apply_bytes_atomically(destination_path, &downloaded.bytes)?;
+    apply_bytes_atomically_with_hooks(destination_path, &downloaded.bytes, hooks)?;
+    hooks.checkpoint("conflict.restore_file.after_local_apply");
 
     Ok(RestoredFileConflictArtifact {
         namespace_id: namespace_id.clone(),
@@ -962,11 +1104,12 @@ fn restore_file_conflict_artifact_row_to_path<S: ObjectStore>(
     })
 }
 
-fn restore_subtree_conflict_artifact_row_to_path<S: ObjectStore>(
+fn restore_subtree_conflict_artifact_row_to_path_with_hooks<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     row: &ConflictArtifactRow,
     destination_root: &Path,
+    hooks: &dyn ClientExecutionHooks,
 ) -> Result<RestoredSubtreeConflictArtifact, ConflictArtifactError> {
     let actual = row.artifact_kind.as_str();
     let Some(envelope) = row.subtree_envelope() else {
@@ -982,7 +1125,7 @@ fn restore_subtree_conflict_artifact_row_to_path<S: ObjectStore>(
     cleanup_restore_stage_path(&stage_root)?;
 
     let restore_result = (|| {
-        create_directory_durably(&stage_root)?;
+        create_directory_durably_with_hooks(&stage_root, hooks)?;
         for entry in &envelope.entries {
             let entry_path = stage_root.join(&entry.relative_path);
             let parent_dir =
@@ -1006,7 +1149,7 @@ fn restore_subtree_conflict_artifact_row_to_path<S: ObjectStore>(
             }
 
             match &entry.inode_kind {
-                InodeKind::Dir => create_directory_durably(&entry_path)?,
+                InodeKind::Dir => create_directory_durably_with_hooks(&entry_path, hooks)?,
                 InodeKind::File => {
                     let manifest_digest =
                         entry.content_manifest_digest.as_deref().ok_or_else(|| {
@@ -1031,7 +1174,7 @@ fn restore_subtree_conflict_artifact_row_to_path<S: ObjectStore>(
                             });
                         }
                     }
-                    apply_bytes_atomically(&entry_path, &downloaded.bytes)?;
+                    apply_bytes_atomically_with_hooks(&entry_path, &downloaded.bytes, hooks)?;
                 }
                 kind => {
                     return Err(ConflictArtifactError::InvalidArtifact {
@@ -1046,7 +1189,9 @@ fn restore_subtree_conflict_artifact_row_to_path<S: ObjectStore>(
             }
         }
 
-        rename_path_durably(&stage_root, destination_root)?;
+        hooks.checkpoint("conflict.restore_subtree.after_stage_ready");
+        rename_path_durably_with_hooks(&stage_root, destination_root, hooks)?;
+        hooks.checkpoint("conflict.restore_subtree.after_local_apply");
         Ok(())
     })();
 

@@ -566,6 +566,39 @@ Required rules:
 - `create_conflict_copy` remains only for busy descendants, target-parent-unusable subtree rename,
   and still-unsupported future hierarchy classes after the stable-path taxonomy cleanup
 
+## Milestone 12: client crash/restart hardening
+
+Lock one client rule:
+
+- every multi-step client path names durable boundary checkpoints
+- retry accepts already-applied filesystem or object-store winner postconditions when they already
+  match the intended final state
+
+Current hardening coverage includes:
+
+- dispatch response crash windows before SQLite apply
+- authoritative rename retry accepting an already-moved local winner
+- conflict artifact write crash windows before cache update
+- archive sidecar create crash windows before cache update
+- subtree restore staging crash windows with absent-or-complete retry behavior
+
+## Milestone 13: provider conformance hardening
+
+Expand the active provider contract and the conformance proof surface to cover:
+
+- overwrite visibility and head freshness
+- delete idempotence
+- compare-and-swap rejection on missing objects
+- sorted listing
+- traversal rejection across all trait methods
+- scoped key-prefix isolation
+
+Project policy after this milestone:
+
+- local FS conformance remains in-repo
+- AWS S3 and Cloudflare R2 real-provider conformance is a required external CI gate
+- no provider workflow YAML is committed in-repo; the contract lives in docs and tests
+
 ## Historical slice order
 
 Milestones 1 through 7 were executed through the following ordered slices.

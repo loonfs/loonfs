@@ -1,10 +1,10 @@
-use super::dispatch::dispatch_client_mutation_from_state;
 use super::*;
 use crate::planner::{PlannedLocalOnlyActionRecord, PlannerDecision};
 use crate::state_db::{
     ClientFileId, LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, SqliteStateDb, StateDbError,
     TransferDirection, TransferState,
 };
+use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use crate::upload::{
     finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
 };
@@ -35,20 +35,50 @@ pub fn execute_local_only_create<S: ObjectStore, F>(
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
+    execute_local_only_create_with_hooks(
+        db,
+        store,
+        client_file_id,
+        source_path,
+        uploaded_at_ms,
+        created_at_ms,
+        &NoopClientExecutionHooks,
+        dispatch,
+    )
+}
+
+pub(crate) fn execute_local_only_create_with_hooks<S: ObjectStore, F>(
+    db: &mut SqliteStateDb,
+    store: &S,
+    client_file_id: &ClientFileId,
+    source_path: Option<&Path>,
+    uploaded_at_ms: u64,
+    created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+    dispatch: F,
+) -> Result<ExecutedLocalOnlyCreate, ExecuteLocalOnlyCreateError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
     if let Some(pending) = db.load_pending_client_mutation_for_client_file(client_file_id)? {
         return match pending.request.op {
-            ClientMutationOp::CreateDir { .. } => {
-                execute_create_remote_dir(db, client_file_id, created_at_ms, dispatch)
-                    .map(ExecutedLocalOnlyCreate::CreateRemoteDir)
-                    .map_err(ExecuteLocalOnlyCreateError::from)
-            }
-            ClientMutationOp::CreateFile { .. } => execute_upload_local_create(
+            ClientMutationOp::CreateDir { .. } => execute_create_remote_dir_with_hooks(
+                db,
+                client_file_id,
+                created_at_ms,
+                hooks,
+                dispatch,
+            )
+            .map(ExecutedLocalOnlyCreate::CreateRemoteDir)
+            .map_err(ExecuteLocalOnlyCreateError::from),
+            ClientMutationOp::CreateFile { .. } => execute_upload_local_create_with_hooks(
                 db,
                 store,
                 client_file_id,
                 source_path,
                 uploaded_at_ms,
                 created_at_ms,
+                hooks,
                 dispatch,
             )
             .map(ExecutedLocalOnlyCreate::UploadLocalCreate)
@@ -67,19 +97,20 @@ where
     let planned = PlannedLocalOnlyActionRecord::try_from(planned_row)?;
 
     match planned.decision {
-        PlannerDecision::UploadLocalCreate => execute_upload_local_create(
+        PlannerDecision::UploadLocalCreate => execute_upload_local_create_with_hooks(
             db,
             store,
             client_file_id,
             source_path,
             uploaded_at_ms,
             created_at_ms,
+            hooks,
             dispatch,
         )
         .map(ExecutedLocalOnlyCreate::UploadLocalCreate)
         .map_err(ExecuteLocalOnlyCreateError::from),
         PlannerDecision::CreateRemoteDir => {
-            execute_create_remote_dir(db, client_file_id, created_at_ms, dispatch)
+            execute_create_remote_dir_with_hooks(db, client_file_id, created_at_ms, hooks, dispatch)
                 .map(ExecutedLocalOnlyCreate::CreateRemoteDir)
                 .map_err(ExecuteLocalOnlyCreateError::from)
         }
@@ -98,6 +129,25 @@ pub fn execute_create_remote_dir<F>(
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
+    execute_create_remote_dir_with_hooks(
+        db,
+        client_file_id,
+        created_at_ms,
+        &NoopClientExecutionHooks,
+        dispatch,
+    )
+}
+
+pub(crate) fn execute_create_remote_dir_with_hooks<F>(
+    db: &mut SqliteStateDb,
+    client_file_id: &ClientFileId,
+    created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
+    dispatch: F,
+) -> Result<ExecutedCreateRemoteDir, ExecuteCreateRemoteDirError>
+where
+    F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
+{
     let reused_pending_request = db
         .load_pending_client_mutation_for_client_file(client_file_id)?
         .is_some();
@@ -106,8 +156,13 @@ where
         ensure_create_remote_dir_ready(db, client_file_id)?;
     }
 
-    let dispatched =
-        dispatch_client_mutation_from_state(db, client_file_id, created_at_ms, dispatch)?;
+    let dispatched = super::dispatch::dispatch_client_mutation_from_state_with_hooks(
+        db,
+        client_file_id,
+        created_at_ms,
+        hooks,
+        dispatch,
+    )?;
 
     Ok(ExecutedCreateRemoteDir {
         reused_pending_request,
@@ -127,24 +182,26 @@ pub fn execute_upload_local_create_from_path<S: ObjectStore, F>(
 where
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
-    execute_upload_local_create(
+    execute_upload_local_create_with_hooks(
         db,
         store,
         client_file_id,
         Some(source_path),
         uploaded_at_ms,
         created_at_ms,
+        &NoopClientExecutionHooks,
         dispatch,
     )
 }
 
-fn execute_upload_local_create<S: ObjectStore, F>(
+fn execute_upload_local_create_with_hooks<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,
     client_file_id: &ClientFileId,
     source_path: Option<&Path>,
     uploaded_at_ms: u64,
     created_at_ms: u64,
+    hooks: &dyn ClientExecutionHooks,
     dispatch: F,
 ) -> Result<UploadLocalCreateExecution, ExecuteUploadLocalCreateError>
 where
@@ -171,6 +228,7 @@ where
                 uploaded_at_ms,
             )?
         };
+        hooks.checkpoint("client.local_only_create.upload_ready");
 
         let (ensured_upload, upload_reused) = match prepared {
             PreparedUploadLocalCreate::Ready {
@@ -184,8 +242,13 @@ where
             }
         };
 
-        let dispatched =
-            dispatch_client_mutation_from_state(db, client_file_id, created_at_ms, dispatch)?;
+        let dispatched = super::dispatch::dispatch_client_mutation_from_state_with_hooks(
+            db,
+            client_file_id,
+            created_at_ms,
+            hooks,
+            dispatch,
+        )?;
 
         Ok(UploadLocalCreateExecution::Completed(
             ExecutedUploadLocalCreate {

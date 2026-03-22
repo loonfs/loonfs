@@ -324,3 +324,77 @@ fn map_create_error(err: std::io::Error) -> ObjectStoreError {
 fn io_error(err: std::io::Error) -> ObjectStoreError {
     ObjectStoreError::Transport(err.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::LocalFsStore;
+    use crate::{ObjectStore, PutMode};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn overwrite_refreshes_head_and_visible_bytes() {
+        let temp_dir = TestDir::new("overwrite");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        let key = "namespaces/ns-1/head.json";
+
+        let first = store
+            .put(key, br#"{"seq":1}"#, PutMode::Overwrite)
+            .expect("seed first object");
+        let second = store
+            .put(key, br#"{"seq":2}"#, PutMode::Overwrite)
+            .expect("overwrite object");
+
+        assert_eq!(
+            store.get(key, None).expect("get object"),
+            Some(br#"{"seq":2}"#.to_vec())
+        );
+        assert_eq!(store.head(key).expect("head object"), Some(second.clone()));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn delete_is_idempotent_and_head_reflects_removal() {
+        let temp_dir = TestDir::new("delete");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        let key = "namespaces/ns-1/lease.json";
+
+        store
+            .put_if_absent(key, br#"{"holder":"writer-a"}"#)
+            .expect("seed lease object");
+        assert!(store.head(key).expect("head before delete").is_some());
+        store.delete(key).expect("delete existing object");
+        store.delete(key).expect("delete missing object");
+        assert_eq!(store.head(key).expect("head after delete"), None);
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "loondb-local-fs-{label}-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}

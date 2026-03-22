@@ -58,6 +58,20 @@ namespace publish logic assumes the head object becomes authoritative as soon as
 Failure mode prevented:
 clients reading stale state after a successful publish.
 
+### Additional active v1 behaviors
+
+Higher layers now also depend on these trait-level behaviors:
+
+- overwrite publishes the new bytes immediately
+- `head` reflects the latest visible version after overwrite and returns `None` after delete
+- deleting a missing key is idempotent
+- compare-and-swap on a missing object fails as `PreconditionFailed`
+- stale compare tokens stay rejected after overwrite
+- `list_prefix` is returned sorted at the trait boundary
+- invalid keys and traversal attempts are rejected consistently across `head`, `get`, `put`,
+  `delete`, and `list_prefix`
+- scoped providers must never leak keys outside their configured prefix
+
 ## What we deliberately avoid
 
 - multi-object transactions
@@ -86,11 +100,13 @@ Why this rule exists:
 
 - test credentials and production configuration should not silently couple together
 - provider validation should stay explicit and reviewable
+- real-provider conformance should be a required delivery gate for object-store contract changes
 
 Failure modes prevented:
 
 - passing tests accidentally using a developer's ambient cloud credentials
 - provider adapters gaining hidden runtime configuration paths that are hard to audit
+- merging object-store contract changes that were only proven against local FS
 
 ## Provider-profile rule
 

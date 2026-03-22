@@ -45,7 +45,17 @@ it catches logic drift.
 
 ### 4. Deterministic simulator
 
-`crates/loon-sim/` will eventually run server and client logic under a single deterministic scheduler with injected faults.
+`crates/loon-sim/` owns the shared deterministic fault vocabulary.
+
+Today it provides the once-only client fault plan used by `loon-client` and `loon-testkit`:
+
+- `crash_after_step_once`
+- `store_error_once`
+- `dispatch_error_once`
+- `local_apply_error_once`
+
+A full scheduler can come later; the current hardening rule is that once-only injected faults must
+still produce a deterministic rendered trace and a retryable postcondition.
 
 Why it exists:
 concurrency bugs are hard to find with normal tests and hard to debug without determinism.
@@ -56,6 +66,22 @@ Slower tests against real providers and platform layers.
 
 Why they exist:
 mocks can drift from reality.
+
+## Client crash/restart rule
+
+Every multi-step client path must name its durable boundary checkpoints.
+
+Retry is required to accept already-applied winner postconditions when the filesystem or object
+store is already in the intended final state, even if SQLite did not advance before the crash.
+
+Current required client crash families include:
+
+- dispatch response received before SQLite apply
+- local rename/delete/materialize/download finalize before SQLite apply
+- conflict artifact and archive sidecar written before cache update
+- subtree restore staged before final rename
+
+Restore must satisfy an explicit absent-or-complete rule for the caller-provided destination.
 
 ## Required output for failing randomized tests
 
@@ -85,6 +111,10 @@ The current executable-invariant rollout is:
 - slice 5a: client transfer invariants for file download/upload flows
 - slice 5b: client reconciliation invariants for late authoritative observation, remote-only
   discovery, and remote-only directory materialization
+
+Provider conformance cases now live under `tests/conformance/objectstore/`, and the real-provider
+AWS S3 plus Cloudflare R2 runs are required as an external CI gate documented in
+`docs/runbooks/provider-conformance.md`.
 
 ## Rule for PM-friendly tests
 
