@@ -75,6 +75,7 @@ Current scheduling rule:
 
 - queue broker/worker/repair interleavings
 - client/server request-response-observation interleavings
+- background writer/checkpoint/progress/repair interleavings
 
 The hardening rule is that once-only injected faults must still produce a deterministic rendered
 trace and a retryable postcondition.
@@ -135,6 +136,9 @@ The current executable-invariant rollout is:
   discovery, and remote-only directory materialization
 - slice 6: scheduler-backed sim invariants for delayed response retry reuse, duplicate response
   idempotence, late observation ordering, and seed-stable traces
+- slice 7: scheduler-backed background sim invariants for stale writer fencing after handover,
+  checkpoint publish wait/monotonicity under interleaving, latest-visible-head snapshot repair,
+  and seed-stable background traces
 
 Provider conformance cases now live under `tests/conformance/objectstore/`, and the real-provider
 AWS S3 plus Cloudflare R2 runs are required as an external CI gate documented in

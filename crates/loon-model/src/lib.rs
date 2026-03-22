@@ -771,6 +771,7 @@ mod queue;
 
 pub use client::{
     allocate_client_request_id, bound_local_matches_remote_observation,
+    checkpoint_publish_head_summary_is_monotonic, checkpoint_publish_waits_for_required_progress,
     delivery_order_is_seed_stable, download_transfer_id, duplicate_response_delivery_is_idempotent,
     expected_download_staged_size, late_remote_observation_converges_once,
     local_apply_failed_issue, local_only_matches_remote_observation,
@@ -782,8 +783,9 @@ pub use client::{
     remote_observation_is_stale, remote_only_discovery_supported,
     remote_only_placeholder_matches_remote_observation, retry_reuses_pending_request_id,
     reuse_or_allocate_client_request_id, select_local_only_observation_bind_candidate,
-    select_next_client_action, select_next_local_only_action, upload_failed_issue,
-    upload_transfer_id, upsert_client_issue, upsert_local_only_issue,
+    select_next_client_action, select_next_local_only_action,
+    snapshot_repair_tracks_latest_visible_head_seq, stale_writer_stays_fenced_after_handover,
+    upload_failed_issue, upload_transfer_id, upsert_client_issue, upsert_local_only_issue,
 };
 pub use content::{
     build_uploaded_content, decide_inode_upload_action, decide_local_only_upload_action,

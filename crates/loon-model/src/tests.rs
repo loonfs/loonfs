@@ -631,6 +631,60 @@ fn model_delivery_order_stability_is_exact_match() {
 }
 
 #[test]
+fn model_stale_writer_remains_fenced_after_handover() {
+    assert!(stale_writer_stays_fenced_after_handover(
+        true,
+        true,
+        FenceToken(8),
+        FenceToken(9),
+    ));
+    assert!(!stale_writer_stays_fenced_after_handover(
+        false,
+        true,
+        FenceToken(8),
+        FenceToken(9),
+    ));
+}
+
+#[test]
+fn model_checkpoint_publish_wait_requires_block_then_success() {
+    assert!(checkpoint_publish_waits_for_required_progress(true, true));
+    assert!(!checkpoint_publish_waits_for_required_progress(true, false));
+}
+
+#[test]
+fn model_checkpoint_publish_head_summary_monotonicity_rejects_regression() {
+    assert!(checkpoint_publish_head_summary_is_monotonic(
+        Some(ChangeSeq(40)),
+        Some(ChangeSeq(40)),
+        Some(ChangeSeq(42)),
+        ChangeSeq(40),
+        ChangeSeq(40),
+        ChangeSeq(42),
+    ));
+    assert!(!checkpoint_publish_head_summary_is_monotonic(
+        Some(ChangeSeq(40)),
+        Some(ChangeSeq(39)),
+        Some(ChangeSeq(42)),
+        ChangeSeq(40),
+        ChangeSeq(39),
+        ChangeSeq(42),
+    ));
+}
+
+#[test]
+fn model_snapshot_repair_targets_latest_visible_head_seq() {
+    assert!(snapshot_repair_tracks_latest_visible_head_seq(
+        Some(ChangeSeq(45)),
+        ChangeSeq(45),
+    ));
+    assert!(!snapshot_repair_tracks_latest_visible_head_seq(
+        Some(ChangeSeq(44)),
+        ChangeSeq(45),
+    ));
+}
+
+#[test]
 fn model_builds_deterministic_download_transfer_id() {
     assert_eq!(
         download_transfer_id(

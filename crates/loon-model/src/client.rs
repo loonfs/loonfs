@@ -57,6 +57,45 @@ where
     first == second
 }
 
+pub fn stale_writer_stays_fenced_after_handover(
+    stale_publish_rejected: bool,
+    head_fence_matches_lease: bool,
+    stale_writer_fence_token: loon_types::FenceToken,
+    active_fence_token: loon_types::FenceToken,
+) -> bool {
+    stale_publish_rejected
+        && head_fence_matches_lease
+        && stale_writer_fence_token != active_fence_token
+}
+
+pub fn checkpoint_publish_waits_for_required_progress(
+    first_publish_blocked: bool,
+    second_publish_succeeded: bool,
+) -> bool {
+    first_publish_blocked && second_publish_succeeded
+}
+
+pub fn checkpoint_publish_head_summary_is_monotonic(
+    snapshot_hint_before: Option<ChangeSeq>,
+    snapshot_hint_after_blocked: Option<ChangeSeq>,
+    snapshot_hint_after_success: Option<ChangeSeq>,
+    retention_floor_before: ChangeSeq,
+    retention_floor_after_blocked: ChangeSeq,
+    retention_floor_after_success: ChangeSeq,
+) -> bool {
+    snapshot_hint_after_blocked >= snapshot_hint_before
+        && snapshot_hint_after_success >= snapshot_hint_after_blocked
+        && retention_floor_after_blocked >= retention_floor_before
+        && retention_floor_after_success >= retention_floor_after_blocked
+}
+
+pub fn snapshot_repair_tracks_latest_visible_head_seq(
+    repaired_through_seq: Option<ChangeSeq>,
+    latest_visible_head_seq: ChangeSeq,
+) -> bool {
+    repaired_through_seq == Some(latest_visible_head_seq)
+}
+
 pub fn download_transfer_id(
     namespace_id: &NamespaceId,
     inode_id: InodeId,

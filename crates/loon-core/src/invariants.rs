@@ -198,6 +198,11 @@ pub const SIM_INTERLEAVING_INVARIANTS: &[&str] = &[
     "duplicate_response_is_idempotent",
     "late_remote_observation_does_not_duplicate_winner_apply",
     "sim_trace_order_is_seed_stable",
+    "stale_writer_publish_remains_fenced_after_handover",
+    "checkpoint_publish_waits_for_required_progress_under_interleaving",
+    "checkpoint_publish_preserves_monotonic_head_summary_under_interleaving",
+    "repair_lost_enqueue_tracks_latest_visible_head_seq",
+    "background_sim_trace_order_is_seed_stable",
 ];
 
 pub const INVARIANTS: &[&str] = &[
@@ -344,6 +349,11 @@ pub const INVARIANTS: &[&str] = &[
     "duplicate_response_is_idempotent",
     "late_remote_observation_does_not_duplicate_winner_apply",
     "sim_trace_order_is_seed_stable",
+    "stale_writer_publish_remains_fenced_after_handover",
+    "checkpoint_publish_waits_for_required_progress_under_interleaving",
+    "checkpoint_publish_preserves_monotonic_head_summary_under_interleaving",
+    "repair_lost_enqueue_tracks_latest_visible_head_seq",
+    "background_sim_trace_order_is_seed_stable",
     "subtree_tombstone_blocks_descendant_mutation",
     "restore_creates_new_revision_head",
 ];

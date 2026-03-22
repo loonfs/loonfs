@@ -14,8 +14,8 @@ use loon_types::{
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
     decode_wal_commit_envelope_zstd, sha256_digest, ChangeSeq, CheckpointManifestEnvelope,
     CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointTableFamily,
-    ContentManifestEnvelope, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
-    WalCommitEnvelope, WalOp,
+    ContentManifestEnvelope, FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceId,
+    RevisionNo, WalCommitEnvelope, WalOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -401,6 +401,38 @@ pub struct LateRemoteObservationInvariantInputs {
 
 #[derive(Debug, Clone, Copy)]
 pub struct SimTraceDeterminismInvariantInputs<'a> {
+    pub first_rendered_trace: &'a str,
+    pub second_rendered_trace: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BackgroundStaleWriterInvariantInputs {
+    pub stale_publish_rejected: bool,
+    pub head_fence_matches_lease: bool,
+    pub stale_writer_fence_token: FenceToken,
+    pub active_fence_token: FenceToken,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BackgroundCheckpointPublishInvariantInputs {
+    pub first_publish_blocked: bool,
+    pub second_publish_succeeded: bool,
+    pub snapshot_hint_before: Option<ChangeSeq>,
+    pub snapshot_hint_after_blocked: Option<ChangeSeq>,
+    pub snapshot_hint_after_success: Option<ChangeSeq>,
+    pub retention_floor_before: ChangeSeq,
+    pub retention_floor_after_blocked: ChangeSeq,
+    pub retention_floor_after_success: ChangeSeq,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BackgroundRepairInvariantInputs {
+    pub repaired_through_seq: Option<ChangeSeq>,
+    pub latest_visible_head_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BackgroundSimTraceDeterminismInvariantInputs<'a> {
     pub first_rendered_trace: &'a str,
     pub second_rendered_trace: &'a str,
 }
@@ -2822,6 +2854,108 @@ pub fn evaluate_sim_trace_determinism_invariants(
     }
 }
 
+pub fn evaluate_background_stale_writer_invariants(
+    inputs: BackgroundStaleWriterInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "stale_writer_publish_remains_fenced_after_handover".to_owned(),
+            passed: loon_model::stale_writer_stays_fenced_after_handover(
+                inputs.stale_publish_rejected,
+                inputs.head_fence_matches_lease,
+                inputs.stale_writer_fence_token,
+                inputs.active_fence_token,
+            ),
+            detail: format!(
+                "stale_publish_rejected={} head_fence_matches_lease={} stale_writer_fence_token={} active_fence_token={}",
+                inputs.stale_publish_rejected,
+                inputs.head_fence_matches_lease,
+                inputs.stale_writer_fence_token.0,
+                inputs.active_fence_token.0
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_background_checkpoint_publish_invariants(
+    inputs: BackgroundCheckpointPublishInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![
+            InvariantCheck {
+                name: "checkpoint_publish_waits_for_required_progress_under_interleaving"
+                    .to_owned(),
+                passed: loon_model::checkpoint_publish_waits_for_required_progress(
+                    inputs.first_publish_blocked,
+                    inputs.second_publish_succeeded,
+                ),
+                detail: format!(
+                    "first_publish_blocked={} second_publish_succeeded={}",
+                    inputs.first_publish_blocked, inputs.second_publish_succeeded
+                ),
+            },
+            InvariantCheck {
+                name: "checkpoint_publish_preserves_monotonic_head_summary_under_interleaving"
+                    .to_owned(),
+                passed: loon_model::checkpoint_publish_head_summary_is_monotonic(
+                    inputs.snapshot_hint_before,
+                    inputs.snapshot_hint_after_blocked,
+                    inputs.snapshot_hint_after_success,
+                    inputs.retention_floor_before,
+                    inputs.retention_floor_after_blocked,
+                    inputs.retention_floor_after_success,
+                ),
+                detail: format!(
+                    "snapshot_hint_before={:?} snapshot_hint_after_blocked={:?} snapshot_hint_after_success={:?} retention_floor_before={} retention_floor_after_blocked={} retention_floor_after_success={}",
+                    inputs.snapshot_hint_before,
+                    inputs.snapshot_hint_after_blocked,
+                    inputs.snapshot_hint_after_success,
+                    inputs.retention_floor_before.0,
+                    inputs.retention_floor_after_blocked.0,
+                    inputs.retention_floor_after_success.0
+                ),
+            },
+        ],
+    }
+}
+
+pub fn evaluate_background_repair_invariants(
+    inputs: BackgroundRepairInvariantInputs,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "repair_lost_enqueue_tracks_latest_visible_head_seq".to_owned(),
+            passed: loon_model::snapshot_repair_tracks_latest_visible_head_seq(
+                inputs.repaired_through_seq,
+                inputs.latest_visible_head_seq,
+            ),
+            detail: format!(
+                "repaired_through_seq={:?} latest_visible_head_seq={}",
+                inputs.repaired_through_seq, inputs.latest_visible_head_seq.0
+            ),
+        }],
+    }
+}
+
+pub fn evaluate_background_sim_trace_determinism_invariants(
+    inputs: BackgroundSimTraceDeterminismInvariantInputs<'_>,
+) -> SimInvariantReport {
+    SimInvariantReport {
+        checks: vec![InvariantCheck {
+            name: "background_sim_trace_order_is_seed_stable".to_owned(),
+            passed: loon_model::delivery_order_is_seed_stable(
+                &[inputs.first_rendered_trace],
+                &[inputs.second_rendered_trace],
+            ),
+            detail: format!(
+                "first_trace_len={} second_trace_len={}",
+                inputs.first_rendered_trace.len(),
+                inputs.second_rendered_trace.len()
+            ),
+        }],
+    }
+}
+
 pub fn evaluate_queue_shard_object_invariants(
     inputs: QueueShardObjectInvariantInputs<'_>,
 ) -> BackgroundWorkInvariantReport {
@@ -4370,8 +4504,11 @@ mod tests {
     use super::{
         evaluate_apply_remote_delete_invariants, evaluate_apply_remote_subtree_delete_invariants,
         evaluate_apply_remote_subtree_rename_invariants,
-        evaluate_checkpoint_head_publish_invariants, evaluate_checkpoint_object_invariants,
-        evaluate_client_retry_reuse_invariants, evaluate_conflict_artifact_archive_invariants,
+        evaluate_background_checkpoint_publish_invariants, evaluate_background_repair_invariants,
+        evaluate_background_sim_trace_determinism_invariants,
+        evaluate_background_stale_writer_invariants, evaluate_checkpoint_head_publish_invariants,
+        evaluate_checkpoint_object_invariants, evaluate_client_retry_reuse_invariants,
+        evaluate_conflict_artifact_archive_invariants,
         evaluate_conflict_artifact_discovery_invariants, evaluate_content_object_invariants,
         evaluate_download_transfer_invariants, evaluate_duplicate_response_invariants,
         evaluate_file_conflict_artifact_restore_invariants,
@@ -4391,6 +4528,8 @@ mod tests {
         evaluate_sim_trace_determinism_invariants,
         evaluate_subtree_conflict_artifact_restore_invariants, ApplyRemoteDeleteInvariantInputs,
         ApplyRemoteSubtreeDeleteInvariantInputs, ApplyRemoteSubtreeRenameInvariantInputs,
+        BackgroundCheckpointPublishInvariantInputs, BackgroundRepairInvariantInputs,
+        BackgroundSimTraceDeterminismInvariantInputs, BackgroundStaleWriterInvariantInputs,
         CheckpointHeadPublishInvariantInputs, CheckpointObjectInvariantInputs,
         CheckpointObjectInvariantSnapshot, CheckpointProgressAuthorizer,
         CheckpointReplayInvariantInputs, ClientRetryReuseInvariantInputs, CommitInvariantInputs,
@@ -6194,6 +6333,82 @@ mod tests {
         assert!(
             report
                 .check("sim_trace_order_is_seed_stable")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn background_stale_writer_invariant_requires_rejected_stale_publish() {
+        let report =
+            evaluate_background_stale_writer_invariants(BackgroundStaleWriterInvariantInputs {
+                stale_publish_rejected: true,
+                head_fence_matches_lease: true,
+                stale_writer_fence_token: FenceToken(8),
+                active_fence_token: FenceToken(9),
+            });
+
+        assert!(
+            report
+                .check("stale_writer_publish_remains_fenced_after_handover")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn background_checkpoint_publish_invariants_require_block_then_success() {
+        let report = evaluate_background_checkpoint_publish_invariants(
+            BackgroundCheckpointPublishInvariantInputs {
+                first_publish_blocked: true,
+                second_publish_succeeded: true,
+                snapshot_hint_before: Some(ChangeSeq(40)),
+                snapshot_hint_after_blocked: Some(ChangeSeq(40)),
+                snapshot_hint_after_success: Some(ChangeSeq(42)),
+                retention_floor_before: ChangeSeq(40),
+                retention_floor_after_blocked: ChangeSeq(40),
+                retention_floor_after_success: ChangeSeq(42),
+            },
+        );
+
+        for name in [
+            "checkpoint_publish_waits_for_required_progress_under_interleaving",
+            "checkpoint_publish_preserves_monotonic_head_summary_under_interleaving",
+        ] {
+            assert!(
+                report.check(name).expect("check should exist").passed,
+                "{name} should pass"
+            );
+        }
+    }
+
+    #[test]
+    fn background_repair_invariant_requires_latest_visible_head_seq() {
+        let report = evaluate_background_repair_invariants(BackgroundRepairInvariantInputs {
+            repaired_through_seq: Some(ChangeSeq(45)),
+            latest_visible_head_seq: ChangeSeq(45),
+        });
+
+        assert!(
+            report
+                .check("repair_lost_enqueue_tracks_latest_visible_head_seq")
+                .expect("check should exist")
+                .passed
+        );
+    }
+
+    #[test]
+    fn background_sim_trace_determinism_invariant_requires_exact_trace_match() {
+        let report = evaluate_background_sim_trace_determinism_invariants(
+            BackgroundSimTraceDeterminismInvariantInputs {
+                first_rendered_trace: "trace-a",
+                second_rendered_trace: "trace-a",
+            },
+        );
+
+        assert!(
+            report
+                .check("background_sim_trace_order_is_seed_stable")
                 .expect("check should exist")
                 .passed
         );
