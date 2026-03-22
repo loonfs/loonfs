@@ -36,6 +36,22 @@ impl SimRuntime {
         });
     }
 
+    pub fn record_exploration_case_started(
+        &mut self,
+        case_index: usize,
+        seed: Option<u64>,
+        fault: impl Into<String>,
+        permuted_actions: Vec<String>,
+    ) {
+        self.trace.push(SimTraceEvent::ExplorationCaseStarted {
+            case_index,
+            seed,
+            fault: fault.into(),
+            permuted_actions,
+            now_ms: self.now_ms,
+        });
+    }
+
     pub fn record_restart(&mut self, actor_id: impl Into<SimActorId>) {
         self.trace.push(SimTraceEvent::ActorRestarted {
             actor_id: actor_id.into(),
@@ -147,6 +163,12 @@ mod tests {
     fn runtime_renders_stable_trace_lines() {
         let mut runtime = SimRuntime::new();
         runtime.record_actor_step("client", "tick result=enqueued_request request_id=req-1");
+        runtime.record_exploration_case_started(
+            1,
+            Some(4242),
+            "none",
+            vec!["deliver_next_response".to_owned()],
+        );
         runtime.enqueue_delivery("client", "server", "client_request");
         runtime.record_restart("client");
         runtime.record_fault(
@@ -160,6 +182,8 @@ mod tests {
             runtime.trace_lines(),
             vec![
                 "actor_step actor=client now_ms=0 tick result=enqueued_request request_id=req-1"
+                    .to_owned(),
+                "exploration_case_started case_index=1 seed=Some(4242) now_ms=0 fault=none permuted_actions=[deliver_next_response]"
                     .to_owned(),
                 "delivery_enqueued delivery_id=1 kind=client_request sender=client recipient=server enqueued_at_ms=0 deliver_at_ms=0"
                     .to_owned(),

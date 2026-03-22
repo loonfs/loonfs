@@ -36,6 +36,9 @@ pub fn render_case(scenario: &Scenario) -> String {
     render_mapping_section(&mut rendered, "initial", &scenario.initial);
     render_sequence_section(&mut rendered, "actions", &scenario.actions);
     render_sequence_section(&mut rendered, "faults", &scenario.faults);
+    if let Some(explore) = &scenario.explore {
+        render_mapping_section(&mut rendered, "explore", explore);
+    }
     render_mapping_section(&mut rendered, "expect", &scenario.expect);
     rendered
 }

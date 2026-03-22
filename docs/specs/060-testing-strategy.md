@@ -85,6 +85,26 @@ trace and a retryable postcondition.
 Why it exists:
 concurrency bugs are hard to find with normal tests and hard to debug without determinism.
 
+### 4a. Bounded exploration
+
+Bounded exploration is testkit-first and unified-namespace-first.
+
+The first exploration surface lives in `loon-testkit`, not `xtask` and not `loon-sim`.
+
+Current rule set:
+
+- handwritten sim fixtures remain the authoritative narrow proofs
+- unified-namespace exploration reuses those fixtures by running a deterministic prefix action
+  stream, then permuting one bounded action window
+- faults are a candidate pool of zero-or-one concrete once-only client faults per candidate case,
+  not multi-fault combinations
+- candidate enumeration, first-failure selection, and rendered output must be deterministic for the
+  same scenario and seed
+- failing exploration output must include the minimized plain sim reproduction when one exists
+
+`xtask minimize-case` remains replay-only in this slice. Exploration and minimization live in
+`loon-testkit` until the bounded unified-namespace runner settles.
+
 ### 5. Native and provider conformance
 
 Slower tests against real providers and platform layers.

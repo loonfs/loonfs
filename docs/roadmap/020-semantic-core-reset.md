@@ -613,6 +613,8 @@ Deliverables:
 - unified namespace `sim` fixtures compose client/server delivery with writer handover,
   checkpoint/progress publication, and snapshot repair against one shared head/lease/object-store
   timeline
+- bounded unified-namespace exploration runs on top of the shared scheduler-backed harness by
+  permuting one explicit action window and one concrete once-only client fault at a time
 - the existing once-only client fault plan is consumable from `tests/scenarios/sim/`
 - seed-stable sim traces are checked in as readable artifacts
 
@@ -624,6 +626,10 @@ Required rules:
   `loon-testkit`
 - the narrower client/server and background scheduler harnesses stay in place as lower-level proofs
   even after unified namespace interleaving coverage exists
+- bounded exploration remains unified-namespace-first and testkit-first in this milestone; it does
+  not add a generic model checker or `xtask` exploration shell yet
+- exploration output must be deterministic for the same scenario and seed, and the first failing
+  executable case must include a minimized plain sim repro when one exists
 - stale-writer/checkpoint/progress native differentials remain as lower-level semantic proofs even
   after scheduler-backed background sim coverage exists
 - no second bespoke scheduler appears inside `loon-client` or `loon-queue`

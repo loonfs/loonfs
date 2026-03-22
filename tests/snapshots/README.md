@@ -11,5 +11,6 @@ Rendered scenario traces and summaries live here, grouped by the xtask command t
 - `conflict-archive/`
 - `conflict-unarchive/`
 - `sim-interleavings/`
+- `sim-explore/`
 
 The intention is that reviewers can diff scenario output without reading Rust code.

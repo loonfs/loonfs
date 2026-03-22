@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod explore;
 pub mod fixtures;
 pub mod invariants;
 pub mod minimize;

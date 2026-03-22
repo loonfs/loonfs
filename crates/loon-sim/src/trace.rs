@@ -58,6 +58,13 @@ impl SimDelivery {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SimTraceEvent {
+    ExplorationCaseStarted {
+        case_index: usize,
+        seed: Option<u64>,
+        fault: String,
+        permuted_actions: Vec<String>,
+        now_ms: u64,
+    },
     ActorStep {
         actor_id: SimActorId,
         step: String,
@@ -87,6 +94,22 @@ pub enum SimTraceEvent {
 impl SimTraceEvent {
     pub fn render_line(&self) -> String {
         match self {
+            Self::ExplorationCaseStarted {
+                case_index,
+                seed,
+                fault,
+                permuted_actions,
+                now_ms,
+            } => {
+                format!(
+                    "exploration_case_started case_index={} seed={:?} now_ms={} fault={} permuted_actions=[{}]",
+                    case_index,
+                    seed,
+                    now_ms,
+                    fault,
+                    permuted_actions.join(" | ")
+                )
+            }
             Self::ActorStep {
                 actor_id,
                 step,

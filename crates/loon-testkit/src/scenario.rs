@@ -60,6 +60,8 @@ pub struct Scenario {
     #[serde(default)]
     pub faults: Vec<BTreeMap<String, serde_yaml::Value>>,
     #[serde(default)]
+    pub explore: Option<BTreeMap<String, serde_yaml::Value>>,
+    #[serde(default)]
     pub expect: BTreeMap<String, serde_yaml::Value>,
 }
 
@@ -98,6 +100,13 @@ impl Scenario {
         T: DeserializeOwned,
     {
         decode_fragment(&self.expect)
+    }
+
+    pub fn decode_explore<T>(&self) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        self.explore.as_ref().map(decode_fragment).transpose()
     }
 
     pub fn decode_fault_plan(&self) -> Result<FaultPlan> {

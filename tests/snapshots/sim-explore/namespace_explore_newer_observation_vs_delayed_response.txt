@@ -1,0 +1,8 @@
+scenario=namespace_explore_newer_observation_vs_delayed_response seed=Some(3401) total_candidate_cases=6 selected_candidate_cases=6 executed_cases=3 skipped_cases=3
+  case=1 status=not_executable reason=deliver_next_response requires a prior newer observation in this exploration window fault=none permuted_actions=[{"deliver_next_response":true} | {"client_tick":{"created_at_ms":1700000208000}} | {"deliver_remote_observation":{"applied_at_ms":1700000207100}}]
+  case=2 status=passed fault=none permuted_actions=[{"deliver_remote_observation":{"applied_at_ms":1700000207100}} | {"client_tick":{"created_at_ms":1700000208000}} | {"deliver_next_response":true}]
+  case=3 status=passed fault=none permuted_actions=[{"deliver_remote_observation":{"applied_at_ms":1700000207100}} | {"deliver_next_response":true} | {"client_tick":{"created_at_ms":1700000208000}}]
+  case=4 status=not_executable reason=deliver_next_response requires a prior newer observation in this exploration window fault=none permuted_actions=[{"client_tick":{"created_at_ms":1700000208000}} | {"deliver_next_response":true} | {"deliver_remote_observation":{"applied_at_ms":1700000207100}}]
+  case=5 status=not_executable reason=deliver_next_response requires a prior newer observation in this exploration window fault=none permuted_actions=[{"deliver_next_response":true} | {"deliver_remote_observation":{"applied_at_ms":1700000207100}} | {"client_tick":{"created_at_ms":1700000208000}}]
+  case=6 status=passed fault=none permuted_actions=[{"client_tick":{"created_at_ms":1700000208000}} | {"deliver_remote_observation":{"applied_at_ms":1700000207100}} | {"deliver_next_response":true}]
+first_failure_case=<none>
