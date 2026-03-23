@@ -8,4 +8,6 @@ The current active operator frontend is `xtask ops ...`, and the shared command/
 contract now lives in `crates/loon-ops`.
 
 When `loon-cli` is activated, it should reuse that `loon-ops` layer with the same subcommand
-grammar and output semantics instead of re-implementing config loading or shell logic.
+grammar and output semantics instead of re-implementing config loading or shell logic. That
+includes `import-remote-observations`, which should move over unchanged rather than being
+re-specified in `loon-cli`.

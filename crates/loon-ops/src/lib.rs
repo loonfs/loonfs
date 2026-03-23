@@ -98,6 +98,10 @@ pub enum OpsCommand {
         config_path: PathBuf,
         namespace_id: NamespaceId,
     },
+    ImportRemoteObservations {
+        config_path: PathBuf,
+        namespace_id: NamespaceId,
+    },
     Smoke {
         config_path: PathBuf,
         namespace_id: NamespaceId,
@@ -153,6 +157,21 @@ pub fn run_command(command: OpsCommand) -> Result<String> {
             let db = SqliteStateDb::open(&config.client.state_db_path)?;
             let summary = db.load_namespace_state_summary(&namespace_id)?;
             render_client_state(&summary)
+        }
+        OpsCommand::ImportRemoteObservations {
+            config_path,
+            namespace_id,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let store = config.open_store()?;
+            let mut db = SqliteStateDb::open(&config.client.state_db_path)?;
+            let report = import_authoritative_remote_observations(
+                &mut db,
+                &store,
+                &namespace_id,
+                config.now_ms(),
+            )?;
+            render_authoritative_import_report(&report)
         }
         OpsCommand::Smoke {
             config_path,
@@ -268,6 +287,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<OpsCommand> {
                 namespace_id: parsed.namespace_id,
             })
         }
+        Some("import-remote-observations") => {
+            let parsed = parse_common_args(args, false)?;
+            Ok(OpsCommand::ImportRemoteObservations {
+                config_path: parsed.config_path,
+                namespace_id: parsed.namespace_id,
+            })
+        }
         Some("smoke") => {
             let parsed = parse_common_args(args, false)?;
             Ok(OpsCommand::Smoke {
@@ -277,7 +303,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<OpsCommand> {
         }
         Some(other) => bail!("unknown ops subcommand: {other}"),
         None => bail!(
-            "usage: ops <bootstrap-namespace|show-namespace-state|show-client-state|smoke> --config <path> --namespace <id> [--allow-existing]"
+            "usage: ops <bootstrap-namespace|show-namespace-state|show-client-state|import-remote-observations|smoke> --config <path> --namespace <id> [--allow-existing]"
         ),
     }
 }
@@ -296,6 +322,19 @@ fn render_client_state(summary: &ClientNamespaceStateSummary) -> Result<String> 
     Ok(format!(
         "command=ops/show-client-state\nnamespace={}\n---\n{}",
         summary.namespace_id.as_str(),
+        yaml
+    ))
+}
+
+fn render_authoritative_import_report(
+    report: &AuthoritativeObservationImportReport,
+) -> Result<String> {
+    let yaml = serde_yaml::to_string(report).context("render authoritative import yaml")?;
+    Ok(format!(
+        "command=ops/import-remote-observations\nnamespace={}\nauthoritative_head_seq={}\ntranslated_observation_count={}\n---\n{}",
+        report.namespace_id.as_str(),
+        report.authoritative_head_seq.0,
+        report.translated_observation_count,
         yaml
     ))
 }
@@ -513,6 +552,38 @@ lease_duration_ms = 60000
         assert_eq!(
             smoke,
             include_str!("../../../tests/snapshots/ops-smoke/ops_smoke.txt")
+        );
+    }
+
+    #[test]
+    fn import_remote_observations_local_fs() {
+        let temp_dir = unique_temp_dir("ops-import-local-fs");
+        let config_path = write_local_fs_config(&temp_dir);
+        let namespace_id = "demo";
+
+        run_args([
+            "bootstrap-namespace".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            namespace_id.to_owned(),
+        ])
+        .expect("bootstrap namespace before import");
+
+        let rendered = run_args([
+            "import-remote-observations".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            namespace_id.to_owned(),
+        ])
+        .expect("run import-remote-observations");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-import-remote-observations/ops_import_remote_observations.txt"
+            )
         );
     }
 

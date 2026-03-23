@@ -69,6 +69,7 @@ Current local operability shell:
   - `xtask ops bootstrap-namespace --config <path> --namespace <id> [--allow-existing]`
   - `xtask ops show-namespace-state --config <path> --namespace <id>`
   - `xtask ops show-client-state --config <path> --namespace <id>`
+  - `xtask ops import-remote-observations --config <path> --namespace <id>`
   - `xtask ops smoke --config <path> --namespace <id>`
 
 Constraints for that shell:
@@ -76,9 +77,11 @@ Constraints for that shell:
 - `xtask` stays a thin wrapper; config loading and command execution belong in `loon-ops`
 - namespace bootstrap and authoritative-state inspection belong in supported library code,
   primarily `loon-server::ops`
-- full-namespace authoritative remote observation import is a supported library path in
-  `loon-ops`, but it is intentionally not exposed as a shell command in the current phase
+- full-namespace authoritative remote observation import remains a supported library path in
+  `loon-ops`, and `xtask ops import-remote-observations` must call that API verbatim rather than
+  re-implementing it
 - the shell is intentionally inspect-and-smoke only in the current phase
+- `ops smoke` remains bootstrap/inspection-only and does not compose the import path yet
 - future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
 
 Current delivery gates:

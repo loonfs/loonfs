@@ -1,0 +1,15 @@
+command=ops/import-remote-observations
+namespace=demo
+authoritative_head_seq=0
+translated_observation_count=0
+---
+namespace_id: demo
+authoritative_head_seq: 0
+translated_observation_count: 0
+bound_local_only_count: 0
+converged_bound_inode_count: 0
+discovered_remote_only_count: 0
+recorded_conflict_or_error_count: 0
+updated_bound_remote_state_count: 0
+ignored_stale_count: 0
+ignored_unmatched_count: 0

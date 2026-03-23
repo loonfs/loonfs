@@ -65,6 +65,7 @@ Deliverables:
   - `bootstrap-namespace`
   - `show-namespace-state`
   - `show-client-state`
+  - `import-remote-observations`
   - `smoke`
 
 Required rules:
@@ -73,7 +74,9 @@ Required rules:
 - `loon-ops` is the shared shell core that future `loon-cli` work must reuse
 - no `demo-*` command family
 - no observe/sync orchestration in this milestone
-- authoritative observation import is a supported library path first, not an `xtask ops` command yet
+- `xtask ops import-remote-observations` is the first shell exposure of authoritative import and
+  it must reuse the `loon-ops` import API unchanged
+- `ops smoke` remains inspect/bootstrap only in this milestone
 - no ambient provider env lookup in core crates
 - bootstrap fails closed by default if the namespace already exists
 - the shell output stays stable and human-readable
@@ -84,6 +87,7 @@ Command contract:
 cargo run -p xtask -- ops bootstrap-namespace --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops show-namespace-state --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops show-client-state --config ./loondb-demo.toml --namespace demo
+cargo run -p xtask -- ops import-remote-observations --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops smoke --config ./loondb-demo.toml --namespace demo
 ```
 
@@ -93,8 +97,8 @@ Exit criteria:
   config shape
 - namespace bootstrap and authoritative-state inspection no longer require test helper code
 - client-state inspection is available through the same shell contract
-- future shell work can expose authoritative observation import only by calling the existing
-  `loon-ops` API unchanged
+- authoritative observation import is shell-exposed only by calling the existing `loon-ops` API
+  unchanged
 - future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers
 
 ## Milestone 16: provider-backed RC hardening

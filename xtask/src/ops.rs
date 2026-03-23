@@ -56,6 +56,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn forwards_import_remote_observations_to_loon_ops() {
+        let temp_dir = unique_temp_dir("xtask-ops-import");
+        let config_path = write_local_fs_config(&temp_dir);
+
+        run([
+            "bootstrap-namespace".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("bootstrap namespace");
+
+        let rendered = run([
+            "import-remote-observations".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run xtask ops import-remote-observations");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../tests/snapshots/ops-import-remote-observations/ops_import_remote_observations.txt"
+            )
+        );
+    }
+
     fn write_local_fs_config(temp_dir: &Path) -> PathBuf {
         let config_path = temp_dir.join("loondb-demo.toml");
         fs::write(
