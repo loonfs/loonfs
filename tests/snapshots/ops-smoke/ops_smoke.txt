@@ -1,0 +1,7 @@
+command=ops/smoke
+namespace=demo
+store_kind=local-fs
+bootstrap_status=existing
+head_seq=0
+client_remote_rows=0
+client_local_rows=0

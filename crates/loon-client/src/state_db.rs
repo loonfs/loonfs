@@ -15,6 +15,7 @@ mod txn;
 #[cfg(test)]
 mod tests;
 
+pub use loon_types::ObservedRemoteInode;
 #[cfg(test)]
 pub(crate) use schema::SCHEMA_VERSION;
 
@@ -523,6 +524,23 @@ pub struct FileSyncViews {
     pub sync_anchor: Option<SyncAnchorRow>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClientNamespaceStateSummary {
+    pub namespace_id: NamespaceId,
+    pub remote_state: Vec<RemoteFileStateRow>,
+    pub local_state: Vec<LocalFileStateRow>,
+    pub sync_anchors: Vec<SyncAnchorRow>,
+    pub local_only_state: Vec<LocalOnlyFileStateRow>,
+    pub planned_actions: Vec<PlannedActionRow>,
+    pub local_only_planned_actions: Vec<LocalOnlyPlannedActionRow>,
+    pub pending_client_mutations: Vec<PendingClientMutationRow>,
+    pub pending_inode_mutations: Vec<PendingInodeMutationRow>,
+    pub transfer_ledgers: Vec<TransferLedgerRow>,
+    pub local_only_transfer_ledgers: Vec<LocalOnlyTransferLedgerRow>,
+    pub conflicts_and_errors: Vec<ConflictOrErrorRow>,
+    pub local_only_conflicts_and_errors: Vec<LocalOnlyConflictOrErrorRow>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundApplyRemoteSubtreeDeleteViews {
     pub namespace_id: NamespaceId,
@@ -819,20 +837,6 @@ pub struct BoundLocalOnlyFile {
 pub struct AppliedInodeMutation {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObservedRemoteInode {
-    pub namespace_id: NamespaceId,
-    pub inode_id: InodeId,
-    pub inode_kind: InodeKind,
-    pub observed_seq: ChangeSeq,
-    pub revision_no: RevisionNo,
-    pub content_digest: Option<String>,
-    pub content_manifest_digest: Option<String>,
-    pub parent_inode_id: Option<InodeId>,
-    pub display_name: String,
-    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

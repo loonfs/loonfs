@@ -1,5 +1,5 @@
-mod basis;
-mod loading;
+pub(crate) mod basis;
+pub(crate) mod loading;
 mod translate;
 
 use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};

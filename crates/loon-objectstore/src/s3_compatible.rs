@@ -10,6 +10,7 @@ use aws_sdk_s3::Client;
 use http::header::{IF_MATCH, IF_NONE_MATCH};
 use http::HeaderValue;
 use std::fmt;
+use tokio::runtime::{Builder, Runtime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct S3CompatibleConfig {
@@ -29,6 +30,7 @@ pub(crate) struct S3CompatibleStore {
     bucket: String,
     key_prefix: Option<String>,
     client: Client,
+    runtime: Runtime,
 }
 
 impl fmt::Debug for S3CompatibleStore {
@@ -85,6 +87,7 @@ impl S3CompatibleStore {
             bucket: config.bucket,
             key_prefix,
             client: Client::from_conf(builder.build()),
+            runtime: build_runtime()?,
         })
     }
 
@@ -100,11 +103,7 @@ impl S3CompatibleStore {
     where
         F: std::future::Future<Output = Result<T, ObjectStoreError>>,
     {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
-        runtime.block_on(future)
+        self.runtime.block_on(future)
     }
 
     async fn head_scoped(
@@ -200,6 +199,13 @@ impl S3CompatibleStore {
             Err(err) => Err(map_sdk_error(err)),
         }
     }
+}
+
+fn build_runtime() -> Result<Runtime, ObjectStoreError> {
+    Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| ObjectStoreError::Transport(err.to_string()))
 }
 
 impl ObjectStore for S3CompatibleStore {
@@ -420,7 +426,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::put_error_code_maps_to_precondition_failed;
+    use super::{
+        put_error_code_maps_to_precondition_failed, S3CompatibleConfig, S3CompatibleStore,
+    };
     use crate::PutMode;
 
     #[test]
@@ -444,5 +452,30 @@ mod tests {
                 "did not expect overwrite missing-object code {code} to map to PreconditionFailed"
             );
         }
+    }
+
+    #[test]
+    fn store_reuses_one_runtime_across_calls() {
+        let store = S3CompatibleStore::new(S3CompatibleConfig {
+            provider_name: "test-s3",
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
+            access_key_id: "access".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            session_token: None,
+            key_prefix: Some("tenant-a".to_owned()),
+            force_path_style: true,
+        })
+        .expect("construct store");
+
+        let first = store
+            .run_async(async { Ok::<_, crate::error::ObjectStoreError>(1usize) })
+            .expect("first block_on");
+        let second = store
+            .run_async(async { Ok::<_, crate::error::ObjectStoreError>(2usize) })
+            .expect("second block_on");
+
+        assert_eq!((first, second), (1, 2));
     }
 }

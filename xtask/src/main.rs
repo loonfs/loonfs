@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 mod conflicts;
+mod ops;
 
 use loon_testkit::fixtures::{fixture_path, fixture_paths};
 use loon_testkit::minimize::minimize_replay_scenario;
@@ -203,10 +204,14 @@ fn run() -> Result<()> {
             print!("{}", conflicts::run_conflict_unarchive(conflict_args)?);
             Ok(())
         }
+        Some("ops") => {
+            print!("{}", ops::run(args)?);
+            Ok(())
+        }
         Some(other) => bail!("unknown xtask command: {other}"),
         None => {
             println!(
-                "xtask commands: render-case | render-kind | validate-fixtures | replay-seed | minimize-case | conflict-list | conflict-show | conflict-restore | conflict-archive | conflict-unarchive"
+                "xtask commands: render-case | render-kind | validate-fixtures | replay-seed | minimize-case | conflict-list | conflict-show | conflict-restore | conflict-archive | conflict-unarchive | ops"
             );
             Ok(())
         }

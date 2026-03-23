@@ -1,0 +1,4 @@
+command=ops/bootstrap-namespace
+namespace=demo
+created=true
+checkpoint_seq=0

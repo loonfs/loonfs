@@ -9,14 +9,21 @@ use super::loads::{
     load_bound_resolve_subtree_rename_conflict_views_from_conn,
     load_bound_upload_local_edit_views_from_conn, load_conflict_artifact,
     load_conflict_artifact_archive, load_conflict_artifact_archives_for_namespace,
-    load_conflict_artifacts_for_namespace, load_conflicts_and_errors, load_inode_upload,
-    load_local_file, load_local_only_candidates_for_namespace,
-    load_local_only_conflicts_and_errors, load_local_only_file, load_local_only_transfer_ledger,
-    load_local_only_upload, load_next_deferred_planned_action, load_next_executable_planned_action,
-    load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
-    load_pending_client_mutation_for_client_file, load_pending_inode_mutation,
-    load_pending_inode_mutation_for_inode, load_planned_action, load_planned_local_only_action,
-    load_remote_file, load_sync_anchor, load_transfer_ledger_for_inode,
+    load_conflict_artifacts_for_namespace, load_conflicts_and_errors,
+    load_conflicts_and_errors_for_namespace, load_inode_upload, load_local_file,
+    load_local_only_candidates_for_namespace, load_local_only_conflicts_and_errors,
+    load_local_only_conflicts_and_errors_for_namespace, load_local_only_file,
+    load_local_only_planned_actions_for_namespace, load_local_only_state_for_namespace,
+    load_local_only_transfer_ledger, load_local_only_transfer_ledgers_for_namespace,
+    load_local_only_upload, load_local_state_for_namespace, load_next_deferred_planned_action,
+    load_next_executable_planned_action, load_next_planned_action,
+    load_next_planned_local_only_action, load_pending_client_mutation,
+    load_pending_client_mutation_for_client_file, load_pending_client_mutations_for_namespace,
+    load_pending_inode_mutation, load_pending_inode_mutation_for_inode,
+    load_pending_inode_mutations_for_namespace, load_planned_action,
+    load_planned_actions_for_namespace, load_planned_local_only_action, load_remote_file,
+    load_remote_state_for_namespace, load_sync_anchor, load_sync_anchors_for_namespace,
+    load_transfer_ledger_for_inode, load_transfer_ledgers_for_namespace,
 };
 use super::schema::initialize_connection;
 use super::*;
@@ -26,20 +33,18 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 use std::path::Path;
 
-impl ObservedRemoteInode {
-    fn as_remote_file_state(&self) -> RemoteFileStateRow {
-        RemoteFileStateRow {
-            namespace_id: self.namespace_id.clone(),
-            inode_id: self.inode_id,
-            inode_kind: self.inode_kind.clone(),
-            observed_seq: self.observed_seq,
-            revision_no: self.revision_no,
-            content_digest: self.content_digest.clone(),
-            content_manifest_digest: self.content_manifest_digest.clone(),
-            parent_inode_id: self.parent_inode_id,
-            display_name: self.display_name.clone(),
-            is_deleted: self.is_deleted,
-        }
+fn observed_remote_as_remote_file_state(observed: &ObservedRemoteInode) -> RemoteFileStateRow {
+    RemoteFileStateRow {
+        namespace_id: observed.namespace_id.clone(),
+        inode_id: observed.inode_id,
+        inode_kind: observed.inode_kind.clone(),
+        observed_seq: observed.observed_seq,
+        revision_no: observed.revision_no,
+        content_digest: observed.content_digest.clone(),
+        content_manifest_digest: observed.content_manifest_digest.clone(),
+        parent_inode_id: observed.parent_inode_id,
+        display_name: observed.display_name.clone(),
+        is_deleted: observed.is_deleted,
     }
 }
 
@@ -352,6 +357,45 @@ impl SqliteStateDb {
         direction: TransferDirection,
     ) -> Result<Option<TransferLedgerRow>, StateDbError> {
         load_transfer_ledger_for_inode(&self.conn, namespace_id, inode_id, direction)
+    }
+
+    pub fn load_namespace_state_summary(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ClientNamespaceStateSummary, StateDbError> {
+        Ok(ClientNamespaceStateSummary {
+            namespace_id: namespace_id.clone(),
+            remote_state: load_remote_state_for_namespace(&self.conn, namespace_id)?,
+            local_state: load_local_state_for_namespace(&self.conn, namespace_id)?,
+            sync_anchors: load_sync_anchors_for_namespace(&self.conn, namespace_id)?,
+            local_only_state: load_local_only_state_for_namespace(&self.conn, namespace_id)?,
+            planned_actions: load_planned_actions_for_namespace(&self.conn, namespace_id)?,
+            local_only_planned_actions: load_local_only_planned_actions_for_namespace(
+                &self.conn,
+                namespace_id,
+            )?,
+            pending_client_mutations: load_pending_client_mutations_for_namespace(
+                &self.conn,
+                namespace_id,
+            )?,
+            pending_inode_mutations: load_pending_inode_mutations_for_namespace(
+                &self.conn,
+                namespace_id,
+            )?,
+            transfer_ledgers: load_transfer_ledgers_for_namespace(&self.conn, namespace_id)?,
+            local_only_transfer_ledgers: load_local_only_transfer_ledgers_for_namespace(
+                &self.conn,
+                namespace_id,
+            )?,
+            conflicts_and_errors: load_conflicts_and_errors_for_namespace(
+                &self.conn,
+                namespace_id,
+            )?,
+            local_only_conflicts_and_errors: load_local_only_conflicts_and_errors_for_namespace(
+                &self.conn,
+                namespace_id,
+            )?,
+        })
     }
 
     pub fn observe_local_only_inode_under_parent(
@@ -2480,7 +2524,7 @@ impl PlannerTxn<'_> {
         observed: &ObservedRemoteInode,
         applied_at_ms: u64,
     ) -> Result<AppliedRemoteObservation, StateDbError> {
-        let observed_remote = observed.as_remote_file_state();
+        let observed_remote = observed_remote_as_remote_file_state(observed);
         let current_remote = load_remote_file(&self.tx, &observed.namespace_id, observed.inode_id)?;
         if let Some(current_remote) = current_remote.as_ref() {
             if observed.observed_seq <= current_remote.observed_seq {

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod configured;
 pub mod error;
 pub mod fs;
 pub mod keys;
@@ -10,6 +11,7 @@ pub mod s3;
 mod s3_compatible;
 
 use crate::error::ObjectStoreError;
+pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

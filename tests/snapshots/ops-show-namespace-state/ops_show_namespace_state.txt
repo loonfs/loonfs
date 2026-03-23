@@ -1,0 +1,30 @@
+command=ops/show-namespace-state
+namespace=demo
+---
+namespace_id: demo
+head:
+  namespace_id: demo
+  seq: 0
+  active_fence_token: 0
+  next_inode_id: 1
+  snapshot_hint_seq: 0
+  retention_floor_seq: 0
+lease:
+  namespace_id: demo
+  holder_id: writer-a
+  fence_token: 0
+  lease_expires_at_ms: 61000
+checkpoint_basis:
+  checkpoint_seq: 0
+  manifest_object_key: namespaces/demo/snapshots/00000000000000000000/manifest.json
+  table_object_count: 4
+wal_tail:
+  object_count: 0
+  first_seq: null
+  last_seq: null
+metadata:
+  inode_count: 0
+  visible_inode_count: 0
+  direntry_count: 0
+  revision_count: 0
+  subtree_tombstone_count: 0

@@ -1,7 +1,11 @@
 # loon-cli
 
-Reserved operator/debugging CLI surface.
+Reserved future operator/debugging CLI surface.
 
-This crate is intentionally quarantined during the semantic-core reset. The design intent remains:
-there should eventually be a thin CLI for operator and debugging workflows. For now, active work
-should go through library crates, scenario fixtures, and `xtask`.
+This crate remains intentionally quarantined.
+
+The current active operator frontend is `xtask ops ...`, and the shared command/config/rendering
+contract now lives in `crates/loon-ops`.
+
+When `loon-cli` is activated, it should reuse that `loon-ops` layer with the same subcommand
+grammar and output semantics instead of re-implementing config loading or shell logic.

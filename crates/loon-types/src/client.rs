@@ -2,6 +2,20 @@ use crate::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedRemoteInode {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub observed_seq: ChangeSeq,
+    pub revision_no: RevisionNo,
+    pub content_digest: Option<String>,
+    pub content_manifest_digest: Option<String>,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientMutationRequest {
     pub namespace_id: NamespaceId,
     pub client_request_id: String,

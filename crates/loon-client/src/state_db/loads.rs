@@ -185,6 +185,128 @@ pub(super) fn load_sync_anchor(
     .transpose()
 }
 
+pub(super) fn load_remote_state_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<RemoteFileStateRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            inode_id,
+            inode_kind,
+            observed_seq,
+            revision_no,
+            content_digest,
+            content_manifest_digest,
+            parent_inode_id,
+            display_name,
+            is_deleted
+        FROM remote_state
+        WHERE namespace_id = ?1
+        ORDER BY inode_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        let inode_id = InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?);
+        let parent_inode_id = row.get::<_, Option<i64>>(6)?;
+        values.push(RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: inode_kind_from_str(&row.get::<_, String>(1)?)?,
+            observed_seq: ChangeSeq(from_sql_u64(row.get::<_, i64>(2)?, "observed_seq")?),
+            revision_no: RevisionNo(from_sql_u64(row.get::<_, i64>(3)?, "revision_no")?),
+            content_digest: row.get::<_, Option<String>>(4)?,
+            content_manifest_digest: row.get::<_, Option<String>>(5)?,
+            parent_inode_id: parent_inode_id
+                .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
+                .transpose()?,
+            display_name: row.get::<_, String>(7)?,
+            is_deleted: row.get::<_, bool>(8)?,
+        });
+    }
+    Ok(values)
+}
+
+pub(super) fn load_local_state_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<LocalFileStateRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            inode_id,
+            inode_kind,
+            content_digest,
+            parent_inode_id,
+            display_name,
+            exists_on_disk,
+            dirty,
+            last_local_change_ms
+        FROM local_state
+        WHERE namespace_id = ?1
+        ORDER BY inode_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        let inode_id = InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?);
+        let parent_inode_id = row.get::<_, Option<i64>>(3)?;
+        values.push(LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: inode_kind_from_str(&row.get::<_, String>(1)?)?,
+            content_digest: row.get::<_, Option<String>>(2)?,
+            parent_inode_id: parent_inode_id
+                .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
+                .transpose()?,
+            display_name: row.get::<_, String>(4)?,
+            exists_on_disk: row.get::<_, bool>(5)?,
+            dirty: row.get::<_, bool>(6)?,
+            last_local_change_ms: from_sql_u64(row.get::<_, i64>(7)?, "last_local_change_ms")?,
+        });
+    }
+    Ok(values)
+}
+
+pub(super) fn load_sync_anchors_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<SyncAnchorRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            inode_id,
+            inode_kind,
+            synced_seq,
+            revision_no,
+            content_digest,
+            content_manifest_digest,
+            parent_inode_id,
+            display_name
+        FROM sync_anchor
+        WHERE namespace_id = ?1
+        ORDER BY inode_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        let inode_id = InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?);
+        let parent_inode_id = row.get::<_, Option<i64>>(6)?;
+        values.push(SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: inode_kind_from_str(&row.get::<_, String>(1)?)?,
+            synced_seq: ChangeSeq(from_sql_u64(row.get::<_, i64>(2)?, "synced_seq")?),
+            revision_no: RevisionNo(from_sql_u64(row.get::<_, i64>(3)?, "revision_no")?),
+            content_digest: row.get::<_, Option<String>>(4)?,
+            content_manifest_digest: row.get::<_, Option<String>>(5)?,
+            parent_inode_id: parent_inode_id
+                .map(|value| from_sql_u64(value, "parent_inode_id").map(InodeId))
+                .transpose()?,
+            display_name: row.get::<_, String>(7)?,
+        });
+    }
+    Ok(values)
+}
+
 pub(super) fn load_planned_action(
     conn: &Connection,
     namespace_id: &NamespaceId,
@@ -216,6 +338,30 @@ pub(super) fn load_planned_action(
         })
     })
     .transpose()
+}
+
+pub(super) fn load_planned_actions_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<PlannedActionRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT inode_id, decision, reason, created_at_ms
+        FROM planned_actions
+        WHERE namespace_id = ?1
+        ORDER BY created_at_ms ASC, inode_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        values.push(PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?),
+            decision: row.get::<_, String>(1)?,
+            reason: row.get::<_, String>(2)?,
+            created_at_ms: from_sql_u64(row.get::<_, i64>(3)?, "created_at_ms")?,
+        });
+    }
+    Ok(values)
 }
 
 pub(super) fn load_conflicts_and_errors(
@@ -250,6 +396,36 @@ pub(super) fn load_conflicts_and_errors(
             summary,
             detail_json,
             created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+        });
+    }
+    Ok(issues)
+}
+
+pub(super) fn load_conflicts_and_errors_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<ConflictOrErrorRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT inode_id, record_id, kind, summary, detail_json, created_at_ms
+        FROM conflicts_and_errors
+        WHERE namespace_id = ?1
+        ORDER BY created_at_ms ASC, inode_id ASC, record_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut issues = Vec::new();
+    while let Some(row) = rows.next()? {
+        let inode_id = InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?);
+        let record_id = row.get::<_, i64>(1)?;
+        let detail_json = serde_json::from_str(&row.get::<_, String>(4)?)
+            .map_err(StateDbError::ConflictOrErrorDetailCodec)?;
+        issues.push(ConflictOrErrorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            record_id: from_sql_u64(record_id, "record_id")?,
+            kind: row.get::<_, String>(2)?,
+            summary: row.get::<_, String>(3)?,
+            detail_json,
+            created_at_ms: from_sql_u64(row.get::<_, i64>(5)?, "created_at_ms")?,
         });
     }
     Ok(issues)
@@ -462,6 +638,34 @@ pub(super) fn load_local_only_conflicts_and_errors(
     Ok(issues)
 }
 
+pub(super) fn load_local_only_conflicts_and_errors_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<LocalOnlyConflictOrErrorRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT client_file_id, record_id, kind, summary, detail_json, created_at_ms
+        FROM local_only_conflicts_and_errors
+        WHERE namespace_id = ?1
+        ORDER BY created_at_ms ASC, client_file_id ASC, record_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut issues = Vec::new();
+    while let Some(row) = rows.next()? {
+        let detail_json = serde_json::from_str(&row.get::<_, String>(4)?)
+            .map_err(StateDbError::ConflictOrErrorDetailCodec)?;
+        issues.push(LocalOnlyConflictOrErrorRow {
+            client_file_id: ClientFileId::new(row.get::<_, String>(0)?),
+            namespace_id: namespace_id.clone(),
+            record_id: from_sql_u64(row.get::<_, i64>(1)?, "record_id")?,
+            kind: row.get::<_, String>(2)?,
+            summary: row.get::<_, String>(3)?,
+            detail_json,
+            created_at_ms: from_sql_u64(row.get::<_, i64>(5)?, "created_at_ms")?,
+        });
+    }
+    Ok(issues)
+}
+
 pub(super) fn load_transfer_ledger_for_inode(
     conn: &Connection,
     namespace_id: &NamespaceId,
@@ -508,6 +712,34 @@ pub(super) fn load_transfer_ledger_for_inode(
         },
     )
     .transpose()
+}
+
+pub(super) fn load_transfer_ledgers_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<TransferLedgerRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT inode_id, transfer_id, direction, object_key, block_index, block_count, state, updated_at_ms
+        FROM transfer_ledger
+        WHERE namespace_id = ?1
+        ORDER BY updated_at_ms ASC, inode_id ASC, direction ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        values.push(TransferLedgerRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(from_sql_u64(row.get::<_, i64>(0)?, "inode_id")?),
+            transfer_id: row.get::<_, String>(1)?,
+            direction: transfer_direction_from_str(&row.get::<_, String>(2)?)?,
+            object_key: row.get::<_, String>(3)?,
+            block_index: from_sql_u64(row.get::<_, i64>(4)?, "block_index")?,
+            block_count: from_sql_u64(row.get::<_, i64>(5)?, "block_count")?,
+            state: transfer_state_from_str(&row.get::<_, String>(6)?)?,
+            updated_at_ms: from_sql_u64(row.get::<_, i64>(7)?, "updated_at_ms")?,
+        });
+    }
+    Ok(values)
 }
 
 pub(super) fn load_local_only_transfer_ledger(
@@ -572,6 +804,42 @@ pub(super) fn load_local_only_transfer_ledger(
         },
     )
     .transpose()
+}
+
+pub(super) fn load_local_only_transfer_ledgers_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<LocalOnlyTransferLedgerRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT
+            client_file_id,
+            transfer_id,
+            direction,
+            object_key,
+            block_index,
+            block_count,
+            state,
+            updated_at_ms
+        FROM local_only_transfer_ledger
+        WHERE namespace_id = ?1
+        ORDER BY updated_at_ms ASC, client_file_id ASC, direction ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        values.push(LocalOnlyTransferLedgerRow {
+            client_file_id: ClientFileId::new(row.get::<_, String>(0)?),
+            namespace_id: namespace_id.clone(),
+            transfer_id: row.get::<_, String>(1)?,
+            direction: transfer_direction_from_str(&row.get::<_, String>(2)?)?,
+            object_key: row.get::<_, String>(3)?,
+            block_index: from_sql_u64(row.get::<_, i64>(4)?, "block_index")?,
+            block_count: from_sql_u64(row.get::<_, i64>(5)?, "block_count")?,
+            state: transfer_state_from_str(&row.get::<_, String>(6)?)?,
+            updated_at_ms: from_sql_u64(row.get::<_, i64>(7)?, "updated_at_ms")?,
+        });
+    }
+    Ok(values)
 }
 
 pub(super) fn load_next_planned_action(
@@ -2467,6 +2735,37 @@ pub(super) fn load_local_only_candidates_for_namespace(
     .collect()
 }
 
+pub(super) fn load_local_only_state_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+    load_local_only_candidates_for_namespace(conn, namespace_id)
+}
+
+pub(super) fn load_local_only_planned_actions_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<LocalOnlyPlannedActionRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT client_file_id, decision, reason, created_at_ms
+        FROM planned_local_only_actions
+        WHERE namespace_id = ?1
+        ORDER BY created_at_ms ASC, client_file_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        values.push(LocalOnlyPlannedActionRow {
+            client_file_id: ClientFileId::new(row.get::<_, String>(0)?),
+            namespace_id: namespace_id.clone(),
+            decision: row.get::<_, String>(1)?,
+            reason: row.get::<_, String>(2)?,
+            created_at_ms: from_sql_u64(row.get::<_, i64>(3)?, "created_at_ms")?,
+        });
+    }
+    Ok(values)
+}
+
 pub(super) fn load_planned_local_only_action(
     conn: &Connection,
     client_file_id: &ClientFileId,
@@ -2697,6 +2996,26 @@ pub(super) fn load_pending_client_mutation_for_client_file(
     }
 }
 
+pub(super) fn load_pending_client_mutations_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<PendingClientMutationRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT client_request_id
+        FROM pending_client_mutations
+        WHERE namespace_id = ?1
+        ORDER BY created_at_ms ASC, client_request_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        if let Some(pending) = load_pending_client_mutation(conn, &row.get::<_, String>(0)?)? {
+            values.push(pending);
+        }
+    }
+    Ok(values)
+}
+
 pub(super) fn load_pending_inode_mutation(
     conn: &Connection,
     client_request_id: &str,
@@ -2753,4 +3072,24 @@ pub(super) fn load_pending_inode_mutation_for_inode(
         Some(client_request_id) => load_pending_inode_mutation(conn, &client_request_id),
         None => Ok(None),
     }
+}
+
+pub(super) fn load_pending_inode_mutations_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<PendingInodeMutationRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT client_request_id
+        FROM pending_inode_mutations
+        WHERE namespace_id = ?1
+        ORDER BY created_at_ms ASC, client_request_id ASC",
+    )?;
+    let mut rows = stmt.query(params![namespace_id.as_str()])?;
+    let mut values = Vec::new();
+    while let Some(row) = rows.next()? {
+        if let Some(pending) = load_pending_inode_mutation(conn, &row.get::<_, String>(0)?)? {
+            values.push(pending);
+        }
+    }
+    Ok(values)
 }

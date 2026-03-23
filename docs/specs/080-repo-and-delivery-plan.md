@@ -35,7 +35,9 @@ Current real delivery surfaces:
 - `loon-core`
 - `loon-model`
 - `loon-objectstore`
+- `loon-ops`
 - `loon-server::mutation`
+- `loon-server::ops`
 - `loon-client`
 - `loon-testkit`
 - `xtask`
@@ -59,6 +61,24 @@ Constraints for that shell:
 - archive state is canonical in object storage via per-artifact sidecars
 - there is still no destructive delete/GC lifecycle
 
+Current local operability shell:
+
+- shared command/config/rendering layer in `loon-ops`
+- thin active frontend in `xtask ops ...`
+- current commands:
+  - `xtask ops bootstrap-namespace --config <path> --namespace <id> [--allow-existing]`
+  - `xtask ops show-namespace-state --config <path> --namespace <id>`
+  - `xtask ops show-client-state --config <path> --namespace <id>`
+  - `xtask ops smoke --config <path> --namespace <id>`
+
+Constraints for that shell:
+
+- `xtask` stays a thin wrapper; config loading and command execution belong in `loon-ops`
+- namespace bootstrap and authoritative-state inspection belong in supported library code,
+  primarily `loon-server::ops`
+- the shell is intentionally inspect-and-smoke only in the current phase
+- future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
+
 Current delivery gates:
 
 - object-store contract changes require the local FS conformance suite in-repo
@@ -76,6 +96,9 @@ Current quarantined delivery surfaces:
 
 These quarantined surfaces stay in the repository to preserve delivery intent and crate names, but
 they should not advertise themselves as active product entrypoints until they wrap real behavior.
+
+For `loon-cli`, the intended activation path is now explicit: it should become a frontend over
+`loon-ops`, not a second owner of config parsing, command grammar, or rendering semantics.
 
 ## What should happen early
 

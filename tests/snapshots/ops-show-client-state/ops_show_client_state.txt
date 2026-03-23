@@ -1,0 +1,16 @@
+command=ops/show-client-state
+namespace=demo
+---
+namespace_id: demo
+remote_state: []
+local_state: []
+sync_anchors: []
+local_only_state: []
+planned_actions: []
+local_only_planned_actions: []
+pending_client_mutations: []
+pending_inode_mutations: []
+transfer_ledgers: []
+local_only_transfer_ledgers: []
+conflicts_and_errors: []
+local_only_conflicts_and_errors: []
