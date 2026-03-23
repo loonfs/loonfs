@@ -1,4 +1,9 @@
 use super::*;
+use crate::client::{
+    authoritative_snapshot_import_batch_rollback_is_atomic,
+    authoritative_snapshot_import_discovers_remote_only_state,
+    authoritative_snapshot_import_is_idempotent,
+};
 use loon_types::{
     ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
     SubtreeConflictArtifactEntry, CONTENT_BLOCK_SIZE_BYTES,
@@ -1053,6 +1058,44 @@ fn model_supports_remote_only_discovery_from_authoritative_observation() {
     };
 
     assert!(remote_only_discovery_supported(&observed_dir));
+}
+
+#[test]
+fn model_authoritative_snapshot_import_discovers_remote_only_state_deterministically() {
+    assert!(authoritative_snapshot_import_discovers_remote_only_state(
+        2, 2
+    ));
+    assert!(!authoritative_snapshot_import_discovers_remote_only_state(
+        2, 1
+    ));
+}
+
+#[test]
+fn model_authoritative_snapshot_import_is_idempotent_on_repeat() {
+    assert!(authoritative_snapshot_import_is_idempotent(2, 2, 0));
+    assert!(!authoritative_snapshot_import_is_idempotent(2, 1, 1));
+}
+
+#[test]
+fn model_authoritative_snapshot_import_batch_rollback_leaves_state_unchanged() {
+    let before = vec![
+        (NamespaceId::from("ns-1"), InodeId(1), ChangeSeq(42)),
+        (NamespaceId::from("ns-1"), InodeId(2), ChangeSeq(42)),
+    ];
+    let after_failed_batch = before.clone();
+    let changed_after_failed_batch = vec![
+        (NamespaceId::from("ns-1"), InodeId(1), ChangeSeq(42)),
+        (NamespaceId::from("ns-1"), InodeId(2), ChangeSeq(43)),
+    ];
+
+    assert!(authoritative_snapshot_import_batch_rollback_is_atomic(
+        &before,
+        &after_failed_batch
+    ));
+    assert!(!authoritative_snapshot_import_batch_rollback_is_atomic(
+        &before,
+        &changed_after_failed_batch
+    ));
 }
 
 #[test]

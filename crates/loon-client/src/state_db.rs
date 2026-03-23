@@ -423,6 +423,14 @@ pub enum StateDbError {
         matches: usize,
     },
     #[error(
+        "remote_observation_batch_namespace_mismatch: expected namespace `{expected_namespace_id}` at index 0 but found `{actual_namespace_id}` at index `{index}`"
+    )]
+    RemoteObservationBatchNamespaceMismatch {
+        expected_namespace_id: String,
+        actual_namespace_id: String,
+        index: usize,
+    },
+    #[error(
         "bind_kind_mismatch: `{client_file_id}` local kind `{local_kind}` != remote kind `{remote_kind}`"
     )]
     BindKindMismatch {

@@ -62,6 +62,34 @@ pub fn response_after_newer_observation_is_idempotent(
         && winner_apply_count == 1
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn authoritative_snapshot_import_discovers_remote_only_state(
+    translated_observation_count: usize,
+    discovered_remote_only_count: usize,
+) -> bool {
+    translated_observation_count == discovered_remote_only_count
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn authoritative_snapshot_import_is_idempotent(
+    translated_observation_count: usize,
+    ignored_stale_count: usize,
+    changed_outcome_count: usize,
+) -> bool {
+    translated_observation_count == ignored_stale_count && changed_outcome_count == 0
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn authoritative_snapshot_import_batch_rollback_is_atomic<T>(
+    before_failed_batch: &T,
+    after_failed_batch: &T,
+) -> bool
+where
+    T: PartialEq,
+{
+    before_failed_batch == after_failed_batch
+}
+
 pub fn delivery_order_is_seed_stable<T>(first: &[T], second: &[T]) -> bool
 where
     T: PartialEq,

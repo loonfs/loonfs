@@ -12,8 +12,11 @@ loon-objectstore = { path = "../loon-objectstore" }
 loon-server = { path = "../loon-server" }
 loon-types = { path = "../loon-types" }
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml.workspace = true
+thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+loon-core = { path = "../loon-core" }
 loon-testkit = { path = "../loon-testkit" }

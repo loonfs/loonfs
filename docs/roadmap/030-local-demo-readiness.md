@@ -6,6 +6,8 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
 - supported namespace bootstrap and authoritative-state inspection
 - supported translation from authoritative namespace state into client-applicable
   `ObservedRemoteInode` values
+- supported library-first full-namespace authoritative observation import through `loon-ops`
+  composition, without adding a shell workflow yet
 - a thin internal shell in `xtask`
 - one shared command/config/rendering layer that can later move into `loon-cli` unchanged
 
@@ -55,6 +57,10 @@ Deliverables:
   - `bootstrap_namespace`
   - `load_namespace_state_summary`
   - `translate_authoritative_state_to_remote_observations`
+- supported library composition in `loon-ops`:
+  - `import_authoritative_remote_observations`
+  - full authoritative snapshot translation before any client DB mutation
+  - atomic batch application through the existing client observation protocol
 - thin `xtask ops ...` commands:
   - `bootstrap-namespace`
   - `show-namespace-state`
@@ -67,6 +73,7 @@ Required rules:
 - `loon-ops` is the shared shell core that future `loon-cli` work must reuse
 - no `demo-*` command family
 - no observe/sync orchestration in this milestone
+- authoritative observation import is a supported library path first, not an `xtask ops` command yet
 - no ambient provider env lookup in core crates
 - bootstrap fails closed by default if the namespace already exists
 - the shell output stays stable and human-readable
@@ -86,6 +93,8 @@ Exit criteria:
   config shape
 - namespace bootstrap and authoritative-state inspection no longer require test helper code
 - client-state inspection is available through the same shell contract
+- future shell work can expose authoritative observation import only by calling the existing
+  `loon-ops` API unchanged
 - future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers
 
 ## Milestone 16: provider-backed RC hardening

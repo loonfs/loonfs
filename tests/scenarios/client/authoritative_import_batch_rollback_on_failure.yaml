@@ -1,0 +1,36 @@
+schema_version: 1
+scenario_kind: client
+name: authoritative_import_batch_rollback_on_failure
+initial:
+  authoritative_namespace:
+    namespace_id: ns-1
+    head_seq: 42
+actions:
+  - apply_translated_authoritative_observations:
+      authoritative_head_seq: 42
+      applied_at_ms: 1700000805000
+      observations:
+        - namespace_id: ns-1
+          inode_id: 1
+          inode_kind: dir
+          observed_seq: 42
+          revision_no: 1
+          content_digest: null
+          content_manifest_digest: null
+          parent_inode_id: null
+          display_name: ""
+          is_deleted: false
+        - namespace_id: ns-2
+          inode_id: 2
+          inode_kind: file
+          observed_seq: 42
+          revision_no: 1
+          content_digest: sha256:other
+          content_manifest_digest: sha256:manifest-other
+          parent_inode_id: 1
+          display_name: other.txt
+          is_deleted: false
+expect:
+  error: remote_observation_batch_namespace_mismatch
+  invariants:
+    - authoritative_snapshot_import_batch_rollback_is_atomic

@@ -1,0 +1,19 @@
+schema_version: 1
+scenario_kind: client
+name: authoritative_import_repeated_snapshot_is_idempotent
+initial:
+  authoritative_namespace:
+    namespace_id: ns-1
+    head_seq: 42
+actions:
+  - import_authoritative_remote_observations:
+      namespace_id: ns-1
+      applied_at_ms: 1700000800000
+  - import_authoritative_remote_observations:
+      namespace_id: ns-1
+      applied_at_ms: 1700000801000
+expect:
+  translated_observation_count: 2
+  ignored_stale_count: 2
+  invariants:
+    - authoritative_snapshot_import_is_idempotent

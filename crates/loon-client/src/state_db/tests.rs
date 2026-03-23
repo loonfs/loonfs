@@ -1,5 +1,5 @@
 use super::{
-    BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow,
+    AppliedRemoteObservation, BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow,
     LocalOnlyConflictOrErrorRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
     LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, ObservedLocalOnlyInode,
     PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError,
@@ -9,7 +9,7 @@ use crate::upload::UploadedContent;
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
     ContentManifestEnvelope, ContentManifestPayload, CreatedRemoteInode, InodeId, InodeKind,
-    NamespaceId, ReplacedRemoteFile, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
+    NamespaceId, ObservedRemoteInode, ReplacedRemoteFile, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde_json::json;
 
@@ -2444,6 +2444,153 @@ fn apply_inode_mutation_response_is_idempotent_when_bound_state_already_matches(
     );
 }
 
+#[test]
+fn apply_remote_observations_batch_preserves_ordered_outcomes() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let observations = vec![
+        sample_observed_remote_with(
+            "ns-1",
+            601,
+            ChangeSeq(42),
+            RevisionNo(1),
+            "sha256:welcome-v1",
+            "sha256:manifest-welcome-v1",
+            Some(InodeId(2)),
+            "welcome.txt",
+            false,
+        ),
+        sample_observed_remote_with(
+            "ns-1",
+            601,
+            ChangeSeq(43),
+            RevisionNo(2),
+            "sha256:welcome-v2",
+            "sha256:manifest-welcome-v2",
+            Some(InodeId(2)),
+            "welcome-renamed.txt",
+            false,
+        ),
+    ];
+
+    let outcomes = db
+        .apply_remote_observations_batch(&observations, 1_700_000_608_000)
+        .expect("apply batch");
+
+    assert_eq!(
+        outcomes,
+        vec![
+            AppliedRemoteObservation::DiscoveredRemoteOnly {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(601),
+            },
+            AppliedRemoteObservation::DiscoveredRemoteOnly {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(601),
+            },
+        ]
+    );
+}
+
+#[test]
+fn apply_remote_observations_batch_matches_sequential_single_apply_state() {
+    let observations = vec![
+        sample_observed_remote_with(
+            "ns-1",
+            601,
+            ChangeSeq(42),
+            RevisionNo(1),
+            "sha256:welcome-v1",
+            "sha256:manifest-welcome-v1",
+            Some(InodeId(2)),
+            "welcome.txt",
+            false,
+        ),
+        sample_observed_remote_with(
+            "ns-1",
+            601,
+            ChangeSeq(43),
+            RevisionNo(2),
+            "sha256:welcome-v2",
+            "sha256:manifest-welcome-v2",
+            Some(InodeId(2)),
+            "welcome-renamed.txt",
+            false,
+        ),
+    ];
+    let mut sequential = SqliteStateDb::open_in_memory().expect("open sequential DB");
+    let mut batch = SqliteStateDb::open_in_memory().expect("open batch DB");
+
+    let sequential_outcomes = observations
+        .iter()
+        .map(|observed| sequential.apply_remote_observation(observed, 1_700_000_608_000))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("apply sequential observations");
+    let batch_outcomes = batch
+        .apply_remote_observations_batch(&observations, 1_700_000_608_000)
+        .expect("apply batch observations");
+
+    assert_eq!(batch_outcomes, sequential_outcomes);
+    assert_eq!(
+        batch
+            .load_namespace_state_summary(&NamespaceId::from("ns-1"))
+            .expect("load batch namespace summary"),
+        sequential
+            .load_namespace_state_summary(&NamespaceId::from("ns-1"))
+            .expect("load sequential namespace summary"),
+    );
+}
+
+#[test]
+fn apply_remote_observations_batch_rolls_back_on_first_failure() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let before = db
+        .load_namespace_state_summary(&namespace_id)
+        .expect("load empty state");
+    let observations = vec![
+        sample_observed_remote_with(
+            "ns-1",
+            601,
+            ChangeSeq(42),
+            RevisionNo(1),
+            "sha256:welcome-v1",
+            "sha256:manifest-welcome-v1",
+            Some(InodeId(2)),
+            "welcome.txt",
+            false,
+        ),
+        sample_observed_remote_with(
+            "ns-2",
+            602,
+            ChangeSeq(43),
+            RevisionNo(1),
+            "sha256:other-v1",
+            "sha256:manifest-other-v1",
+            Some(InodeId(2)),
+            "other.txt",
+            false,
+        ),
+    ];
+
+    let error = db
+        .apply_remote_observations_batch(&observations, 1_700_000_608_000)
+        .expect_err("mixed-namespace batch should fail");
+
+    assert!(matches!(
+        error,
+        StateDbError::RemoteObservationBatchNamespaceMismatch {
+            ref expected_namespace_id,
+            ref actual_namespace_id,
+            index: 1,
+        } if expected_namespace_id == "ns-1" && actual_namespace_id == "ns-2"
+    ));
+    assert_eq!(
+        db.load_namespace_state_summary(&namespace_id)
+            .expect("load state after failed batch"),
+        before
+    );
+}
+
 fn sample_remote() -> RemoteFileStateRow {
     RemoteFileStateRow {
         namespace_id: NamespaceId::from("ns-1"),
@@ -2513,6 +2660,31 @@ fn sample_bound_remote() -> RemoteFileStateRow {
         parent_inode_id: Some(InodeId(2)),
         display_name: "draft.txt".to_owned(),
         is_deleted: false,
+    }
+}
+
+fn sample_observed_remote_with(
+    namespace_id: &str,
+    inode_id: u64,
+    observed_seq: ChangeSeq,
+    revision_no: RevisionNo,
+    content_digest: &str,
+    content_manifest_digest: &str,
+    parent_inode_id: Option<InodeId>,
+    display_name: &str,
+    is_deleted: bool,
+) -> ObservedRemoteInode {
+    ObservedRemoteInode {
+        namespace_id: NamespaceId::from(namespace_id),
+        inode_id: InodeId(inode_id),
+        inode_kind: InodeKind::File,
+        observed_seq,
+        revision_no,
+        content_digest: Some(content_digest.to_owned()),
+        content_manifest_digest: Some(content_manifest_digest.to_owned()),
+        parent_inode_id,
+        display_name: display_name.to_owned(),
+        is_deleted,
     }
 }
 

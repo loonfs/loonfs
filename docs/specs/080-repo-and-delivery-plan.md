@@ -76,6 +76,8 @@ Constraints for that shell:
 - `xtask` stays a thin wrapper; config loading and command execution belong in `loon-ops`
 - namespace bootstrap and authoritative-state inspection belong in supported library code,
   primarily `loon-server::ops`
+- full-namespace authoritative remote observation import is a supported library path in
+  `loon-ops`, but it is intentionally not exposed as a shell command in the current phase
 - the shell is intentionally inspect-and-smoke only in the current phase
 - future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
 

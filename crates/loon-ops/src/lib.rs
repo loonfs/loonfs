@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod import;
+
 use anyhow::{anyhow, bail, Context, Result};
 use loon_client::state_db::{ClientNamespaceStateSummary, SqliteStateDb};
 use loon_objectstore::r2::R2StoreConfig;
@@ -14,6 +16,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub use import::{
+    import_authoritative_remote_observations, AuthoritativeObservationImportError,
+    AuthoritativeObservationImportReport,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpsConfig {

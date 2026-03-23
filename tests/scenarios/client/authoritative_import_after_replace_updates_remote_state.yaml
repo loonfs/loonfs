@@ -1,0 +1,20 @@
+schema_version: 1
+scenario_kind: client
+name: authoritative_import_after_replace_updates_remote_state
+initial:
+  authoritative_namespace:
+    namespace_id: ns-1
+    head_seq: 42
+  client_state:
+    bound_inode_id: 2
+actions:
+  - overwrite_authoritative_snapshot:
+      namespace_id: ns-1
+      head_seq: 43
+      replaced_inode_id: 2
+  - import_authoritative_remote_observations:
+      namespace_id: ns-1
+      applied_at_ms: 1700000802000
+expect:
+  updated_bound_remote_state_count: 1
+  authoritative_head_seq: 43

@@ -675,6 +675,30 @@ impl SqliteStateDb {
         })
     }
 
+    pub fn apply_remote_observations_batch(
+        &mut self,
+        observations: &[ObservedRemoteInode],
+        applied_at_ms: u64,
+    ) -> Result<Vec<AppliedRemoteObservation>, StateDbError> {
+        self.planner_transaction("apply_remote_observations_batch", |tx| {
+            let mut outcomes = Vec::with_capacity(observations.len());
+            let expected_namespace_id = observations.first().map(|observed| &observed.namespace_id);
+            for (index, observed) in observations.iter().enumerate() {
+                if let Some(expected_namespace_id) = expected_namespace_id {
+                    if &observed.namespace_id != expected_namespace_id {
+                        return Err(StateDbError::RemoteObservationBatchNamespaceMismatch {
+                            expected_namespace_id: expected_namespace_id.as_str().to_owned(),
+                            actual_namespace_id: observed.namespace_id.as_str().to_owned(),
+                            index,
+                        });
+                    }
+                }
+                outcomes.push(tx.apply_remote_observation(observed, applied_at_ms)?);
+            }
+            Ok(outcomes)
+        })
+    }
+
     pub(crate) fn record_conflict_or_error(
         &mut self,
         namespace_id: &NamespaceId,
