@@ -8,6 +8,9 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
   `ObservedRemoteInode` values
 - supported library-first full-namespace authoritative observation import through `loon-ops`
   composition, without adding a shell workflow yet
+- supported client-local observation of one existing file through `loon-client` plus thin
+  `loon-ops` composition
+- supported single-step client execution through the real scheduler and real server mutation path
 - a thin internal shell in `xtask`
 - one shared command/config/rendering layer that can later move into `loon-cli` unchanged
 
@@ -66,6 +69,8 @@ Deliverables:
   - `show-namespace-state`
   - `show-client-state`
   - `import-remote-observations`
+  - `observe-local`
+  - `sync-once`
   - `smoke`
 
 Required rules:
@@ -73,7 +78,9 @@ Required rules:
 - `xtask` stays thin and must not become the owner of config parsing or business logic
 - `loon-ops` is the shared shell core that future `loon-cli` work must reuse
 - no `demo-*` command family
-- no observe/sync orchestration in this milestone
+- no recursive local scan, watcher, delete inference, rename inference, or `sync-until-idle`
+- `observe-local` is file-first and existing-file-only
+- `sync-once` is executor-only and progresses at most one real scheduler step
 - `xtask ops import-remote-observations` is the first shell exposure of authoritative import and
   it must reuse the `loon-ops` import API unchanged
 - `ops smoke` remains inspect/bootstrap only in this milestone
@@ -88,6 +95,8 @@ cargo run -p xtask -- ops bootstrap-namespace --config ./loondb-demo.toml --name
 cargo run -p xtask -- ops show-namespace-state --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops show-client-state --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops import-remote-observations --config ./loondb-demo.toml --namespace demo
+cargo run -p xtask -- ops observe-local --config ./loondb-demo.toml --namespace demo --path ./mirror/hello.txt
+cargo run -p xtask -- ops sync-once --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops smoke --config ./loondb-demo.toml --namespace demo
 ```
 
@@ -99,6 +108,9 @@ Exit criteria:
 - client-state inspection is available through the same shell contract
 - authoritative observation import is shell-exposed only by calling the existing `loon-ops` API
   unchanged
+- one existing local file can be observed and planned through the supported client API rather than
+  through shell-local SQLite mutation
+- one honest client scheduler step can be exercised locally without inventing a second sync path
 - future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers
 
 ## Milestone 16: provider-backed RC hardening

@@ -1,3 +1,4 @@
+use crate::planner::PlannedLocalOnlyActionRecord;
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
     ConflictArtifactEnvelope, ConflictArtifactKind, ConflictClass, InodeId, InodeKind, NamespaceId,
@@ -65,6 +66,16 @@ pub enum StateDbError {
     LocalOnlyParentNotBound {
         namespace_id: String,
         parent_inode_id: u64,
+    },
+    #[error("bound_observation_missing: namespace `{namespace_id}` inode `{inode_id}`")]
+    BoundObservationMissing { namespace_id: String, inode_id: u64 },
+    #[error(
+        "local_only_observation_ambiguous: namespace `{namespace_id}` parent inode `{parent_inode_id}` display name `{display_name}`"
+    )]
+    LocalOnlyObservationAmbiguous {
+        namespace_id: String,
+        parent_inode_id: u64,
+        display_name: String,
     },
     #[error("local_only_file_missing: `{client_file_id}`")]
     LocalOnlyFileMissing { client_file_id: String },
@@ -661,6 +672,26 @@ pub struct ObservedLocalOnlyInode {
     pub exists_on_disk: bool,
     pub dirty: bool,
     pub last_local_change_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedBoundInode {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub content_digest: Option<String>,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+    pub exists_on_disk: bool,
+    pub dirty: bool,
+    pub last_local_change_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLocalOnlyInodeResult {
+    pub local_only: LocalOnlyFileStateRow,
+    pub planned_action: PlannedLocalOnlyActionRecord,
+    pub reused_existing_identity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

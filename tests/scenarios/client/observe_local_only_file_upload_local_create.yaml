@@ -1,0 +1,22 @@
+scenario_kind: client
+name: observe_local_only_file_upload_local_create
+
+initial:
+  namespace_id: ns-1
+  bound_parent_directory:
+    inode_id: 1
+    relative_path: ""
+    exists_on_disk: true
+    dirty: false
+
+observe_local:
+  kind: local_only_file
+  relative_path: draft.txt
+  content_digest: sha256:draft-local
+  exists_on_disk: true
+  dirty: true
+
+expect:
+  temp_identity_reused: false
+  planned_decision: upload_local_create
+  planned_reason: local_only_file_without_remote_identity

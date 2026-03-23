@@ -27,7 +27,7 @@ use super::loads::{
 };
 use super::schema::initialize_connection;
 use super::*;
-use crate::planner::plan_file_in_tx;
+use crate::planner::{decide_local_only_inode_action, plan_file_in_tx};
 use crate::upload::UploadedContent;
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -404,6 +404,26 @@ impl SqliteStateDb {
     ) -> Result<LocalOnlyFileStateRow, StateDbError> {
         self.planner_transaction("observe_local_only_inode_under_parent", |tx| {
             tx.observe_local_only_inode_under_parent(observed)
+        })
+    }
+
+    pub fn observe_bound_inode_and_plan(
+        &mut self,
+        observed: &ObservedBoundInode,
+        planned_at_ms: u64,
+    ) -> Result<crate::planner::PlannedActionRecord, StateDbError> {
+        self.planner_transaction("observe_bound_inode_and_plan", |tx| {
+            tx.observe_bound_inode_and_plan(observed, planned_at_ms)
+        })
+    }
+
+    pub fn observe_local_only_inode_under_parent_and_plan(
+        &mut self,
+        observed: &ObservedLocalOnlyInode,
+        planned_at_ms: u64,
+    ) -> Result<ObservedLocalOnlyInodeResult, StateDbError> {
+        self.planner_transaction("observe_local_only_inode_under_parent_and_plan", |tx| {
+            tx.observe_local_only_inode_under_parent_and_plan(observed, planned_at_ms)
         })
     }
 
@@ -1242,6 +1262,91 @@ impl PlannerTxn<'_> {
         };
         self.upsert_local_only_file(&row)?;
         Ok(row)
+    }
+
+    pub fn observe_bound_inode_and_plan(
+        &mut self,
+        observed: &ObservedBoundInode,
+        planned_at_ms: u64,
+    ) -> Result<crate::planner::PlannedActionRecord, StateDbError> {
+        let views = self.load_file_sync_views(&observed.namespace_id, observed.inode_id)?;
+        if views.remote.is_none() && views.sync_anchor.is_none() {
+            return Err(StateDbError::BoundObservationMissing {
+                namespace_id: observed.namespace_id.as_str().to_owned(),
+                inode_id: observed.inode_id.0,
+            });
+        }
+
+        self.upsert_local_file(&LocalFileStateRow {
+            namespace_id: observed.namespace_id.clone(),
+            inode_id: observed.inode_id,
+            inode_kind: observed.inode_kind.clone(),
+            content_digest: observed.content_digest.clone(),
+            parent_inode_id: observed.parent_inode_id,
+            display_name: observed.display_name.clone(),
+            exists_on_disk: observed.exists_on_disk,
+            dirty: observed.dirty,
+            last_local_change_ms: observed.last_local_change_ms,
+        })?;
+
+        plan_file_in_tx(
+            self,
+            &observed.namespace_id,
+            observed.inode_id,
+            planned_at_ms,
+        )
+    }
+
+    pub fn observe_local_only_inode_under_parent_and_plan(
+        &mut self,
+        observed: &ObservedLocalOnlyInode,
+        planned_at_ms: u64,
+    ) -> Result<ObservedLocalOnlyInodeResult, StateDbError> {
+        self.ensure_bound_parent_directory(&observed.namespace_id, observed.parent_inode_id)?;
+
+        let matches = self.load_local_only_rows_by_parent_and_name(
+            &observed.namespace_id,
+            observed.parent_inode_id,
+            &observed.display_name,
+        )?;
+
+        let (client_file_id, reused_existing_identity) = match matches.as_slice() {
+            [] => (self.allocate_local_file_id(&observed.namespace_id)?, false),
+            [existing] => (existing.client_file_id.clone(), true),
+            _ => {
+                return Err(StateDbError::LocalOnlyObservationAmbiguous {
+                    namespace_id: observed.namespace_id.as_str().to_owned(),
+                    parent_inode_id: observed.parent_inode_id.0,
+                    display_name: observed.display_name.clone(),
+                })
+            }
+        };
+
+        let row = LocalOnlyFileStateRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: observed.namespace_id.clone(),
+            inode_kind: observed.inode_kind.clone(),
+            parent_inode_id: Some(observed.parent_inode_id),
+            display_name: observed.display_name.clone(),
+            content_digest: observed.content_digest.clone(),
+            exists_on_disk: observed.exists_on_disk,
+            dirty: observed.dirty,
+            last_local_change_ms: observed.last_local_change_ms,
+        };
+        self.upsert_local_only_file(&row)?;
+
+        let action = decide_local_only_inode_action(&row, planned_at_ms)?;
+        if action.decision == crate::planner::PlannerDecision::NoOp {
+            self.delete_planned_local_only_action(&client_file_id)?;
+        } else {
+            self.upsert_planned_local_only_action(&action.to_row())?;
+        }
+
+        Ok(ObservedLocalOnlyInodeResult {
+            local_only: row,
+            planned_action: action,
+            reused_existing_identity,
+        })
     }
 
     pub fn record_local_only_upload(
@@ -3274,6 +3379,59 @@ impl PlannerTxn<'_> {
         }
 
         Ok(())
+    }
+
+    fn load_local_only_rows_by_parent_and_name(
+        &self,
+        namespace_id: &NamespaceId,
+        parent_inode_id: InodeId,
+        display_name: &str,
+    ) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT
+                client_file_id,
+                namespace_id,
+                inode_kind,
+                parent_inode_id,
+                display_name,
+                content_digest,
+                exists_on_disk,
+                dirty,
+                last_local_change_ms
+            FROM local_only_state
+            WHERE namespace_id = ?1
+              AND parent_inode_id = ?2
+              AND display_name = ?3
+            ORDER BY client_file_id",
+        )?;
+        let rows = stmt.query_map(
+            params![namespace_id.as_str(), parent_inode_id.0, display_name],
+            |row| {
+                let client_file_id = row.get::<_, String>(0)?;
+                let namespace_id = row.get::<_, String>(1)?;
+                let inode_kind = row.get::<_, String>(2)?;
+                Ok(LocalOnlyFileStateRow {
+                    client_file_id: ClientFileId::from(client_file_id.as_str()),
+                    namespace_id: NamespaceId::from(namespace_id.as_str()),
+                    inode_kind: inode_kind_from_str(&inode_kind).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })?,
+                    parent_inode_id: row.get::<_, Option<u64>>(3)?.map(InodeId),
+                    display_name: row.get(4)?,
+                    content_digest: row.get(5)?,
+                    exists_on_disk: row.get(6)?,
+                    dirty: row.get(7)?,
+                    last_local_change_ms: row.get(8)?,
+                })
+            },
+        )?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateDbError::from)
     }
 
     pub fn load_bound_upload_local_edit_views(

@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod import;
+mod observe;
+mod paths;
+mod sync;
 
 use anyhow::{anyhow, bail, Context, Result};
 use loon_client::state_db::{ClientNamespaceStateSummary, SqliteStateDb};
@@ -21,6 +24,8 @@ pub use import::{
     import_authoritative_remote_observations, AuthoritativeObservationImportError,
     AuthoritativeObservationImportReport,
 };
+pub use observe::{observe_local_path, ObserveLocalError, ObserveLocalKind, ObserveLocalReport};
+pub use sync::{sync_once, SyncOnceError, SyncOnceOutcome, SyncOnceReport};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpsConfig {
@@ -102,6 +107,15 @@ pub enum OpsCommand {
         config_path: PathBuf,
         namespace_id: NamespaceId,
     },
+    ObserveLocal {
+        config_path: PathBuf,
+        namespace_id: NamespaceId,
+        path: PathBuf,
+    },
+    SyncOnce {
+        config_path: PathBuf,
+        namespace_id: NamespaceId,
+    },
     Smoke {
         config_path: PathBuf,
         namespace_id: NamespaceId,
@@ -172,6 +186,23 @@ pub fn run_command(command: OpsCommand) -> Result<String> {
                 config.now_ms(),
             )?;
             render_authoritative_import_report(&report)
+        }
+        OpsCommand::ObserveLocal {
+            config_path,
+            namespace_id,
+            path,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let report = observe::observe_local_path(&config, &namespace_id, &path)?;
+            observe::render_observe_local_report(&report)
+        }
+        OpsCommand::SyncOnce {
+            config_path,
+            namespace_id,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let report = sync::sync_once(&config, &namespace_id)?;
+            sync::render_sync_once_report(&report)
         }
         OpsCommand::Smoke {
             config_path,
@@ -294,6 +325,21 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<OpsCommand> {
                 namespace_id: parsed.namespace_id,
             })
         }
+        Some("observe-local") => {
+            let parsed = parse_common_args_with_path(args)?;
+            Ok(OpsCommand::ObserveLocal {
+                config_path: parsed.config_path,
+                namespace_id: parsed.namespace_id,
+                path: parsed.path,
+            })
+        }
+        Some("sync-once") => {
+            let parsed = parse_common_args(args, false)?;
+            Ok(OpsCommand::SyncOnce {
+                config_path: parsed.config_path,
+                namespace_id: parsed.namespace_id,
+            })
+        }
         Some("smoke") => {
             let parsed = parse_common_args(args, false)?;
             Ok(OpsCommand::Smoke {
@@ -303,7 +349,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<OpsCommand> {
         }
         Some(other) => bail!("unknown ops subcommand: {other}"),
         None => bail!(
-            "usage: ops <bootstrap-namespace|show-namespace-state|show-client-state|import-remote-observations|smoke> --config <path> --namespace <id> [--allow-existing]"
+            "usage: ops <bootstrap-namespace|show-namespace-state|show-client-state|import-remote-observations|observe-local|sync-once|smoke> --config <path> --namespace <id> [--allow-existing] [--path <path>]"
         ),
     }
 }
@@ -367,6 +413,12 @@ struct CommonArgs {
     allow_existing: bool,
 }
 
+struct CommonArgsWithPath {
+    config_path: PathBuf,
+    namespace_id: NamespaceId,
+    path: PathBuf,
+}
+
 fn parse_common_args(
     mut args: impl Iterator<Item = String>,
     allow_allow_existing: bool,
@@ -402,10 +454,60 @@ fn parse_common_args(
     })
 }
 
+fn parse_common_args_with_path(
+    mut args: impl Iterator<Item = String>,
+) -> Result<CommonArgsWithPath> {
+    let mut config_path = None;
+    let mut namespace_id = None;
+    let mut path = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                config_path = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --config"))?
+                        .into(),
+                );
+            }
+            "--namespace" => {
+                namespace_id = Some(NamespaceId::from(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --namespace"))?,
+                ));
+            }
+            "--path" => {
+                path = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --path"))?
+                        .into(),
+                );
+            }
+            other => bail!("unexpected ops argument: {other}"),
+        }
+    }
+
+    Ok(CommonArgsWithPath {
+        config_path: config_path.ok_or_else(|| anyhow!("missing --config"))?,
+        namespace_id: namespace_id.ok_or_else(|| anyhow!("missing --namespace"))?,
+        path: path.ok_or_else(|| anyhow!("missing --path"))?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{run_args, OpsConfig};
-    use loon_client::state_db::SqliteStateDb;
+    use loon_client::state_db::{
+        LocalFileStateRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
+    };
+    use loon_client::upload::upload_small_file_from_path;
+    use loon_core::checkpoint::prepare_checkpoint;
+    use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
+    use loon_objectstore::keys::{namespace_head, namespace_lease};
+    use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
+    use loon_types::{
+        ChangeSeq, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
+        LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -587,6 +689,226 @@ lease_duration_ms = 60000
         );
     }
 
+    #[test]
+    fn observe_local_rejects_path_outside_mirror_root() {
+        let temp_dir = unique_temp_dir("ops-observe-outside-root");
+        let config_path = write_local_fs_config(&temp_dir);
+        let _db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        let outside_path = temp_dir.join("outside.txt");
+        fs::write(&outside_path, b"hello from outside root\n").expect("write outside file");
+
+        let error = run_args([
+            "observe-local".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            outside_path.display().to_string(),
+        ])
+        .expect_err("observe-local should reject path outside mirror_root");
+
+        assert!(
+            error
+                .to_string()
+                .contains("observe-local path is outside mirror_root"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn observe_local_rejects_directory_path() {
+        let temp_dir = unique_temp_dir("ops-observe-dir");
+        let config_path = write_local_fs_config(&temp_dir);
+        let _db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+
+        let error = run_args([
+            "observe-local".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect_err("observe-local should reject directory path");
+
+        assert!(
+            error
+                .to_string()
+                .contains("observe-local requires an existing file path, got directory"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn observe_local_bound_file_renders_upload_local_edit_report() {
+        let temp_dir = unique_temp_dir("ops-observe-bound-file");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            "sha256:remote-hello-v1",
+            "sha256:manifest-remote-hello-v1",
+        );
+        fs::write(
+            temp_dir.join("mirror/hello.txt"),
+            b"hello from local edit\n",
+        )
+        .expect("write bound file bytes");
+
+        let rendered = run_args([
+            "observe-local".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+        ])
+        .expect("run observe-local on bound file");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-local/ops_observe_local_bound_file.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn observe_local_local_only_file_renders_upload_local_create_report() {
+        let temp_dir = unique_temp_dir("ops-observe-local-only");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        fs::write(temp_dir.join("mirror/draft.txt"), b"draft local file\n")
+            .expect("write local-only file bytes");
+
+        let rendered = run_args([
+            "observe-local".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/draft.txt").display().to_string(),
+        ])
+        .expect("run observe-local on local-only file");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-local/ops_observe_local_local_only_file.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn sync_once_returns_no_work_for_idle_client() {
+        let temp_dir = unique_temp_dir("ops-sync-once-idle");
+        let config_path = write_local_fs_config(&temp_dir);
+        let _db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+
+        let rendered = run_args([
+            "sync-once".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-once on idle client");
+
+        assert_eq!(
+            rendered,
+            include_str!("../../../tests/snapshots/ops-sync-once/ops_sync_once_no_work.txt")
+        );
+    }
+
+    #[test]
+    fn sync_once_can_progress_non_dispatch_materialization_action() {
+        let temp_dir = unique_temp_dir("ops-sync-once-materialize");
+        let config_path = write_local_fs_config(&temp_dir);
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_remote_only_root_materialization(&mut db, NamespaceId::from("demo"));
+
+        let rendered = run_args([
+            "sync-once".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-once after import");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-sync-once/ops_sync_once_materialize_remote_dir.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn sync_once_can_commit_local_edit_through_real_client_server_path() {
+        let temp_dir = unique_temp_dir("ops-sync-once-local-edit");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_single_file_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+            "hello.txt",
+            b"v1\n",
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+
+        fs::write(
+            temp_dir.join("mirror/hello.txt"),
+            b"hello from local edit\n",
+        )
+        .expect("write local edit file");
+        run_args([
+            "observe-local".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+        ])
+        .expect("observe local edit");
+
+        let rendered = run_args([
+            "sync-once".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-once for local edit");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-sync-once/ops_sync_once_request_committed_upload_local_edit.txt"
+            )
+        );
+    }
+
     fn load_config(contents: &str) -> OpsConfig {
         toml::from_str(contents).expect("parse config")
     }
@@ -621,6 +943,236 @@ now_ms = 1000
         .expect("write config");
         fs::create_dir_all(temp_dir.join("mirror")).expect("create mirror root");
         config_path
+    }
+
+    fn seed_bound_root_directory(db: &mut SqliteStateDb, namespace_id: NamespaceId) {
+        db.planner_transaction("seed-bound-root-directory", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: String::new(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: None,
+                display_name: String::new(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id,
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: String::new(),
+            })?;
+            Ok(())
+        })
+        .expect("seed bound root directory");
+    }
+
+    fn seed_bound_file(
+        db: &mut SqliteStateDb,
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+        display_name: &str,
+        content_digest: &str,
+        content_manifest_digest: &str,
+    ) {
+        db.planner_transaction("seed-bound-file", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(content_digest.to_owned()),
+                content_manifest_digest: Some(content_manifest_digest.to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: display_name.to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::File,
+                content_digest: Some(content_digest.to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: display_name.to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id,
+                inode_id,
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(content_digest.to_owned()),
+                content_manifest_digest: Some(content_manifest_digest.to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: display_name.to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed bound file");
+    }
+
+    fn seed_remote_only_root_materialization(db: &mut SqliteStateDb, namespace_id: NamespaceId) {
+        db.planner_transaction("seed-remote-only-root-materialization", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: String::new(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: None,
+                display_name: String::new(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 0,
+            })?;
+            tx.upsert_planned_action(&loon_client::state_db::PlannedActionRow {
+                namespace_id,
+                inode_id: InodeId(1),
+                decision: "materialize_remote_dir".to_owned(),
+                reason: "remote_observed_without_anchor".to_owned(),
+                created_at_ms: 1_000,
+            })?;
+            Ok(())
+        })
+        .expect("seed remote-only root materialization");
+    }
+
+    #[derive(Debug, Clone)]
+    struct SeededAuthoritativeSnapshot {
+        file_digest: String,
+        manifest_digest: String,
+    }
+
+    fn seed_authoritative_single_file_snapshot(
+        store_root: &Path,
+        namespace_id: &NamespaceId,
+        display_name: &str,
+        contents: &[u8],
+    ) -> SeededAuthoritativeSnapshot {
+        let store = ConfiguredObjectStore::local_fs(store_root, Some("tenant-a"))
+            .expect("create configured store");
+        let source_path = store_root.join("seed-source.txt");
+        fs::write(&source_path, contents).expect("write seed source");
+        let uploaded = upload_small_file_from_path(&store, namespace_id, &source_path)
+            .expect("upload seed content");
+
+        let metadata = MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+            ],
+            direntries: vec![DirentryRecord {
+                parent_inode_id: InodeId(1),
+                name_key: display_name.to_owned(),
+                display_name: display_name.to_owned(),
+                child_inode_id: InodeId(2),
+                bind_seq: ChangeSeq(1),
+                bind_op_index: 0,
+            }],
+            revisions: vec![RevisionRecord {
+                inode_id: InodeId(2),
+                revision_no: RevisionNo(1),
+                committed_seq: ChangeSeq(1),
+                revision_op_index: 0,
+                content_manifest_digest: uploaded.content_manifest_digest.clone(),
+            }],
+            subtree_tombstones: Vec::new(),
+        };
+        let head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(1),
+            active_fence_token: FenceToken(0),
+            next_inode_id: InodeId(3),
+            snapshot_hint_seq: Some(ChangeSeq(1)),
+            retention_floor_seq: ChangeSeq(0),
+        };
+        let lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(0),
+            lease_expires_at_ms: 60_000,
+        };
+        let checkpoint =
+            prepare_checkpoint(&head, &metadata, "loon-ops-test").expect("prepare checkpoint");
+        store
+            .put_overwrite(
+                &checkpoint.manifest.object_key,
+                &checkpoint.manifest.encoded_bytes,
+            )
+            .expect("write checkpoint manifest");
+        for segment in &checkpoint.segments {
+            store
+                .put_overwrite(&segment.object_key, &segment.encoded_bytes)
+                .expect("write checkpoint segment");
+        }
+        let head_envelope =
+            HeadStateEnvelope::from_state(ControlObjectKind::NamespaceHead, "loon-ops-test", head)
+                .expect("encode head envelope");
+        let lease_envelope = LeaseStateEnvelope::from_state(
+            ControlObjectKind::NamespaceLease,
+            "loon-ops-test",
+            lease,
+        )
+        .expect("encode lease envelope");
+        store
+            .put_overwrite(
+                &namespace_head(namespace_id.as_str()),
+                &serde_json::to_vec(&head_envelope).expect("serialize head envelope"),
+            )
+            .expect("write head object");
+        store
+            .put_overwrite(
+                &namespace_lease(namespace_id.as_str()),
+                &serde_json::to_vec(&lease_envelope).expect("serialize lease envelope"),
+            )
+            .expect("write lease object");
+
+        SeededAuthoritativeSnapshot {
+            file_digest: uploaded.file_digest_sha256,
+            manifest_digest: uploaded.content_manifest_digest,
+        }
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {

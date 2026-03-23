@@ -63,6 +63,36 @@ pub fn response_after_newer_observation_is_idempotent(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn bound_file_observation_plans_upload_local_edit(
+    planned_decision: &str,
+    exists_on_disk: bool,
+    dirty: bool,
+) -> bool {
+    exists_on_disk && dirty && planned_decision == "upload_local_edit"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn local_only_observation_under_bound_parent_plans_upload_local_create(
+    planned_decision: &str,
+    parent_is_bound_directory: bool,
+    exists_on_disk: bool,
+    dirty: bool,
+) -> bool {
+    parent_is_bound_directory
+        && exists_on_disk
+        && dirty
+        && planned_decision == "upload_local_create"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn repeated_local_only_observation_reuses_identity(
+    first_client_file_id: &str,
+    second_client_file_id: &str,
+) -> bool {
+    !first_client_file_id.is_empty() && first_client_file_id == second_client_file_id
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn authoritative_snapshot_import_discovers_remote_only_state(
     translated_observation_count: usize,
     discovered_remote_only_count: usize,

@@ -14,6 +14,8 @@ Rendered scenario traces and summaries live here, grouped by the xtask command t
 - `ops-show-namespace-state/`
 - `ops-show-client-state/`
 - `ops-import-remote-observations/`
+- `ops-observe-local/`
+- `ops-sync-once/`
 - `ops-smoke/`
 - `sim-interleavings/`
 - `sim-explore/`

@@ -2,7 +2,9 @@ use super::*;
 use crate::client::{
     authoritative_snapshot_import_batch_rollback_is_atomic,
     authoritative_snapshot_import_discovers_remote_only_state,
-    authoritative_snapshot_import_is_idempotent,
+    authoritative_snapshot_import_is_idempotent, bound_file_observation_plans_upload_local_edit,
+    local_only_observation_under_bound_parent_plans_upload_local_create,
+    repeated_local_only_observation_reuses_identity,
 };
 use loon_types::{
     ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
@@ -126,6 +128,52 @@ fn model_create_file_advances_next_inode_id() {
 
     assert_eq!(ns.head_seq, ChangeSeq(1));
     assert_eq!(ns.next_inode_id, InodeId(8));
+}
+
+#[test]
+fn model_bound_file_observation_plans_upload_local_edit() {
+    assert!(bound_file_observation_plans_upload_local_edit(
+        "upload_local_edit",
+        true,
+        true
+    ));
+    assert!(!bound_file_observation_plans_upload_local_edit(
+        "download_remote_edit",
+        true,
+        true
+    ));
+}
+
+#[test]
+fn model_local_only_observation_under_bound_parent_plans_upload_local_create() {
+    assert!(
+        local_only_observation_under_bound_parent_plans_upload_local_create(
+            "upload_local_create",
+            true,
+            true,
+            true
+        )
+    );
+    assert!(
+        !local_only_observation_under_bound_parent_plans_upload_local_create(
+            "upload_local_create",
+            false,
+            true,
+            true
+        )
+    );
+}
+
+#[test]
+fn model_repeated_local_only_observation_reuses_temp_identity() {
+    assert!(repeated_local_only_observation_reuses_identity(
+        "tmp:ns-1:00000000000000000001",
+        "tmp:ns-1:00000000000000000001"
+    ));
+    assert!(!repeated_local_only_observation_reuses_identity(
+        "tmp:ns-1:00000000000000000001",
+        "tmp:ns-1:00000000000000000002"
+    ));
 }
 
 #[test]

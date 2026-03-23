@@ -1,10 +1,11 @@
 use super::{
     AppliedRemoteObservation, BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow,
     LocalOnlyConflictOrErrorRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, ObservedLocalOnlyInode,
+    LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, ObservedBoundInode, ObservedLocalOnlyInode,
     PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError,
     SyncAnchorRow, TransferDirection, TransferLedgerRow, TransferState, SCHEMA_VERSION,
 };
+use crate::planner::{PlannedActionRecord, PlannedLocalOnlyActionRecord};
 use crate::upload::UploadedContent;
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
@@ -1172,6 +1173,235 @@ fn observe_local_only_inode_under_parent_rejects_unbound_parent() {
             ..
         }
     ));
+}
+
+#[test]
+fn observe_bound_inode_and_plan_updates_local_state_and_replans() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    db.planner_transaction("seed-bound-file", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(41),
+            revision_no: RevisionNo(2),
+            content_digest: Some("sha256:remote-note".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-remote-note".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "note.txt".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:remote-note".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "note.txt".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_200_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
+            synced_seq: ChangeSeq(41),
+            revision_no: RevisionNo(2),
+            content_digest: Some("sha256:remote-note".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-remote-note".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "note.txt".to_owned(),
+        })?;
+        Ok(())
+    })
+    .expect("seed bound file");
+
+    let planned = db
+        .observe_bound_inode_and_plan(
+            &ObservedBoundInode {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_id: InodeId(42),
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:local-note".to_owned()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_700_000_300_000,
+            },
+            1_700_000_300_001,
+        )
+        .expect("observe bound inode and plan");
+
+    assert_eq!(
+        db.load_file_sync_views(&NamespaceId::from("ns-1"), InodeId(42))
+            .expect("load sync views")
+            .local,
+        Some(LocalFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:local-note".to_owned()),
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "note.txt".to_owned(),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_300_000,
+        })
+    );
+    assert_eq!(
+        planned,
+        PlannedActionRecord {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(42),
+            decision: crate::planner::PlannerDecision::UploadLocalEdit,
+            reason: crate::planner::PlannerReason::LocalDiffersFromAnchor,
+            created_at_ms: 1_700_000_300_001,
+        }
+    );
+    assert_eq!(
+        db.load_planned_action(&NamespaceId::from("ns-1"), InodeId(42))
+            .expect("load planned action"),
+        Some(planned.to_row())
+    );
+}
+
+#[test]
+fn observe_local_only_inode_under_parent_and_plan_reuses_existing_identity() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_bound_directory_parent(&mut db, InodeId(902));
+    let existing_client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000001");
+    seed_local_only_rows(
+        &mut db,
+        &[LocalOnlyFileStateRow {
+            client_file_id: existing_client_file_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::File,
+            parent_inode_id: Some(InodeId(902)),
+            display_name: "note.txt".to_owned(),
+            content_digest: Some("sha256:old-child-note".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_250_000,
+        }],
+    );
+
+    let result = db
+        .observe_local_only_inode_under_parent_and_plan(
+            &ObservedLocalOnlyInode {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_kind: InodeKind::File,
+                parent_inode_id: InodeId(902),
+                display_name: "note.txt".to_owned(),
+                content_digest: Some("sha256:new-child-note".to_owned()),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_700_000_300_000,
+            },
+            1_700_000_300_001,
+        )
+        .expect("observe local-only child and plan");
+
+    assert!(result.reused_existing_identity);
+    assert_eq!(result.local_only.client_file_id, existing_client_file_id);
+    assert_eq!(
+        result.planned_action,
+        PlannedLocalOnlyActionRecord {
+            client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            namespace_id: NamespaceId::from("ns-1"),
+            decision: crate::planner::PlannerDecision::UploadLocalCreate,
+            reason: crate::planner::PlannerReason::LocalOnlyFileWithoutRemoteIdentity,
+            created_at_ms: 1_700_000_300_001,
+        }
+    );
+    assert_eq!(
+        db.load_local_only_file(&ClientFileId::from("tmp:ns-1:00000000000000000001"))
+            .expect("load local-only row"),
+        Some(LocalOnlyFileStateRow {
+            client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::File,
+            parent_inode_id: Some(InodeId(902)),
+            display_name: "note.txt".to_owned(),
+            content_digest: Some("sha256:new-child-note".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_300_000,
+        })
+    );
+    assert_eq!(
+        db.load_planned_local_only_action(&ClientFileId::from("tmp:ns-1:00000000000000000001"))
+            .expect("load local-only plan"),
+        Some(result.planned_action.to_row())
+    );
+}
+
+#[test]
+fn observe_local_only_inode_under_parent_and_plan_rejects_ambiguous_existing_identity() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_bound_directory_parent(&mut db, InodeId(902));
+    seed_local_only_rows(
+        &mut db,
+        &[
+            LocalOnlyFileStateRow {
+                client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_kind: InodeKind::File,
+                parent_inode_id: Some(InodeId(902)),
+                display_name: "note.txt".to_owned(),
+                content_digest: Some("sha256:first".to_owned()),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_700_000_250_000,
+            },
+            LocalOnlyFileStateRow {
+                client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000002"),
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_kind: InodeKind::File,
+                parent_inode_id: Some(InodeId(902)),
+                display_name: "note.txt".to_owned(),
+                content_digest: Some("sha256:second".to_owned()),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_700_000_250_100,
+            },
+        ],
+    );
+
+    let error = db
+        .observe_local_only_inode_under_parent_and_plan(
+            &ObservedLocalOnlyInode {
+                namespace_id: NamespaceId::from("ns-1"),
+                inode_kind: InodeKind::File,
+                parent_inode_id: InodeId(902),
+                display_name: "note.txt".to_owned(),
+                content_digest: Some("sha256:new-child-note".to_owned()),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_700_000_300_000,
+            },
+            1_700_000_300_001,
+        )
+        .expect_err("ambiguous local-only observation should fail");
+
+    assert!(matches!(
+        error,
+        StateDbError::LocalOnlyObservationAmbiguous {
+            parent_inode_id: 902,
+            ..
+        }
+    ));
+    assert_eq!(
+        db.load_planned_local_only_action(&ClientFileId::from("tmp:ns-1:00000000000000000001"))
+            .expect("load first plan"),
+        None
+    );
+    assert_eq!(
+        db.load_planned_local_only_action(&ClientFileId::from("tmp:ns-1:00000000000000000002"))
+            .expect("load second plan"),
+        None
+    );
 }
 
 #[test]

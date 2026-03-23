@@ -295,6 +295,96 @@ Failure modes named for the first implementation:
 - `local_only_parent_not_directory`
 - `local_only_parent_not_bound`
 
+## Supported local observation API
+
+The first supported shell-facing local observation surface stays intentionally small.
+
+It supports only existing local files through two library entrypoints:
+
+- `observe_bound_inode_and_plan`
+- `observe_local_only_inode_under_parent_and_plan`
+
+Rules:
+
+- these entrypoints belong to `loon-client`, not to `xtask`
+- both must perform local-state persistence and planner output replacement in one SQLite
+  transaction
+- both preserve canonical inode-keyed or temporary-id-keyed durable identity; neither infers
+  identity from a path alone
+- this slice does not infer local delete, rename, or move
+
+Why this rule exists:
+
+- future `xtask` and future `loon-cli` should call one supported client observation surface
+- local observation and planner replacement should not become a best-effort multi-step shell flow
+
+Failure modes prevented:
+
+- shell code persisting local state without replanning
+- duplicate temporary identities for the same local-only child after repeated observation
+- different frontends inventing different path-classification rules
+
+## Bound inode observation and replan
+
+For one already-bound inode, the supported observation API takes:
+
+- `namespace_id`
+- `inode_id`
+- `inode_kind`
+- observed local content/path view fields
+- `planned_at_ms`
+
+One successful bound observation must, in one SQLite transaction:
+
+1. validate that the inode is already known as bound durable state
+2. upsert the current `local_state(namespace_id, inode_id)` row
+3. derive the next file planner decision against the current `remote_state`, `local_state`, and
+   `sync_anchor`
+4. replace or clear `planned_actions(namespace_id, inode_id)` for that inode
+
+Rules:
+
+- caller order is preserved; the API does not reorder observations
+- the planner decision is the normal bound-file decision for that inode, not a special
+  shell-specific decision
+- the first shell slice uses this only for `file` observations at the current bound path
+
+Failure modes named for the first implementation:
+
+- `bound_observation_missing`
+
+## Repeated local-only child observation and replan
+
+For one local-only child beneath a still-bound parent directory, the supported observation API
+must reuse durable temporary identity when the tuple
+`(namespace_id, parent_inode_id, display_name)` already matches an existing local-only row.
+
+One successful local-only child observation must, in one SQLite transaction:
+
+1. validate that the parent is still bound and is a directory
+2. load any existing local-only row with the same
+   `(namespace_id, parent_inode_id, display_name)`
+3. if exactly one row exists, reuse its `client_file_id`
+4. if no row exists, allocate a fresh `client_file_id`
+5. upsert the observed `local_only_state(client_file_id)` row
+6. derive the next local-only planner decision for that same `client_file_id`
+7. replace or clear `planned_local_only_actions(client_file_id)` for that temp identity
+
+Rules:
+
+- repeated observation of the same local-only path must not create duplicate temp identities
+- this slice only supports file-first shell observation, but the durable API stays kind-aware
+- the planner decision is still the ordinary local-only decision:
+  - `upload_local_create` for dirty files that exist on disk
+  - `create_remote_dir` for existing local-only directories
+
+Failure modes named for the first implementation:
+
+- `local_only_parent_missing`
+- `local_only_parent_not_directory`
+- `local_only_parent_not_bound`
+- `local_only_observation_ambiguous`
+
 ## First durable content upload path
 
 Before the client can publish `create_file`, it must turn one observed local file into
@@ -418,6 +508,41 @@ Rules:
 - for `create_file`, the executor must load `content_manifest_digest` from the durable
   `local_only_uploads(client_file_id)` row, not from caller memory and not from the local observed
   file digest
+
+## Supported single-step sync shell composition
+
+The first shell-facing sync command is `sync-once`.
+
+Rules:
+
+- it is a thin composition layer over `execute_next_client_action`
+- it executes at most one real client scheduler step
+- it does not become `sync-until-idle` in this slice
+- it does not implicitly import authoritative remote observations
+
+Path resolution policy for the first shell slice:
+
+- current/source path prefers `local_state`, then `sync_anchor`, then `remote_state`
+- target path prefers `remote_state`, then `sync_anchor`, then `local_state`
+- all resolved paths are joined under configured `mirror_root`
+
+Dispatch policy for the first shell slice:
+
+- the shell uses the real server mutation path
+- one dispatched client request is executed by the authoritative side immediately
+- the real client response application path handles the result
+- if the next selected planner decision is not executable through the current real scheduler
+  surface, the shell must fail closed instead of pretending it made progress
+
+Why this rule exists:
+
+- local operability should reuse the same scheduler and mutation contracts as tests and later CLI
+- a thin shell should not become a second sync engine
+
+Failure modes prevented:
+
+- a shell-specific upload-only fast path that bypasses planner ordering
+- hidden implicit remote refresh during a supposedly single-step local sync command
 - for `replace_file`, the executor must load `content_manifest_digest` from a durable inode-keyed
   upload row, not from caller memory and not from the local observed file digest
 - `replace_file` must carry canonical `inode_id` plus the current bound `base_revision_no`, never

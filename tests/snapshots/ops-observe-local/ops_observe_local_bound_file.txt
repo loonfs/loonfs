@@ -1,0 +1,15 @@
+command=ops/observe-local
+namespace=demo
+relative_path=hello.txt
+observation_kind=bound_file
+planned_decision=upload_local_edit
+---
+namespace_id: demo
+relative_path: hello.txt
+observation_kind: bound_file
+content_digest: sha256:2ce23785f30e11028b712199b942efafe7e1da43664c811ea91c115d26c57007
+planned_decision: upload_local_edit
+planned_reason: local_differs_from_anchor
+inode_id: 2
+client_file_id: null
+reused_existing_identity: null
