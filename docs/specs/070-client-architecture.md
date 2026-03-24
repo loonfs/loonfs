@@ -345,7 +345,7 @@ Rules:
   - local-only file/dir exact match first
   - then bound file/dir exact match
   - otherwise fail closed
-- this slice still does not add a watcher or move inference
+- this slice still does not add a watcher
 
 Why this rule exists:
 
@@ -379,9 +379,19 @@ Rules:
   - `local_state`
   - `local_only_state`
 - remote-only rows are not candidates for subtree local delete detection
-- move inference remains out of scope:
-  - subtree scan never rewrites one delete plus one create into a rename
-  - explicit `observe-move` remains the only supported rename/move observation path
+- subtree scan may infer file-only moves when all of the following are true:
+  - one missing tracked file and one unmatched present file form a unique candidate pair
+  - the source and target content digests match exactly
+  - the destination parent is valid for the source class
+- directory move inference remains out of scope:
+  - subtree scan never rewrites directory create/delete pairs into a rename
+  - explicit `observe-move` remains the supported directory rename/move path
+- ambiguity fails closed:
+  - if one missing tracked file can pair with multiple present files, fail the scan
+  - if one present file can pair with multiple missing tracked files, fail the scan
+- move-plus-edit remains out of scope:
+  - subtree scan does not infer rename when the content digest changed
+  - non-qualifying candidates continue to behave as create plus delete
 
 Why this rule exists:
 
@@ -394,6 +404,7 @@ Failure modes prevented:
 - persisting half a scanned tree when a later observation in the same scan is invalid
 - recreating nested unsynced files under duplicate temporary identities during one recursive scan
 - inferring a rename from unrelated create/delete pairs
+- silently guessing between multiple same-digest move candidates
 
 ## Bound delete observation and replan
 

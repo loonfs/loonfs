@@ -12,6 +12,8 @@ scanned_dir_count: 2
 applied_operation_count: 3
 bound_observe_count: 1
 local_only_observe_count: 2
+paired_bound_move_count: 0
+paired_local_only_move_count: 0
 bound_delete_count: 0
 local_only_delete_count: 0
 planned_decision_counts:

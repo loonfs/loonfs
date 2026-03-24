@@ -1673,6 +1673,18 @@ impl PlannerTxn<'_> {
                         planned_action: planned,
                     });
                 }
+                SubtreeObservationOp::MoveBound {
+                    from_relative_path,
+                    observed,
+                } => {
+                    let planned = self.observe_bound_inode_and_plan(observed, planned_at_ms)?;
+                    outcomes.push(SubtreeObservationOutcome::MovedBound {
+                        from_relative_path: from_relative_path.clone(),
+                        inode_id: observed.inode_id,
+                        inode_kind: observed.inode_kind.clone(),
+                        planned_action: planned,
+                    });
+                }
                 SubtreeObservationOp::ObserveLocalOnly { observed } => {
                     let resolved_parent = match &observed.parent {
                         SubtreeLocalOnlyParentRef::Bound { parent_inode_id } => {
@@ -1708,6 +1720,52 @@ impl PlannerTxn<'_> {
                         result.local_only.client_file_id.clone(),
                     );
                     outcomes.push(SubtreeObservationOutcome::ObservedLocalOnly {
+                        relative_path: observed.relative_path.clone(),
+                        result,
+                    });
+                }
+                SubtreeObservationOp::MoveLocalOnly { observed } => {
+                    let resolved_parent = match &observed.parent {
+                        SubtreeLocalOnlyParentRef::Bound { parent_inode_id } => {
+                            LocalOnlyParentRef::Bound {
+                                parent_inode_id: *parent_inode_id,
+                            }
+                        }
+                        SubtreeLocalOnlyParentRef::ExistingLocalOnly {
+                            parent_client_file_id,
+                        } => LocalOnlyParentRef::LocalOnly {
+                            parent_client_file_id: parent_client_file_id.clone(),
+                        },
+                        SubtreeLocalOnlyParentRef::BatchLocalOnly {
+                            parent_relative_path,
+                        } => LocalOnlyParentRef::LocalOnly {
+                            parent_client_file_id: batch_local_only_ids
+                                .get(parent_relative_path)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    StateDbError::SubtreeObservationBatchParentMissing {
+                                        parent_relative_path: parent_relative_path.clone(),
+                                    }
+                                })?,
+                        },
+                    };
+                    let result = self.observe_local_only_move_and_plan(
+                        &observed.client_file_id,
+                        &resolved_parent,
+                        observed.inode_kind.clone(),
+                        &observed.display_name,
+                        observed.content_digest.clone(),
+                        observed.exists_on_disk,
+                        observed.dirty,
+                        observed.last_local_change_ms,
+                        planned_at_ms,
+                    )?;
+                    batch_local_only_ids.insert(
+                        observed.relative_path.clone(),
+                        result.local_only.client_file_id.clone(),
+                    );
+                    outcomes.push(SubtreeObservationOutcome::MovedLocalOnly {
+                        from_relative_path: observed.from_relative_path.clone(),
                         relative_path: observed.relative_path.clone(),
                         result,
                     });

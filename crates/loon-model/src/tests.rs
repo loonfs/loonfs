@@ -8,11 +8,16 @@ use crate::client::{
     bound_file_observation_plans_upload_local_edit, bound_move_observation_plans_rename,
     local_only_delete_clears_temp_state, local_only_move_preserves_identity,
     local_only_observation_under_bound_parent_plans_upload_local_create,
+    recursive_subtree_ambiguous_file_pairing_fails_closed,
+    recursive_subtree_changed_digest_file_does_not_pair,
+    recursive_subtree_directory_move_does_not_pair,
     recursive_subtree_missing_bound_directory_plans_delete_subtree,
     recursive_subtree_missing_bound_file_plans_delete_file,
     recursive_subtree_missing_local_only_directory_clears_subtree,
     recursive_subtree_observation_updates_bound_edit_and_local_only_create,
     recursive_subtree_repeat_reuses_local_only_identity,
+    recursive_subtree_unique_bound_file_move_is_paired,
+    recursive_subtree_unique_local_only_file_move_preserves_identity,
     repeated_local_only_observation_reuses_identity, subtree_observation_batch_rollback_is_atomic,
     sync_until_idle_fails_on_max_steps, sync_until_idle_stops_on_no_work,
 };
@@ -257,6 +262,57 @@ fn model_recursive_subtree_observation_updates_bound_edit_and_local_only_create(
             "upload_local_create"
         )
     );
+}
+
+#[test]
+fn model_recursive_subtree_unique_bound_file_move_is_paired() {
+    assert!(recursive_subtree_unique_bound_file_move_is_paired(
+        "rename", 1
+    ));
+    assert!(!recursive_subtree_unique_bound_file_move_is_paired(
+        "upload_local_edit",
+        1
+    ));
+}
+
+#[test]
+fn model_recursive_subtree_unique_local_only_file_move_preserves_identity() {
+    assert!(
+        recursive_subtree_unique_local_only_file_move_preserves_identity(
+            "tmp:ns-1:00000000000000000001",
+            "tmp:ns-1:00000000000000000001",
+            1
+        )
+    );
+    assert!(
+        !recursive_subtree_unique_local_only_file_move_preserves_identity(
+            "tmp:ns-1:00000000000000000001",
+            "tmp:ns-1:00000000000000000002",
+            1
+        )
+    );
+}
+
+#[test]
+fn model_recursive_subtree_ambiguous_file_pairing_fails_closed() {
+    assert!(recursive_subtree_ambiguous_file_pairing_fails_closed(
+        "ambiguous_move_pairing"
+    ));
+    assert!(!recursive_subtree_ambiguous_file_pairing_fails_closed(
+        "source_not_tracked"
+    ));
+}
+
+#[test]
+fn model_recursive_subtree_directory_move_does_not_pair() {
+    assert!(recursive_subtree_directory_move_does_not_pair(0, 0));
+    assert!(!recursive_subtree_directory_move_does_not_pair(1, 0));
+}
+
+#[test]
+fn model_recursive_subtree_changed_digest_file_does_not_pair() {
+    assert!(recursive_subtree_changed_digest_file_does_not_pair(0, 0));
+    assert!(!recursive_subtree_changed_digest_file_does_not_pair(0, 1));
 }
 
 #[test]

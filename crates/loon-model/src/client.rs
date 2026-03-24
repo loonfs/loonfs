@@ -173,6 +173,45 @@ pub fn recursive_subtree_repeat_reuses_local_only_identity(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_unique_bound_file_move_is_paired(
+    planned_decision: &str,
+    paired_bound_move_count: usize,
+) -> bool {
+    planned_decision == "rename" && paired_bound_move_count == 1
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_unique_local_only_file_move_preserves_identity(
+    first_client_file_id: &str,
+    second_client_file_id: &str,
+    paired_local_only_move_count: usize,
+) -> bool {
+    paired_local_only_move_count == 1
+        && local_only_move_preserves_identity(first_client_file_id, second_client_file_id)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_ambiguous_file_pairing_fails_closed(error_kind: &str) -> bool {
+    error_kind == "ambiguous_move_pairing"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_directory_move_does_not_pair(
+    paired_bound_move_count: usize,
+    paired_local_only_move_count: usize,
+) -> bool {
+    paired_bound_move_count == 0 && paired_local_only_move_count == 0
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_changed_digest_file_does_not_pair(
+    paired_bound_move_count: usize,
+    paired_local_only_move_count: usize,
+) -> bool {
+    paired_bound_move_count == 0 && paired_local_only_move_count == 0
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn subtree_observation_batch_rollback_is_atomic<T>(
     before_failed_batch: &T,
     after_failed_batch: &T,

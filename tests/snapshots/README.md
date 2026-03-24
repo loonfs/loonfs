@@ -29,3 +29,7 @@ Rendered scenario traces and summaries live here, grouped by the xtask command t
 the scheduler-backed harnesses.
 
 The intention is that reviewers can diff scenario output without reading Rust code.
+
+`ops-observe-subtree/` also covers the strict inferred file-move path: unique digest-equal file
+pairs may render as inferred rename work, while ambiguous candidates remain explicit failure
+cases.

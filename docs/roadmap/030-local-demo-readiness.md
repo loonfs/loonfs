@@ -87,10 +87,12 @@ Required rules:
 - `xtask` stays thin and must not become the owner of config parsing or business logic
 - `loon-ops` is the shared shell core that future `loon-cli` work must reuse
 - no `demo-*` command family
-- no watcher or delete/move inference inside `observe-local` / `observe-subtree`
+- no watcher or delete/move inference inside `observe-local`
 - `observe-local` is still file-first and existing-file-only
 - delete and move remain explicit shell commands, not inference inside `observe-local`
 - `observe-subtree` is directory-only, recursive, and atomic
+- `observe-subtree` may infer file-only moves for unique digest-equal pairs; directory moves
+  still require explicit `observe-move`
 - `sync-once` is executor-only and progresses at most one real scheduler step
 - `sync-until-idle` is only a loop over the real `sync-once` path
 - `xtask ops import-remote-observations` is the first shell exposure of authoritative import and
@@ -128,8 +130,8 @@ Exit criteria:
   through shell-local SQLite mutation
 - explicit local delete and move can be observed through the same supported client API surface,
   with bound rename/delete syncing through the real mutation path
-- one recursive subtree scan can batch create/edit/delete observations without inventing move
-  inference
+- one recursive subtree scan can batch create/edit/delete observations and preserve unambiguous
+  file move identity without widening into heuristic directory rename inference
 - one honest client scheduler step or idle loop can be exercised locally without inventing a
   second sync path
 - future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers

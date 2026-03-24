@@ -5,8 +5,8 @@ use loon_client::planner::{PlannedActionRecord, PlannedLocalOnlyActionRecord};
 use loon_client::state_db::{
     ClientFileId, LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyParentRef,
     ObservedBoundDelete, ObservedBoundInode, ObservedLocalOnlyDeleteResult, ObservedLocalOnlyInode,
-    ObservedLocalOnlySubtreeInode, SqliteStateDb, StateDbError, SubtreeLocalOnlyParentRef,
-    SubtreeObservationOp, SubtreeObservationOutcome,
+    ObservedLocalOnlySubtreeInode, ObservedLocalOnlySubtreeMove, SqliteStateDb, StateDbError,
+    SubtreeLocalOnlyParentRef, SubtreeObservationOp, SubtreeObservationOutcome,
 };
 use loon_types::{sha256_digest, InodeId, InodeKind, NamespaceId};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,8 @@ pub struct ObserveSubtreeReport {
     pub applied_operation_count: usize,
     pub bound_observe_count: usize,
     pub local_only_observe_count: usize,
+    pub paired_bound_move_count: usize,
+    pub paired_local_only_move_count: usize,
     pub bound_delete_count: usize,
     pub local_only_delete_count: usize,
     pub planned_decision_counts: BTreeMap<String, usize>,
@@ -232,6 +234,13 @@ pub enum ObserveSubtreeError {
         namespace_id: String,
         relative_path: String,
     },
+    #[error(
+        "observe-subtree move pairing is ambiguous in namespace `{namespace_id}` at relative path `{relative_path}`"
+    )]
+    AmbiguousMovePairing {
+        namespace_id: String,
+        relative_path: String,
+    },
     #[error("observe-subtree unsupported filesystem entry `{path}`")]
     UnsupportedFilesystemEntry { path: String },
 }
@@ -265,6 +274,27 @@ impl PathMatch {
 enum ParentMatch {
     Bound(InodeId),
     LocalOnly(ClientFileId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubtreeDestinationParent {
+    Bound(InodeId),
+    ExistingLocalOnly(ClientFileId),
+    BatchLocalOnly { parent_relative_path: String },
+}
+
+#[derive(Debug, Clone)]
+struct UnmatchedPresentFile {
+    relative_path: String,
+    parent: SubtreeDestinationParent,
+    display_name: String,
+    content_digest: String,
+}
+
+#[derive(Debug, Clone)]
+struct MissingTrackedFile {
+    relative_path: String,
+    source: PathMatch,
 }
 
 pub fn observe_local_path(
@@ -836,6 +866,7 @@ fn build_subtree_operations(
     let mut operations = Vec::new();
     let mut present_paths = BTreeSet::new();
     let mut new_local_only_dirs = BTreeSet::new();
+    let mut unmatched_present_files = Vec::new();
 
     for entry in scanned_entries {
         present_paths.insert(entry.relative_path.clone());
@@ -933,25 +964,35 @@ fn build_subtree_operations(
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let inode_kind = match entry.kind {
-                    ScannedEntryKind::File => InodeKind::File,
-                    ScannedEntryKind::Dir => InodeKind::Dir,
-                };
-                operations.push(SubtreeObservationOp::ObserveLocalOnly {
-                    observed: ObservedLocalOnlySubtreeInode {
-                        relative_path: entry.relative_path.clone(),
-                        namespace_id: namespace_id.clone(),
-                        inode_kind,
-                        parent,
-                        display_name,
-                        content_digest: entry.content_digest.clone(),
-                        exists_on_disk: true,
-                        dirty: true,
-                        last_local_change_ms: now_ms,
-                    },
-                });
-                if entry.kind == ScannedEntryKind::Dir {
-                    new_local_only_dirs.insert(entry.relative_path.clone());
+                match entry.kind {
+                    ScannedEntryKind::Dir => {
+                        operations.push(SubtreeObservationOp::ObserveLocalOnly {
+                            observed: ObservedLocalOnlySubtreeInode {
+                                relative_path: entry.relative_path.clone(),
+                                namespace_id: namespace_id.clone(),
+                                inode_kind: InodeKind::Dir,
+                                parent,
+                                display_name,
+                                content_digest: None,
+                                exists_on_disk: true,
+                                dirty: true,
+                                last_local_change_ms: now_ms,
+                            },
+                        });
+                        new_local_only_dirs.insert(entry.relative_path.clone());
+                    }
+                    ScannedEntryKind::File => {
+                        unmatched_present_files.push(UnmatchedPresentFile {
+                            relative_path: entry.relative_path.clone(),
+                            parent: destination_parent_from_subtree_parent_ref(&parent),
+                            display_name,
+                            content_digest: entry.content_digest.clone().ok_or_else(|| {
+                                ObserveSubtreeError::UnsupportedFilesystemEntry {
+                                    path: entry.relative_path.clone(),
+                                }
+                            })?,
+                        });
+                    }
                 }
             }
         }
@@ -973,33 +1014,209 @@ fn build_subtree_operations(
         missing_roots.insert(tracked_relative_path);
     }
 
-    for missing_relative_path in missing_roots {
-        let source = classify_exact_path(path_index, namespace_id, &missing_relative_path)
-            .map_err(|_| ObserveSubtreeError::AmbiguousMatch {
-                namespace_id: namespace_id.as_str().to_owned(),
-                relative_path: missing_relative_path.clone(),
+    let mut missing_tracked_files = Vec::new();
+    let mut missing_delete_ops = BTreeMap::new();
+
+    for missing_relative_path in &missing_roots {
+        let source =
+            classify_exact_path(path_index, namespace_id, missing_relative_path).map_err(|_| {
+                ObserveSubtreeError::AmbiguousMatch {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    relative_path: missing_relative_path.clone(),
+                }
             })?;
         let Some(source) = source else {
             continue;
         };
         match source {
+            PathMatch::Bound(row) if row.inode_kind == InodeKind::File => {
+                missing_tracked_files.push(MissingTrackedFile {
+                    relative_path: missing_relative_path.clone(),
+                    source: PathMatch::Bound(row),
+                });
+            }
+            PathMatch::LocalOnly(row) if row.inode_kind == InodeKind::File => {
+                missing_tracked_files.push(MissingTrackedFile {
+                    relative_path: missing_relative_path.clone(),
+                    source: PathMatch::LocalOnly(row),
+                });
+            }
             PathMatch::Bound(row) => {
-                operations.push(SubtreeObservationOp::DeleteBound {
-                    observed: ObservedBoundDelete {
+                missing_delete_ops.insert(
+                    missing_relative_path.clone(),
+                    SubtreeObservationOp::DeleteBound {
+                        observed: ObservedBoundDelete {
+                            namespace_id: namespace_id.clone(),
+                            inode_id: row.inode_id,
+                            inode_kind: row.inode_kind,
+                            content_digest: row.content_digest,
+                            parent_inode_id: row.parent_inode_id,
+                            display_name: row.display_name,
+                            last_local_change_ms: now_ms,
+                        },
+                    },
+                );
+            }
+            PathMatch::LocalOnly(row) => {
+                missing_delete_ops.insert(
+                    missing_relative_path.clone(),
+                    SubtreeObservationOp::DeleteLocalOnly {
+                        client_file_id: row.client_file_id,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut candidate_targets_by_source = BTreeMap::<String, Vec<String>>::new();
+    let mut candidate_sources_by_target = BTreeMap::<String, Vec<String>>::new();
+    for source in &missing_tracked_files {
+        let Some(source_content_digest) = source_path_content_digest(&source.source) else {
+            continue;
+        };
+        for target in &unmatched_present_files {
+            if source_content_digest != target.content_digest {
+                continue;
+            }
+            if !destination_parent_is_valid_for_source(&source.source, &target.parent) {
+                continue;
+            }
+            candidate_targets_by_source
+                .entry(source.relative_path.clone())
+                .or_default()
+                .push(target.relative_path.clone());
+            candidate_sources_by_target
+                .entry(target.relative_path.clone())
+                .or_default()
+                .push(source.relative_path.clone());
+        }
+    }
+
+    for (source_relative_path, target_relative_paths) in &candidate_targets_by_source {
+        if target_relative_paths.len() > 1 {
+            return Err(ObserveSubtreeError::AmbiguousMovePairing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                relative_path: source_relative_path.clone(),
+            });
+        }
+    }
+    for (target_relative_path, source_relative_paths) in &candidate_sources_by_target {
+        if source_relative_paths.len() > 1 {
+            return Err(ObserveSubtreeError::AmbiguousMovePairing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                relative_path: target_relative_path.clone(),
+            });
+        }
+    }
+
+    let paired_source_to_target = candidate_targets_by_source
+        .into_iter()
+        .filter_map(|(source_relative_path, mut target_relative_paths)| {
+            let target_relative_path = target_relative_paths.pop()?;
+            Some((source_relative_path, target_relative_path))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let paired_target_to_source = candidate_sources_by_target
+        .into_iter()
+        .filter_map(|(target_relative_path, mut source_relative_paths)| {
+            let source_relative_path = source_relative_paths.pop()?;
+            Some((target_relative_path, source_relative_path))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let missing_file_sources = missing_tracked_files
+        .into_iter()
+        .map(|source| (source.relative_path.clone(), source.source))
+        .collect::<BTreeMap<_, _>>();
+
+    for target in unmatched_present_files {
+        let Some(source_relative_path) = paired_target_to_source.get(&target.relative_path) else {
+            operations.push(SubtreeObservationOp::ObserveLocalOnly {
+                observed: ObservedLocalOnlySubtreeInode {
+                    relative_path: target.relative_path,
+                    namespace_id: namespace_id.clone(),
+                    inode_kind: InodeKind::File,
+                    parent: subtree_parent_ref_from_destination_parent(&target.parent),
+                    display_name: target.display_name,
+                    content_digest: Some(target.content_digest),
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: now_ms,
+                },
+            });
+            continue;
+        };
+
+        let source = missing_file_sources
+            .get(source_relative_path)
+            .expect("paired source path should always resolve to a missing tracked file source");
+        match source {
+            PathMatch::Bound(row) => {
+                let SubtreeDestinationParent::Bound(parent_inode_id) = target.parent.clone() else {
+                    continue;
+                };
+                operations.push(SubtreeObservationOp::MoveBound {
+                    from_relative_path: source_relative_path.clone(),
+                    observed: ObservedBoundInode {
                         namespace_id: namespace_id.clone(),
                         inode_id: row.inode_id,
-                        inode_kind: row.inode_kind,
-                        content_digest: row.content_digest,
-                        parent_inode_id: row.parent_inode_id,
-                        display_name: row.display_name,
+                        inode_kind: row.inode_kind.clone(),
+                        content_digest: Some(target.content_digest),
+                        parent_inode_id: Some(parent_inode_id),
+                        display_name: target.display_name,
+                        exists_on_disk: true,
+                        dirty: true,
                         last_local_change_ms: now_ms,
                     },
                 });
             }
             PathMatch::LocalOnly(row) => {
-                operations.push(SubtreeObservationOp::DeleteLocalOnly {
-                    client_file_id: row.client_file_id,
+                operations.push(SubtreeObservationOp::MoveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeMove {
+                        from_relative_path: source_relative_path.clone(),
+                        relative_path: target.relative_path,
+                        client_file_id: row.client_file_id.clone(),
+                        namespace_id: namespace_id.clone(),
+                        inode_kind: row.inode_kind.clone(),
+                        parent: subtree_parent_ref_from_destination_parent(&target.parent),
+                        display_name: target.display_name,
+                        content_digest: Some(target.content_digest),
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: now_ms,
+                    },
                 });
+            }
+        }
+    }
+
+    for missing_relative_path in missing_roots {
+        if paired_source_to_target.contains_key(&missing_relative_path) {
+            continue;
+        }
+        if let Some(operation) = missing_delete_ops.get(&missing_relative_path) {
+            operations.push(operation.clone());
+            continue;
+        }
+
+        if let Some(source) = missing_file_sources.get(&missing_relative_path) {
+            match source {
+                PathMatch::Bound(row) => operations.push(SubtreeObservationOp::DeleteBound {
+                    observed: ObservedBoundDelete {
+                        namespace_id: namespace_id.clone(),
+                        inode_id: row.inode_id,
+                        inode_kind: row.inode_kind.clone(),
+                        content_digest: row.content_digest.clone(),
+                        parent_inode_id: row.parent_inode_id,
+                        display_name: row.display_name.clone(),
+                        last_local_change_ms: now_ms,
+                    },
+                }),
+                PathMatch::LocalOnly(row) => {
+                    operations.push(SubtreeObservationOp::DeleteLocalOnly {
+                        client_file_id: row.client_file_id.clone(),
+                    });
+                }
             }
         }
     }
@@ -1022,6 +1239,8 @@ fn summarize_observe_subtree(
         applied_operation_count: outcomes.len(),
         bound_observe_count: 0,
         local_only_observe_count: 0,
+        paired_bound_move_count: 0,
+        paired_local_only_move_count: 0,
         bound_delete_count: 0,
         local_only_delete_count: 0,
         planned_decision_counts: BTreeMap::new(),
@@ -1038,6 +1257,20 @@ fn summarize_observe_subtree(
             }
             SubtreeObservationOutcome::ObservedLocalOnly { result, .. } => {
                 report.local_only_observe_count += 1;
+                *report
+                    .planned_decision_counts
+                    .entry(result.planned_action.decision.as_str().to_owned())
+                    .or_insert(0) += 1;
+            }
+            SubtreeObservationOutcome::MovedBound { planned_action, .. } => {
+                report.paired_bound_move_count += 1;
+                *report
+                    .planned_decision_counts
+                    .entry(planned_action.decision.as_str().to_owned())
+                    .or_insert(0) += 1;
+            }
+            SubtreeObservationOutcome::MovedLocalOnly { result, .. } => {
+                report.paired_local_only_move_count += 1;
                 *report
                     .planned_decision_counts
                     .entry(result.planned_action.decision.as_str().to_owned())
@@ -1073,6 +1306,61 @@ fn subtree_parent_ref_from_existing(parent: LocalOnlyParentRef) -> SubtreeLocalO
         } => SubtreeLocalOnlyParentRef::ExistingLocalOnly {
             parent_client_file_id,
         },
+    }
+}
+
+fn subtree_parent_ref_from_destination_parent(
+    parent: &SubtreeDestinationParent,
+) -> SubtreeLocalOnlyParentRef {
+    match parent {
+        SubtreeDestinationParent::Bound(parent_inode_id) => SubtreeLocalOnlyParentRef::Bound {
+            parent_inode_id: *parent_inode_id,
+        },
+        SubtreeDestinationParent::ExistingLocalOnly(parent_client_file_id) => {
+            SubtreeLocalOnlyParentRef::ExistingLocalOnly {
+                parent_client_file_id: parent_client_file_id.clone(),
+            }
+        }
+        SubtreeDestinationParent::BatchLocalOnly {
+            parent_relative_path,
+        } => SubtreeLocalOnlyParentRef::BatchLocalOnly {
+            parent_relative_path: parent_relative_path.clone(),
+        },
+    }
+}
+
+fn destination_parent_from_subtree_parent_ref(
+    parent: &SubtreeLocalOnlyParentRef,
+) -> SubtreeDestinationParent {
+    match parent {
+        SubtreeLocalOnlyParentRef::Bound { parent_inode_id } => {
+            SubtreeDestinationParent::Bound(*parent_inode_id)
+        }
+        SubtreeLocalOnlyParentRef::ExistingLocalOnly {
+            parent_client_file_id,
+        } => SubtreeDestinationParent::ExistingLocalOnly(parent_client_file_id.clone()),
+        SubtreeLocalOnlyParentRef::BatchLocalOnly {
+            parent_relative_path,
+        } => SubtreeDestinationParent::BatchLocalOnly {
+            parent_relative_path: parent_relative_path.clone(),
+        },
+    }
+}
+
+fn source_path_content_digest(source: &PathMatch) -> Option<&str> {
+    match source {
+        PathMatch::Bound(row) => row.content_digest.as_deref(),
+        PathMatch::LocalOnly(row) => row.content_digest.as_deref(),
+    }
+}
+
+fn destination_parent_is_valid_for_source(
+    source: &PathMatch,
+    parent: &SubtreeDestinationParent,
+) -> bool {
+    match source {
+        PathMatch::Bound(_) => matches!(parent, SubtreeDestinationParent::Bound(_)),
+        PathMatch::LocalOnly(_) => true,
     }
 }
 

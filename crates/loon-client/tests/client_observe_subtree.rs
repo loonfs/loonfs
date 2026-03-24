@@ -1,8 +1,8 @@
 use loon_client::planner::PlannerDecision;
 use loon_client::state_db::{
     LocalFileStateRow, ObservedBoundDelete, ObservedBoundInode, ObservedLocalOnlySubtreeInode,
-    RemoteFileStateRow, SqliteStateDb, StateDbError, SubtreeLocalOnlyParentRef,
-    SubtreeObservationOp, SubtreeObservationOutcome, SyncAnchorRow,
+    ObservedLocalOnlySubtreeMove, RemoteFileStateRow, SqliteStateDb, StateDbError,
+    SubtreeLocalOnlyParentRef, SubtreeObservationOp, SubtreeObservationOutcome, SyncAnchorRow,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 
@@ -192,6 +192,230 @@ fn observe_subtree_repeat_reuses_nested_local_only_identity() {
 
     assert_eq!(first_root_id, second_root_id);
     assert_eq!(first_child_id, second_child_id);
+}
+
+#[test]
+fn observe_subtree_move_bound_file_plans_rename() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open state db");
+    seed_bound_root_directory(&mut db);
+    seed_bound_directory(&mut db, InodeId(3), "archive", Some(InodeId(1)));
+    seed_bound_file(
+        &mut db,
+        InodeId(2),
+        "hello.txt",
+        InodeId(1),
+        "sha256:hello-v1",
+    );
+
+    let outcomes = db
+        .observe_subtree_and_plan(
+            &[SubtreeObservationOp::MoveBound {
+                from_relative_path: "hello.txt".to_owned(),
+                observed: ObservedBoundInode {
+                    namespace_id: demo_namespace(),
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::File,
+                    content_digest: Some("sha256:hello-v1".to_owned()),
+                    parent_inode_id: Some(InodeId(3)),
+                    display_name: "hello.txt".to_owned(),
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: 1_000,
+                },
+            }],
+            1_000,
+        )
+        .expect("observe subtree bound move");
+
+    match &outcomes[0] {
+        SubtreeObservationOutcome::MovedBound {
+            from_relative_path,
+            planned_action,
+            ..
+        } => {
+            assert_eq!(from_relative_path, "hello.txt");
+            assert_eq!(planned_action.decision, PlannerDecision::Rename);
+        }
+        other => panic!("unexpected move outcome: {other:?}"),
+    }
+}
+
+#[test]
+fn observe_subtree_move_local_only_file_under_bound_parent_preserves_identity() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open state db");
+    seed_bound_root_directory(&mut db);
+    seed_bound_directory(&mut db, InodeId(3), "archive", Some(InodeId(1)));
+
+    let created = db
+        .observe_subtree_and_plan(
+            &[SubtreeObservationOp::ObserveLocalOnly {
+                observed: ObservedLocalOnlySubtreeInode {
+                    relative_path: "draft.txt".to_owned(),
+                    namespace_id: demo_namespace(),
+                    inode_kind: InodeKind::File,
+                    parent: SubtreeLocalOnlyParentRef::Bound {
+                        parent_inode_id: InodeId(1),
+                    },
+                    display_name: "draft.txt".to_owned(),
+                    content_digest: Some("sha256:draft-v1".to_owned()),
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: 1_000,
+                },
+            }],
+            1_000,
+        )
+        .expect("create local-only file");
+    let original_client_file_id = observed_local_only_id(&created[0]);
+
+    let moved = db
+        .observe_subtree_and_plan(
+            &[SubtreeObservationOp::MoveLocalOnly {
+                observed: ObservedLocalOnlySubtreeMove {
+                    from_relative_path: "draft.txt".to_owned(),
+                    relative_path: "archive/draft.txt".to_owned(),
+                    client_file_id: loon_client::state_db::ClientFileId::new(
+                        original_client_file_id.clone(),
+                    ),
+                    namespace_id: demo_namespace(),
+                    inode_kind: InodeKind::File,
+                    parent: SubtreeLocalOnlyParentRef::Bound {
+                        parent_inode_id: InodeId(3),
+                    },
+                    display_name: "draft.txt".to_owned(),
+                    content_digest: Some("sha256:draft-v1".to_owned()),
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: 2_000,
+                },
+            }],
+            2_000,
+        )
+        .expect("move local-only file under bound parent");
+
+    match &moved[0] {
+        SubtreeObservationOutcome::MovedLocalOnly {
+            from_relative_path,
+            result,
+            ..
+        } => {
+            assert_eq!(from_relative_path, "draft.txt");
+            assert_eq!(
+                result.local_only.client_file_id.as_str(),
+                original_client_file_id
+            );
+            assert_eq!(
+                result.planned_action.decision,
+                PlannerDecision::UploadLocalCreate
+            );
+        }
+        other => panic!("unexpected local-only move outcome: {other:?}"),
+    }
+}
+
+#[test]
+fn observe_subtree_move_local_only_file_under_local_only_parent_preserves_identity() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open state db");
+    seed_bound_root_directory(&mut db);
+
+    let created = db
+        .observe_subtree_and_plan(
+            &[
+                SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: "drafts".to_owned(),
+                        namespace_id: demo_namespace(),
+                        inode_kind: InodeKind::Dir,
+                        parent: SubtreeLocalOnlyParentRef::Bound {
+                            parent_inode_id: InodeId(1),
+                        },
+                        display_name: "drafts".to_owned(),
+                        content_digest: None,
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: 1_000,
+                    },
+                },
+                SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: "archive".to_owned(),
+                        namespace_id: demo_namespace(),
+                        inode_kind: InodeKind::Dir,
+                        parent: SubtreeLocalOnlyParentRef::Bound {
+                            parent_inode_id: InodeId(1),
+                        },
+                        display_name: "archive".to_owned(),
+                        content_digest: None,
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: 1_000,
+                    },
+                },
+                SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: "drafts/note.txt".to_owned(),
+                        namespace_id: demo_namespace(),
+                        inode_kind: InodeKind::File,
+                        parent: SubtreeLocalOnlyParentRef::BatchLocalOnly {
+                            parent_relative_path: "drafts".to_owned(),
+                        },
+                        display_name: "note.txt".to_owned(),
+                        content_digest: Some("sha256:note-v1".to_owned()),
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: 1_000,
+                    },
+                },
+            ],
+            1_000,
+        )
+        .expect("create local-only subtree");
+
+    let archive_dir_id = observed_local_only_id(&created[1]);
+    let original_client_file_id = observed_local_only_id(&created[2]);
+
+    let moved = db
+        .observe_subtree_and_plan(
+            &[SubtreeObservationOp::MoveLocalOnly {
+                observed: ObservedLocalOnlySubtreeMove {
+                    from_relative_path: "drafts/note.txt".to_owned(),
+                    relative_path: "archive/note.txt".to_owned(),
+                    client_file_id: loon_client::state_db::ClientFileId::new(
+                        original_client_file_id.clone(),
+                    ),
+                    namespace_id: demo_namespace(),
+                    inode_kind: InodeKind::File,
+                    parent: SubtreeLocalOnlyParentRef::ExistingLocalOnly {
+                        parent_client_file_id: loon_client::state_db::ClientFileId::new(
+                            archive_dir_id.clone(),
+                        ),
+                    },
+                    display_name: "note.txt".to_owned(),
+                    content_digest: Some("sha256:note-v1".to_owned()),
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: 2_000,
+                },
+            }],
+            2_000,
+        )
+        .expect("move local-only file under local-only parent");
+
+    match &moved[0] {
+        SubtreeObservationOutcome::MovedLocalOnly {
+            from_relative_path,
+            result,
+            ..
+        } => {
+            assert_eq!(from_relative_path, "drafts/note.txt");
+            assert_eq!(
+                result.local_only.client_file_id.as_str(),
+                original_client_file_id
+            );
+            assert_eq!(result.planned_action.decision, PlannerDecision::NoOp);
+        }
+        other => panic!("unexpected local-only move outcome: {other:?}"),
+    }
 }
 
 #[test]

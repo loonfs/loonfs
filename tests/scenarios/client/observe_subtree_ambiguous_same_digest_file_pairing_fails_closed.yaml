@@ -1,0 +1,37 @@
+schema_version: 1
+scenario_kind: client
+name: observe_subtree_ambiguous_same_digest_file_pairing_fails_closed
+
+initial:
+  namespace_id: ns-1
+  bound_directories:
+    - inode_id: 1
+      parent_inode_id:
+      display_name: ""
+      relative_path: ""
+      exists_on_disk: true
+      dirty: false
+  bound_files:
+    - inode_id: 42
+      parent_inode_id: 1
+      display_name: hello.txt
+      relative_path: hello.txt
+      remote_content_digest: sha256:hello-v1
+      local_content_digest: sha256:hello-v1
+      sync_anchor_content_digest: sha256:hello-v1
+
+observe_subtree:
+  relative_path: ""
+  present_entries:
+    - kind: dir
+      relative_path: ""
+    - kind: file
+      relative_path: renamed-a.txt
+      content_digest: sha256:hello-v1
+    - kind: file
+      relative_path: renamed-b.txt
+      content_digest: sha256:hello-v1
+
+expect_error:
+  kind: ambiguous_move_pairing
+  relative_path: hello.txt

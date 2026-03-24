@@ -10,7 +10,7 @@ mod tests {
     use loon_client::state_db::{
         LocalFileStateRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
     };
-    use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
+    use loon_types::{sha256_digest, ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -298,6 +298,44 @@ mod tests {
             rendered,
             include_str!(
                 "../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_bound_edit_and_nested_local_only_create.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn forwards_observe_subtree_inferred_bound_move_to_loon_ops() {
+        let temp_dir = unique_temp_dir("xtask-ops-observe-subtree-bound-move");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        let file_digest = sha256_digest(b"hello v1\n");
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &file_digest,
+            &format!("manifest:{file_digest}"),
+        );
+        fs::write(temp_dir.join("mirror/renamed.txt"), b"hello v1\n")
+            .expect("write moved bound file");
+
+        let rendered = run([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run xtask ops observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_inferred_bound_file_move.txt"
             )
         );
     }

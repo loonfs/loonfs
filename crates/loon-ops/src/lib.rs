@@ -708,8 +708,8 @@ mod tests {
     use loon_objectstore::keys::{namespace_head, namespace_lease};
     use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
     use loon_types::{
-        ChangeSeq, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
-        LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,
+        sha256_digest, ChangeSeq, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope,
+        InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1329,6 +1329,122 @@ lease_duration_ms = 60000
     }
 
     #[test]
+    fn observe_subtree_renders_inferred_bound_file_move_report() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree-bound-move");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        let file_digest = sha256_digest(b"hello v1\n");
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &file_digest,
+            &format!("manifest:{file_digest}"),
+        );
+
+        fs::write(temp_dir.join("mirror/renamed.txt"), b"hello v1\n")
+            .expect("write moved bound file");
+
+        let rendered = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_inferred_bound_file_move.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn observe_subtree_renders_inferred_local_only_file_move_report() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree-local-only-move");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        let file_digest = sha256_digest(b"draft v1\n");
+        seed_local_only_file(
+            &mut db,
+            "tmp:demo:00000000000000000001",
+            InodeId(1),
+            "draft.txt",
+            &file_digest,
+        );
+
+        fs::write(temp_dir.join("mirror/renamed.txt"), b"draft v1\n")
+            .expect("write moved local-only file");
+
+        let rendered = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_inferred_local_only_file_move.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn observe_subtree_rejects_ambiguous_same_digest_file_pairing() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree-ambiguous-move");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        let file_digest = sha256_digest(b"hello v1\n");
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &file_digest,
+            &format!("manifest:{file_digest}"),
+        );
+
+        fs::write(temp_dir.join("mirror/renamed-a.txt"), b"hello v1\n")
+            .expect("write first ambiguous file");
+        fs::write(temp_dir.join("mirror/renamed-b.txt"), b"hello v1\n")
+            .expect("write second ambiguous file");
+
+        let error = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect_err("ambiguous same-digest pairing should fail");
+
+        assert!(
+            error.to_string().contains("move pairing is ambiguous"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn sync_once_returns_no_work_for_idle_client() {
         let temp_dir = unique_temp_dir("ops-sync-once-idle");
         let config_path = write_local_fs_config(&temp_dir);
@@ -1549,6 +1665,56 @@ lease_duration_ms = 60000
             rendered,
             include_str!(
                 "../../../tests/snapshots/ops-sync-until-idle/ops_sync_until_idle_request_committed_upload_local_edit.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn sync_until_idle_reaches_idle_after_inferred_bound_rename() {
+        let temp_dir = unique_temp_dir("ops-sync-until-idle-bound-rename");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_single_file_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+            "hello.txt",
+            b"v1\n",
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+
+        fs::write(temp_dir.join("mirror/renamed.txt"), b"v1\n").expect("write renamed bound file");
+        run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("observe subtree rename");
+
+        let rendered = run_args([
+            "sync-until-idle".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-until-idle for inferred bound rename");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-sync-until-idle/ops_sync_until_idle_request_committed_rename.txt"
             )
         );
     }

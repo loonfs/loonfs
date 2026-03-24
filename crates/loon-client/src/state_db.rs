@@ -764,6 +764,21 @@ pub struct ObservedLocalOnlySubtreeInode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLocalOnlySubtreeMove {
+    pub from_relative_path: String,
+    pub relative_path: String,
+    pub client_file_id: ClientFileId,
+    pub namespace_id: NamespaceId,
+    pub inode_kind: InodeKind,
+    pub parent: SubtreeLocalOnlyParentRef,
+    pub display_name: String,
+    pub content_digest: Option<String>,
+    pub exists_on_disk: bool,
+    pub dirty: bool,
+    pub last_local_change_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedBoundDelete {
     pub namespace_id: NamespaceId,
     pub inode_id: InodeId,
@@ -780,8 +795,15 @@ pub enum SubtreeObservationOp {
     ObserveBound {
         observed: ObservedBoundInode,
     },
+    MoveBound {
+        from_relative_path: String,
+        observed: ObservedBoundInode,
+    },
     ObserveLocalOnly {
         observed: ObservedLocalOnlySubtreeInode,
+    },
+    MoveLocalOnly {
+        observed: ObservedLocalOnlySubtreeMove,
     },
     DeleteBound {
         observed: ObservedBoundDelete,
@@ -799,7 +821,18 @@ pub enum SubtreeObservationOutcome {
         inode_kind: InodeKind,
         planned_action: crate::planner::PlannedActionRecord,
     },
+    MovedBound {
+        from_relative_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+        planned_action: crate::planner::PlannedActionRecord,
+    },
     ObservedLocalOnly {
+        relative_path: String,
+        result: ObservedLocalOnlyInodeResult,
+    },
+    MovedLocalOnly {
+        from_relative_path: String,
         relative_path: String,
         result: ObservedLocalOnlyInodeResult,
     },

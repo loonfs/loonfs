@@ -94,8 +94,9 @@ Constraints for that shell:
   `xtask ops observe-subtree` is only a thin adapter over that path
 - `xtask ops sync-once` is intentionally single-step and executor-only
 - `xtask ops sync-until-idle` is only a thin loop over `sync-once`
-- the shell is intentionally narrow in the current phase; there is still no watcher or move
-  inference inside subtree scans
+- the shell is intentionally narrow in the current phase; there is still no watcher, and subtree
+  move inference is restricted to unique digest-equal file pairs while directory moves remain
+  explicit
 - `ops smoke` remains bootstrap/inspection-only and does not compose the import path yet
 - future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
 
