@@ -33,6 +33,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+## Canonical local RC path
+
+The canonical local release-candidate command is:
+
+```bash
+cargo run -p xtask -- rc-local --config ./loondb-demo.toml --namespace demo
+```
+
+That path is strict: fmt check, clippy, workspace tests, local object-store conformance, and the
+existing `xtask ops smoke` path.
+
 ## Documentation style
 
 When you introduce a new term:

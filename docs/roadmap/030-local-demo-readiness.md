@@ -127,23 +127,30 @@ Primary crates:
 
 Deliverables:
 
-- reusable Tokio runtime ownership in the S3/R2 adapter
-- one narrow RC path that runs:
-  - format/checks
+- one canonical `xtask rc-local` path that runs:
+  - `cargo fmt --all --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
   - workspace tests
-  - object-store conformance
-  - `xtask ops smoke`
+- local object-store conformance
+- the existing `loon-ops` smoke path, called through `xtask rc-local`
+- checked-in example configs for:
+  - `local-fs`
+  - `aws-s3`
+  - `cloudflare-r2`
 - documented real-provider smoke steps for AWS S3 first, then Cloudflare R2
 
 Required rules:
 
 - keep the object-store trait synchronous
+- keep `xtask rc-local` in `xtask`, not `loon-ops`
 - do not widen the shell into a workflow runner in this phase
 - do not wake up `loon-cli`, `loond`, HTTP, or `loon-macos`
+- `ops smoke` remains narrow and unchanged
+- real-provider smoke stays documented/manual rather than auto-run by `rc-local`
 
 Exit criteria:
 
-- repeated S3/R2 calls do not build a fresh Tokio runtime per call
+- one canonical `xtask rc-local --config <path> --namespace <id>` path exists
 - one canonical provider-backed smoke path exists
 - local operability does not depend on test-only wiring
 
@@ -153,6 +160,7 @@ At the end of this roadmap phase:
 
 - the repo has a real local operability substrate
 - `xtask ops ...` is the current frontend
+- `xtask rc-local` is the canonical repo RC path
 - `loon-ops` owns the shared shell contract
 - `loon-cli` is still quarantined, but its eventual handoff path is explicit
 - the project can return to client behavior work without losing a clear local operator path

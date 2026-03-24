@@ -112,6 +112,31 @@ cargo test -p loon-objectstore --test conformance cloudflare_r2_real_provider_co
 Today those ignored tests execute the same conformance assertions the local FS adapter runs, using
 real AWS S3 and Cloudflare R2 resources.
 
+## Provider-backed smoke with xtask
+
+Conformance proves the provider contract. It does not prove that the current operability shell can
+open the configured store and reconstruct namespace state.
+
+Use the tracked ops config templates under:
+
+```text
+configs/
+```
+
+Then run:
+
+```bash
+cp configs/loondb-demo.aws-s3.example.toml loondb-demo.aws-s3.local.toml
+# edit values
+cargo run -p xtask -- ops smoke --config ./loondb-demo.aws-s3.local.toml --namespace demo
+
+cp configs/loondb-demo.cloudflare-r2.example.toml loondb-demo.cloudflare-r2.local.toml
+# edit values
+cargo run -p xtask -- ops smoke --config ./loondb-demo.cloudflare-r2.local.toml --namespace demo
+```
+
+The canonical local-FS RC path is documented separately in `docs/runbooks/local-rc.md`.
+
 ## External CI gate
 
 Required external jobs:

@@ -1,0 +1,17 @@
+[object_store]
+kind = "aws-s3"
+bucket = "replace-me"
+region = "us-east-1"
+access_key_id = "REPLACE_ME"
+secret_access_key = "REPLACE_ME"
+key_prefix = "tenant-a"
+force_path_style = false
+
+[client]
+state_db_path = "./.loondb-demo/aws/client.sqlite3"
+mirror_root = "./.loondb-demo/aws/mirror"
+
+[server]
+writer_id = "writer-a"
+writer_version = "local-rc"
+lease_duration_ms = 60000

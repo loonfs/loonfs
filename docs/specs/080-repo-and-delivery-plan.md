@@ -90,6 +90,22 @@ Constraints for that shell:
 - `ops smoke` remains bootstrap/inspection-only and does not compose the import path yet
 - future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
 
+Current local RC path:
+
+- `xtask rc-local --config <path> --namespace <id>`
+
+Constraints for that path:
+
+- it is repo automation owned by `xtask`, not part of the `loon-ops` command contract
+- it runs the strict baseline:
+  - `cargo fmt --all --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
+  - `cargo test -p loon-objectstore --test conformance`
+  - the existing `loon-ops` smoke command path
+- real-provider validation remains documented/manual rather than auto-run by `rc-local`
+- future `loon-cli` activation still reuses `loon-ops`; it does not inherit `rc-local`
+
 Current delivery gates:
 
 - object-store contract changes require the local FS conformance suite in-repo

@@ -370,7 +370,7 @@ where
     put_error_code_maps_to_precondition_failed(&PutMode::Overwrite, service_error_code(err))
 }
 
-fn service_error_code<'a, E, R>(err: &'a SdkError<E, R>) -> Option<&'a str>
+fn service_error_code<E, R>(err: &SdkError<E, R>) -> Option<&str>
 where
     E: ProvideErrorMetadata,
 {

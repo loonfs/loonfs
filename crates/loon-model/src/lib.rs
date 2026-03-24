@@ -582,6 +582,16 @@ pub struct ModelQueueClaim {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelJobClaimParams {
+    pub broker_id: String,
+    pub broker_epoch: u64,
+    pub worker_id: String,
+    pub claim_token: String,
+    pub now_ms: u64,
+    pub claim_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelQueueSeqPayload {
     pub namespace_id: NamespaceId,
     pub through_seq: ChangeSeq,

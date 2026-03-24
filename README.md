@@ -97,6 +97,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Run the built-in test runner across all crates
 cargo test --workspace
 
+# Run the canonical local release-candidate path
+cargo run -p xtask -- rc-local --config ./loondb-demo.toml --namespace demo
+
 # Run the same tests with nextest (optional, if installed)
 cargo nextest run
 

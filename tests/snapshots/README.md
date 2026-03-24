@@ -17,6 +17,7 @@ Rendered scenario traces and summaries live here, grouped by the xtask command t
 - `ops-observe-local/`
 - `ops-sync-once/`
 - `ops-smoke/`
+- `rc-local/`
 - `sim-interleavings/`
 - `sim-explore/`
 

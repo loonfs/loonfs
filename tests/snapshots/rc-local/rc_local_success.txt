@@ -1,0 +1,13 @@
+command=rc-local
+namespace=demo
+status=passed
+steps_run=5
+steps=fmt-check,clippy-workspace,workspace-tests,objectstore-conformance-localfs,ops-smoke
+[smoke]
+command=ops/smoke
+namespace=demo
+store_kind=local-fs
+bootstrap_status=existing
+head_seq=0
+client_remote_rows=0
+client_local_rows=0

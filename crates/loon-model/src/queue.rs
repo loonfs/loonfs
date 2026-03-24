@@ -1,6 +1,7 @@
 use crate::{
-    ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobCompleteOutcome,
-    ModelQueueBroker, ModelQueueClaim, ModelQueueJobState, ModelQueueShard,
+    ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobClaimParams,
+    ModelJobCompleteOutcome, ModelQueueBroker, ModelQueueClaim, ModelQueueJobState,
+    ModelQueueShard,
 };
 use loon_types::NamespaceId;
 
@@ -48,15 +49,10 @@ impl ModelQueueShard {
 
     pub fn claim_job(
         &mut self,
-        broker_id: &str,
-        broker_epoch: u64,
-        worker_id: &str,
-        claim_token: &str,
         job_id: &str,
-        now_ms: u64,
-        claim_timeout_ms: u64,
+        params: &ModelJobClaimParams,
     ) -> Result<ModelJobClaimOutcome, ModelError> {
-        ensure_active_broker_lease(self, broker_id, broker_epoch, now_ms)?;
+        ensure_active_broker_lease(self, &params.broker_id, params.broker_epoch, params.now_ms)?;
 
         let job = self
             .jobs
@@ -67,10 +63,10 @@ impl ModelQueueShard {
             })?;
 
         let new_claim = ModelQueueClaim {
-            worker_id: worker_id.to_owned(),
-            claim_token: claim_token.to_owned(),
-            heartbeat_at_ms: now_ms,
-            timeout_at_ms: now_ms.saturating_add(claim_timeout_ms),
+            worker_id: params.worker_id.clone(),
+            claim_token: params.claim_token.clone(),
+            heartbeat_at_ms: params.now_ms,
+            timeout_at_ms: params.now_ms.saturating_add(params.claim_timeout_ms),
         };
 
         match job.state {
@@ -89,12 +85,12 @@ impl ModelQueueShard {
                     .ok_or_else(|| ModelError::JobNotClaimed {
                         job_id: job_id.to_owned(),
                     })?;
-                if current.timeout_at_ms > now_ms {
+                if current.timeout_at_ms > params.now_ms {
                     return Err(ModelError::JobBusy {
                         job_id: job_id.to_owned(),
                         worker_id: current.worker_id.clone(),
                         timeout_at_ms: current.timeout_at_ms,
-                        now_ms,
+                        now_ms: params.now_ms,
                     });
                 }
 

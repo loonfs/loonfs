@@ -2340,7 +2340,17 @@ fn model_claim_timeout_then_steal_rejects_stale_complete() {
         .expect("broker-a should acquire lease");
     assert_eq!(
         queue
-            .claim_job("broker-a", 1, "worker-a", "claim-a", "job-1", 0, 10_000)
+            .claim_job(
+                "job-1",
+                &ModelJobClaimParams {
+                    broker_id: "broker-a".to_owned(),
+                    broker_epoch: 1,
+                    worker_id: "worker-a".to_owned(),
+                    claim_token: "claim-a".to_owned(),
+                    now_ms: 0,
+                    claim_timeout_ms: 10_000,
+                },
+            )
             .expect("worker-a should claim job"),
         ModelJobClaimOutcome::Claimed {
             claim_token: "claim-a".to_owned(),
@@ -2352,7 +2362,17 @@ fn model_claim_timeout_then_steal_rejects_stale_complete() {
         .expect("broker-b should take over after expiry");
     assert_eq!(
         queue
-            .claim_job("broker-b", 2, "worker-b", "claim-b", "job-1", 30_000, 10_000,)
+            .claim_job(
+                "job-1",
+                &ModelJobClaimParams {
+                    broker_id: "broker-b".to_owned(),
+                    broker_epoch: 2,
+                    worker_id: "worker-b".to_owned(),
+                    claim_token: "claim-b".to_owned(),
+                    now_ms: 30_000,
+                    claim_timeout_ms: 10_000,
+                },
+            )
             .expect("worker-b should steal expired job"),
         ModelJobClaimOutcome::Stolen {
             claim_token: "claim-b".to_owned(),

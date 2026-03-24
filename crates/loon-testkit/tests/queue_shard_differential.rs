@@ -1,8 +1,8 @@
 use loon_model::{
-    ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobCompleteOutcome,
-    ModelMetadataState, ModelNamespace, ModelProgressObject, ModelQueueBroker, ModelQueueClaim,
-    ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome, ModelQueueSeqPayload,
-    ModelQueueShard, ModelQueueWorkClass,
+    ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobClaimParams,
+    ModelJobCompleteOutcome, ModelMetadataState, ModelNamespace, ModelProgressObject,
+    ModelQueueBroker, ModelQueueClaim, ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome,
+    ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::ObjectStore;
@@ -146,13 +146,15 @@ fn run_fixture_report(relative_path: &str) -> QueueShardFixtureRunReport {
             QueueShardActionRef::ClaimQueueJob(action) => {
                 let model_outcome = model_queue
                     .claim_job(
-                        &action.broker,
-                        action.broker_epoch,
-                        &action.worker,
-                        &action.claim_token,
                         &action.job_id,
-                        action.now_ms,
-                        action.claim_timeout_ms,
+                        &ModelJobClaimParams {
+                            broker_id: action.broker.clone(),
+                            broker_epoch: action.broker_epoch,
+                            worker_id: action.worker.clone(),
+                            claim_token: action.claim_token.clone(),
+                            now_ms: action.now_ms,
+                            claim_timeout_ms: action.claim_timeout_ms,
+                        },
                     )
                     .map(NativeQueueOutcome::from)
                     .unwrap_or_else(|err| NativeQueueOutcome::Error(normalize_model_error(err)));

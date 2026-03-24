@@ -1,8 +1,8 @@
 use loon_model::{
-    ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobCompleteOutcome,
-    ModelMetadataState, ModelNamespace, ModelProgressObject, ModelQueueBroker, ModelQueueClaim,
-    ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome, ModelQueueSeqPayload,
-    ModelQueueShard, ModelQueueWorkClass,
+    ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobClaimParams,
+    ModelJobCompleteOutcome, ModelMetadataState, ModelNamespace, ModelProgressObject,
+    ModelQueueBroker, ModelQueueClaim, ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome,
+    ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass,
 };
 use loon_queue::broker::{renew_broker_lease, BrokerLeaseError, BrokerLeaseOutcome};
 use loon_queue::repair::{
@@ -206,13 +206,15 @@ pub fn run_queue_scenario_report(
 
                     let model_result = model_queue
                         .claim_job(
-                            &action.broker,
-                            action.broker_epoch,
-                            &action.worker,
-                            &action.claim_token,
                             &action.job_id,
-                            action.now_ms,
-                            action.claim_timeout_ms,
+                            &ModelJobClaimParams {
+                                broker_id: action.broker.clone(),
+                                broker_epoch: action.broker_epoch,
+                                worker_id: action.worker.clone(),
+                                claim_token: action.claim_token.clone(),
+                                now_ms: action.now_ms,
+                                claim_timeout_ms: action.claim_timeout_ms,
+                            },
                         )
                         .map(QueueOutcome::from)
                         .unwrap_or_else(|err| QueueOutcome::Error(normalize_model_error(err)));

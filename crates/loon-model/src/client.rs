@@ -590,9 +590,7 @@ pub fn local_apply_failed_issue(
     inode_id: InodeId,
     kind: &str,
     summary: &str,
-    operation: &str,
-    path: &str,
-    source: &str,
+    detail_json: serde_json::Value,
     created_at_ms: u64,
 ) -> ModelClientIssue {
     ModelClientIssue {
@@ -600,11 +598,7 @@ pub fn local_apply_failed_issue(
         inode_id,
         kind: kind.to_owned(),
         summary: summary.to_owned(),
-        detail_json: json!({
-            "operation": operation,
-            "path": path,
-            "source": source,
-        }),
+        detail_json,
         created_at_ms,
     }
 }
