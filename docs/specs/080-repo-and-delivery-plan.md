@@ -64,7 +64,7 @@ Constraints for that shell:
 Current local operability shell:
 
 - shared command/config/rendering layer in `loon-ops`
-- thin active frontend in `xtask ops ...`
+- thin active frontends in `xtask ops ...` and `loon ops ...`
 - current commands:
   - `xtask ops bootstrap-namespace --config <path> --namespace <id> [--allow-existing]`
   - `xtask ops show-namespace-state --config <path> --namespace <id>`
@@ -77,10 +77,25 @@ Current local operability shell:
   - `xtask ops sync-once --config <path> --namespace <id>`
   - `xtask ops sync-until-idle --config <path> --namespace <id> [--max-steps <n>]`
   - `xtask ops smoke --config <path> --namespace <id>`
+  - `loon ops bootstrap-namespace --config <path> --namespace <id> [--allow-existing]`
+  - `loon ops show-namespace-state --config <path> --namespace <id>`
+  - `loon ops show-client-state --config <path> --namespace <id>`
+  - `loon ops import-remote-observations --config <path> --namespace <id>`
+  - `loon ops observe-local --config <path> --namespace <id> --path <path>`
+  - `loon ops observe-delete --config <path> --namespace <id> --path <path>`
+  - `loon ops observe-move --config <path> --namespace <id> --from <path> --to <path>`
+  - `loon ops observe-subtree --config <path> --namespace <id> --path <path>`
+  - `loon ops sync-once --config <path> --namespace <id>`
+  - `loon ops sync-until-idle --config <path> --namespace <id> [--max-steps <n>]`
+  - `loon ops smoke --config <path> --namespace <id>`
+  - `loon completion <bash|zsh|fish|powershell|elvish>`
+  - `loon manpages <output-dir>`
+  - `loon version`
 
 Constraints for that shell:
 
-- `xtask` stays a thin wrapper; config loading and command execution belong in `loon-ops`
+- `xtask` stays a thin wrapper; `loon-cli` also stays thin; config loading and command execution
+  belong in `loon-ops`
 - namespace bootstrap and authoritative-state inspection belong in supported library code,
   primarily `loon-server::ops`
 - full-namespace authoritative remote observation import remains a supported library path in
@@ -98,13 +113,17 @@ Constraints for that shell:
   a second local observation path
 - `xtask ops sync-once` is intentionally single-step and executor-only
 - `xtask ops sync-until-idle` is only a thin loop over `sync-once`
+- `loon ops ...` must preserve the same subcommand grammar and stdout rendering as `xtask ops ...`
+- `loon-cli` may add CLI-only affordances such as completions, manpage generation, and version
+  output, but it must not become a second owner of config, semantics, or rendering
 - the shell is intentionally narrow in the current phase; there is still no watcher, and subtree
   move inference is restricted to:
   - unique digest-equal file pairs
   - unique exact-subtree directory pairs
 - explicit `observe-move` remains the override for non-exact directory refactors
 - `ops smoke` remains bootstrap/inspection-only and does not compose the import path yet
-- future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
+- broader future `loon-cli` work must continue to reuse the `loon-ops` command contract rather
+  than fork it
 - native filesystem object ids in the reducer are advisory within one batch only and are never
   durable truth
 
@@ -134,7 +153,6 @@ Current delivery gates:
 
 Current quarantined delivery surfaces:
 
-- `loon-cli`
 - the `loond` binary shell
 - `loon-server` HTTP/app placeholders
 - `loon-macos`
@@ -142,8 +160,8 @@ Current quarantined delivery surfaces:
 These quarantined surfaces stay in the repository to preserve delivery intent and crate names, but
 they should not advertise themselves as active product entrypoints until they wrap real behavior.
 
-For `loon-cli`, the intended activation path is now explicit: it should become a frontend over
-`loon-ops`, not a second owner of config parsing, command grammar, or rendering semantics.
+For `loon-cli`, the intended activation path is now active: it is a frontend over `loon-ops`, not
+a second owner of config parsing, command grammar, or rendering semantics.
 
 ## What should happen early
 

@@ -26,9 +26,11 @@ For now, this repository is a **development bootstrap**, not a finished product.
 - `loon-core`, `loon-model`, and `loon-objectstore` hold the active protocol and storage logic
 - `loon-server::mutation` is the current authoritative server-side execution surface
 - `loon-client` contains the active SQLite/planner/executor work
-- `loon-testkit` and `xtask` are the active review and debugging tools
-- `loon-cli`, the `loond` binary shell, and `loon-macos` are reserved delivery surfaces and are
-  intentionally quarantined during the semantic-core reset
+- `loon-ops` owns the shared operability command/config/rendering contract
+- `xtask ops ...` and `loon ops ...` are the active local operability frontends
+- `xtask rc-local` remains the canonical repo release-candidate path
+- `loon-testkit` remains the active review and debugging toolkit
+- the `loond` binary shell and `loon-macos` are still reserved later-phase delivery surfaces
 
 ## Start here
 
@@ -62,7 +64,7 @@ crates/
   loon-testkit/     scenario fixtures, rendering, helpers
   loon-sim/         deterministic simulator scaffolding
   loon-server/      authoritative mutation surface; binary/http shell quarantined for now
-  loon-cli/         reserved CLI placeholder during semantic-core reset
+  loon-cli/         active thin CLI frontend over loon-ops
   loon-client/      active client state, planner, and executor implementation
   loon-macos/       reserved macOS integration placeholder for later File Provider work
 
@@ -99,6 +101,9 @@ cargo test --workspace
 
 # Run the canonical local release-candidate path
 cargo run -p xtask -- rc-local --config ./loondb-demo.toml --namespace demo
+
+# Run the active thin CLI frontend over the same loon-ops contract
+cargo run -p loon-cli -- ops smoke --config ./loondb-demo.toml --namespace demo
 
 # Run the same tests with nextest (optional, if installed)
 cargo nextest run

@@ -19,7 +19,7 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
 - supported single-step client execution through the real scheduler and real server mutation path
 - supported thin repeat-until-idle execution through the same real scheduler step
 - a thin internal shell in `xtask`
-- one shared command/config/rendering layer that can later move into `loon-cli` unchanged
+- one shared command/config/rendering layer now reused by both `xtask ops ...` and `loon ops ...`
 
 ## Why this roadmap exists
 
@@ -49,6 +49,7 @@ Primary crates:
 - `loon-objectstore`
 - `loon-server`
 - `loon-client`
+- `loon-cli`
 - `xtask`
 
 Deliverables:
@@ -72,6 +73,7 @@ Deliverables:
   - full authoritative snapshot translation before any client DB mutation
   - atomic batch application through the existing client observation protocol
 - thin `xtask ops ...` commands:
+- thin `loon ops ...` commands over the same `loon-ops` contract:
   - `bootstrap-namespace`
   - `show-namespace-state`
   - `show-client-state`
@@ -87,7 +89,7 @@ Deliverables:
 Required rules:
 
 - `xtask` stays thin and must not become the owner of config parsing or business logic
-- `loon-ops` is the shared shell core that future `loon-cli` work must reuse
+- `loon-ops` is the shared shell core now reused by both `xtask ops ...` and `loon ops ...`
 - `loon-client` owns local filesystem event normalization and path-based local observation routing
 - `loon-ops` shell commands delegate to that client-owned local observation layer rather than
   re-implementing path classification
@@ -107,7 +109,7 @@ Required rules:
 - `sync-once` is executor-only and progresses at most one real scheduler step
 - `sync-until-idle` is only a loop over the real `sync-once` path
 - `xtask ops import-remote-observations` is the first shell exposure of authoritative import and
-  it must reuse the `loon-ops` import API unchanged
+  it must reuse the `loon-ops` import API unchanged; `loon ops ...` must do the same
 - `ops smoke` remains inspect/bootstrap only in this milestone
 - no ambient provider env lookup in core crates
 - bootstrap fails closed by default if the namespace already exists
@@ -133,6 +135,8 @@ Exit criteria:
 
 - one developer can point `xtask ops` at `local-fs`, AWS S3, or Cloudflare R2 using the same
   config shape
+- the same `loon-ops` command contract is available through `loon ops ...` without changing
+  config shape or behavior ownership
 - namespace bootstrap and authoritative-state inspection no longer require test helper code
 - client-state inspection is available through the same shell contract
 - authoritative observation import is shell-exposed only by calling the existing `loon-ops` API
@@ -145,7 +149,8 @@ Exit criteria:
   file and directory move identity without widening into heuristic move guesses
 - one honest client scheduler step or idle loop can be exercised locally without inventing a
   second sync path
-- future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers
+- broader future `loon-cli` work can continue to reuse `loon-ops` instead of re-implementing
+  config and renderers
 - the repo now has a generic watcher-ready local event reducer without committing to an OS watcher
   adapter yet
 
@@ -195,8 +200,8 @@ Exit criteria:
 At the end of this roadmap phase:
 
 - the repo has a real local operability substrate
-- `xtask ops ...` is the current frontend
+- `xtask ops ...` and `loon ops ...` are both active frontends over the same shared contract
 - `xtask rc-local` is the canonical repo RC path
 - `loon-ops` owns the shared shell contract
-- `loon-cli` is still quarantined, but its eventual handoff path is explicit
+- `loon-cli` is active as a thin frontend, while broader public CLI surface is still deferred
 - the project can return to client behavior work without losing a clear local operator path

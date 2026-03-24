@@ -1,7 +1,33 @@
+mod app;
+mod cmd;
+mod error;
+
 fn main() -> std::process::ExitCode {
-    eprintln!(
-        "loon-cli is intentionally unavailable during the semantic-core reset.\n\
-         Active surfaces today are library crates, scenario fixtures, and `cargo run -p xtask -- ...`."
-    );
-    std::process::ExitCode::FAILURE
+    match app::run(std::env::args_os()) {
+        Ok(output) => {
+            if !output.is_empty() {
+                if output.ends_with('\n') {
+                    print!("{output}");
+                } else {
+                    println!("{output}");
+                }
+            }
+            std::process::ExitCode::SUCCESS
+        }
+        Err(error) => {
+            let rendered = error.render();
+            if error.use_stderr() {
+                if rendered.ends_with('\n') {
+                    eprint!("{rendered}");
+                } else {
+                    eprintln!("{rendered}");
+                }
+            } else if rendered.ends_with('\n') {
+                print!("{rendered}");
+            } else {
+                println!("{rendered}");
+            }
+            std::process::ExitCode::from(error.exit_code())
+        }
+    }
 }

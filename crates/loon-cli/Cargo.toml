@@ -5,5 +5,17 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "loon"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+clap_mangen = "0.2"
+loon-ops = { path = "../loon-ops" }
+loon-types = { path = "../loon-types" }
+
+[dev-dependencies]
+loon-testkit = { path = "../loon-testkit" }

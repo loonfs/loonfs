@@ -1,23 +1,25 @@
 # loon-cli
 
-Reserved future operator/debugging CLI surface.
+Active thin CLI frontend over `crates/loon-ops`.
 
-This crate remains intentionally quarantined.
+Current scope:
 
-The current active operator frontend is `xtask ops ...`, and the shared command/config/rendering
-contract now lives in `crates/loon-ops`.
+- `loon ops ...` reuses the shared `loon-ops` subcommand grammar and output semantics unchanged
+- `loon completion ...`, `loon manpages ...`, and `loon version` are CLI-only affordances
+- `xtask ops ...` remains supported in parallel for repo/dev workflows
+- `xtask rc-local` remains repo automation and does not move into `loon-cli`
 
-When `loon-cli` is activated, it should reuse that `loon-ops` layer with the same subcommand
-grammar and output semantics instead of re-implementing config loading or shell logic. That
-includes `import-remote-observations`, `observe-local`, `observe-delete`, `observe-move`,
-`observe-subtree`, `sync-once`, and `sync-until-idle`, which should move over unchanged rather
-than being re-specified in `loon-cli`.
+Deliberate non-goals in the current slice:
 
-The local filesystem semantics underneath those commands now live in `crates/loon-client`:
+- no profiles or token auth
+- no separate `~/.config/loon/config.toml` model
+- no endpoint or HTTP transport abstraction
+- no public `namespace`, `ls`, `cat`, `put`, `get`, or `doctor` families yet
+
+The local filesystem semantics underneath the `ops` commands continue to live in `crates/loon-client`:
 
 - path-based `observe-local` / `observe-delete` / `observe-move` / `observe-subtree` routing
 - generic filesystem event normalization for future watcher adapters
 
-In particular, subtree move pairing semantics should be reused unchanged through that client-owned
-layer: unique digest-equal file pairs and unique exact-subtree directory pairs may infer a move,
-while non-exact directory refactors still require explicit `observe-move`.
+Broader CLI work should continue to reuse those existing layers rather than re-implementing them in
+`loon-cli`.
