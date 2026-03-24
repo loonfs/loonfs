@@ -1,0 +1,10 @@
+events:
+  - kind: renamed
+    from_relative_path: hello.txt
+    to_relative_path: archive/hello.txt
+    inode_kind: file
+expect:
+  intents:
+    - kind: observe_move
+      from_relative_path: hello.txt
+      to_relative_path: archive/hello.txt

@@ -86,12 +86,16 @@ Constraints for that shell:
 - full-namespace authoritative remote observation import remains a supported library path in
   `loon-ops`, and `xtask ops import-remote-observations` must call that API verbatim rather than
   re-implementing it
+- `loon-client` owns local filesystem event normalization and path-based local observation routing
 - local observation of one existing file remains a supported client/library path first, and
-  `xtask ops observe-local` is only a thin adapter over that path
+  `xtask ops observe-local` is only a thin adapter over that `loon-client` path
 - explicit local delete and move observation remain supported client/library paths first, and
-  `xtask ops observe-delete` / `xtask ops observe-move` are thin adapters over those paths
+  `xtask ops observe-delete` / `xtask ops observe-move` are thin adapters over those
+  `loon-client` paths
 - recursive local subtree observation remains a supported client/library path first, and
-  `xtask ops observe-subtree` is only a thin adapter over that path
+  `xtask ops observe-subtree` is only a thin adapter over that `loon-client` path
+- any future watcher adapter must feed the generic `loon-client` event reducer rather than adding
+  a second local observation path
 - `xtask ops sync-once` is intentionally single-step and executor-only
 - `xtask ops sync-until-idle` is only a thin loop over `sync-once`
 - the shell is intentionally narrow in the current phase; there is still no watcher, and subtree
@@ -101,6 +105,8 @@ Constraints for that shell:
 - explicit `observe-move` remains the override for non-exact directory refactors
 - `ops smoke` remains bootstrap/inspection-only and does not compose the import path yet
 - future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
+- native filesystem object ids in the reducer are advisory within one batch only and are never
+  durable truth
 
 Current local RC path:
 

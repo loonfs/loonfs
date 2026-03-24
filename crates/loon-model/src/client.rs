@@ -255,6 +255,58 @@ where
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn fs_event_create_then_write_reduces_to_observe_local(intent_kinds: &[&str]) -> bool {
+    intent_kinds == ["observe_local"]
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fs_event_rename_reduces_to_observe_move(intent_kinds: &[&str]) -> bool {
+    intent_kinds == ["observe_move"]
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fs_event_repeated_edits_reduce_to_one_subtree(
+    intent_kinds: &[&str],
+    relative_paths: &[&str],
+) -> bool {
+    intent_kinds == ["observe_subtree"]
+        && relative_paths.len() == 1
+        && !relative_paths[0].is_empty()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fs_event_delete_burst_reduces_to_highest_root_delete(
+    intent_kinds: &[&str],
+    relative_paths: &[&str],
+    expected_root: &str,
+) -> bool {
+    intent_kinds == ["observe_delete"] && relative_paths == [expected_root]
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fs_event_atomic_save_returns_error(reason_code: &str) -> bool {
+    reason_code == "contradictory_path_events"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fs_event_conflicting_rename_edges_return_error(reason_code: &str) -> bool {
+    reason_code == "ambiguous_rename_source"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fs_event_conflicting_native_id_reuse_returns_error(reason_code: &str) -> bool {
+    reason_code == "ambiguous_native_object_id"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn fs_event_descendants_under_root_move_or_delete_are_absorbed(
+    intent_kinds: &[&str],
+    intent_count: usize,
+) -> bool {
+    intent_count == 1 && matches!(intent_kinds, ["observe_move"] | ["observe_delete"])
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn sync_until_idle_stops_on_no_work(
     final_outcome: &str,
     steps_run: usize,

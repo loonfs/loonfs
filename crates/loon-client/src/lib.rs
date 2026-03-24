@@ -2,6 +2,7 @@
 
 mod conflict;
 mod local_apply;
+pub mod local_fs;
 pub mod testing;
 
 pub use conflict::{

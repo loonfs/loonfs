@@ -1,0 +1,11 @@
+events:
+  - kind: removed
+    relative_path: report.txt
+    inode_kind: file
+  - kind: created
+    relative_path: report.txt
+    inode_kind: file
+expect:
+  error_reason_code: contradictory_path_events
+  affected_relative_paths:
+    - report.txt

@@ -418,6 +418,56 @@ Failure modes prevented:
 - inferring a rename from unrelated create/delete pairs
 - silently guessing between multiple same-digest move candidates
 
+## Generic filesystem event normalization
+
+The next local-change layer is platform-neutral and reducer-only.
+
+It belongs to `loon-client`, not to `loon-ops`, and it does not talk to SQLite directly.
+
+It adds one generic normalized event vocabulary plus one reducer that maps one ordered event batch
+into the already-supported observation intents:
+
+- `observe-local`
+- `observe-delete`
+- `observe-move`
+- `observe-subtree`
+
+Rules:
+
+- normalized event paths are already relative to one configured `mirror_root`
+- supported event kinds are:
+  - `created`
+  - `modified`
+  - `removed`
+  - `renamed`
+  - `rescan_subtree`
+- events may include:
+  - optional inode-kind hints
+  - optional native file identity hints
+- native file identity is advisory only:
+  - it may help pair one same-batch remove plus create into one move
+  - it is never durable truth
+  - it is never stored across batches
+- explicit rename events always win over native-id pairing
+- ambiguity or contradiction fails closed with a typed reducer error:
+  - no implicit rescan fallback
+  - no partial apply
+- platform watchers come later as thin adapters that feed this generic reducer
+
+Why this rule exists:
+
+- the hard problem is deterministic local-change meaning, not OS callback subscription
+- future watcher adapters should share one semantic reduction path instead of embedding shell or
+  platform-specific heuristics
+- `xtask ops ...` and future `loon-cli` should call the same client-owned path routing layer that
+  watcher adapters will eventually use
+
+Failure modes prevented:
+
+- one platform adapter reducing noisy event bursts differently from another
+- treating advisory native object ids like durable canonical identity
+- shell code becoming the accidental owner of local-change semantics
+
 ## Bound delete observation and replan
 
 For one already-bound inode, explicit delete observation must:
@@ -2842,7 +2892,8 @@ conflict reasoning and convergence are much easier when directionality is explic
 
 ## Client responsibilities
 
-- watch local changes
+- normalize local change events into supported observation intents
+- later attach platform watcher adapters that feed the generic reducer
 - poll or subscribe to remote changes
 - plan sync work deterministically
 - persist enough local state to recover after restart

@@ -14,6 +14,8 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
   `loon-ops` composition
 - supported recursive subtree observation through `loon-client` batch observation plus thin
   `loon-ops` composition
+- supported generic filesystem event normalization in `loon-client`, ready for future watcher
+  adapters without adding one yet
 - supported single-step client execution through the real scheduler and real server mutation path
 - supported thin repeat-until-idle execution through the same real scheduler step
 - a thin internal shell in `xtask`
@@ -86,6 +88,9 @@ Required rules:
 
 - `xtask` stays thin and must not become the owner of config parsing or business logic
 - `loon-ops` is the shared shell core that future `loon-cli` work must reuse
+- `loon-client` owns local filesystem event normalization and path-based local observation routing
+- `loon-ops` shell commands delegate to that client-owned local observation layer rather than
+  re-implementing path classification
 - no `demo-*` command family
 - no watcher or delete/move inference inside `observe-local`
 - `observe-local` is still file-first and existing-file-only
@@ -141,6 +146,8 @@ Exit criteria:
 - one honest client scheduler step or idle loop can be exercised locally without inventing a
   second sync path
 - future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers
+- the repo now has a generic watcher-ready local event reducer without committing to an OS watcher
+  adapter yet
 
 ## Milestone 16: provider-backed RC hardening
 

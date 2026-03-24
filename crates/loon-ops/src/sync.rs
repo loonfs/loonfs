@@ -1,4 +1,3 @@
-use crate::paths::{join_under_mirror_root, NamespacePathIndex};
 use crate::{require_existing_file, OpsConfig};
 use anyhow::Result;
 use loon_client::executor::{
@@ -6,6 +5,7 @@ use loon_client::executor::{
     ExecutedLocalOnlyCreate, NextClientAction, UploadLocalCreateExecution,
     UploadLocalEditExecution,
 };
+use loon_client::local_fs::{join_under_mirror_root, NamespacePathIndex};
 use loon_client::state_db::{ClientFileId, SqliteStateDb, TransferDirection, TransferState};
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
 use loon_types::{ChangeSeq, InodeId, NamespaceId};

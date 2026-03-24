@@ -1,0 +1,13 @@
+events:
+  - kind: renamed
+    from_relative_path: report.txt
+    to_relative_path: archive/report-a.txt
+    inode_kind: file
+  - kind: renamed
+    from_relative_path: report.txt
+    to_relative_path: archive/report-b.txt
+    inode_kind: file
+expect:
+  error_reason_code: ambiguous_rename_source
+  affected_relative_paths:
+    - report.txt

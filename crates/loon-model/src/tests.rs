@@ -6,6 +6,12 @@ use crate::client::{
     bound_directory_delete_observation_plans_delete_subtree,
     bound_file_delete_observation_plans_delete_file,
     bound_file_observation_plans_upload_local_edit, bound_move_observation_plans_rename,
+    fs_event_atomic_save_returns_error, fs_event_conflicting_native_id_reuse_returns_error,
+    fs_event_conflicting_rename_edges_return_error,
+    fs_event_create_then_write_reduces_to_observe_local,
+    fs_event_delete_burst_reduces_to_highest_root_delete,
+    fs_event_descendants_under_root_move_or_delete_are_absorbed,
+    fs_event_rename_reduces_to_observe_move, fs_event_repeated_edits_reduce_to_one_subtree,
     local_only_delete_clears_temp_state, local_only_move_preserves_identity,
     local_only_observation_under_bound_parent_plans_upload_local_create,
     recursive_subtree_ambiguous_directory_pairing_fails_closed,
@@ -392,6 +398,98 @@ fn model_recursive_subtree_repeat_reuses_local_only_identity() {
         "tmp:ns-1:00000000000000000001",
         "tmp:ns-1:00000000000000000002"
     ));
+}
+
+#[test]
+fn model_fs_event_create_then_write_reduces_to_observe_local() {
+    assert!(fs_event_create_then_write_reduces_to_observe_local(&[
+        "observe_local",
+    ]));
+    assert!(!fs_event_create_then_write_reduces_to_observe_local(&[
+        "observe_subtree",
+    ]));
+}
+
+#[test]
+fn model_fs_event_rename_reduces_to_observe_move() {
+    assert!(fs_event_rename_reduces_to_observe_move(&["observe_move"]));
+    assert!(!fs_event_rename_reduces_to_observe_move(&[
+        "observe_delete"
+    ]));
+}
+
+#[test]
+fn model_fs_event_repeated_edits_reduce_to_one_subtree() {
+    assert!(fs_event_repeated_edits_reduce_to_one_subtree(
+        &["observe_subtree"],
+        &["docs"]
+    ));
+    assert!(!fs_event_repeated_edits_reduce_to_one_subtree(
+        &["observe_local"],
+        &["docs"]
+    ));
+}
+
+#[test]
+fn model_fs_event_delete_burst_reduces_to_highest_root_delete() {
+    assert!(fs_event_delete_burst_reduces_to_highest_root_delete(
+        &["observe_delete"],
+        &["docs"],
+        "docs"
+    ));
+    assert!(!fs_event_delete_burst_reduces_to_highest_root_delete(
+        &["observe_delete", "observe_delete"],
+        &["docs", "docs/note.txt"],
+        "docs"
+    ));
+}
+
+#[test]
+fn model_fs_event_atomic_save_returns_error() {
+    assert!(fs_event_atomic_save_returns_error(
+        "contradictory_path_events"
+    ));
+    assert!(!fs_event_atomic_save_returns_error(
+        "ambiguous_rename_source"
+    ));
+}
+
+#[test]
+fn model_fs_event_conflicting_rename_edges_return_error() {
+    assert!(fs_event_conflicting_rename_edges_return_error(
+        "ambiguous_rename_source"
+    ));
+    assert!(!fs_event_conflicting_rename_edges_return_error(
+        "ambiguous_native_object_id"
+    ));
+}
+
+#[test]
+fn model_fs_event_conflicting_native_id_reuse_returns_error() {
+    assert!(fs_event_conflicting_native_id_reuse_returns_error(
+        "ambiguous_native_object_id"
+    ));
+    assert!(!fs_event_conflicting_native_id_reuse_returns_error(
+        "contradictory_path_events"
+    ));
+}
+
+#[test]
+fn model_fs_event_descendants_under_root_move_or_delete_are_absorbed() {
+    assert!(fs_event_descendants_under_root_move_or_delete_are_absorbed(
+        &["observe_move"],
+        1
+    ));
+    assert!(fs_event_descendants_under_root_move_or_delete_are_absorbed(
+        &["observe_delete"],
+        1
+    ));
+    assert!(
+        !fs_event_descendants_under_root_move_or_delete_are_absorbed(
+            &["observe_move", "observe_local"],
+            2
+        )
+    );
 }
 
 #[test]

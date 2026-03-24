@@ -2,7 +2,6 @@
 
 mod import;
 mod observe;
-mod paths;
 mod sync;
 
 use anyhow::{anyhow, bail, Context, Result};

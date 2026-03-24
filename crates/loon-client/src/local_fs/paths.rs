@@ -1,4 +1,4 @@
-use loon_client::state_db::{
+use crate::state_db::{
     ClientFileId, ClientNamespaceStateSummary, LocalFileStateRow, LocalOnlyFileStateRow,
     LocalOnlyParentLinkRow, LocalOnlyParentRef, RemoteFileStateRow, SyncAnchorRow,
 };
@@ -6,7 +6,7 @@ use loon_types::InodeId;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamespacePathIndex {
+pub struct NamespacePathIndex {
     local_paths_by_inode: BTreeMap<InodeId, String>,
     anchor_paths_by_inode: BTreeMap<InodeId, String>,
     remote_paths_by_inode: BTreeMap<InodeId, String>,
@@ -19,7 +19,7 @@ pub(crate) struct NamespacePathIndex {
 }
 
 impl NamespacePathIndex {
-    pub(crate) fn build(
+    pub fn build(
         summary: &ClientNamespaceStateSummary,
         local_only_parent_links: &[LocalOnlyParentLinkRow],
     ) -> Self {
@@ -102,35 +102,35 @@ impl NamespacePathIndex {
         }
     }
 
-    pub(crate) fn bound_file_matches(&self, relative_path: &str) -> &[LocalFileStateRow] {
+    pub fn bound_file_matches(&self, relative_path: &str) -> &[LocalFileStateRow] {
         self.bound_files_by_path
             .get(relative_path)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub(crate) fn bound_dir_matches(&self, relative_path: &str) -> &[LocalFileStateRow] {
+    pub fn bound_dir_matches(&self, relative_path: &str) -> &[LocalFileStateRow] {
         self.bound_dirs_by_path
             .get(relative_path)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub(crate) fn local_only_file_matches(&self, relative_path: &str) -> &[LocalOnlyFileStateRow] {
+    pub fn local_only_file_matches(&self, relative_path: &str) -> &[LocalOnlyFileStateRow] {
         self.local_only_files_by_path
             .get(relative_path)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub(crate) fn local_only_dir_matches(&self, relative_path: &str) -> &[LocalOnlyFileStateRow] {
+    pub fn local_only_dir_matches(&self, relative_path: &str) -> &[LocalOnlyFileStateRow] {
         self.local_only_dirs_by_path
             .get(relative_path)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub(crate) fn resolve_local_only_source_relative_path(
+    pub fn resolve_local_only_source_relative_path(
         &self,
         client_file_id: &ClientFileId,
     ) -> Option<&str> {
@@ -139,7 +139,7 @@ impl NamespacePathIndex {
             .map(String::as_str)
     }
 
-    pub(crate) fn local_only_parent_ref_for(
+    pub fn local_only_parent_ref_for(
         &self,
         row: &LocalOnlyFileStateRow,
     ) -> Option<LocalOnlyParentRef> {
@@ -154,7 +154,7 @@ impl NamespacePathIndex {
             })
     }
 
-    pub(crate) fn tracked_relative_paths_under_prefix(&self, prefix: &str) -> BTreeSet<String> {
+    pub fn tracked_relative_paths_under_prefix(&self, prefix: &str) -> BTreeSet<String> {
         let mut paths = BTreeSet::new();
         collect_paths_under_prefix(self.bound_files_by_path.keys(), prefix, &mut paths);
         collect_paths_under_prefix(self.bound_dirs_by_path.keys(), prefix, &mut paths);
@@ -163,7 +163,7 @@ impl NamespacePathIndex {
         paths
     }
 
-    pub(crate) fn resolve_current_inode_relative_path(&self, inode_id: InodeId) -> Option<&str> {
+    pub fn resolve_current_inode_relative_path(&self, inode_id: InodeId) -> Option<&str> {
         self.local_paths_by_inode
             .get(&inode_id)
             .or_else(|| self.anchor_paths_by_inode.get(&inode_id))
@@ -171,7 +171,7 @@ impl NamespacePathIndex {
             .map(String::as_str)
     }
 
-    pub(crate) fn resolve_target_inode_relative_path(
+    pub fn resolve_target_inode_relative_path(
         &self,
         inode_id: InodeId,
         parent_inode_id: Option<InodeId>,
@@ -199,7 +199,7 @@ impl NamespacePathIndex {
     }
 }
 
-pub(crate) fn join_under_mirror_root(
+pub fn join_under_mirror_root(
     mirror_root: &std::path::Path,
     relative_path: &str,
 ) -> std::path::PathBuf {
@@ -338,7 +338,7 @@ where
     }
 }
 
-pub(crate) fn relative_path_is_under_prefix(relative_path: &str, prefix: &str) -> bool {
+pub fn relative_path_is_under_prefix(relative_path: &str, prefix: &str) -> bool {
     prefix.is_empty()
         || relative_path == prefix
         || relative_path

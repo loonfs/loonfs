@@ -1,0 +1,14 @@
+events:
+  - kind: removed
+    relative_path: draft.txt
+    inode_kind: file
+    native_object_id: native:1
+  - kind: created
+    relative_path: archive/draft.txt
+    inode_kind: file
+    native_object_id: native:1
+expect:
+  intents:
+    - kind: observe_move
+      from_relative_path: draft.txt
+      to_relative_path: archive/draft.txt

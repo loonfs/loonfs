@@ -1,0 +1,14 @@
+events:
+  - kind: removed
+    relative_path: docs
+    inode_kind: dir
+  - kind: removed
+    relative_path: docs/report.txt
+    inode_kind: file
+  - kind: removed
+    relative_path: docs/drafts/note.txt
+    inode_kind: file
+expect:
+  intents:
+    - kind: observe_delete
+      relative_path: docs
