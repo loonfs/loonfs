@@ -1,8 +1,9 @@
 use loon_client::planner::PlannerDecision;
 use loon_client::state_db::{
-    LocalFileStateRow, ObservedBoundDelete, ObservedBoundInode, ObservedLocalOnlySubtreeInode,
-    ObservedLocalOnlySubtreeMove, RemoteFileStateRow, SqliteStateDb, StateDbError,
-    SubtreeLocalOnlyParentRef, SubtreeObservationOp, SubtreeObservationOutcome, SyncAnchorRow,
+    ClientFileId, LocalFileStateRow, ObservedBoundDelete, ObservedBoundInode,
+    ObservedLocalOnlySubtreeInode, ObservedLocalOnlySubtreeMove, RemoteFileStateRow, SqliteStateDb,
+    StateDbError, SubtreeLocalOnlyParentRef, SubtreeObservationOp, SubtreeObservationOutcome,
+    SyncAnchorRow,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 
@@ -241,6 +242,53 @@ fn observe_subtree_move_bound_file_plans_rename() {
 }
 
 #[test]
+fn observe_subtree_move_bound_directory_plans_rename() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open state db");
+    seed_bound_root_directory(&mut db);
+    seed_bound_directory(&mut db, InodeId(3), "archive", Some(InodeId(1)));
+    seed_bound_directory(&mut db, InodeId(2), "docs", Some(InodeId(1)));
+    seed_bound_file(
+        &mut db,
+        InodeId(4),
+        "note.txt",
+        InodeId(2),
+        "sha256:note-v1",
+    );
+
+    let outcomes = db
+        .observe_subtree_and_plan(
+            &[SubtreeObservationOp::MoveBound {
+                from_relative_path: "docs".to_owned(),
+                observed: ObservedBoundInode {
+                    namespace_id: demo_namespace(),
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    content_digest: None,
+                    parent_inode_id: Some(InodeId(3)),
+                    display_name: "docs".to_owned(),
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: 1_000,
+                },
+            }],
+            1_000,
+        )
+        .expect("observe subtree bound directory move");
+
+    match &outcomes[0] {
+        SubtreeObservationOutcome::MovedBound {
+            from_relative_path,
+            planned_action,
+            ..
+        } => {
+            assert_eq!(from_relative_path, "docs");
+            assert_eq!(planned_action.decision, PlannerDecision::Rename);
+        }
+        other => panic!("unexpected move outcome: {other:?}"),
+    }
+}
+
+#[test]
 fn observe_subtree_move_local_only_file_under_bound_parent_preserves_identity() {
     let mut db = SqliteStateDb::open_in_memory().expect("open state db");
     seed_bound_root_directory(&mut db);
@@ -311,6 +359,109 @@ fn observe_subtree_move_local_only_file_under_bound_parent_preserves_identity() 
         }
         other => panic!("unexpected local-only move outcome: {other:?}"),
     }
+}
+
+#[test]
+fn observe_subtree_move_local_only_directory_under_bound_parent_preserves_identities() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open state db");
+    seed_bound_root_directory(&mut db);
+    seed_bound_directory(&mut db, InodeId(3), "archive", Some(InodeId(1)));
+
+    let created = db
+        .observe_subtree_and_plan(
+            &[
+                SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: "drafts".to_owned(),
+                        namespace_id: demo_namespace(),
+                        inode_kind: InodeKind::Dir,
+                        parent: SubtreeLocalOnlyParentRef::Bound {
+                            parent_inode_id: InodeId(1),
+                        },
+                        display_name: "drafts".to_owned(),
+                        content_digest: None,
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: 1_000,
+                    },
+                },
+                SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: "drafts/note.txt".to_owned(),
+                        namespace_id: demo_namespace(),
+                        inode_kind: InodeKind::File,
+                        parent: SubtreeLocalOnlyParentRef::BatchLocalOnly {
+                            parent_relative_path: "drafts".to_owned(),
+                        },
+                        display_name: "note.txt".to_owned(),
+                        content_digest: Some("sha256:note-v1".to_owned()),
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: 1_000,
+                    },
+                },
+            ],
+            1_000,
+        )
+        .expect("create local-only directory subtree");
+    let original_root_id = observed_local_only_id(&created[0]);
+    let original_child_id = observed_local_only_id(&created[1]);
+
+    let moved = db
+        .observe_subtree_and_plan(
+            &[SubtreeObservationOp::MoveLocalOnly {
+                observed: ObservedLocalOnlySubtreeMove {
+                    from_relative_path: "drafts".to_owned(),
+                    relative_path: "archive/drafts".to_owned(),
+                    client_file_id: ClientFileId::new(original_root_id.clone()),
+                    namespace_id: demo_namespace(),
+                    inode_kind: InodeKind::Dir,
+                    parent: SubtreeLocalOnlyParentRef::Bound {
+                        parent_inode_id: InodeId(3),
+                    },
+                    display_name: "drafts".to_owned(),
+                    content_digest: None,
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: 2_000,
+                },
+            }],
+            2_000,
+        )
+        .expect("move local-only directory under bound parent");
+
+    match &moved[0] {
+        SubtreeObservationOutcome::MovedLocalOnly {
+            from_relative_path,
+            result,
+            ..
+        } => {
+            assert_eq!(from_relative_path, "drafts");
+            assert_eq!(result.local_only.client_file_id.as_str(), original_root_id);
+            assert_eq!(
+                result.planned_action.decision,
+                PlannerDecision::CreateRemoteDir
+            );
+        }
+        other => panic!("unexpected local-only directory move outcome: {other:?}"),
+    }
+
+    let child = db
+        .load_local_only_file(&ClientFileId::new(original_child_id.clone()))
+        .expect("load child after directory move")
+        .expect("child should remain present");
+    assert_eq!(child.client_file_id.as_str(), original_child_id);
+    let parent_links = db
+        .load_local_only_parent_links_for_namespace(&demo_namespace())
+        .expect("load parent links");
+    let child_parent = parent_links
+        .iter()
+        .find(|row| row.client_file_id.as_str() == original_child_id)
+        .expect("child parent link present");
+    assert_eq!(
+        child_parent.parent_client_file_id.as_str(),
+        original_root_id
+    );
 }
 
 #[test]
@@ -416,6 +567,121 @@ fn observe_subtree_move_local_only_file_under_local_only_parent_preserves_identi
         }
         other => panic!("unexpected local-only move outcome: {other:?}"),
     }
+}
+
+#[test]
+fn observe_subtree_move_local_only_directory_under_local_only_parent_preserves_identities() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open state db");
+    seed_bound_root_directory(&mut db);
+
+    let created = db
+        .observe_subtree_and_plan(
+            &[
+                SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: "archive".to_owned(),
+                        namespace_id: demo_namespace(),
+                        inode_kind: InodeKind::Dir,
+                        parent: SubtreeLocalOnlyParentRef::Bound {
+                            parent_inode_id: InodeId(1),
+                        },
+                        display_name: "archive".to_owned(),
+                        content_digest: None,
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: 1_000,
+                    },
+                },
+                SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: "drafts".to_owned(),
+                        namespace_id: demo_namespace(),
+                        inode_kind: InodeKind::Dir,
+                        parent: SubtreeLocalOnlyParentRef::Bound {
+                            parent_inode_id: InodeId(1),
+                        },
+                        display_name: "drafts".to_owned(),
+                        content_digest: None,
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: 1_000,
+                    },
+                },
+                SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: "drafts/note.txt".to_owned(),
+                        namespace_id: demo_namespace(),
+                        inode_kind: InodeKind::File,
+                        parent: SubtreeLocalOnlyParentRef::BatchLocalOnly {
+                            parent_relative_path: "drafts".to_owned(),
+                        },
+                        display_name: "note.txt".to_owned(),
+                        content_digest: Some("sha256:note-v1".to_owned()),
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: 1_000,
+                    },
+                },
+            ],
+            1_000,
+        )
+        .expect("create local-only directories");
+    let archive_id = observed_local_only_id(&created[0]);
+    let original_root_id = observed_local_only_id(&created[1]);
+    let original_child_id = observed_local_only_id(&created[2]);
+
+    let moved = db
+        .observe_subtree_and_plan(
+            &[SubtreeObservationOp::MoveLocalOnly {
+                observed: ObservedLocalOnlySubtreeMove {
+                    from_relative_path: "drafts".to_owned(),
+                    relative_path: "archive/drafts".to_owned(),
+                    client_file_id: ClientFileId::new(original_root_id.clone()),
+                    namespace_id: demo_namespace(),
+                    inode_kind: InodeKind::Dir,
+                    parent: SubtreeLocalOnlyParentRef::ExistingLocalOnly {
+                        parent_client_file_id: ClientFileId::new(archive_id.clone()),
+                    },
+                    display_name: "drafts".to_owned(),
+                    content_digest: None,
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: 2_000,
+                },
+            }],
+            2_000,
+        )
+        .expect("move local-only directory under local-only parent");
+
+    match &moved[0] {
+        SubtreeObservationOutcome::MovedLocalOnly {
+            from_relative_path,
+            result,
+            ..
+        } => {
+            assert_eq!(from_relative_path, "drafts");
+            assert_eq!(result.local_only.client_file_id.as_str(), original_root_id);
+            assert_eq!(result.planned_action.decision, PlannerDecision::NoOp);
+        }
+        other => panic!("unexpected local-only directory move outcome: {other:?}"),
+    }
+
+    let child = db
+        .load_local_only_file(&ClientFileId::new(original_child_id.clone()))
+        .expect("load child after directory move")
+        .expect("child should remain present");
+    assert_eq!(child.client_file_id.as_str(), original_child_id);
+    let parent_links = db
+        .load_local_only_parent_links_for_namespace(&demo_namespace())
+        .expect("load parent links");
+    let child_parent = parent_links
+        .iter()
+        .find(|row| row.client_file_id.as_str() == original_child_id)
+        .expect("child parent link present");
+    assert_eq!(
+        child_parent.parent_client_file_id.as_str(),
+        original_root_id
+    );
 }
 
 #[test]

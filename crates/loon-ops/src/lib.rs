@@ -1406,6 +1406,150 @@ lease_duration_ms = 60000
     }
 
     #[test]
+    fn observe_subtree_renders_inferred_bound_directory_move_report() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree-bound-dir-move");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(3),
+            Some(InodeId(1)),
+            "archive",
+        );
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            Some(InodeId(1)),
+            "docs",
+        );
+        let file_digest = sha256_digest(b"note v1\n");
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(4),
+            "note.txt",
+            &file_digest,
+            &format!("manifest:{file_digest}"),
+        );
+        db.planner_transaction("reparent-note-under-docs", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(file_digest.clone()),
+                content_manifest_digest: Some(format!("manifest:{file_digest}")),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                content_digest: Some(file_digest.clone()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(file_digest.clone()),
+                content_manifest_digest: Some(format!("manifest:{file_digest}")),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed note under docs");
+
+        fs::create_dir_all(temp_dir.join("mirror/archive/docs")).expect("create moved docs dir");
+        fs::write(temp_dir.join("mirror/archive/docs/note.txt"), b"note v1\n")
+            .expect("write moved note file");
+
+        let rendered = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_inferred_bound_directory_move.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn observe_subtree_renders_inferred_local_only_directory_move_report() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree-local-only-dir-move");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(3),
+            Some(InodeId(1)),
+            "archive",
+        );
+        let note_digest = sha256_digest(b"note v1\n");
+        seed_local_only_directory_with_child_digest(
+            &mut db,
+            "tmp:demo:00000000000000000001",
+            "tmp:demo:00000000000000000002",
+            InodeId(1),
+            "drafts",
+            "note.txt",
+            &note_digest,
+        );
+
+        fs::create_dir_all(temp_dir.join("mirror/archive/drafts"))
+            .expect("create moved drafts dir");
+        fs::write(
+            temp_dir.join("mirror/archive/drafts/note.txt"),
+            b"note v1\n",
+        )
+        .expect("write moved local-only note");
+
+        let rendered = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_inferred_local_only_directory_move.txt"
+            )
+        );
+    }
+
+    #[test]
     fn observe_subtree_rejects_ambiguous_same_digest_file_pairing() {
         let temp_dir = unique_temp_dir("ops-observe-subtree-ambiguous-move");
         let config_path = write_local_fs_config(&temp_dir);
@@ -1441,6 +1585,58 @@ lease_duration_ms = 60000
         assert!(
             error.to_string().contains("move pairing is ambiguous"),
             "{error:#}"
+        );
+    }
+
+    #[test]
+    fn observe_subtree_rejects_ambiguous_exact_directory_pairing() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree-ambiguous-dir-move");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        let note_digest = sha256_digest(b"note v1\n");
+        seed_local_only_directory_with_child_digest(
+            &mut db,
+            "tmp:demo:00000000000000000001",
+            "tmp:demo:00000000000000000002",
+            InodeId(1),
+            "drafts",
+            "note.txt",
+            &note_digest,
+        );
+
+        fs::create_dir_all(temp_dir.join("mirror/archive-a/drafts"))
+            .expect("create first ambiguous directory target");
+        fs::create_dir_all(temp_dir.join("mirror/archive-b/drafts"))
+            .expect("create second ambiguous directory target");
+        fs::write(
+            temp_dir.join("mirror/archive-a/drafts/note.txt"),
+            b"note v1\n",
+        )
+        .expect("write first ambiguous note");
+        fs::write(
+            temp_dir.join("mirror/archive-b/drafts/note.txt"),
+            b"note v1\n",
+        )
+        .expect("write second ambiguous note");
+
+        let error = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect_err("ambiguous directory pairing should fail");
+
+        assert_eq!(
+            format!("{}\n", error),
+            include_str!(
+                "../../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_ambiguous_directory_pairing_error.txt"
+            )
         );
     }
 
@@ -1720,6 +1916,108 @@ lease_duration_ms = 60000
     }
 
     #[test]
+    fn sync_until_idle_reaches_idle_after_inferred_bound_directory_rename() {
+        let temp_dir = unique_temp_dir("ops-sync-until-idle-bound-dir-rename");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_directory_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(3),
+            Some(InodeId(1)),
+            "archive",
+        );
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            Some(InodeId(1)),
+            "docs",
+        );
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(4),
+            "note.txt",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+        db.planner_transaction("reparent-note-under-docs", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(snapshot.file_digest.clone()),
+                content_manifest_digest: Some(snapshot.manifest_digest.clone()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                content_digest: Some(snapshot.file_digest.clone()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(snapshot.file_digest.clone()),
+                content_manifest_digest: Some(snapshot.manifest_digest.clone()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed note under docs");
+
+        fs::create_dir_all(temp_dir.join("mirror/archive/docs")).expect("create moved docs dir");
+        fs::write(temp_dir.join("mirror/archive/docs/note.txt"), b"note v1\n")
+            .expect("write moved note");
+        run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("observe subtree directory rename");
+
+        let rendered = run_args([
+            "sync-until-idle".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-until-idle for inferred bound directory rename");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-sync-until-idle/ops_sync_until_idle_request_committed_directory_rename.txt"
+            )
+        );
+    }
+
+    #[test]
     fn sync_until_idle_fails_on_max_steps() {
         let temp_dir = unique_temp_dir("ops-sync-until-idle-max-steps");
         let config_path = write_local_fs_config(&temp_dir);
@@ -1986,6 +2284,26 @@ now_ms = 1000
         root_display_name: &str,
         child_display_name: &str,
     ) {
+        seed_local_only_directory_with_child_digest(
+            db,
+            root_client_file_id,
+            child_client_file_id,
+            parent_inode_id,
+            root_display_name,
+            child_display_name,
+            "sha256:note-v1",
+        );
+    }
+
+    fn seed_local_only_directory_with_child_digest(
+        db: &mut SqliteStateDb,
+        root_client_file_id: &str,
+        child_client_file_id: &str,
+        parent_inode_id: InodeId,
+        root_display_name: &str,
+        child_display_name: &str,
+        child_content_digest: &str,
+    ) {
         db.planner_transaction("seed-local-only-directory-with-child", |tx| {
             tx.upsert_local_only_file(&LocalOnlyFileStateRow {
                 client_file_id: root_client_file_id.into(),
@@ -2011,7 +2329,7 @@ now_ms = 1000
                 inode_kind: InodeKind::File,
                 parent_inode_id: None,
                 display_name: child_display_name.to_owned(),
-                content_digest: Some("sha256:note-v1".to_owned()),
+                content_digest: Some(child_content_digest.to_owned()),
                 exists_on_disk: true,
                 dirty: true,
                 last_local_change_ms: 1_000,
@@ -2123,6 +2441,130 @@ now_ms = 1000
             seq: ChangeSeq(1),
             active_fence_token: FenceToken(0),
             next_inode_id: InodeId(3),
+            snapshot_hint_seq: Some(ChangeSeq(1)),
+            retention_floor_seq: ChangeSeq(0),
+        };
+        let lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(0),
+            lease_expires_at_ms: 60_000,
+        };
+        let checkpoint =
+            prepare_checkpoint(&head, &metadata, "loon-ops-test").expect("prepare checkpoint");
+        store
+            .put_overwrite(
+                &checkpoint.manifest.object_key,
+                &checkpoint.manifest.encoded_bytes,
+            )
+            .expect("write checkpoint manifest");
+        for segment in &checkpoint.segments {
+            store
+                .put_overwrite(&segment.object_key, &segment.encoded_bytes)
+                .expect("write checkpoint segment");
+        }
+        let head_envelope =
+            HeadStateEnvelope::from_state(ControlObjectKind::NamespaceHead, "loon-ops-test", head)
+                .expect("encode head envelope");
+        let lease_envelope = LeaseStateEnvelope::from_state(
+            ControlObjectKind::NamespaceLease,
+            "loon-ops-test",
+            lease,
+        )
+        .expect("encode lease envelope");
+        store
+            .put_overwrite(
+                &namespace_head(namespace_id.as_str()),
+                &serde_json::to_vec(&head_envelope).expect("serialize head envelope"),
+            )
+            .expect("write head object");
+        store
+            .put_overwrite(
+                &namespace_lease(namespace_id.as_str()),
+                &serde_json::to_vec(&lease_envelope).expect("serialize lease envelope"),
+            )
+            .expect("write lease object");
+
+        SeededAuthoritativeSnapshot {
+            file_digest: uploaded.file_digest_sha256,
+            manifest_digest: uploaded.content_manifest_digest,
+        }
+    }
+
+    fn seed_authoritative_directory_snapshot(
+        store_root: &Path,
+        namespace_id: &NamespaceId,
+    ) -> SeededAuthoritativeSnapshot {
+        let store = ConfiguredObjectStore::local_fs(store_root, Some("tenant-a"))
+            .expect("create configured store");
+        let source_path = store_root.join("seed-note.txt");
+        fs::write(&source_path, b"note v1\n").expect("write seed note source");
+        let uploaded = upload_small_file_from_path(&store, namespace_id, &source_path)
+            .expect("upload seed note content");
+
+        let metadata = MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(3),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(4),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+            ],
+            direntries: vec![
+                DirentryRecord {
+                    parent_inode_id: InodeId(1),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(2),
+                    bind_seq: ChangeSeq(1),
+                    bind_op_index: 0,
+                },
+                DirentryRecord {
+                    parent_inode_id: InodeId(1),
+                    name_key: "archive".to_owned(),
+                    display_name: "archive".to_owned(),
+                    child_inode_id: InodeId(3),
+                    bind_seq: ChangeSeq(1),
+                    bind_op_index: 0,
+                },
+                DirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "note.txt".to_owned(),
+                    display_name: "note.txt".to_owned(),
+                    child_inode_id: InodeId(4),
+                    bind_seq: ChangeSeq(1),
+                    bind_op_index: 0,
+                },
+            ],
+            revisions: vec![RevisionRecord {
+                inode_id: InodeId(4),
+                revision_no: RevisionNo(1),
+                committed_seq: ChangeSeq(1),
+                revision_op_index: 0,
+                content_manifest_digest: uploaded.content_manifest_digest.clone(),
+            }],
+            subtree_tombstones: Vec::new(),
+        };
+        let head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(1),
+            active_fence_token: FenceToken(0),
+            next_inode_id: InodeId(5),
             snapshot_hint_seq: Some(ChangeSeq(1)),
             retention_floor_seq: ChangeSeq(0),
         };

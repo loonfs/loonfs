@@ -196,7 +196,39 @@ pub fn recursive_subtree_ambiguous_file_pairing_fails_closed(error_kind: &str) -
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn recursive_subtree_directory_move_does_not_pair(
+pub fn recursive_subtree_unique_bound_directory_move_is_paired(
+    planned_decision: &str,
+    paired_bound_move_count: usize,
+) -> bool {
+    planned_decision == "rename" && paired_bound_move_count == 1
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_unique_local_only_directory_move_preserves_identity(
+    original_root_client_file_id: &str,
+    moved_root_client_file_id: &str,
+    original_child_client_file_id: &str,
+    moved_child_client_file_id: &str,
+    paired_local_only_move_count: usize,
+) -> bool {
+    paired_local_only_move_count == 1
+        && local_only_move_preserves_identity(
+            original_root_client_file_id,
+            moved_root_client_file_id,
+        )
+        && local_only_move_preserves_identity(
+            original_child_client_file_id,
+            moved_child_client_file_id,
+        )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_ambiguous_directory_pairing_fails_closed(error_kind: &str) -> bool {
+    error_kind == "ambiguous_move_pairing"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_directory_move_with_descendant_drift_does_not_pair(
     paired_bound_move_count: usize,
     paired_local_only_move_count: usize,
 ) -> bool {

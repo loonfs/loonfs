@@ -286,7 +286,6 @@ enum SubtreeDestinationParent {
 #[derive(Debug, Clone)]
 struct UnmatchedPresentFile {
     relative_path: String,
-    parent: SubtreeDestinationParent,
     display_name: String,
     content_digest: String,
 }
@@ -295,6 +294,25 @@ struct UnmatchedPresentFile {
 struct MissingTrackedFile {
     relative_path: String,
     source: PathMatch,
+}
+
+#[derive(Debug, Clone)]
+struct UnmatchedPresentDirectory {
+    relative_path: String,
+    display_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct MissingTrackedDirectory {
+    relative_path: String,
+    source: PathMatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootedSubtreeFingerprintEntry {
+    relative_path: String,
+    inode_kind: InodeKind,
+    content_digest: Option<String>,
 }
 
 pub fn observe_local_path(
@@ -865,7 +883,7 @@ fn build_subtree_operations(
 ) -> Result<Vec<SubtreeObservationOp>, ObserveSubtreeError> {
     let mut operations = Vec::new();
     let mut present_paths = BTreeSet::new();
-    let mut new_local_only_dirs = BTreeSet::new();
+    let mut unmatched_present_dirs = Vec::new();
     let mut unmatched_present_files = Vec::new();
 
     for entry in scanned_entries {
@@ -930,61 +948,20 @@ fn build_subtree_operations(
                 });
             }
             None => {
-                let parent_relative_path = Path::new(&entry.relative_path)
-                    .parent()
-                    .map(normalize_relative_path)
-                    .unwrap_or_default();
-                let parent = if new_local_only_dirs.contains(&parent_relative_path) {
-                    SubtreeLocalOnlyParentRef::BatchLocalOnly {
-                        parent_relative_path: parent_relative_path.clone(),
-                    }
-                } else {
-                    match classify_destination_parent(
-                        path_index,
-                        namespace_id,
-                        &parent_relative_path,
-                    ) {
-                        Ok(ParentMatch::Bound(parent_inode_id)) => {
-                            SubtreeLocalOnlyParentRef::Bound { parent_inode_id }
-                        }
-                        Ok(ParentMatch::LocalOnly(parent_client_file_id)) => {
-                            SubtreeLocalOnlyParentRef::ExistingLocalOnly {
-                                parent_client_file_id,
-                            }
-                        }
-                        Err(_) => {
-                            return Err(ObserveSubtreeError::UntrackedParent {
-                                namespace_id: namespace_id.as_str().to_owned(),
-                                relative_path: entry.relative_path.clone(),
-                            });
-                        }
-                    }
-                };
                 let display_name = Path::new(&entry.relative_path)
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 match entry.kind {
                     ScannedEntryKind::Dir => {
-                        operations.push(SubtreeObservationOp::ObserveLocalOnly {
-                            observed: ObservedLocalOnlySubtreeInode {
-                                relative_path: entry.relative_path.clone(),
-                                namespace_id: namespace_id.clone(),
-                                inode_kind: InodeKind::Dir,
-                                parent,
-                                display_name,
-                                content_digest: None,
-                                exists_on_disk: true,
-                                dirty: true,
-                                last_local_change_ms: now_ms,
-                            },
+                        unmatched_present_dirs.push(UnmatchedPresentDirectory {
+                            relative_path: entry.relative_path.clone(),
+                            display_name,
                         });
-                        new_local_only_dirs.insert(entry.relative_path.clone());
                     }
                     ScannedEntryKind::File => {
                         unmatched_present_files.push(UnmatchedPresentFile {
                             relative_path: entry.relative_path.clone(),
-                            parent: destination_parent_from_subtree_parent_ref(&parent),
                             display_name,
                             content_digest: entry.content_digest.clone().ok_or_else(|| {
                                 ObserveSubtreeError::UnsupportedFilesystemEntry {
@@ -1015,7 +992,7 @@ fn build_subtree_operations(
     }
 
     let mut missing_tracked_files = Vec::new();
-    let mut missing_delete_ops = BTreeMap::new();
+    let mut missing_tracked_dirs = Vec::new();
 
     for missing_relative_path in &missing_roots {
         let source =
@@ -1041,44 +1018,170 @@ fn build_subtree_operations(
                     source: PathMatch::LocalOnly(row),
                 });
             }
+            PathMatch::Bound(row) => missing_tracked_dirs.push(MissingTrackedDirectory {
+                relative_path: missing_relative_path.clone(),
+                source: PathMatch::Bound(row),
+            }),
+            PathMatch::LocalOnly(row) => missing_tracked_dirs.push(MissingTrackedDirectory {
+                relative_path: missing_relative_path.clone(),
+                source: PathMatch::LocalOnly(row),
+            }),
+        }
+    }
+
+    let unmatched_present_dir_paths = unmatched_present_dirs
+        .iter()
+        .map(|dir| dir.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    let directory_pairings = build_directory_pairings(
+        path_index,
+        namespace_id,
+        scanned_entries,
+        &unmatched_present_dirs,
+        &unmatched_present_dir_paths,
+        &missing_tracked_dirs,
+    )?;
+    let paired_directory_source_roots = directory_pairings
+        .iter()
+        .map(|(source_relative_path, _)| source_relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    let paired_directory_target_roots = directory_pairings
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let paired_directory_targets_to_source = directory_pairings
+        .iter()
+        .map(|(source_relative_path, target_relative_path)| {
+            (target_relative_path.clone(), source_relative_path.clone())
+        })
+        .collect::<BTreeMap<_, _>>();
+    let missing_directory_sources = missing_tracked_dirs
+        .into_iter()
+        .map(|source| (source.relative_path.clone(), source.source))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut new_local_only_dirs = BTreeSet::new();
+    for target in &unmatched_present_dirs {
+        if path_is_at_or_under_any_root(&target.relative_path, &paired_directory_target_roots) {
+            continue;
+        }
+        let parent = resolve_subtree_destination_parent(
+            path_index,
+            namespace_id,
+            &new_local_only_dirs,
+            &target.relative_path,
+        )?;
+        operations.push(SubtreeObservationOp::ObserveLocalOnly {
+            observed: ObservedLocalOnlySubtreeInode {
+                relative_path: target.relative_path.clone(),
+                namespace_id: namespace_id.clone(),
+                inode_kind: InodeKind::Dir,
+                parent: subtree_parent_ref_from_destination_parent(&parent),
+                display_name: target.display_name.clone(),
+                content_digest: None,
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: now_ms,
+            },
+        });
+        new_local_only_dirs.insert(target.relative_path.clone());
+    }
+
+    for target in &unmatched_present_dirs {
+        let Some(source_relative_path) = paired_directory_targets_to_source
+            .get(&target.relative_path)
+            .cloned()
+        else {
+            continue;
+        };
+        let source = missing_directory_sources
+            .get(&source_relative_path)
+            .expect("paired directory source should resolve");
+        let parent = resolve_subtree_destination_parent(
+            path_index,
+            namespace_id,
+            &new_local_only_dirs,
+            &target.relative_path,
+        )?;
+        match source {
             PathMatch::Bound(row) => {
-                missing_delete_ops.insert(
-                    missing_relative_path.clone(),
-                    SubtreeObservationOp::DeleteBound {
-                        observed: ObservedBoundDelete {
-                            namespace_id: namespace_id.clone(),
-                            inode_id: row.inode_id,
-                            inode_kind: row.inode_kind,
-                            content_digest: row.content_digest,
-                            parent_inode_id: row.parent_inode_id,
-                            display_name: row.display_name,
-                            last_local_change_ms: now_ms,
-                        },
+                let SubtreeDestinationParent::Bound(parent_inode_id) = parent else {
+                    continue;
+                };
+                operations.push(SubtreeObservationOp::MoveBound {
+                    from_relative_path: source_relative_path,
+                    observed: ObservedBoundInode {
+                        namespace_id: namespace_id.clone(),
+                        inode_id: row.inode_id,
+                        inode_kind: row.inode_kind.clone(),
+                        content_digest: None,
+                        parent_inode_id: Some(parent_inode_id),
+                        display_name: target.display_name.clone(),
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: now_ms,
                     },
-                );
+                });
             }
             PathMatch::LocalOnly(row) => {
-                missing_delete_ops.insert(
-                    missing_relative_path.clone(),
-                    SubtreeObservationOp::DeleteLocalOnly {
-                        client_file_id: row.client_file_id,
+                operations.push(SubtreeObservationOp::MoveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeMove {
+                        from_relative_path: source_relative_path,
+                        relative_path: target.relative_path.clone(),
+                        client_file_id: row.client_file_id.clone(),
+                        namespace_id: namespace_id.clone(),
+                        inode_kind: row.inode_kind.clone(),
+                        parent: subtree_parent_ref_from_destination_parent(&parent),
+                        display_name: target.display_name.clone(),
+                        content_digest: None,
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: now_ms,
                     },
-                );
+                });
             }
         }
     }
 
+    let remaining_unmatched_present_files = unmatched_present_files
+        .into_iter()
+        .filter(|target| {
+            !path_is_at_or_under_any_root(&target.relative_path, &paired_directory_target_roots)
+        })
+        .collect::<Vec<_>>();
+    let remaining_missing_tracked_files = missing_tracked_files
+        .into_iter()
+        .filter(|source| !paired_directory_source_roots.contains(&source.relative_path))
+        .collect::<Vec<_>>();
+
     let mut candidate_targets_by_source = BTreeMap::<String, Vec<String>>::new();
     let mut candidate_sources_by_target = BTreeMap::<String, Vec<String>>::new();
-    for source in &missing_tracked_files {
+    let file_target_parents = remaining_unmatched_present_files
+        .iter()
+        .map(|target| {
+            Ok::<_, ObserveSubtreeError>((
+                target.relative_path.clone(),
+                resolve_subtree_destination_parent(
+                    path_index,
+                    namespace_id,
+                    &new_local_only_dirs,
+                    &target.relative_path,
+                )?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    for source in &remaining_missing_tracked_files {
         let Some(source_content_digest) = source_path_content_digest(&source.source) else {
             continue;
         };
-        for target in &unmatched_present_files {
+        for target in &remaining_unmatched_present_files {
             if source_content_digest != target.content_digest {
                 continue;
             }
-            if !destination_parent_is_valid_for_source(&source.source, &target.parent) {
+            let Some(target_parent) = file_target_parents.get(&target.relative_path) else {
+                continue;
+            };
+            if !destination_parent_is_valid_for_source(&source.source, target_parent) {
                 continue;
             }
             candidate_targets_by_source
@@ -1124,19 +1227,22 @@ fn build_subtree_operations(
         })
         .collect::<BTreeMap<_, _>>();
 
-    let missing_file_sources = missing_tracked_files
+    let missing_file_sources = remaining_missing_tracked_files
         .into_iter()
         .map(|source| (source.relative_path.clone(), source.source))
         .collect::<BTreeMap<_, _>>();
 
-    for target in unmatched_present_files {
+    for target in remaining_unmatched_present_files {
         let Some(source_relative_path) = paired_target_to_source.get(&target.relative_path) else {
+            let target_parent = file_target_parents
+                .get(&target.relative_path)
+                .expect("unpaired file target should resolve parent");
             operations.push(SubtreeObservationOp::ObserveLocalOnly {
                 observed: ObservedLocalOnlySubtreeInode {
                     relative_path: target.relative_path,
                     namespace_id: namespace_id.clone(),
                     inode_kind: InodeKind::File,
-                    parent: subtree_parent_ref_from_destination_parent(&target.parent),
+                    parent: subtree_parent_ref_from_destination_parent(target_parent),
                     display_name: target.display_name,
                     content_digest: Some(target.content_digest),
                     exists_on_disk: true,
@@ -1150,9 +1256,12 @@ fn build_subtree_operations(
         let source = missing_file_sources
             .get(source_relative_path)
             .expect("paired source path should always resolve to a missing tracked file source");
+        let target_parent = file_target_parents
+            .get(&target.relative_path)
+            .expect("paired file target should resolve parent");
         match source {
             PathMatch::Bound(row) => {
-                let SubtreeDestinationParent::Bound(parent_inode_id) = target.parent.clone() else {
+                let SubtreeDestinationParent::Bound(parent_inode_id) = target_parent.clone() else {
                     continue;
                 };
                 operations.push(SubtreeObservationOp::MoveBound {
@@ -1178,7 +1287,7 @@ fn build_subtree_operations(
                         client_file_id: row.client_file_id.clone(),
                         namespace_id: namespace_id.clone(),
                         inode_kind: row.inode_kind.clone(),
-                        parent: subtree_parent_ref_from_destination_parent(&target.parent),
+                        parent: subtree_parent_ref_from_destination_parent(target_parent),
                         display_name: target.display_name,
                         content_digest: Some(target.content_digest),
                         exists_on_disk: true,
@@ -1191,11 +1300,31 @@ fn build_subtree_operations(
     }
 
     for missing_relative_path in missing_roots {
+        if paired_directory_source_roots.contains(&missing_relative_path) {
+            continue;
+        }
         if paired_source_to_target.contains_key(&missing_relative_path) {
             continue;
         }
-        if let Some(operation) = missing_delete_ops.get(&missing_relative_path) {
-            operations.push(operation.clone());
+        if let Some(source) = missing_directory_sources.get(&missing_relative_path) {
+            match source {
+                PathMatch::Bound(row) => operations.push(SubtreeObservationOp::DeleteBound {
+                    observed: ObservedBoundDelete {
+                        namespace_id: namespace_id.clone(),
+                        inode_id: row.inode_id,
+                        inode_kind: row.inode_kind.clone(),
+                        content_digest: row.content_digest.clone(),
+                        parent_inode_id: row.parent_inode_id,
+                        display_name: row.display_name.clone(),
+                        last_local_change_ms: now_ms,
+                    },
+                }),
+                PathMatch::LocalOnly(row) => {
+                    operations.push(SubtreeObservationOp::DeleteLocalOnly {
+                        client_file_id: row.client_file_id.clone(),
+                    });
+                }
+            }
             continue;
         }
 
@@ -1222,6 +1351,116 @@ fn build_subtree_operations(
     }
 
     Ok(operations)
+}
+
+fn build_directory_pairings(
+    path_index: &NamespacePathIndex,
+    namespace_id: &NamespaceId,
+    scanned_entries: &[ScannedEntry],
+    unmatched_present_dirs: &[UnmatchedPresentDirectory],
+    unmatched_present_dir_paths: &BTreeSet<String>,
+    missing_tracked_dirs: &[MissingTrackedDirectory],
+) -> Result<BTreeMap<String, String>, ObserveSubtreeError> {
+    let source_fingerprints = missing_tracked_dirs
+        .iter()
+        .map(|source| {
+            Ok::<_, ObserveSubtreeError>((
+                source.relative_path.clone(),
+                tracked_rooted_subtree_fingerprint(
+                    path_index,
+                    namespace_id,
+                    &source.relative_path,
+                )?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let target_fingerprints = unmatched_present_dirs
+        .iter()
+        .map(|target| {
+            (
+                target.relative_path.clone(),
+                scanned_rooted_subtree_fingerprint(scanned_entries, &target.relative_path),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut candidate_targets_by_source = BTreeMap::<String, Vec<String>>::new();
+    let mut candidate_sources_by_target = BTreeMap::<String, Vec<String>>::new();
+    for source in missing_tracked_dirs {
+        let Some(source_fingerprint) = source_fingerprints.get(&source.relative_path) else {
+            continue;
+        };
+        for target in unmatched_present_dirs {
+            let Some(target_fingerprint) = target_fingerprints.get(&target.relative_path) else {
+                continue;
+            };
+            if source_fingerprint != target_fingerprint {
+                continue;
+            }
+            let target_parent = resolve_subtree_destination_parent(
+                path_index,
+                namespace_id,
+                unmatched_present_dir_paths,
+                &target.relative_path,
+            )?;
+            if !destination_parent_is_valid_for_source(&source.source, &target_parent) {
+                continue;
+            }
+            candidate_targets_by_source
+                .entry(source.relative_path.clone())
+                .or_default()
+                .push(target.relative_path.clone());
+            candidate_sources_by_target
+                .entry(target.relative_path.clone())
+                .or_default()
+                .push(source.relative_path.clone());
+        }
+    }
+
+    for (source_relative_path, target_relative_paths) in &candidate_targets_by_source {
+        if target_relative_paths.len() > 1 {
+            return Err(ObserveSubtreeError::AmbiguousMovePairing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                relative_path: source_relative_path.clone(),
+            });
+        }
+    }
+    for (target_relative_path, source_relative_paths) in &candidate_sources_by_target {
+        if source_relative_paths.len() > 1 {
+            return Err(ObserveSubtreeError::AmbiguousMovePairing {
+                namespace_id: namespace_id.as_str().to_owned(),
+                relative_path: target_relative_path.clone(),
+            });
+        }
+    }
+
+    let pairings = candidate_targets_by_source
+        .into_iter()
+        .filter_map(|(source_relative_path, mut target_relative_paths)| {
+            let target_relative_path = target_relative_paths.pop()?;
+            Some((source_relative_path, target_relative_path))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let paired_targets = pairings.values().cloned().collect::<Vec<_>>();
+    for (index, left) in paired_targets.iter().enumerate() {
+        for right in paired_targets.iter().skip(index + 1) {
+            if relative_path_is_under_prefix(left, right)
+                || relative_path_is_under_prefix(right, left)
+            {
+                return Err(ObserveSubtreeError::AmbiguousMovePairing {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    relative_path: if relative_path_is_under_prefix(left, right) {
+                        left.clone()
+                    } else {
+                        right.clone()
+                    },
+                });
+            }
+        }
+    }
+
+    Ok(pairings)
 }
 
 fn summarize_observe_subtree(
@@ -1329,22 +1568,111 @@ fn subtree_parent_ref_from_destination_parent(
     }
 }
 
-fn destination_parent_from_subtree_parent_ref(
-    parent: &SubtreeLocalOnlyParentRef,
-) -> SubtreeDestinationParent {
-    match parent {
-        SubtreeLocalOnlyParentRef::Bound { parent_inode_id } => {
-            SubtreeDestinationParent::Bound(*parent_inode_id)
-        }
-        SubtreeLocalOnlyParentRef::ExistingLocalOnly {
-            parent_client_file_id,
-        } => SubtreeDestinationParent::ExistingLocalOnly(parent_client_file_id.clone()),
-        SubtreeLocalOnlyParentRef::BatchLocalOnly {
+fn resolve_subtree_destination_parent(
+    path_index: &NamespacePathIndex,
+    namespace_id: &NamespaceId,
+    batch_local_only_dirs: &BTreeSet<String>,
+    relative_path: &str,
+) -> Result<SubtreeDestinationParent, ObserveSubtreeError> {
+    let parent_relative_path = relative_parent_path(relative_path);
+    if batch_local_only_dirs.contains(&parent_relative_path) {
+        return Ok(SubtreeDestinationParent::BatchLocalOnly {
             parent_relative_path,
-        } => SubtreeDestinationParent::BatchLocalOnly {
-            parent_relative_path: parent_relative_path.clone(),
-        },
+        });
     }
+    classify_destination_parent(path_index, namespace_id, &parent_relative_path)
+        .map(destination_parent_from_parent_match)
+        .map_err(|error| match error {
+            DestinationParentError::Ambiguous => ObserveSubtreeError::AmbiguousMatch {
+                namespace_id: namespace_id.as_str().to_owned(),
+                relative_path: parent_relative_path.clone(),
+            },
+            DestinationParentError::Missing => ObserveSubtreeError::UntrackedParent {
+                namespace_id: namespace_id.as_str().to_owned(),
+                relative_path: parent_relative_path.clone(),
+            },
+        })
+}
+
+fn destination_parent_from_parent_match(parent: ParentMatch) -> SubtreeDestinationParent {
+    match parent {
+        ParentMatch::Bound(parent_inode_id) => SubtreeDestinationParent::Bound(parent_inode_id),
+        ParentMatch::LocalOnly(parent_client_file_id) => {
+            SubtreeDestinationParent::ExistingLocalOnly(parent_client_file_id)
+        }
+    }
+}
+
+fn tracked_rooted_subtree_fingerprint(
+    path_index: &NamespacePathIndex,
+    namespace_id: &NamespaceId,
+    root_relative_path: &str,
+) -> Result<Vec<RootedSubtreeFingerprintEntry>, ObserveSubtreeError> {
+    path_index
+        .tracked_relative_paths_under_prefix(root_relative_path)
+        .into_iter()
+        .map(|tracked_relative_path| {
+            let source = classify_exact_path(path_index, namespace_id, &tracked_relative_path)
+                .map_err(|_| ObserveSubtreeError::AmbiguousMatch {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    relative_path: tracked_relative_path.clone(),
+                })?
+                .ok_or_else(|| ObserveSubtreeError::UntrackedParent {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    relative_path: tracked_relative_path.clone(),
+                })?;
+            Ok::<_, ObserveSubtreeError>(RootedSubtreeFingerprintEntry {
+                relative_path: rooted_suffix(&tracked_relative_path, root_relative_path),
+                inode_kind: source.inode_kind(),
+                content_digest: source_path_content_digest(&source).map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+fn scanned_rooted_subtree_fingerprint(
+    scanned_entries: &[ScannedEntry],
+    root_relative_path: &str,
+) -> Vec<RootedSubtreeFingerprintEntry> {
+    scanned_entries
+        .iter()
+        .filter(|entry| {
+            entry.relative_path == root_relative_path
+                || relative_path_is_under_prefix(&entry.relative_path, root_relative_path)
+        })
+        .map(|entry| RootedSubtreeFingerprintEntry {
+            relative_path: rooted_suffix(&entry.relative_path, root_relative_path),
+            inode_kind: match entry.kind {
+                ScannedEntryKind::File => InodeKind::File,
+                ScannedEntryKind::Dir => InodeKind::Dir,
+            },
+            content_digest: entry.content_digest.clone(),
+        })
+        .collect()
+}
+
+fn rooted_suffix(relative_path: &str, root_relative_path: &str) -> String {
+    if relative_path == root_relative_path {
+        return String::new();
+    }
+    relative_path
+        .strip_prefix(root_relative_path)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+        .unwrap_or(relative_path)
+        .to_owned()
+}
+
+fn relative_parent_path(relative_path: &str) -> String {
+    Path::new(relative_path)
+        .parent()
+        .map(normalize_relative_path)
+        .unwrap_or_default()
+}
+
+fn path_is_at_or_under_any_root(relative_path: &str, roots: &BTreeSet<String>) -> bool {
+    roots
+        .iter()
+        .any(|root| root == relative_path || relative_path_is_under_prefix(relative_path, root))
 }
 
 fn source_path_content_digest(source: &PathMatch) -> Option<&str> {

@@ -30,6 +30,8 @@ the scheduler-backed harnesses.
 
 The intention is that reviewers can diff scenario output without reading Rust code.
 
-`ops-observe-subtree/` also covers the strict inferred file-move path: unique digest-equal file
-pairs may render as inferred rename work, while ambiguous candidates remain explicit failure
-cases.
+`ops-observe-subtree/` also covers the strict inferred move paths:
+
+- unique digest-equal file pairs may render as inferred rename work
+- unique exact-subtree directory pairs may render as inferred rename work
+- ambiguous candidates remain explicit failure cases

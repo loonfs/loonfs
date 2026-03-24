@@ -91,8 +91,14 @@ Required rules:
 - `observe-local` is still file-first and existing-file-only
 - delete and move remain explicit shell commands, not inference inside `observe-local`
 - `observe-subtree` is directory-only, recursive, and atomic
-- `observe-subtree` may infer file-only moves for unique digest-equal pairs; directory moves
-  still require explicit `observe-move`
+- `observe-subtree` may infer:
+  - unique digest-equal file moves
+  - unique exact-subtree directory moves
+- directory inference remains strict:
+  - rooted subtree fingerprints must match exactly
+  - descendant add/delete/edit blocks pairing
+  - ambiguity fails closed
+- explicit `observe-move` remains the override for non-exact refactors
 - `sync-once` is executor-only and progresses at most one real scheduler step
 - `sync-until-idle` is only a loop over the real `sync-once` path
 - `xtask ops import-remote-observations` is the first shell exposure of authoritative import and
@@ -131,7 +137,7 @@ Exit criteria:
 - explicit local delete and move can be observed through the same supported client API surface,
   with bound rename/delete syncing through the real mutation path
 - one recursive subtree scan can batch create/edit/delete observations and preserve unambiguous
-  file move identity without widening into heuristic directory rename inference
+  file and directory move identity without widening into heuristic move guesses
 - one honest client scheduler step or idle loop can be exercised locally without inventing a
   second sync path
 - future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers

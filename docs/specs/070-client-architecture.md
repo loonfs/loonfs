@@ -379,16 +379,28 @@ Rules:
   - `local_state`
   - `local_only_state`
 - remote-only rows are not candidates for subtree local delete detection
-- subtree scan may infer file-only moves when all of the following are true:
+- subtree scan may infer file moves when all of the following are true:
   - one missing tracked file and one unmatched present file form a unique candidate pair
   - the source and target content digests match exactly
   - the destination parent is valid for the source class
-- directory move inference remains out of scope:
-  - subtree scan never rewrites directory create/delete pairs into a rename
-  - explicit `observe-move` remains the supported directory rename/move path
+- subtree scan may infer directory moves only when all of the following are true:
+  - one missing tracked directory root and one unmatched present directory root form a unique
+    candidate pair
+  - their rooted subtree fingerprints match exactly
+  - the fingerprint compares root-relative entries only:
+    - descendant relative path under the root
+    - inode kind for each entry
+    - file digest for file entries
+  - the destination parent is valid for the source class
+  - any descendant add, delete, or edit blocks pairing instead of being merged into a move
+- explicit `observe-move` remains the supported override for non-exact directory refactors
 - ambiguity fails closed:
   - if one missing tracked file can pair with multiple present files, fail the scan
   - if one present file can pair with multiple missing tracked files, fail the scan
+  - if one missing tracked directory root can pair with multiple present directory roots, fail the
+    scan
+  - if one present directory root can pair with multiple missing tracked directory roots, fail the
+    scan
 - move-plus-edit remains out of scope:
   - subtree scan does not infer rename when the content digest changed
   - non-qualifying candidates continue to behave as create plus delete

@@ -1,0 +1,51 @@
+schema_version: 1
+scenario_kind: client
+name: observe_subtree_ambiguous_exact_directory_pairing_fails_closed
+
+initial:
+  namespace_id: ns-1
+  bound_directories:
+    - inode_id: 1
+      parent_inode_id:
+      display_name: ""
+      relative_path: ""
+      exists_on_disk: true
+      dirty: false
+  local_only_directories:
+    - client_file_id: tmp:ns-1:00000000000000000001
+      parent_inode_id: 1
+      display_name: drafts
+      relative_path: drafts
+      exists_on_disk: true
+      dirty: true
+  local_only_files:
+    - client_file_id: tmp:ns-1:00000000000000000002
+      parent_client_file_id: tmp:ns-1:00000000000000000001
+      display_name: note.txt
+      relative_path: drafts/note.txt
+      content_digest: sha256:note-v1
+      exists_on_disk: true
+      dirty: true
+
+observe_subtree:
+  relative_path: ""
+  present_entries:
+    - kind: dir
+      relative_path: ""
+    - kind: dir
+      relative_path: archive-a
+    - kind: dir
+      relative_path: archive-a/drafts
+    - kind: file
+      relative_path: archive-a/drafts/note.txt
+      content_digest: sha256:note-v1
+    - kind: dir
+      relative_path: archive-b
+    - kind: dir
+      relative_path: archive-b/drafts
+    - kind: file
+      relative_path: archive-b/drafts/note.txt
+      content_digest: sha256:note-v1
+
+expect:
+  error_kind: ambiguous_move_pairing
