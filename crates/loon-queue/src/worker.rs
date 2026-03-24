@@ -48,32 +48,61 @@ pub enum JobCompleteOutcome {
     PromotedFollowUp { through_seq: ChangeSeq },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobClaimRequest<'a> {
+    pub broker_id: &'a str,
+    pub broker_epoch: u64,
+    pub worker_id: &'a str,
+    pub claim_token: &'a str,
+    pub job_id: &'a str,
+    pub now_ms: u64,
+    pub claim_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobHeartbeatRequest<'a> {
+    pub broker_id: &'a str,
+    pub broker_epoch: u64,
+    pub job_id: &'a str,
+    pub claim_token: &'a str,
+    pub now_ms: u64,
+    pub claim_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobCompleteRequest<'a> {
+    pub broker_id: &'a str,
+    pub broker_epoch: u64,
+    pub job_id: &'a str,
+    pub claim_token: &'a str,
+    pub now_ms: u64,
+}
+
 pub fn claim_job(
     shard: &mut QueueShardState,
-    broker_id: &str,
-    broker_epoch: u64,
-    worker_id: &str,
-    claim_token: &str,
-    job_id: &str,
-    now_ms: u64,
-    claim_timeout_ms: u64,
+    request: &JobClaimRequest<'_>,
 ) -> Result<JobClaimOutcome, WorkerMutationError> {
-    ensure_active_broker_lease(shard, broker_id, broker_epoch, now_ms)
-        .map_err(WorkerMutationError::Broker)?;
+    ensure_active_broker_lease(
+        shard,
+        request.broker_id,
+        request.broker_epoch,
+        request.now_ms,
+    )
+    .map_err(WorkerMutationError::Broker)?;
 
     let job = shard
         .jobs
         .iter_mut()
-        .find(|job| job.job_id == job_id)
+        .find(|job| job.job_id == request.job_id)
         .ok_or_else(|| WorkerMutationError::JobNotFound {
-            job_id: job_id.to_owned(),
+            job_id: request.job_id.to_owned(),
         })?;
 
     let new_claim = QueueClaim {
-        worker_id: worker_id.to_owned(),
-        claim_token: claim_token.to_owned(),
-        heartbeat_at_ms: now_ms,
-        timeout_at_ms: now_ms.saturating_add(claim_timeout_ms),
+        worker_id: request.worker_id.to_owned(),
+        claim_token: request.claim_token.to_owned(),
+        heartbeat_at_ms: request.now_ms,
+        timeout_at_ms: request.now_ms.saturating_add(request.claim_timeout_ms),
     };
 
     match job.state {
@@ -90,14 +119,14 @@ pub fn claim_job(
                 .claim
                 .as_ref()
                 .ok_or_else(|| WorkerMutationError::JobNotClaimed {
-                    job_id: job_id.to_owned(),
+                    job_id: request.job_id.to_owned(),
                 })?;
-            if current.timeout_at_ms > now_ms {
+            if current.timeout_at_ms > request.now_ms {
                 return Err(WorkerMutationError::JobBusy {
-                    job_id: job_id.to_owned(),
+                    job_id: request.job_id.to_owned(),
                     worker_id: current.worker_id.clone(),
                     timeout_at_ms: current.timeout_at_ms,
-                    now_ms,
+                    now_ms: request.now_ms,
                 });
             }
 
@@ -112,38 +141,38 @@ pub fn claim_job(
 
 pub fn heartbeat_job(
     shard: &mut QueueShardState,
-    broker_id: &str,
-    broker_epoch: u64,
-    job_id: &str,
-    claim_token: &str,
-    now_ms: u64,
-    claim_timeout_ms: u64,
+    request: &JobHeartbeatRequest<'_>,
 ) -> Result<JobHeartbeatOutcome, WorkerMutationError> {
-    ensure_active_broker_lease(shard, broker_id, broker_epoch, now_ms)
-        .map_err(WorkerMutationError::Broker)?;
+    ensure_active_broker_lease(
+        shard,
+        request.broker_id,
+        request.broker_epoch,
+        request.now_ms,
+    )
+    .map_err(WorkerMutationError::Broker)?;
 
     let job = shard
         .jobs
         .iter_mut()
-        .find(|job| job.job_id == job_id)
+        .find(|job| job.job_id == request.job_id)
         .ok_or_else(|| WorkerMutationError::JobNotFound {
-            job_id: job_id.to_owned(),
+            job_id: request.job_id.to_owned(),
         })?;
     let claim = job
         .claim
         .as_mut()
         .ok_or_else(|| WorkerMutationError::JobNotClaimed {
-            job_id: job_id.to_owned(),
+            job_id: request.job_id.to_owned(),
         })?;
-    if claim.claim_token != claim_token {
+    if claim.claim_token != request.claim_token {
         return Err(WorkerMutationError::ClaimTokenMismatch {
             expected: claim.claim_token.clone(),
-            actual: claim_token.to_owned(),
+            actual: request.claim_token.to_owned(),
         });
     }
 
-    claim.heartbeat_at_ms = now_ms;
-    claim.timeout_at_ms = now_ms.saturating_add(claim_timeout_ms);
+    claim.heartbeat_at_ms = request.now_ms;
+    claim.timeout_at_ms = request.now_ms.saturating_add(request.claim_timeout_ms);
     Ok(JobHeartbeatOutcome {
         claim_token: claim.claim_token.clone(),
         timeout_at_ms: claim.timeout_at_ms,
@@ -152,33 +181,34 @@ pub fn heartbeat_job(
 
 pub fn complete_job(
     shard: &mut QueueShardState,
-    broker_id: &str,
-    broker_epoch: u64,
-    job_id: &str,
-    claim_token: &str,
-    now_ms: u64,
+    request: &JobCompleteRequest<'_>,
 ) -> Result<JobCompleteOutcome, WorkerMutationError> {
-    ensure_active_broker_lease(shard, broker_id, broker_epoch, now_ms)
-        .map_err(WorkerMutationError::Broker)?;
+    ensure_active_broker_lease(
+        shard,
+        request.broker_id,
+        request.broker_epoch,
+        request.now_ms,
+    )
+    .map_err(WorkerMutationError::Broker)?;
 
     let job_index = shard
         .jobs
         .iter()
-        .position(|job| job.job_id == job_id)
+        .position(|job| job.job_id == request.job_id)
         .ok_or_else(|| WorkerMutationError::JobNotFound {
-            job_id: job_id.to_owned(),
+            job_id: request.job_id.to_owned(),
         })?;
 
     {
         let claim = shard.jobs[job_index].claim.as_ref().ok_or_else(|| {
             WorkerMutationError::JobNotClaimed {
-                job_id: job_id.to_owned(),
+                job_id: request.job_id.to_owned(),
             }
         })?;
-        if claim.claim_token != claim_token {
+        if claim.claim_token != request.claim_token {
             return Err(WorkerMutationError::ClaimTokenMismatch {
                 expected: claim.claim_token.clone(),
-                actual: claim_token.to_owned(),
+                actual: request.claim_token.to_owned(),
             });
         }
     }
@@ -200,8 +230,8 @@ pub fn complete_job(
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobCompleteOutcome,
-        WorkerMutationError,
+        claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobClaimRequest,
+        JobCompleteOutcome, JobCompleteRequest, JobHeartbeatRequest, WorkerMutationError,
     };
     use crate::broker::renew_broker_lease;
     use crate::types::{JobState, QueueJob, QueueShardState, SeqScopedPayload, WorkClass};
@@ -213,7 +243,16 @@ mod tests {
         renew_broker_lease(&mut shard, "broker-a", 0, 10_000).expect("initial broker lease");
 
         let outcome = claim_job(
-            &mut shard, "broker-a", 1, "worker-a", "claim-a", "job-1", 0, 10_000,
+            &mut shard,
+            &JobClaimRequest {
+                broker_id: "broker-a",
+                broker_epoch: 1,
+                worker_id: "worker-a",
+                claim_token: "claim-a",
+                job_id: "job-1",
+                now_ms: 0,
+                claim_timeout_ms: 10_000,
+            },
         )
         .expect("claim should succeed");
 
@@ -232,12 +271,31 @@ mod tests {
         let mut shard = ready_snapshot_shard();
         renew_broker_lease(&mut shard, "broker-a", 0, 10_000).expect("initial broker lease");
         claim_job(
-            &mut shard, "broker-a", 1, "worker-a", "claim-a", "job-1", 0, 10_000,
+            &mut shard,
+            &JobClaimRequest {
+                broker_id: "broker-a",
+                broker_epoch: 1,
+                worker_id: "worker-a",
+                claim_token: "claim-a",
+                job_id: "job-1",
+                now_ms: 0,
+                claim_timeout_ms: 10_000,
+            },
         )
         .expect("claim should succeed");
 
-        let outcome = heartbeat_job(&mut shard, "broker-a", 1, "job-1", "claim-a", 5_000, 10_000)
-            .expect("heartbeat should succeed");
+        let outcome = heartbeat_job(
+            &mut shard,
+            &JobHeartbeatRequest {
+                broker_id: "broker-a",
+                broker_epoch: 1,
+                job_id: "job-1",
+                claim_token: "claim-a",
+                now_ms: 5_000,
+                claim_timeout_ms: 10_000,
+            },
+        )
+        .expect("heartbeat should succeed");
 
         assert_eq!(outcome.timeout_at_ms, 15_000);
         assert_eq!(
@@ -255,30 +313,68 @@ mod tests {
         let mut shard = ready_snapshot_shard();
         renew_broker_lease(&mut shard, "broker-a", 0, 10_000).expect("initial broker lease");
         claim_job(
-            &mut shard, "broker-a", 1, "worker-a", "claim-a", "job-1", 0, 10_000,
+            &mut shard,
+            &JobClaimRequest {
+                broker_id: "broker-a",
+                broker_epoch: 1,
+                worker_id: "worker-a",
+                claim_token: "claim-a",
+                job_id: "job-1",
+                now_ms: 0,
+                claim_timeout_ms: 10_000,
+            },
         )
         .expect("claim should succeed");
 
         renew_broker_lease(&mut shard, "broker-b", 30_000, 10_000)
             .expect("expired lease should allow takeover");
         assert_eq!(
-            claim_job(&mut shard, "broker-b", 2, "worker-b", "claim-b", "job-1", 30_000, 10_000,)
-                .expect("timed-out claim should be stealable"),
+            claim_job(
+                &mut shard,
+                &JobClaimRequest {
+                    broker_id: "broker-b",
+                    broker_epoch: 2,
+                    worker_id: "worker-b",
+                    claim_token: "claim-b",
+                    job_id: "job-1",
+                    now_ms: 30_000,
+                    claim_timeout_ms: 10_000,
+                },
+            )
+            .expect("timed-out claim should be stealable"),
             JobClaimOutcome::Stolen {
                 claim_token: "claim-b".to_owned(),
             }
         );
 
-        let stale_complete =
-            complete_job(&mut shard, "broker-b", 2, "job-1", "claim-a", 30_001).unwrap_err();
+        let stale_complete = complete_job(
+            &mut shard,
+            &JobCompleteRequest {
+                broker_id: "broker-b",
+                broker_epoch: 2,
+                job_id: "job-1",
+                claim_token: "claim-a",
+                now_ms: 30_001,
+            },
+        )
+        .unwrap_err();
         assert!(matches!(
             stale_complete,
             WorkerMutationError::ClaimTokenMismatch { .. }
         ));
 
         assert_eq!(
-            complete_job(&mut shard, "broker-b", 2, "job-1", "claim-b", 30_001)
-                .expect("fresh claim should complete"),
+            complete_job(
+                &mut shard,
+                &JobCompleteRequest {
+                    broker_id: "broker-b",
+                    broker_epoch: 2,
+                    job_id: "job-1",
+                    claim_token: "claim-b",
+                    now_ms: 30_001,
+                },
+            )
+            .expect("fresh claim should complete"),
             JobCompleteOutcome::Removed
         );
         assert!(shard.jobs.is_empty());

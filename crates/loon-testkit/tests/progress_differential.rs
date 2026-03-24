@@ -46,10 +46,7 @@ fn run_fixture_report(relative_path: &str) -> ProgressFixtureRunReport {
 
     let (namespace_id, work_class) = scenario_target(&initial, &actions, &expect);
     let model_namespace = ModelNamespace::new(namespace_id.clone());
-    let mut model_progress = initial
-        .progress
-        .as_ref()
-        .map(|progress| model_progress_from_fixture(progress));
+    let mut model_progress = initial.progress.as_ref().map(model_progress_from_fixture);
 
     let temp_dir = TestDir::new("progress-differential");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");

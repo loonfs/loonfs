@@ -253,12 +253,14 @@ pub enum ExecutedLocalOnlyCreate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum UploadLocalCreateExecution {
     Progressed(ProgressedUploadLocalCreate),
     Completed(ExecutedUploadLocalCreate),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum UploadLocalEditExecution {
     Progressed(ProgressedUploadLocalEdit),
     Completed(ExecutedUploadLocalEdit),

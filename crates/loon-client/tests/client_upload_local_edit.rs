@@ -952,7 +952,7 @@ fn run_multitick_upload_local_edit_invariant_report() -> InodeUploadInvariantFix
         &store,
         None,
         Some(source_path.as_path()),
-        &first_execute,
+        first_execute,
     )
     .expect("first action should execute")
     .expect("first action should be scheduled");
@@ -981,7 +981,7 @@ fn run_multitick_upload_local_edit_invariant_report() -> InodeUploadInvariantFix
         &store,
         None,
         Some(source_path.as_path()),
-        &second_execute,
+        second_execute,
     )
     .expect("second action should execute")
     .expect("second action should be scheduled");
@@ -1059,6 +1059,7 @@ fn run_multitick_upload_local_edit_invariant_report() -> InodeUploadInvariantFix
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn run_execute_next_client_action(
     db_path: &Path,
     store: &LocalFsStore,
@@ -1428,6 +1429,7 @@ struct EditFailureExpectedState {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct EditProgressExpectedState {
     transfer_ledger: FixtureTransferLedgerSeed,
     issue: RawTransferResetIssueExpect,

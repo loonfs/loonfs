@@ -246,6 +246,7 @@ fn remote_only_directory_materialization_invariant_trace_matches_checked_in_arti
     );
 }
 
+#[allow(clippy::result_large_err)]
 fn run_execute_next_client_action(
     db_path: &Path,
     store: &LocalFsStore,

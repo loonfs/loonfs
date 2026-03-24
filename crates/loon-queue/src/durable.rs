@@ -2,8 +2,8 @@ use crate::broker::{renew_broker_lease, BrokerLeaseError, BrokerLeaseOutcome};
 use crate::repair::{repair_lost_snapshot_enqueue, SnapshotRepairError, SnapshotRepairOutcome};
 use crate::types::{QueueShardEnvelope, QueueShardState, WorkClass};
 use crate::worker::{
-    claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobCompleteOutcome,
-    JobHeartbeatOutcome, WorkerMutationError,
+    claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobClaimRequest, JobCompleteOutcome,
+    JobCompleteRequest, JobHeartbeatOutcome, JobHeartbeatRequest, WorkerMutationError,
 };
 use loon_objectstore::error::ObjectStoreError;
 use loon_objectstore::keys::queue_shard;
@@ -238,26 +238,11 @@ pub fn renew_broker_lease_in_store<S: ObjectStore>(
 pub fn claim_job_in_store<S: ObjectStore>(
     store: &S,
     shard_index: u32,
-    broker_id: &str,
-    broker_epoch: u64,
-    worker_id: &str,
-    claim_token: &str,
-    job_id: &str,
-    now_ms: u64,
-    claim_timeout_ms: u64,
+    request: &JobClaimRequest<'_>,
     writer_version: &str,
 ) -> Result<DurableJobClaimOutcome, DurableWorkerMutationError> {
     mutate_existing_queue_shard(store, shard_index, writer_version, |next_state| {
-        let outcome = claim_job(
-            next_state,
-            broker_id,
-            broker_epoch,
-            worker_id,
-            claim_token,
-            job_id,
-            now_ms,
-            claim_timeout_ms,
-        )?;
+        let outcome = claim_job(next_state, request)?;
         Ok((outcome.clone(), claim_invariants(&outcome)))
     })
 }
@@ -265,24 +250,11 @@ pub fn claim_job_in_store<S: ObjectStore>(
 pub fn heartbeat_job_in_store<S: ObjectStore>(
     store: &S,
     shard_index: u32,
-    broker_id: &str,
-    broker_epoch: u64,
-    job_id: &str,
-    claim_token: &str,
-    now_ms: u64,
-    claim_timeout_ms: u64,
+    request: &JobHeartbeatRequest<'_>,
     writer_version: &str,
 ) -> Result<DurableJobHeartbeatOutcome, DurableWorkerMutationError> {
     mutate_existing_queue_shard(store, shard_index, writer_version, |next_state| {
-        let outcome = heartbeat_job(
-            next_state,
-            broker_id,
-            broker_epoch,
-            job_id,
-            claim_token,
-            now_ms,
-            claim_timeout_ms,
-        )?;
+        let outcome = heartbeat_job(next_state, request)?;
         Ok((outcome, heartbeat_invariants()))
     })
 }
@@ -290,22 +262,11 @@ pub fn heartbeat_job_in_store<S: ObjectStore>(
 pub fn complete_job_in_store<S: ObjectStore>(
     store: &S,
     shard_index: u32,
-    broker_id: &str,
-    broker_epoch: u64,
-    job_id: &str,
-    claim_token: &str,
-    now_ms: u64,
+    request: &JobCompleteRequest<'_>,
     writer_version: &str,
 ) -> Result<DurableJobCompleteOutcome, DurableWorkerMutationError> {
     mutate_existing_queue_shard(store, shard_index, writer_version, |next_state| {
-        let outcome = complete_job(
-            next_state,
-            broker_id,
-            broker_epoch,
-            job_id,
-            claim_token,
-            now_ms,
-        )?;
+        let outcome = complete_job(next_state, request)?;
         Ok((outcome, complete_invariants()))
     })
 }
@@ -636,7 +597,10 @@ mod tests {
     use crate::types::{
         JobState, QueueClaim, QueueJob, QueueShardEnvelope, QueueShardState, WorkClass,
     };
-    use crate::worker::{JobClaimOutcome, JobCompleteOutcome, WorkerMutationError};
+    use crate::worker::{
+        JobClaimOutcome, JobClaimRequest, JobCompleteOutcome, JobCompleteRequest,
+        JobHeartbeatRequest, WorkerMutationError,
+    };
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::queue_shard;
     use loon_objectstore::ObjectStore;
@@ -742,13 +706,15 @@ mod tests {
         claim_job_in_store(
             &store,
             17,
-            "broker-a",
-            1,
-            "worker-a",
-            "claim-a",
-            "job-1",
-            0,
-            10_000,
+            &JobClaimRequest {
+                broker_id: "broker-a",
+                broker_epoch: 1,
+                worker_id: "worker-a",
+                claim_token: "claim-a",
+                job_id: "job-1",
+                now_ms: 0,
+                claim_timeout_ms: 10_000,
+            },
             "loon-queue-test",
         )
         .expect("claim should succeed");
@@ -756,12 +722,14 @@ mod tests {
         heartbeat_job_in_store(
             &store,
             17,
-            "broker-a",
-            1,
-            "job-1",
-            "claim-a",
-            5_000,
-            10_000,
+            &JobHeartbeatRequest {
+                broker_id: "broker-a",
+                broker_epoch: 1,
+                job_id: "job-1",
+                claim_token: "claim-a",
+                now_ms: 5_000,
+                claim_timeout_ms: 10_000,
+            },
             "loon-queue-test",
         )
         .expect("heartbeat should succeed");
@@ -796,13 +764,15 @@ mod tests {
         match claim_job_in_store(
             &store,
             17,
-            "broker-a",
-            1,
-            "worker-a",
-            "claim-a",
-            "job-1",
-            0,
-            10_000,
+            &JobClaimRequest {
+                broker_id: "broker-a",
+                broker_epoch: 1,
+                worker_id: "worker-a",
+                claim_token: "claim-a",
+                job_id: "job-1",
+                now_ms: 0,
+                claim_timeout_ms: 10_000,
+            },
             "loon-queue-test",
         )
         .expect("initial claim should succeed")
@@ -833,13 +803,15 @@ mod tests {
         match claim_job_in_store(
             &store,
             17,
-            "broker-b",
-            2,
-            "worker-b",
-            "claim-b",
-            "job-1",
-            30_000,
-            10_000,
+            &JobClaimRequest {
+                broker_id: "broker-b",
+                broker_epoch: 2,
+                worker_id: "worker-b",
+                claim_token: "claim-b",
+                job_id: "job-1",
+                now_ms: 30_000,
+                claim_timeout_ms: 10_000,
+            },
             "loon-queue-test",
         )
         .expect("timed-out claim should be stealable")
@@ -862,11 +834,13 @@ mod tests {
         let stale_complete = complete_job_in_store(
             &store,
             17,
-            "broker-b",
-            2,
-            "job-1",
-            "claim-a",
-            30_001,
+            &JobCompleteRequest {
+                broker_id: "broker-b",
+                broker_epoch: 2,
+                job_id: "job-1",
+                claim_token: "claim-a",
+                now_ms: 30_001,
+            },
             "loon-queue-test",
         )
         .expect_err("stale claim token should be rejected");
@@ -880,11 +854,13 @@ mod tests {
         match complete_job_in_store(
             &store,
             17,
-            "broker-b",
-            2,
-            "job-1",
-            "claim-b",
-            30_001,
+            &JobCompleteRequest {
+                broker_id: "broker-b",
+                broker_epoch: 2,
+                job_id: "job-1",
+                claim_token: "claim-b",
+                now_ms: 30_001,
+            },
             "loon-queue-test",
         )
         .expect("fresh claim should complete")

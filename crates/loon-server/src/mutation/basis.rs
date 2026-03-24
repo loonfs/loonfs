@@ -57,15 +57,15 @@ pub enum BasisLoadError {
     #[error("missing WAL object after list `{object_key}`")]
     MissingWalObjectAfterList { object_key: String },
     #[error("checkpoint replay failed: {0:?}")]
-    CheckpointReplay(CheckpointReplayError),
+    CheckpointReplay(Box<CheckpointReplayError>),
     #[error("wal replay failed: {0:?}")]
     WalReplay(WalReplayError),
     #[error(
         "verified basis mismatch: expected current head `{expected:?}`, reconstructed `{actual:?}`"
     )]
     ReconstructedHeadMismatch {
-        expected: HeadState,
-        actual: HeadState,
+        expected: Box<HeadState>,
+        actual: Box<HeadState>,
     },
 }
 
@@ -123,7 +123,7 @@ fn load_metadata_from_checkpoint_basis<S: ObjectStore>(
         &segments,
         &wal_tail,
     )
-    .map_err(BasisLoadError::CheckpointReplay)?;
+    .map_err(|error| BasisLoadError::CheckpointReplay(Box::new(error)))?;
     ensure_reconstructed_head_matches(&loaded_head.envelope, &replayed.resulting_head)?;
     Ok(replayed.resulting_metadata_state)
 }
@@ -153,8 +153,8 @@ fn ensure_reconstructed_head_matches(
 ) -> Result<(), BasisLoadError> {
     if &current_head.state != reconstructed {
         return Err(BasisLoadError::ReconstructedHeadMismatch {
-            expected: current_head.state.clone(),
-            actual: reconstructed.clone(),
+            expected: Box::new(current_head.state.clone()),
+            actual: Box::new(reconstructed.clone()),
         });
     }
     Ok(())

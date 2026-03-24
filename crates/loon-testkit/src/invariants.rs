@@ -3498,11 +3498,11 @@ fn metadata_apply_checks_decode_failure(error: &str) -> Vec<InvariantCheck> {
     .collect()
 }
 
-fn sequenced_ops_for_commit<'a>(seq: ChangeSeq, ops: &'a [WalOp]) -> Vec<SequencedWalOp<'a>> {
+fn sequenced_ops_for_commit(seq: ChangeSeq, ops: &[WalOp]) -> Vec<SequencedWalOp<'_>> {
     ops.iter().map(|op| SequencedWalOp { seq, op }).collect()
 }
 
-fn flatten_wal_ops<'a>(decoded: &'a [DecodedWalObject]) -> Vec<SequencedWalOp<'a>> {
+fn flatten_wal_ops(decoded: &[DecodedWalObject]) -> Vec<SequencedWalOp<'_>> {
     let mut out = Vec::new();
     for object in decoded {
         out.extend(object.envelope.payload.ops.iter().map(|op| SequencedWalOp {

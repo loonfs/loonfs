@@ -574,6 +574,7 @@ pub struct BoundApplyRemoteSubtreeDeleteViews {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum RemoteSubtreeDeleteAssessment {
     NotApplicable,
     Ready(BoundApplyRemoteSubtreeDeleteViews),
@@ -623,6 +624,7 @@ pub struct BoundResolveSubtreeRenameConflictViews {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum RemoteSubtreeRenameAssessment {
     NotApplicable,
     Ready(BoundApplyRemoteSubtreeRenameViews),

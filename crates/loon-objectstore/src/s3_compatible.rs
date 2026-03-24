@@ -10,6 +10,7 @@ use aws_sdk_s3::Client;
 use http::header::{IF_MATCH, IF_NONE_MATCH};
 use http::HeaderValue;
 use std::fmt;
+use std::sync::OnceLock;
 use tokio::runtime::{Builder, Runtime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,8 @@ pub(crate) struct S3CompatibleStore {
     provider_name: &'static str,
     bucket: String,
     key_prefix: Option<String>,
-    client: Client,
+    client_config: S3CompatibleConfig,
+    client: OnceLock<Client>,
     runtime: Runtime,
 }
 
@@ -67,28 +69,19 @@ impl S3CompatibleStore {
         }
 
         let key_prefix = normalize_key_prefix(config.key_prefix.as_deref())?;
-        let credentials = Credentials::new(
-            config.access_key_id,
-            config.secret_access_key,
-            config.session_token,
-            None,
-            "loondb-objectstore",
-        );
-        let mut builder = aws_sdk_s3::config::Builder::new()
-            .region(Region::new(config.region))
-            .credentials_provider(credentials)
-            .force_path_style(config.force_path_style);
-        if let Some(endpoint_url) = config.endpoint_url {
-            builder = builder.endpoint_url(endpoint_url);
-        }
-
         Ok(Self {
             provider_name: config.provider_name,
-            bucket: config.bucket,
+            bucket: config.bucket.clone(),
             key_prefix,
-            client: Client::from_conf(builder.build()),
+            client_config: config,
+            client: OnceLock::new(),
             runtime: build_runtime()?,
         })
+    }
+
+    fn client(&self) -> &Client {
+        self.client
+            .get_or_init(|| build_client(self.client_config.clone()))
     }
 
     fn scoped_key(&self, key: &str) -> Result<String, ObjectStoreError> {
@@ -111,7 +104,7 @@ impl S3CompatibleStore {
         scoped_key: &str,
     ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         match self
-            .client
+            .client()
             .head_object()
             .bucket(&self.bucket)
             .key(scoped_key)
@@ -135,7 +128,7 @@ impl S3CompatibleStore {
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let result = match &mode {
             PutMode::Overwrite => {
-                self.client
+                self.client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
@@ -145,7 +138,7 @@ impl S3CompatibleStore {
                     .await
             }
             PutMode::CreateIfAbsent => {
-                self.client
+                self.client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
@@ -169,7 +162,7 @@ impl S3CompatibleStore {
                     ))
                 })?;
 
-                self.client
+                self.client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
@@ -206,6 +199,24 @@ fn build_runtime() -> Result<Runtime, ObjectStoreError> {
         .enable_all()
         .build()
         .map_err(|err| ObjectStoreError::Transport(err.to_string()))
+}
+
+fn build_client(config: S3CompatibleConfig) -> Client {
+    let credentials = Credentials::new(
+        config.access_key_id,
+        config.secret_access_key,
+        config.session_token,
+        None,
+        "loondb-objectstore",
+    );
+    let mut builder = aws_sdk_s3::config::Builder::new()
+        .region(Region::new(config.region))
+        .credentials_provider(credentials)
+        .force_path_style(config.force_path_style);
+    if let Some(endpoint_url) = config.endpoint_url {
+        builder = builder.endpoint_url(endpoint_url);
+    }
+    Client::from_conf(builder.build())
 }
 
 impl ObjectStore for S3CompatibleStore {
@@ -248,7 +259,7 @@ impl ObjectStore for S3CompatibleStore {
             };
 
             let mut request = self
-                .client
+                .client()
                 .get_object()
                 .bucket(&self.bucket)
                 .key(&scoped_key);
@@ -286,7 +297,7 @@ impl ObjectStore for S3CompatibleStore {
         let scoped_key = self.scoped_key(key)?;
         self.run_async(async {
             match self
-                .client
+                .client()
                 .delete_object()
                 .bucket(&self.bucket)
                 .key(&scoped_key)
@@ -308,7 +319,7 @@ impl ObjectStore for S3CompatibleStore {
 
             loop {
                 let mut request = self
-                    .client
+                    .client()
                     .list_objects_v2()
                     .bucket(&self.bucket)
                     .prefix(&scoped_prefix);

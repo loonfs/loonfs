@@ -158,6 +158,7 @@ fn rename_error(error: LocalApplyError) -> ExecuteResolveSubtreeConflictError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_upload_local_edit_from_path<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -362,6 +363,7 @@ pub(crate) fn execute_apply_remote_rename_with_hooks(
     result
 }
 
+#[allow(dead_code)]
 pub(super) fn execute_apply_remote_rename_and_replace<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -383,6 +385,7 @@ pub(super) fn execute_apply_remote_rename_and_replace<S: ObjectStore>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_apply_remote_rename_and_replace_with_hooks<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -447,6 +450,7 @@ pub(crate) fn execute_apply_remote_rename_and_replace_with_hooks<S: ObjectStore>
     result
 }
 
+#[allow(dead_code)]
 pub(super) fn execute_resolve_same_inode_conflict<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -539,6 +543,7 @@ pub(crate) fn execute_resolve_same_inode_conflict_with_hooks<S: ObjectStore>(
     result
 }
 
+#[allow(dead_code)]
 pub(super) fn execute_resolve_delete_vs_edit_conflict<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -623,6 +628,7 @@ pub(crate) fn execute_resolve_delete_vs_edit_conflict_with_hooks<S: ObjectStore>
     result
 }
 
+#[allow(dead_code)]
 pub(super) fn execute_resolve_rename_vs_edit_conflict<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -644,6 +650,7 @@ pub(super) fn execute_resolve_rename_vs_edit_conflict<S: ObjectStore>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_resolve_rename_vs_edit_conflict_with_hooks<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -725,6 +732,7 @@ pub(crate) fn execute_resolve_rename_vs_edit_conflict_with_hooks<S: ObjectStore>
     result
 }
 
+#[allow(dead_code)]
 pub(super) fn execute_resolve_path_binding_collision<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -817,6 +825,7 @@ pub(crate) fn execute_resolve_path_binding_collision_with_hooks<S: ObjectStore>(
     result
 }
 
+#[allow(dead_code)]
 pub(super) fn execute_resolve_subtree_delete_conflict<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -898,6 +907,7 @@ pub(crate) fn execute_resolve_subtree_delete_conflict_with_hooks<S: ObjectStore>
     result
 }
 
+#[allow(dead_code)]
 pub(super) fn execute_resolve_subtree_rename_conflict<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -919,6 +929,7 @@ pub(super) fn execute_resolve_subtree_rename_conflict<S: ObjectStore>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_resolve_subtree_rename_conflict_with_hooks<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -1211,6 +1222,7 @@ pub(crate) fn execute_apply_remote_subtree_rename_with_hooks(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn execute_upload_local_edit<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -1237,6 +1249,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_upload_local_edit_with_hooks<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -1576,9 +1589,7 @@ pub(crate) fn execute_materialize_remote_dir_with_hooks(
             });
         }
 
-        if target_path.exists() && !target_path.is_dir() {
-            create_directory_durably_with_hooks(target_path, hooks)?;
-        } else if !target_path.exists() {
+        if !target_path.exists() || !target_path.is_dir() {
             create_directory_durably_with_hooks(target_path, hooks)?;
         }
         hooks.checkpoint("client.materialize_remote_dir.after_local_apply");
@@ -1931,6 +1942,7 @@ fn ensure_subtree_rename_conflict_ready(
     Ok(db.load_bound_resolve_subtree_rename_conflict_views(namespace_id, inode_id)?)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_conflict_artifact_for_bound_file<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -1977,6 +1989,7 @@ fn ensure_conflict_artifact_for_bound_file<S: ObjectStore>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_conflict_artifact_for_local_only<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -2017,6 +2030,7 @@ fn ensure_conflict_artifact_for_local_only<S: ObjectStore>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_conflict_artifact<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -2137,6 +2151,7 @@ fn ensure_subtree_rename_conflict_artifact<S: ObjectStore>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_subtree_conflict_artifact_inner<S: ObjectStore>(
     db: &mut SqliteStateDb,
     store: &S,

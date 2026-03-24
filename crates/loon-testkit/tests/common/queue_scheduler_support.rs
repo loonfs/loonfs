@@ -13,8 +13,8 @@ use loon_queue::types::{
     JobState, QueueBroker, QueueClaim, QueueJob, QueueShardState, SeqScopedPayload, WorkClass,
 };
 use loon_queue::worker::{
-    claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobCompleteOutcome,
-    WorkerMutationError,
+    claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobClaimRequest, JobCompleteOutcome,
+    JobCompleteRequest, JobHeartbeatRequest, WorkerMutationError,
 };
 use loon_sim::SimRuntime;
 use loon_testkit::invariants::{
@@ -220,13 +220,15 @@ pub fn run_queue_scenario_report(
                         .unwrap_or_else(|err| QueueOutcome::Error(normalize_model_error(err)));
                     let queue_result = claim_job(
                         &mut queue,
-                        &action.broker,
-                        action.broker_epoch,
-                        &action.worker,
-                        &action.claim_token,
-                        &action.job_id,
-                        action.now_ms,
-                        action.claim_timeout_ms,
+                        &JobClaimRequest {
+                            broker_id: &action.broker,
+                            broker_epoch: action.broker_epoch,
+                            worker_id: &action.worker,
+                            claim_token: &action.claim_token,
+                            job_id: &action.job_id,
+                            now_ms: action.now_ms,
+                            claim_timeout_ms: action.claim_timeout_ms,
+                        },
                     )
                     .map(QueueOutcome::from)
                     .unwrap_or_else(|err| QueueOutcome::Error(normalize_worker_error(err)));
@@ -267,12 +269,14 @@ pub fn run_queue_scenario_report(
                         .unwrap_or_else(|err| QueueOutcome::Error(normalize_model_error(err)));
                     let queue_result = heartbeat_job(
                         &mut queue,
-                        &action.broker,
-                        action.broker_epoch,
-                        &action.job_id,
-                        &action.claim_token,
-                        action.now_ms,
-                        action.claim_timeout_ms,
+                        &JobHeartbeatRequest {
+                            broker_id: &action.broker,
+                            broker_epoch: action.broker_epoch,
+                            job_id: &action.job_id,
+                            claim_token: &action.claim_token,
+                            now_ms: action.now_ms,
+                            claim_timeout_ms: action.claim_timeout_ms,
+                        },
                     )
                     .map(|outcome| {
                         QueueOutcome::Heartbeat(HeartbeatSnapshot {
@@ -297,11 +301,13 @@ pub fn run_queue_scenario_report(
                         .unwrap_or_else(|err| QueueOutcome::Error(normalize_model_error(err)));
                     let queue_result = complete_job(
                         &mut queue,
-                        &action.broker,
-                        action.broker_epoch,
-                        &action.job_id,
-                        &action.claim_token,
-                        runtime.now_ms(),
+                        &JobCompleteRequest {
+                            broker_id: &action.broker,
+                            broker_epoch: action.broker_epoch,
+                            job_id: &action.job_id,
+                            claim_token: &action.claim_token,
+                            now_ms: runtime.now_ms(),
+                        },
                     )
                     .map(QueueOutcome::from)
                     .unwrap_or_else(|err| QueueOutcome::Error(normalize_worker_error(err)));
@@ -337,11 +343,11 @@ pub fn run_queue_scenario_report(
                 panic!(
                     "queue differential outcome mismatch at step {}:\n{}",
                     index + 1,
-                    render_trace(&scenario, &trace)
+                    render_trace(scenario, &trace)
                 );
             }
 
-            assert_queue_states_match(&scenario, &trace, index + 1, &model_queue, &queue);
+            assert_queue_states_match(scenario, &trace, index + 1, &model_queue, &queue);
             let model_after = snapshot_from_model_queue(&model_queue);
             let queue_after = snapshot_from_queue(&queue);
             let model_report = evaluate_queue_step_invariants(
@@ -363,7 +369,7 @@ pub fn run_queue_scenario_report(
                 prior_stolen_claim_seen,
             );
             assert_background_reports_match_and_pass(
-                &scenario,
+                scenario,
                 &mut trace,
                 "queue-model",
                 &model_report,
@@ -1294,7 +1300,7 @@ fn queue_broker_lease_outcome_kind(outcome: &QueueOutcome) -> QueueBrokerLeaseOu
     }
 }
 
-fn queue_claim_outcome_kind<'a>(outcome: &'a QueueOutcome) -> QueueClaimOutcomeKind<'a> {
+fn queue_claim_outcome_kind(outcome: &QueueOutcome) -> QueueClaimOutcomeKind<'_> {
     match outcome {
         QueueOutcome::Claim(ClaimSnapshot::Claimed { claim_token }) => {
             QueueClaimOutcomeKind::Claimed { claim_token }
@@ -1307,7 +1313,7 @@ fn queue_claim_outcome_kind<'a>(outcome: &'a QueueOutcome) -> QueueClaimOutcomeK
     }
 }
 
-fn queue_heartbeat_outcome_kind<'a>(outcome: &'a QueueOutcome) -> QueueHeartbeatOutcomeKind<'a> {
+fn queue_heartbeat_outcome_kind(outcome: &QueueOutcome) -> QueueHeartbeatOutcomeKind<'_> {
     match outcome {
         QueueOutcome::Heartbeat(HeartbeatSnapshot {
             claim_token,
@@ -1361,6 +1367,7 @@ fn assert_background_report_passes(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assert_background_reports_match_and_pass(
     scenario: &Scenario,
     trace: &mut Vec<String>,

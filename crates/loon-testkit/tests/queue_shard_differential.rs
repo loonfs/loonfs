@@ -13,6 +13,7 @@ use loon_queue::durable::{
 };
 use loon_queue::repair::build_snapshot_dedupe_key;
 use loon_queue::types::{JobState, QueueJob, QueueShardEnvelope, QueueShardState, WorkClass};
+use loon_queue::worker::{JobClaimRequest, JobCompleteRequest};
 use loon_testkit::invariants::{
     evaluate_queue_broker_lease_invariants, evaluate_queue_claim_invariants,
     evaluate_queue_complete_invariants, evaluate_queue_repair_invariants,
@@ -161,13 +162,15 @@ fn run_fixture_report(relative_path: &str) -> QueueShardFixtureRunReport {
                 let core_outcome = claim_job_in_store(
                     &store,
                     action.shard_id,
-                    &action.broker,
-                    action.broker_epoch,
-                    &action.worker,
-                    &action.claim_token,
-                    &action.job_id,
-                    action.now_ms,
-                    action.claim_timeout_ms,
+                    &JobClaimRequest {
+                        broker_id: &action.broker,
+                        broker_epoch: action.broker_epoch,
+                        worker_id: &action.worker,
+                        claim_token: &action.claim_token,
+                        job_id: &action.job_id,
+                        now_ms: action.now_ms,
+                        claim_timeout_ms: action.claim_timeout_ms,
+                    },
                     TEST_WRITER_VERSION,
                 )
                 .map(NativeQueueOutcome::from)
@@ -194,11 +197,13 @@ fn run_fixture_report(relative_path: &str) -> QueueShardFixtureRunReport {
                 let core_outcome = complete_job_in_store(
                     &store,
                     action.shard_id,
-                    &action.broker,
-                    action.broker_epoch,
-                    &action.job_id,
-                    &action.claim_token,
-                    action.now_ms,
+                    &JobCompleteRequest {
+                        broker_id: &action.broker,
+                        broker_epoch: action.broker_epoch,
+                        job_id: &action.job_id,
+                        claim_token: &action.claim_token,
+                        now_ms: action.now_ms,
+                    },
                     TEST_WRITER_VERSION,
                 )
                 .map(NativeQueueOutcome::from)

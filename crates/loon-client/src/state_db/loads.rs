@@ -2472,9 +2472,9 @@ fn build_sync_anchor_relative_paths(
     )
 }
 
-fn build_relative_paths_from_rows<'a>(
+fn build_relative_paths_from_rows(
     root_inode_id: InodeId,
-    rows: Vec<(InodeId, Option<InodeId>, &'a str)>,
+    rows: Vec<(InodeId, Option<InodeId>, &str)>,
 ) -> Result<std::collections::BTreeMap<InodeId, String>, StateDbError> {
     let row_map = rows
         .into_iter()

@@ -84,7 +84,7 @@ pub enum NamespaceBootstrapError {
     #[error("failed to load lease object: {0}")]
     LoadLease(ControlObjectLoadError),
     #[error("failed to validate existing namespace state: {0}")]
-    ExistingNamespaceState(#[from] NamespaceStateSummaryError),
+    ExistingNamespaceState(Box<NamespaceStateSummaryError>),
     #[error("failed to write head object: {0}")]
     HeadWrite(String),
     #[error("failed to write lease object: {0}")]
@@ -96,11 +96,23 @@ pub enum NamespaceBootstrapError {
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
     #[error("failed to load stored checkpoint for bootstrap: {0:?}")]
-    CheckpointReplay(CheckpointReplayError),
+    CheckpointReplay(Box<CheckpointReplayError>),
     #[error("failed to prepare checkpoint: {0:?}")]
     CheckpointBuild(CheckpointBuildError),
     #[error("failed to prepare checkpoint head publish: {0:?}")]
     CheckpointPublish(CheckpointPublishError),
+}
+
+impl From<NamespaceStateSummaryError> for NamespaceBootstrapError {
+    fn from(value: NamespaceStateSummaryError) -> Self {
+        Self::ExistingNamespaceState(Box::new(value))
+    }
+}
+
+impl From<CheckpointReplayError> for NamespaceBootstrapError {
+    fn from(value: CheckpointReplayError) -> Self {
+        Self::CheckpointReplay(Box::new(value))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -110,7 +122,7 @@ pub enum NamespaceStateSummaryError {
     #[error("failed to load lease object: {0}")]
     Lease(ControlObjectLoadError),
     #[error(transparent)]
-    Basis(#[from] BasisLoadError),
+    Basis(Box<BasisLoadError>),
     #[error("failed to list checkpoint tables under `{prefix}`: {message}")]
     ListCheckpointTables { prefix: String, message: String },
     #[error("failed to read checkpoint manifest `{object_key}`: {message}")]
@@ -118,23 +130,35 @@ pub enum NamespaceStateSummaryError {
     #[error("missing checkpoint manifest `{object_key}`")]
     MissingCheckpointManifest { object_key: String },
     #[error("failed to decode checkpoint manifest: {0:?}")]
-    CheckpointManifest(CheckpointReplayError),
+    CheckpointManifest(Box<CheckpointReplayError>),
     #[error("failed to list WAL objects under `{prefix}`: {message}")]
     ListWal { prefix: String, message: String },
     #[error("invalid WAL object key `{object_key}`")]
     InvalidWalObjectKey { object_key: String },
 }
 
+impl From<BasisLoadError> for NamespaceStateSummaryError {
+    fn from(value: BasisLoadError) -> Self {
+        Self::Basis(Box::new(value))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum RemoteObservationTranslationError {
     #[error(transparent)]
-    Basis(#[from] BasisLoadError),
+    Basis(Box<BasisLoadError>),
     #[error("failed to read content manifest `{object_key}`: {message}")]
     ReadManifest { object_key: String, message: String },
     #[error("missing content manifest `{object_key}`")]
     MissingManifest { object_key: String },
     #[error("failed to decode content manifest `{object_key}`: {message}")]
     DecodeManifest { object_key: String, message: String },
+}
+
+impl From<BasisLoadError> for RemoteObservationTranslationError {
+    fn from(value: BasisLoadError) -> Self {
+        Self::Basis(Box::new(value))
+    }
 }
 
 pub fn bootstrap_namespace<S: ObjectStore>(
@@ -255,7 +279,7 @@ pub fn bootstrap_namespace<S: ObjectStore>(
             })
             .collect::<Vec<_>>(),
     )
-    .map_err(NamespaceBootstrapError::CheckpointReplay)?;
+    .map_err(|error| NamespaceBootstrapError::CheckpointReplay(Box::new(error)))?;
     let head_etag = head_metadata
         .etag
         .ok_or_else(|| NamespaceBootstrapError::MissingHeadEtag {
@@ -458,7 +482,7 @@ fn load_namespace_checkpoint_manifest<S: ObjectStore>(
             encoded_bytes: encoded_bytes.clone(),
         },
     )
-    .map_err(NamespaceStateSummaryError::CheckpointManifest)?;
+    .map_err(|error| NamespaceStateSummaryError::CheckpointManifest(Box::new(error)))?;
     Ok(StoredCheckpointManifest {
         object_key,
         encoded_bytes,

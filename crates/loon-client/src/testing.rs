@@ -275,6 +275,7 @@ fn map_store_error_kind(kind: InjectedStoreErrorKind, key: &str) -> ObjectStoreE
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 pub fn execute_next_client_action_with_faults<S, LP, IP, ITP, F>(
     db: &mut SqliteStateDb,
     store: &S,

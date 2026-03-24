@@ -50,6 +50,7 @@ pub(crate) fn apply_bytes_atomically_with_hooks(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn create_directory_durably(target_path: &Path) -> Result<(), LocalApplyError> {
     create_directory_durably_with_hooks(target_path, &NoopClientExecutionHooks)
 }
@@ -68,6 +69,7 @@ pub(crate) fn create_directory_durably_with_hooks(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn rename_path_durably(
     current_path: &Path,
     target_path: &Path,
@@ -146,6 +148,7 @@ pub(crate) fn stage_file_size(target_path: &Path) -> Result<Option<u64>, LocalAp
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn reset_stage_file(target_path: &Path) -> Result<(), LocalApplyError> {
     reset_stage_file_with_hooks(target_path, &NoopClientExecutionHooks)
 }
@@ -168,6 +171,7 @@ pub(crate) fn reset_stage_file_with_hooks(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn append_stage_bytes(target_path: &Path, bytes: &[u8]) -> Result<(), LocalApplyError> {
     append_stage_bytes_with_hooks(target_path, bytes, &NoopClientExecutionHooks)
 }
@@ -197,6 +201,7 @@ pub(crate) fn append_stage_bytes_with_hooks(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) fn finalize_stage_file(target_path: &Path) -> Result<(), LocalApplyError> {
     finalize_stage_file_with_hooks(target_path, &NoopClientExecutionHooks)
 }

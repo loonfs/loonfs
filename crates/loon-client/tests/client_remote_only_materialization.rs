@@ -734,6 +734,7 @@ fn run_execute_next_client_action(
     .expect("execute next client action")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seed_remote_only_state(
     db_path: &Path,
     remote_state: &RemoteFileStateRow,
@@ -1010,6 +1011,7 @@ struct MaterializeExpectedState {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct MaterializeProgressExpectedState {
     transfer_ledger: FixtureTransferLedgerSeed,
     issue: RawTransferResetIssueExpect,

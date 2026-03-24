@@ -61,11 +61,17 @@ pub enum SyncOnceError {
     #[error(transparent)]
     StateDb(#[from] loon_client::state_db::StateDbError),
     #[error(transparent)]
-    Execute(#[from] ExecuteNextClientActionError),
+    Execute(Box<ExecuteNextClientActionError>),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
     #[error("sync-once selected unsupported planner decision `{decision}`")]
     UnsupportedSelectedAction { decision: String },
+}
+
+impl From<ExecuteNextClientActionError> for SyncOnceError {
+    fn from(value: ExecuteNextClientActionError) -> Self {
+        Self::Execute(Box::new(value))
+    }
 }
 
 pub fn sync_once(

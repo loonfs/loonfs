@@ -47,6 +47,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_local_only_create_with_hooks<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -194,6 +195,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_upload_local_create_with_hooks<S: ObjectStore, F>(
     db: &mut SqliteStateDb,
     store: &S,

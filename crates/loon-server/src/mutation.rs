@@ -45,7 +45,7 @@ pub struct ExecutedClientMutation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ClientMutationExecutionError {
     #[error(transparent)]
-    Basis(#[from] BasisLoadError),
+    Basis(Box<BasisLoadError>),
     #[error("durable content validation failed: {0}")]
     DurableContent(loon_core::content::DurableContentValidationError),
     #[error(transparent)]
@@ -64,6 +64,12 @@ pub enum ClientMutationExecutionError {
     HeadWrite(String),
     #[error("client mutation must allocate exactly one inode id, got {actual}")]
     UnexpectedAllocatedInodeCount { actual: usize },
+}
+
+impl From<BasisLoadError> for ClientMutationExecutionError {
+    fn from(value: BasisLoadError) -> Self {
+        Self::Basis(Box::new(value))
+    }
 }
 
 pub fn execute_client_mutation<S: ObjectStore>(
@@ -450,7 +456,7 @@ mod tests {
                 op_index: 0,
                 inode_id: expect.wal_object.payload.inode_id,
                 base_revision: expect.wal_object.payload.base_revision_no,
-                content_manifest_digest: content_manifest_digest,
+                content_manifest_digest,
             }]
         );
         assert_eq!(
@@ -932,9 +938,11 @@ mod tests {
 
         assert!(matches!(
             error,
-            ClientMutationExecutionError::Basis(
-                super::BasisLoadError::MissingCheckpointManifest { .. }
-            )
+            ClientMutationExecutionError::Basis(error)
+                if matches!(
+                    error.as_ref(),
+                    super::BasisLoadError::MissingCheckpointManifest { .. }
+                )
         ));
     }
 

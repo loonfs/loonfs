@@ -544,7 +544,7 @@ fn progress_object_from_fixture(
     }
 }
 
-fn model_authorizer<'a>(progress: &'a ModelProgressObject) -> CheckpointProgressAuthorizer<'a> {
+fn model_authorizer(progress: &ModelProgressObject) -> CheckpointProgressAuthorizer<'_> {
     CheckpointProgressAuthorizer {
         namespace_id: &progress.namespace_id,
         work_class: &progress.work_class,
@@ -552,9 +552,9 @@ fn model_authorizer<'a>(progress: &'a ModelProgressObject) -> CheckpointProgress
     }
 }
 
-fn core_authorizer<'a>(
-    progress: &'a loon_core::progress::LoadedProgressObject,
-) -> CheckpointProgressAuthorizer<'a> {
+fn core_authorizer(
+    progress: &loon_core::progress::LoadedProgressObject,
+) -> CheckpointProgressAuthorizer<'_> {
     CheckpointProgressAuthorizer {
         namespace_id: &progress.envelope.state.namespace_id,
         work_class: &progress.envelope.state.work_class,

@@ -24,6 +24,8 @@ Current templates:
 - `configs/loondb-demo.cloudflare-r2.example.toml`
 
 Copy the template you need to an untracked local file before editing values.
+The default local-fs template writes demo artifacts under `/.loondb-demo/`, and that directory is
+ignored by Git so the canonical RC path does not dirty the worktree.
 
 ## Canonical local RC path
 

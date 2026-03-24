@@ -292,7 +292,7 @@ pub fn run_background_scenario_report(
                         panic!(
                             "background sim stale-writer model/core divergence at step {}:\n{}",
                             index + 1,
-                            render_trace(&scenario, &trace)
+                            render_trace(scenario, &trace)
                         );
                     }
 
@@ -338,7 +338,7 @@ pub fn run_background_scenario_report(
                         },
                     );
                     assert_sim_report_passes(
-                        &scenario,
+                        scenario,
                         &mut trace,
                         "background-sim",
                         &sim_report,
@@ -360,7 +360,7 @@ pub fn run_background_scenario_report(
                         panic!(
                             "background sim checkpoint build model/core divergence at step {}:\n{}",
                             index + 1,
-                            render_trace(&scenario, &trace)
+                            render_trace(scenario, &trace)
                         );
                     }
                     prepared_model_checkpoint = Some(model_checkpoint);
@@ -401,7 +401,7 @@ pub fn run_background_scenario_report(
                             snapshot_hint_seq: model_after.snapshot_hint_seq,
                             retention_floor_seq: model_after.retention_floor_seq,
                         })
-                        .unwrap_or_else(|err| normalize_model_checkpoint_publish_error(err));
+                        .unwrap_or_else(normalize_model_checkpoint_publish_error);
 
                     let loaded_checkpoint = load_checkpoint(
                         &core_head.namespace_id,
@@ -449,7 +449,7 @@ pub fn run_background_scenario_report(
                         panic!(
                         "background sim checkpoint publish model/core divergence at step {}:\n{}",
                         index + 1,
-                        render_trace(&scenario, &trace)
+                        render_trace(scenario, &trace)
                     );
                     }
 
@@ -503,7 +503,7 @@ pub fn run_background_scenario_report(
                             },
                         );
                         assert_background_report_passes(
-                            &scenario,
+                            scenario,
                             &mut trace,
                             "checkpoint-publish",
                             &checkpoint_report,
@@ -539,7 +539,7 @@ pub fn run_background_scenario_report(
                             },
                         );
                         assert_sim_report_passes(
-                            &scenario,
+                            scenario,
                             &mut trace,
                             "background-sim",
                             &sim_report,
@@ -583,7 +583,7 @@ pub fn run_background_scenario_report(
                         panic!(
                             "background sim progress publish model/core divergence at step {}:\n{}",
                             index + 1,
-                            render_trace(&scenario, &trace)
+                            render_trace(scenario, &trace)
                         );
                     }
 
@@ -619,7 +619,7 @@ pub fn run_background_scenario_report(
                             },
                         });
                     assert_background_report_passes(
-                        &scenario,
+                        scenario,
                         &mut trace,
                         "progress",
                         &progress_report,
@@ -659,7 +659,7 @@ pub fn run_background_scenario_report(
                         panic!(
                             "background sim repair model/core divergence at step {}:\n{}",
                             index + 1,
-                            render_trace(&scenario, &trace)
+                            render_trace(scenario, &trace)
                         );
                     }
                     model_queue = Some(next_model_queue);
@@ -736,7 +736,7 @@ pub fn run_background_scenario_report(
                                 }),
                         });
                     assert_background_report_passes(
-                        &scenario,
+                        scenario,
                         &mut trace,
                         "queue-repair",
                         &queue_report,
@@ -752,7 +752,7 @@ pub fn run_background_scenario_report(
                             cas_protected: true,
                         });
                     assert_background_report_passes(
-                        &scenario,
+                        scenario,
                         &mut trace,
                         "queue-shard",
                         &queue_object_report,
@@ -770,7 +770,7 @@ pub fn run_background_scenario_report(
                             latest_visible_head_seq: core_head.seq,
                         });
                     assert_sim_report_passes(
-                        &scenario,
+                        scenario,
                         &mut trace,
                         "background-sim",
                         &sim_report,
@@ -1606,9 +1606,9 @@ fn checkpoint_model_authorizers(
     }
 }
 
-fn core_authorizer<'a>(
-    progress: &'a loon_core::progress::LoadedProgressObject,
-) -> CheckpointProgressAuthorizer<'a> {
+fn core_authorizer(
+    progress: &loon_core::progress::LoadedProgressObject,
+) -> CheckpointProgressAuthorizer<'_> {
     CheckpointProgressAuthorizer {
         namespace_id: &progress.envelope.state.namespace_id,
         work_class: &progress.envelope.state.work_class,

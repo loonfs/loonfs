@@ -114,6 +114,22 @@ pub enum CheckpointBuildError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentDescriptorMismatchDetails {
+    pub expected: CheckpointSegmentDescriptor,
+    pub actual: CheckpointSegmentDescriptor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentSummaryMismatchDetails {
+    pub expected_row_count: u64,
+    pub actual_row_count: u64,
+    pub expected_min_key: String,
+    pub actual_min_key: String,
+    pub expected_max_key: String,
+    pub actual_max_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckpointReplayError {
     Codec(String),
     ObjectKeyMismatch {
@@ -139,8 +155,7 @@ pub enum CheckpointReplayError {
     },
     SegmentDescriptorMismatch {
         object_key: String,
-        expected: CheckpointSegmentDescriptor,
-        actual: CheckpointSegmentDescriptor,
+        details: Box<SegmentDescriptorMismatchDetails>,
     },
     SegmentRowFamilyMismatch {
         object_key: String,
@@ -161,12 +176,7 @@ pub enum CheckpointReplayError {
     },
     SegmentSummaryMismatch {
         object_key: String,
-        expected_row_count: u64,
-        actual_row_count: u64,
-        expected_min_key: String,
-        actual_min_key: String,
-        expected_max_key: String,
-        actual_max_key: String,
+        details: Box<SegmentSummaryMismatchDetails>,
     },
     WalReplay(WalReplayError),
 }
@@ -364,8 +374,10 @@ pub fn load_checkpoint(
         if &actual_descriptor != expected_descriptor {
             return Err(CheckpointReplayError::SegmentDescriptorMismatch {
                 object_key: stored_segment.object_key.clone(),
-                expected: expected_descriptor.clone(),
-                actual: actual_descriptor,
+                details: Box::new(SegmentDescriptorMismatchDetails {
+                    expected: expected_descriptor.clone(),
+                    actual: actual_descriptor,
+                }),
             });
         }
 
@@ -886,12 +898,14 @@ fn validate_checkpoint_segment_payload_rows(
     {
         return Err(CheckpointReplayError::SegmentSummaryMismatch {
             object_key: object_key.to_owned(),
-            expected_row_count: payload.row_count,
-            actual_row_count,
-            expected_min_key: payload.min_key.clone(),
-            actual_min_key,
-            expected_max_key: payload.max_key.clone(),
-            actual_max_key,
+            details: Box::new(SegmentSummaryMismatchDetails {
+                expected_row_count: payload.row_count,
+                actual_row_count,
+                expected_min_key: payload.min_key.clone(),
+                actual_min_key,
+                expected_max_key: payload.max_key.clone(),
+                actual_max_key,
+            }),
         });
     }
 
@@ -1387,12 +1401,11 @@ mod tests {
         match error {
             CheckpointReplayError::SegmentDescriptorMismatch {
                 object_key,
-                expected,
-                actual,
+                details,
             } => {
                 assert!(object_key.contains("/tables/"));
-                assert_eq!(expected.row_count, 1);
-                assert_eq!(actual.row_count, 2);
+                assert_eq!(details.expected.row_count, 1);
+                assert_eq!(details.actual.row_count, 2);
             }
             other => panic!("unexpected error: {other:?}"),
         }

@@ -24,6 +24,7 @@ enum NextClientActionCandidate {
     DeferredPlannedAction(PlannedActionRow),
 }
 
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 pub fn execute_next_client_action<S, LP, IP, ITP, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -54,6 +55,7 @@ where
     )
 }
 
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
 pub(crate) fn execute_next_client_action_with_hooks<S, LP, IP, ITP, F>(
     db: &mut SqliteStateDb,
     store: &S,
@@ -392,6 +394,7 @@ where
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub fn execute_next_local_only_create<S, P, F>(
     db: &mut SqliteStateDb,
     store: &S,

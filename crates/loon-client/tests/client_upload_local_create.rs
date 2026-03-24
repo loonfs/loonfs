@@ -1012,6 +1012,7 @@ struct FailureExpectedState {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct UploadProgressExpectedState {
     local_only_transfer_ledger: FixtureTransferLedgerSeed,
     #[serde(default)]

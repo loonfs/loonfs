@@ -299,7 +299,7 @@ fn parse_render_case_args(mut args: impl Iterator<Item = String>) -> Result<Rend
         .ok_or_else(|| anyhow::anyhow!("usage: render-case <scenario> [--snapshot]"))?;
     let mut snapshot = false;
 
-    while let Some(arg) = args.next() {
+    for arg in args {
         match arg.as_str() {
             "--snapshot" => snapshot = true,
             other => bail!("unexpected render-case argument: {other}"),
@@ -324,7 +324,7 @@ fn parse_render_kind_args(mut args: impl Iterator<Item = String>) -> Result<Rend
     let kind = ScenarioKind::parse(&kind)?;
     let mut snapshot = false;
 
-    while let Some(arg) = args.next() {
+    for arg in args {
         match arg.as_str() {
             "--snapshot" => snapshot = true,
             other => bail!("unexpected render-kind argument: {other}"),

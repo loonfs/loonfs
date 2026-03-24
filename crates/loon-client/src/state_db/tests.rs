@@ -2893,6 +2893,7 @@ fn sample_bound_remote() -> RemoteFileStateRow {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sample_observed_remote_with(
     namespace_id: &str,
     inode_id: u64,

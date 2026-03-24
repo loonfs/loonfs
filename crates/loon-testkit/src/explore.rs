@@ -579,7 +579,7 @@ fn build_concrete_case(
         .unwrap_or_else(|| "none".to_owned());
     let concrete_scenario = build_scenario_from_case(
         original_scenario,
-        fault.as_ref().map(|fault| encode_fault(fault)),
+        fault.as_ref().map(encode_fault),
         permuted_actions,
         tail_actions,
         effective_seed,

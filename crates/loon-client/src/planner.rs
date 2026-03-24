@@ -168,7 +168,7 @@ fn decide_path_binding_collision_action(
             return Ok(None);
         }
     }
-    if !matches!(views.local.as_ref(), Some(_)) {
+    if views.local.is_none() {
         return Ok(None);
     }
 

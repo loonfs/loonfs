@@ -516,14 +516,14 @@ pub fn run_namespace_scenario_report(
                     } else {
                         late_observation_response_ok = true;
                     }
-                    delayed_client_response_converged = !db
+                    delayed_client_response_converged = db
                         .load_next_planned_local_only_action()
                         .expect("load next planned local-only action after response")
                         .and_then(|planned| {
                             db.load_pending_client_mutation_for_client_file(&planned.client_file_id)
                                 .expect("load pending client mutation after response")
                         })
-                        .is_some();
+                        .is_none();
                     runtime.record_actor_step(
                         "client",
                         format!(
@@ -733,7 +733,7 @@ pub fn run_namespace_scenario_report(
                         panic!(
                             "namespace sim stale-writer model/core divergence at step {}:\n{}",
                             index + 1,
-                            render_trace(&scenario, &trace)
+                            render_trace(scenario, &trace)
                         );
                     }
 
@@ -784,7 +784,7 @@ pub fn run_namespace_scenario_report(
                         panic!(
                             "namespace sim checkpoint build model/core divergence at step {}:\n{}",
                             index + 1,
-                            render_trace(&scenario, &trace)
+                            render_trace(scenario, &trace)
                         );
                     }
                     prepared_model_checkpoint = Some(model_checkpoint);
@@ -879,7 +879,7 @@ pub fn run_namespace_scenario_report(
                         panic!(
                         "namespace sim checkpoint publish model/core divergence at step {}:\n{}",
                         index + 1,
-                        render_trace(&scenario, &trace)
+                        render_trace(scenario, &trace)
                     );
                     }
 
@@ -937,7 +937,7 @@ pub fn run_namespace_scenario_report(
                             },
                         );
                         assert_background_report_passes(
-                            &scenario,
+                            scenario,
                             &mut trace,
                             "checkpoint-publish",
                             &checkpoint_report,
@@ -988,7 +988,7 @@ pub fn run_namespace_scenario_report(
                         panic!(
                             "namespace sim progress publish model/core divergence at step {}:\n{}",
                             index + 1,
-                            render_trace(&scenario, &trace)
+                            render_trace(scenario, &trace)
                         );
                     }
 
@@ -1024,7 +1024,7 @@ pub fn run_namespace_scenario_report(
                             },
                         });
                     assert_background_report_passes(
-                        &scenario,
+                        scenario,
                         &mut trace,
                         "progress",
                         &progress_report,
@@ -1064,7 +1064,7 @@ pub fn run_namespace_scenario_report(
                         panic!(
                             "namespace sim repair model/core divergence at step {}:\n{}",
                             index + 1,
-                            render_trace(&scenario, &trace)
+                            render_trace(scenario, &trace)
                         );
                     }
                     model_queue = Some(next_model_queue);
@@ -1141,7 +1141,7 @@ pub fn run_namespace_scenario_report(
                                 }),
                         });
                     assert_background_report_passes(
-                        &scenario,
+                        scenario,
                         &mut trace,
                         "queue-repair",
                         &queue_report,
@@ -1157,7 +1157,7 @@ pub fn run_namespace_scenario_report(
                             cas_protected: true,
                         });
                     assert_background_report_passes(
-                        &scenario,
+                        scenario,
                         &mut trace,
                         "queue-shard",
                         &queue_object_report,
@@ -1278,7 +1278,7 @@ pub fn run_namespace_scenario_report(
             assert!(
             checkpoint_publish_history.len() >= 2,
             "checkpoint publish interleaving invariants require at least two publish attempts:\n{}",
-            render_trace(&scenario, &trace)
+            render_trace(scenario, &trace)
         );
             let first = &checkpoint_publish_history[0];
             let second = &checkpoint_publish_history[1];
@@ -1349,21 +1349,21 @@ pub fn run_namespace_scenario_report(
                     panic!(
                         "namespace sim invariant failed: {}:\n{}",
                         check.name,
-                        render_trace(&scenario, &trace)
+                        render_trace(scenario, &trace)
                     );
                 }
                 add_invariant(&mut observed_invariants, &check.name);
             }
         }
 
-        assert_client_final_expectations(&db_path, &expect, &trace, &scenario);
-        assert_background_final_expectations(&store, &core_head, &expect, &trace, &scenario);
+        assert_client_final_expectations(&db_path, &expect, &trace, scenario);
+        assert_background_final_expectations(&store, &core_head, &expect, &trace, scenario);
 
         for invariant in &expect.invariants {
             assert!(
                 observed_invariants.iter().any(|value| value == invariant),
                 "missing expected invariant `{invariant}`:\n{}",
-                render_trace(&scenario, &trace)
+                render_trace(scenario, &trace)
             );
         }
 
@@ -1381,7 +1381,7 @@ pub fn run_namespace_scenario_report(
     };
 
     NamespaceFixtureRunReport {
-        rendered_trace: render_trace(&scenario, &trace),
+        rendered_trace: render_trace(scenario, &trace),
         status,
     }
 }
@@ -2235,9 +2235,9 @@ fn checkpoint_model_authorizers(
     }
 }
 
-fn core_authorizer<'a>(
-    progress: &'a loon_core::progress::LoadedProgressObject,
-) -> CheckpointProgressAuthorizer<'a> {
+fn core_authorizer(
+    progress: &loon_core::progress::LoadedProgressObject,
+) -> CheckpointProgressAuthorizer<'_> {
     CheckpointProgressAuthorizer {
         namespace_id: &progress.envelope.state.namespace_id,
         work_class: &progress.envelope.state.work_class,
