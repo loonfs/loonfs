@@ -39,6 +39,9 @@ pub enum CommitOp {
         base_revision: RevisionNo,
         content_manifest_digest: String,
     },
+    DeleteFile {
+        inode_id: InodeId,
+    },
     Rename {
         inode_id: InodeId,
         new_parent_inode: InodeId,
@@ -155,6 +158,18 @@ pub enum CommitValidationError {
     ReplaceFileUnderSubtreeTombstone {
         inode_id: InodeId,
         root_inode: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
+    DeleteFileInodeMissing {
+        inode_id: InodeId,
+    },
+    DeleteFileInodeNotFile {
+        inode_id: InodeId,
+        actual_kind: InodeKind,
+    },
+    DeleteFileCoveredByTombstone {
+        inode_id: InodeId,
+        covering_root_inode: InodeId,
         tombstone_seq: ChangeSeq,
     },
     RenameInodeMissing {

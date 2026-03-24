@@ -164,6 +164,12 @@ pub struct ExecutedUploadLocalEdit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutedDispatchInodeMutation {
+    pub decision: PlannerDecision,
+    pub dispatched: DispatchedInodeMutation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgressedUploadLocalEdit {
     pub transfer: TransferLedgerRow,
 }
@@ -832,6 +838,7 @@ pub enum ExecuteNextLocalOnlyCreateError {
 pub enum NextClientAction {
     ExecutedLocalOnlyCreate(ExecutedNextLocalOnlyCreate),
     ExecutedUploadLocalEdit(UploadLocalEditExecution),
+    ExecutedDispatchInodeMutation(ExecutedDispatchInodeMutation),
     ExecutedDownloadRemoteEdit(DownloadRemoteEditExecution),
     ExecutedResolveSameInodeConflict(ExecutedResolveSameInodeConflict),
     ExecutedResolveDeleteVsEditConflict(ExecutedResolveDeleteVsEditConflict),
@@ -856,6 +863,8 @@ pub enum ExecuteNextClientActionError {
     LocalOnlyCreate(#[from] ExecuteLocalOnlyCreateError),
     #[error(transparent)]
     UploadLocalEdit(#[from] ExecuteUploadLocalEditError),
+    #[error(transparent)]
+    DispatchInodeMutation(#[from] DispatchInodeMutationError),
     #[error(transparent)]
     DownloadRemoteEdit(#[from] ExecuteDownloadRemoteEditError),
     #[error(transparent)]

@@ -93,6 +93,50 @@ pub fn repeated_local_only_observation_reuses_identity(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn bound_file_delete_observation_plans_delete_file(
+    planned_decision: &str,
+    exists_on_disk: bool,
+    dirty: bool,
+) -> bool {
+    !exists_on_disk && dirty && planned_decision == "delete_file"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn bound_directory_delete_observation_plans_delete_subtree(
+    planned_decision: &str,
+    exists_on_disk: bool,
+    dirty: bool,
+) -> bool {
+    !exists_on_disk && dirty && planned_decision == "delete_subtree"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn bound_move_observation_plans_rename(
+    planned_decision: &str,
+    exists_on_disk: bool,
+    dirty: bool,
+    path_changed: bool,
+) -> bool {
+    exists_on_disk && dirty && path_changed && planned_decision == "rename"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn local_only_delete_clears_temp_state(
+    local_only_row_removed: bool,
+    planned_action_removed: bool,
+) -> bool {
+    local_only_row_removed && planned_action_removed
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn local_only_move_preserves_identity(
+    original_client_file_id: &str,
+    moved_client_file_id: &str,
+) -> bool {
+    !original_client_file_id.is_empty() && original_client_file_id == moved_client_file_id
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn authoritative_snapshot_import_discovers_remote_only_state(
     translated_observation_count: usize,
     discovered_remote_only_count: usize,

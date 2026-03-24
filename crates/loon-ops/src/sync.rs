@@ -83,7 +83,8 @@ pub fn sync_once(
     let store = config.open_store()?;
     let mut db = SqliteStateDb::open(&config.client.state_db_path)?;
     let summary = db.load_namespace_state_summary(namespace_id)?;
-    let path_index = NamespacePathIndex::build(&summary);
+    let parent_links = db.load_local_only_parent_links_for_namespace(namespace_id)?;
+    let path_index = NamespacePathIndex::build(&summary, &parent_links);
     let mirror_root = config.client.mirror_root.clone();
     let now_ms = config.now_ms();
     let writer_id = config.server.writer_id.clone();
@@ -235,6 +236,17 @@ fn report_for_next_action(
             client_file_id: None,
             client_request_id: Some(completed.dispatched.request.client_request_id),
             committed_seq: Some(completed.dispatched.response.committed_seq),
+            conflict_id: None,
+            transfer: None,
+        },
+        NextClientAction::ExecutedDispatchInodeMutation(executed) => SyncOnceReport {
+            namespace_id: namespace_id.clone(),
+            outcome: SyncOnceOutcome::RequestCommitted,
+            action_kind: Some(executed.decision.as_str().to_owned()),
+            inode_id: Some(executed.dispatched.applied.inode_id),
+            client_file_id: None,
+            client_request_id: Some(executed.dispatched.request.client_request_id),
+            committed_seq: Some(executed.dispatched.response.committed_seq),
             conflict_id: None,
             transfer: None,
         },

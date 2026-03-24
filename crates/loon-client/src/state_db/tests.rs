@@ -1,9 +1,10 @@
 use super::{
     AppliedRemoteObservation, BoundLocalOnlyFile, ClientFileId, FileSyncViews, LocalFileStateRow,
-    LocalOnlyConflictOrErrorRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow,
-    LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, ObservedBoundInode, ObservedLocalOnlyInode,
-    PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb, StateDbError,
-    SyncAnchorRow, TransferDirection, TransferLedgerRow, TransferState, SCHEMA_VERSION,
+    LocalOnlyConflictOrErrorRow, LocalOnlyFileStateRow, LocalOnlyParentLinkRow, LocalOnlyParentRef,
+    LocalOnlyPlannedActionRow, LocalOnlyTransferLedgerRow, LocalOnlyUploadRow, ObservedBoundInode,
+    ObservedLocalOnlyInode, PendingClientMutationRow, PlannedActionRow, RemoteFileStateRow,
+    SqliteStateDb, StateDbError, SyncAnchorRow, TransferDirection, TransferLedgerRow,
+    TransferState, SCHEMA_VERSION,
 };
 use crate::planner::{PlannedActionRecord, PlannedLocalOnlyActionRecord};
 use crate::upload::UploadedContent;
@@ -2615,6 +2616,8 @@ fn apply_inode_mutation_response_is_idempotent_when_bound_state_already_matches(
             revision_no: RevisionNo(18),
             content_digest: "sha256:replaced-18".to_owned(),
         }),
+        renamed_inode: None,
+        deleted_inode: None,
     };
 
     db.planner_transaction("seed-matching-bound-state", |tx| {
@@ -2945,6 +2948,8 @@ fn sample_client_create_file_response() -> ClientMutationResponse {
             content_digest: Some("sha256:new-local-file".to_owned()),
         }),
         replaced_file: None,
+        renamed_inode: None,
+        deleted_inode: None,
     }
 }
 
@@ -3007,6 +3012,266 @@ fn seed_bound_directory_parent(db: &mut SqliteStateDb, inode_id: InodeId) {
         Ok(())
     })
     .expect("seed bound directory parent");
+}
+
+fn seed_bound_root(db: &mut SqliteStateDb) {
+    db.planner_transaction("seed-bound-root", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(500),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            synced_seq: ChangeSeq(500),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+        })?;
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(500),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "workspace".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "workspace".to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::Dir,
+            synced_seq: ChangeSeq(500),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "workspace".to_owned(),
+        })?;
+        Ok(())
+    })
+    .expect("seed bound root");
+}
+
+#[test]
+fn observe_local_only_move_and_plan_reuses_identity_for_file() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_bound_root(&mut db);
+    seed_bound_directory_parent(&mut db, InodeId(9));
+    let client_file_id = ClientFileId::from("tmp:ns-1:00000000000000000007");
+    db.planner_transaction("seed-local-only-file-for-move", |tx| {
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::File,
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "draft.txt".to_owned(),
+            content_digest: Some("sha256:draft-v1".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            decision: "upload_local_create".to_owned(),
+            reason: "local_only_file_without_remote_identity".to_owned(),
+            created_at_ms: 1_700_000_100_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed local-only file");
+
+    let observed = db
+        .observe_local_only_move_and_plan(
+            &client_file_id,
+            &LocalOnlyParentRef::Bound {
+                parent_inode_id: InodeId(9),
+            },
+            InodeKind::File,
+            "draft.txt",
+            Some("sha256:draft-v1".to_owned()),
+            true,
+            true,
+            1_700_000_200_000,
+            1_700_000_200_000,
+        )
+        .expect("move local-only file");
+
+    assert_eq!(observed.local_only.client_file_id, client_file_id);
+    assert_eq!(observed.local_only.parent_inode_id, Some(InodeId(9)));
+    assert_eq!(
+        observed.planned_action.decision,
+        crate::planner::PlannerDecision::UploadLocalCreate
+    );
+}
+
+#[test]
+fn observe_local_only_delete_removes_directory_subtree() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_bound_root(&mut db);
+    let root_id = ClientFileId::from("tmp:ns-1:00000000000000000008");
+    let child_id = ClientFileId::from("tmp:ns-1:00000000000000000009");
+    db.planner_transaction("seed-local-only-directory-subtree", |tx| {
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: root_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::Dir,
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "drafts".to_owned(),
+            content_digest: None,
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: child_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::File,
+            parent_inode_id: None,
+            display_name: "note.txt".to_owned(),
+            content_digest: Some("sha256:note-v1".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_local_only_parent_link(&child_id, &root_id)?;
+        tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+            client_file_id: child_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            decision: "upload_local_create".to_owned(),
+            reason: "local_only_file_without_remote_identity".to_owned(),
+            created_at_ms: 1_700_000_100_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed local-only subtree");
+
+    let deleted = db
+        .observe_local_only_delete(&root_id)
+        .expect("delete local-only subtree");
+
+    assert_eq!(deleted.root_client_file_id, root_id);
+    assert!(
+        deleted.removed_client_file_ids.contains(&child_id),
+        "delete should remove descendant temp identity"
+    );
+    assert_eq!(
+        db.load_local_only_file(&root_id)
+            .expect("load root after delete"),
+        None
+    );
+    assert_eq!(
+        db.load_local_only_file(&child_id)
+            .expect("load child after delete"),
+        None
+    );
+}
+
+#[test]
+fn bind_local_only_directory_to_remote_reparents_direct_children() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    seed_bound_root(&mut db);
+    let root_id = ClientFileId::from("tmp:ns-1:00000000000000000010");
+    let child_id = ClientFileId::from("tmp:ns-1:00000000000000000011");
+    db.planner_transaction("seed-local-only-directory-bind-reparent", |tx| {
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: root_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::Dir,
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "drafts".to_owned(),
+            content_digest: None,
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: child_id.clone(),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: InodeKind::File,
+            parent_inode_id: None,
+            display_name: "note.txt".to_owned(),
+            content_digest: Some("sha256:note-v1".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_local_only_parent_link(&child_id, &root_id)?;
+        Ok(())
+    })
+    .expect("seed directory bind state");
+
+    db.bind_local_only_inode_to_remote(
+        &root_id,
+        &RemoteFileStateRow {
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_id: InodeId(7),
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(2),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: Some(InodeId(2)),
+            display_name: "drafts".to_owned(),
+            is_deleted: false,
+        },
+    )
+    .expect("bind local-only directory");
+
+    let child = db
+        .load_local_only_file(&child_id)
+        .expect("load child after bind")
+        .expect("child should remain local-only");
+    assert_eq!(child.parent_inode_id, Some(InodeId(7)));
+    assert_eq!(
+        db.load_local_only_parent_links_for_namespace(&NamespaceId::from("ns-1"))
+            .expect("load parent links after bind"),
+        Vec::<LocalOnlyParentLinkRow>::new()
+    );
+    assert_eq!(
+        db.load_planned_local_only_action(&child_id)
+            .expect("load child plan after bind")
+            .expect("child should be replanned")
+            .decision,
+        "upload_local_create"
+    );
 }
 
 fn seed_local_rows(db: &mut SqliteStateDb, rows: &[LocalFileStateRow]) {

@@ -120,6 +120,146 @@ mod tests {
     }
 
     #[test]
+    fn forwards_observe_delete_to_loon_ops() {
+        let temp_dir = unique_temp_dir("xtask-ops-observe-delete");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            "sha256:remote-hello-v1",
+            "sha256:manifest-remote-hello-v1",
+        );
+
+        let rendered = run([
+            "observe-delete".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+        ])
+        .expect("run xtask ops observe-delete");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../tests/snapshots/ops-observe-delete/ops_observe_delete_bound_file.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn forwards_observe_move_to_loon_ops() {
+        let temp_dir = unique_temp_dir("xtask-ops-observe-move");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        db.planner_transaction("seed-archive-parent", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(9),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "archive".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(9),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "archive".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(9),
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "archive".to_owned(),
+            })?;
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some("sha256:remote-hello-v1".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-remote-hello-v1".to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "hello.txt".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::File,
+                content_digest: Some("sha256:remote-hello-v1".to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "hello.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some("sha256:remote-hello-v1".to_owned()),
+                content_manifest_digest: Some("sha256:manifest-remote-hello-v1".to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: "hello.txt".to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed bound move state");
+        fs::create_dir_all(temp_dir.join("mirror/archive")).expect("create archive dir");
+        fs::write(temp_dir.join("mirror/archive/hello.txt"), b"hello v1\n")
+            .expect("write moved file");
+
+        let rendered = run([
+            "observe-move".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--from".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+            "--to".to_owned(),
+            temp_dir
+                .join("mirror/archive/hello.txt")
+                .display()
+                .to_string(),
+        ])
+        .expect("run xtask ops observe-move");
+
+        assert_eq!(
+            rendered,
+            include_str!("../../tests/snapshots/ops-observe-move/ops_observe_move_bound_file.txt")
+        );
+    }
+
+    #[test]
     fn forwards_sync_once_to_loon_ops() {
         let temp_dir = unique_temp_dir("xtask-ops-sync-once");
         let config_path = write_local_fs_config(&temp_dir);
@@ -211,6 +351,54 @@ now_ms = 1000
             Ok(())
         })
         .expect("seed bound root directory");
+    }
+
+    fn seed_bound_file(
+        db: &mut SqliteStateDb,
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+        display_name: &str,
+        content_digest: &str,
+        content_manifest_digest: &str,
+    ) {
+        db.planner_transaction("seed-bound-file", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(content_digest.to_owned()),
+                content_manifest_digest: Some(content_manifest_digest.to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: display_name.to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::File,
+                content_digest: Some(content_digest.to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: display_name.to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id,
+                inode_id,
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(content_digest.to_owned()),
+                content_manifest_digest: Some(content_manifest_digest.to_owned()),
+                parent_inode_id: Some(InodeId(1)),
+                display_name: display_name.to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed bound file");
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {

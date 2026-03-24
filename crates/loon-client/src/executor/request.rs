@@ -19,12 +19,23 @@ pub fn build_inode_mutation_request_from_state(
             inode_id: inode_id.0,
         })?;
     let planned = PlannedActionRecord::try_from(planned_row)?;
-    let (_remote, local, anchor) = db.load_bound_upload_local_edit_views(namespace_id, inode_id)?;
-    let content_manifest_digest = match planned.decision {
-        PlannerDecision::UploadLocalEdit => {
-            Some(db.resolve_inode_upload_content_manifest_digest(&local)?)
-        }
-        _ => None,
+    let views = db.load_file_sync_views(namespace_id, inode_id)?;
+    let local = views
+        .local
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let anchor = views
+        .sync_anchor
+        .ok_or_else(|| ExecutorError::PlannedActionMissing {
+            namespace_id: namespace_id.as_str().to_owned(),
+            inode_id: inode_id.0,
+        })?;
+    let content_manifest_digest = if planned.decision == PlannerDecision::UploadLocalEdit {
+        Some(db.resolve_inode_upload_content_manifest_digest(&local)?)
+    } else {
+        None
     };
 
     build_inode_mutation_request(
@@ -82,6 +93,41 @@ pub fn build_inode_mutation_request(
                         inode_id: local.inode_id.0,
                     },
                 )?,
+            }
+        }
+        PlannerDecision::Rename => ClientMutationOp::Rename {
+            inode_id: local.inode_id,
+            new_parent_inode_id: local.parent_inode_id.ok_or_else(|| {
+                ExecutorError::MissingParentInode {
+                    client_file_id: format!("{}:{}", local.namespace_id.as_str(), local.inode_id.0),
+                }
+            })?,
+            new_display_name: local.display_name.clone(),
+        },
+        PlannerDecision::DeleteFile => {
+            if local.inode_kind != InodeKind::File {
+                return Err(ExecutorError::InodeDecisionKindMismatch {
+                    namespace_id: local.namespace_id.as_str().to_owned(),
+                    inode_id: local.inode_id.0,
+                    decision: planned.decision.clone(),
+                    inode_kind: local.inode_kind.clone(),
+                });
+            }
+            ClientMutationOp::DeleteFile {
+                inode_id: local.inode_id,
+            }
+        }
+        PlannerDecision::DeleteSubtree => {
+            if local.inode_kind != InodeKind::Dir {
+                return Err(ExecutorError::InodeDecisionKindMismatch {
+                    namespace_id: local.namespace_id.as_str().to_owned(),
+                    inode_id: local.inode_id.0,
+                    decision: planned.decision.clone(),
+                    inode_kind: local.inode_kind.clone(),
+                });
+            }
+            ClientMutationOp::DeleteSubtree {
+                root_inode_id: local.inode_id,
             }
         }
         ref other => return Err(ExecutorError::UnsupportedDecision(other.clone())),

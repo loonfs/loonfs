@@ -98,8 +98,13 @@ pub fn execute_client_mutation<S: ObjectStore>(
         .map_err(map_store_write_error)?;
     let head_metadata = publish_commit_head(store, &basis.head_etag, &head_publish)
         .map_err(|err| ClientMutationExecutionError::HeadWrite(format!("{err:?}")))?;
-    let response =
-        build_client_mutation_response(request, validated_content.as_ref(), &plan, &head_publish)?;
+    let response = build_client_mutation_response(
+        request,
+        validated_content.as_ref(),
+        &plan,
+        &applied_metadata.metadata_state,
+        &head_publish,
+    )?;
 
     let mut checked_invariants = Vec::new();
     if let Some(validated_content) = &validated_content {

@@ -1,0 +1,14 @@
+command=ops/sync-once
+namespace=demo
+outcome=request_committed
+action_kind=delete_file
+---
+namespace_id: demo
+outcome: request_committed
+action_kind: delete_file
+inode_id: 2
+client_file_id: null
+client_request_id: client-req-00000000000000000001
+committed_seq: 2
+conflict_id: null
+transfer: null

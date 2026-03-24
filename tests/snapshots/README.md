@@ -15,6 +15,8 @@ Rendered scenario traces and summaries live here, grouped by the xtask command t
 - `ops-show-client-state/`
 - `ops-import-remote-observations/`
 - `ops-observe-local/`
+- `ops-observe-delete/`
+- `ops-observe-move/`
 - `ops-sync-once/`
 - `ops-smoke/`
 - `rc-local/`

@@ -10,6 +10,8 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
   composition, without adding a shell workflow yet
 - supported client-local observation of one existing file through `loon-client` plus thin
   `loon-ops` composition
+- supported explicit client-local delete and move observation through `loon-client` plus thin
+  `loon-ops` composition
 - supported single-step client execution through the real scheduler and real server mutation path
 - a thin internal shell in `xtask`
 - one shared command/config/rendering layer that can later move into `loon-cli` unchanged
@@ -70,6 +72,8 @@ Deliverables:
   - `show-client-state`
   - `import-remote-observations`
   - `observe-local`
+  - `observe-delete`
+  - `observe-move`
   - `sync-once`
   - `smoke`
 
@@ -78,8 +82,9 @@ Required rules:
 - `xtask` stays thin and must not become the owner of config parsing or business logic
 - `loon-ops` is the shared shell core that future `loon-cli` work must reuse
 - no `demo-*` command family
-- no recursive local scan, watcher, delete inference, rename inference, or `sync-until-idle`
-- `observe-local` is file-first and existing-file-only
+- no recursive local scan, watcher, delete inference, or `sync-until-idle`
+- `observe-local` is still file-first and existing-file-only
+- delete and move remain explicit shell commands, not inference inside `observe-local`
 - `sync-once` is executor-only and progresses at most one real scheduler step
 - `xtask ops import-remote-observations` is the first shell exposure of authoritative import and
   it must reuse the `loon-ops` import API unchanged
@@ -96,6 +101,8 @@ cargo run -p xtask -- ops show-namespace-state --config ./loondb-demo.toml --nam
 cargo run -p xtask -- ops show-client-state --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops import-remote-observations --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops observe-local --config ./loondb-demo.toml --namespace demo --path ./mirror/hello.txt
+cargo run -p xtask -- ops observe-delete --config ./loondb-demo.toml --namespace demo --path ./mirror/hello.txt
+cargo run -p xtask -- ops observe-move --config ./loondb-demo.toml --namespace demo --from ./mirror/hello.txt --to ./mirror/archive/hello.txt
 cargo run -p xtask -- ops sync-once --config ./loondb-demo.toml --namespace demo
 cargo run -p xtask -- ops smoke --config ./loondb-demo.toml --namespace demo
 ```
@@ -110,6 +117,8 @@ Exit criteria:
   unchanged
 - one existing local file can be observed and planned through the supported client API rather than
   through shell-local SQLite mutation
+- explicit local delete and move can be observed through the same supported client API surface,
+  with bound rename/delete syncing through the real mutation path
 - one honest client scheduler step can be exercised locally without inventing a second sync path
 - future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers
 

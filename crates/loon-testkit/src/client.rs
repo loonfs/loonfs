@@ -1,10 +1,10 @@
 use loon_core::checkpoint::prepare_checkpoint;
-use loon_core::metadata::{InodeRecord, MetadataState, RevisionRecord};
+use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::ObjectStore;
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ControlObjectKind, HeadStateEnvelope,
-    InodeKind,
+    InodeId, InodeKind,
 };
 
 pub fn seed_server_basis_for_request<S: ObjectStore>(
@@ -76,6 +76,68 @@ fn minimal_server_basis_metadata_for_request(request: &ClientMutationRequest) ->
                 committed_seq: ChangeSeq(base_revision_no.0),
                 revision_op_index: 0,
                 content_manifest_digest: "sha256:previous-manifest".to_owned(),
+            }],
+            ..MetadataState::default()
+        },
+        ClientMutationOp::Rename {
+            inode_id,
+            new_parent_inode_id,
+            ..
+        } => MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: *new_parent_inode_id,
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: *inode_id,
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+            ],
+            direntries: vec![DirentryRecord {
+                parent_inode_id: InodeId(1),
+                name_key: "before".to_owned(),
+                display_name: "before".to_owned(),
+                child_inode_id: *inode_id,
+                bind_seq: ChangeSeq(1),
+                bind_op_index: 0,
+            }],
+            revisions: vec![RevisionRecord {
+                inode_id: *inode_id,
+                revision_no: loon_types::RevisionNo(1),
+                committed_seq: ChangeSeq(1),
+                revision_op_index: 0,
+                content_manifest_digest: "sha256:previous-manifest".to_owned(),
+            }],
+            ..MetadataState::default()
+        },
+        ClientMutationOp::DeleteFile { inode_id } => MetadataState {
+            inodes: vec![InodeRecord {
+                inode_id: *inode_id,
+                inode_kind: InodeKind::File,
+                created_seq: ChangeSeq(1),
+            }],
+            revisions: vec![RevisionRecord {
+                inode_id: *inode_id,
+                revision_no: loon_types::RevisionNo(1),
+                committed_seq: ChangeSeq(1),
+                revision_op_index: 0,
+                content_manifest_digest: "sha256:previous-manifest".to_owned(),
+            }],
+            ..MetadataState::default()
+        },
+        ClientMutationOp::DeleteSubtree { root_inode_id } => MetadataState {
+            inodes: vec![InodeRecord {
+                inode_id: *root_inode_id,
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(1),
             }],
             ..MetadataState::default()
         },

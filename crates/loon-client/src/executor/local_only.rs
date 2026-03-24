@@ -84,7 +84,10 @@ where
             )
             .map(ExecutedLocalOnlyCreate::UploadLocalCreate)
             .map_err(ExecuteLocalOnlyCreateError::from),
-            ClientMutationOp::ReplaceFile { .. } => Err(ExecuteLocalOnlyCreateError::Executor(
+            ClientMutationOp::ReplaceFile { .. }
+            | ClientMutationOp::Rename { .. }
+            | ClientMutationOp::DeleteFile { .. }
+            | ClientMutationOp::DeleteSubtree { .. } => Err(ExecuteLocalOnlyCreateError::Executor(
                 ExecutorError::UnsupportedDecision(PlannerDecision::UploadLocalEdit),
             )),
         };

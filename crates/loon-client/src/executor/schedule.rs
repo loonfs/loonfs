@@ -11,6 +11,7 @@ use super::inode::{
 };
 use super::local_only::{execute_local_only_create, execute_local_only_create_with_hooks};
 use super::*;
+use crate::executor::dispatch::dispatch_inode_mutation_from_state_with_hooks;
 use crate::state_db::{ClientFileId, SqliteStateDb};
 use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use loon_objectstore::ObjectStore;
@@ -124,6 +125,33 @@ where
                         dispatch,
                     )?;
                     Ok(Some(NextClientAction::ExecutedUploadLocalEdit(executed)))
+                }
+                value
+                    if value == PlannerDecision::Rename.as_str()
+                        || value == PlannerDecision::DeleteFile.as_str()
+                        || value == PlannerDecision::DeleteSubtree.as_str() =>
+                {
+                    let decision = if value == PlannerDecision::Rename.as_str() {
+                        PlannerDecision::Rename
+                    } else if value == PlannerDecision::DeleteFile.as_str() {
+                        PlannerDecision::DeleteFile
+                    } else {
+                        PlannerDecision::DeleteSubtree
+                    };
+                    let dispatched = dispatch_inode_mutation_from_state_with_hooks(
+                        db,
+                        &namespace_id,
+                        inode_id,
+                        created_at_ms,
+                        hooks,
+                        dispatch,
+                    )?;
+                    Ok(Some(NextClientAction::ExecutedDispatchInodeMutation(
+                        ExecutedDispatchInodeMutation {
+                            decision,
+                            dispatched,
+                        },
+                    )))
                 }
                 value if value == PlannerDecision::DownloadRemoteEdit.as_str() => {
                     let target_path = resolve_inode_source_path(&namespace_id, inode_id);

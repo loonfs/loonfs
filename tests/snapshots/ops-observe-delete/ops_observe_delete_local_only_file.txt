@@ -1,0 +1,13 @@
+command=ops/observe-delete
+namespace=demo
+relative_path=draft.txt
+observation_kind=local_only_file
+planned_decision=no_op
+---
+namespace_id: demo
+relative_path: draft.txt
+observation_kind: local_only_file
+planned_decision: no_op
+inode_id: null
+client_file_id: tmp:demo:00000000000000000001
+removed_client_file_count: 1

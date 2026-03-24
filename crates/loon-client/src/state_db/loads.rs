@@ -861,7 +861,7 @@ pub(super) fn load_next_executable_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision IN ('upload_local_edit', 'download_remote_edit', 'resolve_same_inode_conflict', 'resolve_delete_vs_edit_conflict', 'resolve_rename_vs_edit_conflict', 'resolve_path_binding_collision', 'resolve_subtree_delete_conflict', 'resolve_subtree_rename_conflict', 'apply_remote_rename_and_replace', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
+        WHERE decision IN ('upload_local_edit', 'rename', 'delete_file', 'delete_subtree', 'download_remote_edit', 'resolve_same_inode_conflict', 'resolve_delete_vs_edit_conflict', 'resolve_rename_vs_edit_conflict', 'resolve_path_binding_collision', 'resolve_subtree_delete_conflict', 'resolve_subtree_rename_conflict', 'apply_remote_rename_and_replace', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -874,7 +874,7 @@ pub(super) fn load_next_deferred_planned_action(
         conn,
         "SELECT namespace_id, inode_id, decision, reason, created_at_ms
         FROM planned_actions
-        WHERE decision NOT IN ('upload_local_edit', 'download_remote_edit', 'resolve_same_inode_conflict', 'resolve_delete_vs_edit_conflict', 'resolve_rename_vs_edit_conflict', 'resolve_path_binding_collision', 'resolve_subtree_delete_conflict', 'resolve_subtree_rename_conflict', 'apply_remote_rename_and_replace', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
+        WHERE decision NOT IN ('upload_local_edit', 'rename', 'delete_file', 'delete_subtree', 'download_remote_edit', 'resolve_same_inode_conflict', 'resolve_delete_vs_edit_conflict', 'resolve_rename_vs_edit_conflict', 'resolve_path_binding_collision', 'resolve_subtree_delete_conflict', 'resolve_subtree_rename_conflict', 'apply_remote_rename_and_replace', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir')
         ORDER BY created_at_ms ASC, namespace_id ASC, inode_id ASC
         LIMIT 1",
     )
@@ -1390,6 +1390,11 @@ pub(super) fn assess_remote_subtree_rename_from_conn(
     match (analysis.root_local, analysis.root_anchor) {
         (None, None) => Ok(RemoteSubtreeRenameAssessment::NotApplicable),
         (Some(root_local), Some(root_anchor)) => {
+            if root_remote.parent_inode_id == root_anchor.parent_inode_id
+                && root_remote.display_name == root_anchor.display_name
+            {
+                return Ok(RemoteSubtreeRenameAssessment::NotApplicable);
+            }
             if root_local.inode_kind != InodeKind::Dir || root_anchor.inode_kind != InodeKind::Dir {
                 return Ok(RemoteSubtreeRenameAssessment::DeferredRootLocalDiffers);
             }
@@ -1398,11 +1403,6 @@ pub(super) fn assess_remote_subtree_rename_from_conn(
             }
             if !root_remote_matches_anchor_except_path(&root_remote, &root_anchor) {
                 return Ok(RemoteSubtreeRenameAssessment::DeferredRootLocalDiffers);
-            }
-            if root_remote.parent_inode_id == root_anchor.parent_inode_id
-                && root_remote.display_name == root_anchor.display_name
-            {
-                return Ok(RemoteSubtreeRenameAssessment::NotApplicable);
             }
             if analysis.first_busy_descendant_inode_id.is_some() {
                 return Ok(RemoteSubtreeRenameAssessment::DeferredDescendantsBusy);
@@ -2204,7 +2204,7 @@ fn assess_target_parent_chain(
     })
 }
 
-fn load_local_subtree_inode_ids(
+pub(super) fn load_local_subtree_inode_ids(
     conn: &Connection,
     namespace_id: &NamespaceId,
     root_inode_id: InodeId,
@@ -2235,7 +2235,7 @@ fn load_local_subtree_inode_ids(
     Ok(inode_ids)
 }
 
-fn load_remote_subtree_descendant_inode_ids(
+pub(super) fn load_remote_subtree_descendant_inode_ids(
     conn: &Connection,
     namespace_id: &NamespaceId,
     root_inode_id: InodeId,
@@ -2267,7 +2267,7 @@ fn load_remote_subtree_descendant_inode_ids(
     Ok(inode_ids)
 }
 
-fn load_local_only_descendants_under_subtree(
+pub(super) fn load_local_only_descendants_under_subtree(
     conn: &Connection,
     namespace_id: &NamespaceId,
     root_inode_id: InodeId,
@@ -2733,6 +2733,45 @@ pub(super) fn load_local_only_candidates_for_namespace(
         })
     })
     .collect()
+}
+
+pub(super) fn load_local_only_parent_link(
+    conn: &Connection,
+    client_file_id: &ClientFileId,
+) -> Result<Option<ClientFileId>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT parent_client_file_id
+            FROM local_only_parent_links
+            WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+
+    Ok(raw.map(ClientFileId::new))
+}
+
+pub(super) fn load_local_only_parent_links_for_namespace(
+    conn: &Connection,
+    namespace_id: &NamespaceId,
+) -> Result<Vec<LocalOnlyParentLinkRow>, StateDbError> {
+    let mut stmt = conn.prepare(
+        "SELECT l.client_file_id, l.parent_client_file_id
+        FROM local_only_parent_links l
+        JOIN local_only_state s ON s.client_file_id = l.client_file_id
+        WHERE s.namespace_id = ?1
+        ORDER BY l.client_file_id ASC",
+    )?;
+    let rows = stmt.query_map(params![namespace_id.as_str()], |row| {
+        Ok(LocalOnlyParentLinkRow {
+            client_file_id: ClientFileId::new(row.get::<_, String>(0)?),
+            parent_client_file_id: ClientFileId::new(row.get::<_, String>(1)?),
+        })
+    })?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StateDbError::from)
 }
 
 pub(super) fn load_local_only_state_for_namespace(

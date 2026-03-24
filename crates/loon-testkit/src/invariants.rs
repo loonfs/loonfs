@@ -3532,6 +3532,10 @@ fn evaluate_metadata_apply_invariants(
             AggregateCheck::not_applicable("no replace_file wal op"),
         ),
         (
+            "delete_file_writes_tombstone_row",
+            AggregateCheck::not_applicable("no delete_file wal op"),
+        ),
+        (
             "rename_appends_new_direntry_binding",
             AggregateCheck::not_applicable("no rename wal op"),
         ),
@@ -3645,6 +3649,23 @@ fn evaluate_metadata_apply_invariants(
                             base_revision.0,
                             next_revision.0,
                             content_manifest_digest
+                        ),
+                    );
+            }
+            WalOp::DeleteFile { op_index, inode_id } => {
+                let passed = after_metadata.subtree_tombstones.iter().any(|tombstone| {
+                    tombstone.root_inode_id == *inode_id
+                        && tombstone.tombstone_seq == sequenced.seq
+                        && tombstone.tombstone_op_index == *op_index
+                });
+                states
+                    .get_mut("delete_file_writes_tombstone_row")
+                    .expect("delete_file invariant")
+                    .record(
+                        passed,
+                        format!(
+                            "seq={} op_index={} inode={}",
+                            sequenced.seq.0, op_index, inode_id.0
                         ),
                     );
             }
@@ -3852,6 +3873,18 @@ fn check_subtree_tombstone_blocks_descendant_mutation(
                 )
             }
             WalOp::ReplaceFile { inode_id, .. } | WalOp::RestoreRevision { inode_id, .. } => {
+                applicable = true;
+                let covering = metadata_state.covering_subtree_tombstone(*inode_id, committed_seq);
+                (
+                    covering.is_none(),
+                    format!(
+                        "op={op:?} inode={} covering_root={:?}",
+                        inode_id.0,
+                        covering.as_ref().map(|record| record.root_inode_id.0)
+                    ),
+                )
+            }
+            WalOp::DeleteFile { inode_id, .. } => {
                 applicable = true;
                 let covering = metadata_state.covering_subtree_tombstone(*inode_id, committed_seq);
                 (

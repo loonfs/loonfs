@@ -179,6 +179,15 @@ fn validate_metadata_preconditions(
                     false,
                 )?;
             }
+            CommitOp::DeleteFile { inode_id } => {
+                validate_delete_file_target(&ephemeral_metadata_state, *inode_id, committed_seq)?;
+                validate_delete_file_not_covered(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    committed_seq,
+                    checked_invariants,
+                )?;
+            }
             CommitOp::Rename {
                 inode_id,
                 new_parent_inode,
@@ -305,6 +314,10 @@ fn materialize_simulated_wal_op(
             inode_id: *inode_id,
             base_revision: *base_revision,
             content_manifest_digest: content_manifest_digest.clone(),
+        },
+        CommitOp::DeleteFile { inode_id } => WalOp::DeleteFile {
+            op_index,
+            inode_id: *inode_id,
         },
         CommitOp::Rename {
             inode_id,
@@ -435,6 +448,45 @@ fn validate_delete_subtree_root(
         });
     }
 
+    Ok(())
+}
+
+fn validate_delete_file_target(
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    base_seq: ChangeSeq,
+) -> Result<(), CommitValidationError> {
+    let inode = metadata_state
+        .inode_at_seq(inode_id, base_seq)
+        .ok_or(CommitValidationError::DeleteFileInodeMissing { inode_id })?;
+    if inode.inode_kind != InodeKind::File {
+        return Err(CommitValidationError::DeleteFileInodeNotFile {
+            inode_id,
+            actual_kind: inode.inode_kind,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_delete_file_not_covered(
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    base_seq: ChangeSeq,
+    checked_invariants: &mut Vec<String>,
+) -> Result<(), CommitValidationError> {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
+        return Err(CommitValidationError::DeleteFileCoveredByTombstone {
+            inode_id,
+            covering_root_inode: tombstone.root_inode_id,
+            tombstone_seq: tombstone.tombstone_seq,
+        });
+    }
+
+    push_unique_invariant(
+        checked_invariants,
+        "subtree_tombstone_blocks_descendant_mutation",
+    );
     Ok(())
 }
 

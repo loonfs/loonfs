@@ -5,10 +5,11 @@ use loon_core::commit::{
 use loon_core::content::{
     validate_durable_content_reference, DurableContentValidationError, ValidatedDurableContent,
 };
+use loon_core::metadata::MetadataState;
 use loon_objectstore::ObjectStore;
 use loon_types::{
-    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, CreatedRemoteInode, HeadState,
-    ReplacedRemoteFile, RevisionNo,
+    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, CreatedRemoteInode,
+    DeletedRemoteInode, HeadState, RenamedRemoteInode, ReplacedRemoteFile, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,6 +31,10 @@ pub enum ClientMutationTranslationError {
         inode_id: loon_types::InodeId,
         base_revision: RevisionNo,
     },
+    #[error("rename response is missing the current binding for inode `{inode_id:?}`")]
+    RenameResponseBindingMissing { inode_id: loon_types::InodeId },
+    #[error("delete response is missing inode metadata for inode `{inode_id:?}`")]
+    DeleteResponseInodeMissing { inode_id: loon_types::InodeId },
 }
 
 pub(crate) fn validate_referenced_durable_content<S: ObjectStore>(
@@ -51,7 +56,10 @@ pub(crate) fn validate_referenced_durable_content<S: ObjectStore>(
         )
         .map(Some)
         .map_err(ClientMutationExecutionError::DurableContent),
-        ClientMutationOp::CreateDir { .. } => Ok(None),
+        ClientMutationOp::CreateDir { .. }
+        | ClientMutationOp::Rename { .. }
+        | ClientMutationOp::DeleteFile { .. }
+        | ClientMutationOp::DeleteSubtree { .. } => Ok(None),
     }
 }
 
@@ -59,9 +67,10 @@ pub(crate) fn build_client_mutation_response(
     request: &ClientMutationRequest,
     validated_content: Option<&ValidatedDurableContent>,
     plan: &CommitPlan,
+    resulting_metadata_state: &MetadataState,
     head_publish: &PreparedCommitHeadPublish,
 ) -> Result<ClientMutationResponse, ClientMutationExecutionError> {
-    let (created_inode, replaced_file) = match &request.op {
+    let (created_inode, replaced_file, renamed_inode, deleted_inode) = match &request.op {
         ClientMutationOp::CreateDir {
             parent_inode_id,
             display_name,
@@ -83,6 +92,8 @@ pub(crate) fn build_client_mutation_response(
                     display_name: display_name.clone(),
                     content_digest: None,
                 }),
+                None,
+                None,
                 None,
             )
         }
@@ -114,6 +125,8 @@ pub(crate) fn build_client_mutation_response(
                     ),
                 }),
                 None,
+                None,
+                None,
             )
         }
         ClientMutationOp::ReplaceFile {
@@ -138,6 +151,68 @@ pub(crate) fn build_client_mutation_response(
                         .file_digest_sha256
                         .clone(),
                 }),
+                None,
+                None,
+            )
+        }
+        ClientMutationOp::Rename { inode_id, .. } => {
+            let current_binding = resulting_metadata_state
+                .current_parent_binding_for_child(*inode_id, head_publish.resulting_head.seq)
+                .ok_or(
+                    ClientMutationTranslationError::RenameResponseBindingMissing {
+                        inode_id: *inode_id,
+                    },
+                )?;
+            let inode_kind = resulting_metadata_state
+                .inode_at_seq(*inode_id, head_publish.resulting_head.seq)
+                .ok_or(ClientMutationTranslationError::DeleteResponseInodeMissing {
+                    inode_id: *inode_id,
+                })?
+                .inode_kind;
+            (
+                None,
+                None,
+                Some(RenamedRemoteInode {
+                    inode_id: *inode_id,
+                    inode_kind,
+                    parent_inode_id: current_binding.parent_inode_id,
+                    display_name: current_binding.display_name,
+                }),
+                None,
+            )
+        }
+        ClientMutationOp::DeleteFile { inode_id } => {
+            let inode_kind = resulting_metadata_state
+                .inode_at_seq(*inode_id, head_publish.resulting_head.seq)
+                .ok_or(ClientMutationTranslationError::DeleteResponseInodeMissing {
+                    inode_id: *inode_id,
+                })?
+                .inode_kind;
+            (
+                None,
+                None,
+                None,
+                Some(DeletedRemoteInode {
+                    inode_id: *inode_id,
+                    inode_kind,
+                }),
+            )
+        }
+        ClientMutationOp::DeleteSubtree { root_inode_id } => {
+            let inode_kind = resulting_metadata_state
+                .inode_at_seq(*root_inode_id, head_publish.resulting_head.seq)
+                .ok_or(ClientMutationTranslationError::DeleteResponseInodeMissing {
+                    inode_id: *root_inode_id,
+                })?
+                .inode_kind;
+            (
+                None,
+                None,
+                None,
+                Some(DeletedRemoteInode {
+                    inode_id: *root_inode_id,
+                    inode_kind,
+                }),
             )
         }
     };
@@ -148,6 +223,8 @@ pub(crate) fn build_client_mutation_response(
         committed_seq: head_publish.resulting_head.seq,
         created_inode,
         replaced_file,
+        renamed_inode,
+        deleted_inode,
     })
 }
 
@@ -238,12 +315,62 @@ pub(crate) fn translate_client_mutation_request(
                 ],
             )
         }
+        ClientMutationOp::Rename {
+            inode_id,
+            new_parent_inode_id,
+            new_display_name,
+        } => (
+            CommitOp::Rename {
+                inode_id: *inode_id,
+                new_parent_inode: *new_parent_inode_id,
+                new_display_name: new_display_name.clone(),
+            },
+            vec![
+                Precondition::HeadSeqIs(current_head.seq),
+                Precondition::ChildNameAbsent {
+                    parent_inode: *new_parent_inode_id,
+                    name_key: new_display_name.clone(),
+                },
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: *inode_id,
+                },
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: *new_parent_inode_id,
+                },
+            ],
+        ),
+        ClientMutationOp::DeleteFile { inode_id } => (
+            CommitOp::DeleteFile {
+                inode_id: *inode_id,
+            },
+            vec![
+                Precondition::HeadSeqIs(current_head.seq),
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: *inode_id,
+                },
+            ],
+        ),
+        ClientMutationOp::DeleteSubtree { root_inode_id } => (
+            CommitOp::DeleteSubtree {
+                root_inode: *root_inode_id,
+            },
+            vec![
+                Precondition::HeadSeqIs(current_head.seq),
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: *root_inode_id,
+                },
+            ],
+        ),
     };
 
     if matches!(
         &request.op,
         ClientMutationOp::CreateDir { display_name, .. }
-            | ClientMutationOp::CreateFile { display_name, .. } if display_name.trim().is_empty()
+            | ClientMutationOp::CreateFile { display_name, .. }
+            | ClientMutationOp::Rename {
+                new_display_name: display_name,
+                ..
+            } if display_name.trim().is_empty()
     ) {
         return Err(ClientMutationTranslationError::EmptyDisplayName);
     }

@@ -12,20 +12,22 @@ scenario=wal_tail_replay_advances_head kind=native schema_version=1 seed=Some(42
   11. invariants[wal-model] wal_replay_applies_metadata_rows=pass detail=replayed_head_seq=42 after_head_seq=42 replayed_metadata_matches=true
   12. invariants[wal-model] create_dir_writes_inode_and_direntry_rows=pass detail=seq=42 op_index=0 inode=501 parent=2 name=drafts
   13. invariants[wal-model] create_file_writes_inode_direntry_and_initial_revision=fail detail=no create_file wal op
-  14. invariants[wal-model] delete_subtree_writes_tombstone_row=fail detail=no delete_subtree wal op
-  15. invariants[wal-model] rename_appends_new_direntry_binding=fail detail=no rename wal op
-  16. invariants[wal-model] replace_file_appends_new_revision_head=pass detail=seq=41 op_index=0 inode=42 base_revision=7 next_revision=8 digest=sha256:report-v8
-  17. invariants[wal-model] restore_creates_new_revision_head=fail detail=no restore_revision wal op
-  18. invariants[wal-core] wal_payload_checksum_matches_payload=pass detail=decoded_wal_objects=2
-  19. invariants[wal-core] wal_key_matches_committed_seq=pass detail=validated_object_keys=2
-  20. invariants[wal-core] head_publish_requires_durable_wal=pass detail=basis_seq=40 after_seq=42 wal_tail_len=2 covered=true
-  21. invariants[wal-core] wal_replay_requires_matching_namespace=pass detail=expected_namespace=ns-1
-  22. invariants[wal-core] wal_replay_requires_matching_base_head_seq=pass detail=basis_seq=40 wal_objects=2
-  23. invariants[wal-core] wal_tail_seq_is_contiguous=pass detail=basis_seq=40 wal_objects=2
-  24. invariants[wal-core] wal_replay_applies_metadata_rows=pass detail=replayed_head_seq=42 after_head_seq=42 replayed_metadata_matches=true
-  25. invariants[wal-core] create_dir_writes_inode_and_direntry_rows=pass detail=seq=42 op_index=0 inode=501 parent=2 name=drafts
-  26. invariants[wal-core] create_file_writes_inode_direntry_and_initial_revision=fail detail=no create_file wal op
-  27. invariants[wal-core] delete_subtree_writes_tombstone_row=fail detail=no delete_subtree wal op
-  28. invariants[wal-core] rename_appends_new_direntry_binding=fail detail=no rename wal op
-  29. invariants[wal-core] replace_file_appends_new_revision_head=pass detail=seq=41 op_index=0 inode=42 base_revision=7 next_revision=8 digest=sha256:report-v8
-  30. invariants[wal-core] restore_creates_new_revision_head=fail detail=no restore_revision wal op
+  14. invariants[wal-model] delete_file_writes_tombstone_row=fail detail=no delete_file wal op
+  15. invariants[wal-model] delete_subtree_writes_tombstone_row=fail detail=no delete_subtree wal op
+  16. invariants[wal-model] rename_appends_new_direntry_binding=fail detail=no rename wal op
+  17. invariants[wal-model] replace_file_appends_new_revision_head=pass detail=seq=41 op_index=0 inode=42 base_revision=7 next_revision=8 digest=sha256:report-v8
+  18. invariants[wal-model] restore_creates_new_revision_head=fail detail=no restore_revision wal op
+  19. invariants[wal-core] wal_payload_checksum_matches_payload=pass detail=decoded_wal_objects=2
+  20. invariants[wal-core] wal_key_matches_committed_seq=pass detail=validated_object_keys=2
+  21. invariants[wal-core] head_publish_requires_durable_wal=pass detail=basis_seq=40 after_seq=42 wal_tail_len=2 covered=true
+  22. invariants[wal-core] wal_replay_requires_matching_namespace=pass detail=expected_namespace=ns-1
+  23. invariants[wal-core] wal_replay_requires_matching_base_head_seq=pass detail=basis_seq=40 wal_objects=2
+  24. invariants[wal-core] wal_tail_seq_is_contiguous=pass detail=basis_seq=40 wal_objects=2
+  25. invariants[wal-core] wal_replay_applies_metadata_rows=pass detail=replayed_head_seq=42 after_head_seq=42 replayed_metadata_matches=true
+  26. invariants[wal-core] create_dir_writes_inode_and_direntry_rows=pass detail=seq=42 op_index=0 inode=501 parent=2 name=drafts
+  27. invariants[wal-core] create_file_writes_inode_direntry_and_initial_revision=fail detail=no create_file wal op
+  28. invariants[wal-core] delete_file_writes_tombstone_row=fail detail=no delete_file wal op
+  29. invariants[wal-core] delete_subtree_writes_tombstone_row=fail detail=no delete_subtree wal op
+  30. invariants[wal-core] rename_appends_new_direntry_binding=fail detail=no rename wal op
+  31. invariants[wal-core] replace_file_appends_new_revision_head=pass detail=seq=41 op_index=0 inode=42 base_revision=7 next_revision=8 digest=sha256:report-v8
+  32. invariants[wal-core] restore_creates_new_revision_head=fail detail=no restore_revision wal op

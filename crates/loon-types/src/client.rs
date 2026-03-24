@@ -31,6 +31,10 @@ pub struct ClientMutationResponse {
     pub created_inode: Option<CreatedRemoteInode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaced_file: Option<ReplacedRemoteFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_inode: Option<RenamedRemoteInode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_inode: Option<DeletedRemoteInode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +56,20 @@ pub struct ReplacedRemoteFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenamedRemoteInode {
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub parent_inode_id: InodeId,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedRemoteInode {
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientMutationOp {
     CreateDir {
@@ -67,5 +85,16 @@ pub enum ClientMutationOp {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
         content_manifest_digest: String,
+    },
+    Rename {
+        inode_id: InodeId,
+        new_parent_inode_id: InodeId,
+        new_display_name: String,
+    },
+    DeleteFile {
+        inode_id: InodeId,
+    },
+    DeleteSubtree {
+        root_inode_id: InodeId,
     },
 }

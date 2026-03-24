@@ -324,6 +324,134 @@ Failure modes prevented:
 - duplicate temporary identities for the same local-only child after repeated observation
 - different frontends inventing different path-classification rules
 
+## Explicit local delete and move observation
+
+The next supported shell-facing local observation surface keeps observation explicit instead of
+teaching `observe-local` to infer filesystem meaning heuristically.
+
+It adds two library-first operations:
+
+- explicit local delete observation
+- explicit local move observation
+
+Rules:
+
+- these entrypoints still belong to `loon-client`, not to `xtask`
+- they require the filesystem to already reflect the change:
+  - delete: the source path is absent on disk
+  - move: the source path is absent and the target path is present
+- both paths must stay under the configured `mirror_root`
+- exact source classification remains deterministic:
+  - local-only file/dir exact match first
+  - then bound file/dir exact match
+  - otherwise fail closed
+- this slice still does not add a watcher, recursive scan, or `sync-until-idle`
+
+Why this rule exists:
+
+- delete and move are high-impact mutations and should not depend on lossy shell-side inference
+- future `xtask` and future `loon-cli` should call one explicit supported observation surface
+
+Failure modes prevented:
+
+- deleting or moving the wrong tracked identity because two paths happened to look similar
+- letting one frontend treat a path as a delete while another treats it as a rename
+
+## Bound delete observation and replan
+
+For one already-bound inode, explicit delete observation must:
+
+1. validate that the inode is already known as bound durable state
+2. upsert the current `local_state(namespace_id, inode_id)` row with:
+   - `exists_on_disk = false`
+   - `dirty = true`
+3. derive the next planner decision against the current `remote_state`, `local_state`, and
+   `sync_anchor`
+4. replace or clear `planned_actions(namespace_id, inode_id)` for that inode
+
+Rules:
+
+- a bound file delete plans the new authoritative `delete_file` mutation
+- a bound directory delete plans `delete_subtree`
+- delete observation is still explicit; the planner does not infer delete from a missing path
+  during `observe-local`
+
+## Bound move observation and replan
+
+For one already-bound inode, explicit move observation must:
+
+1. validate that the inode is already known as bound durable state
+2. validate that the destination parent is already a bound directory
+3. upsert the current `local_state(namespace_id, inode_id)` row with the new
+   `parent_inode_id` / `display_name`
+4. derive the next planner decision against the current `remote_state`, `local_state`, and
+   `sync_anchor`
+5. replace or clear `planned_actions(namespace_id, inode_id)` for that inode
+
+Rules:
+
+- the first bound move slice uses the authoritative `rename` mutation for both files and
+  directories
+- bound reparent into a local-only parent is rejected in this slice
+- bound moves onto an already tracked destination path owned by another inode are rejected
+
+Why these rules exist:
+
+- bound rename/move should stay inode-keyed and end-to-end, not become a path-only local hack
+- reparenting into unsynced local-only structure needs a stricter staging protocol than this slice
+
+Failure modes prevented:
+
+- dispatching a rename into a parent the authoritative server cannot address yet
+- treating a bound move like a content-only edit
+
+## Local-only delete and move observation
+
+For local-only identities, explicit delete/move observation remains purely client-local state
+maintenance.
+
+Delete rules:
+
+- deleting a local-only file removes the temp row, planned action, upload state, transfer ledger,
+  pending request, and local-only issues in one SQLite transaction
+- deleting a local-only directory removes the full temp subtree and associated local-only planner /
+  transfer / pending rows in one SQLite transaction
+
+Move rules:
+
+- repeated local-only move observation must preserve the moved root `client_file_id`
+- local-only file move rewrites the parent/name view for that one temp identity
+- local-only directory move rewrites the rooted subtree path state while preserving descendant temp
+  identities
+- local-only moves may target a bound or local-only directory parent
+
+Why these rules exist:
+
+- local-only rows are temporary durable identity, so delete/move must maintain that identity
+  deterministically until authoritative bind happens
+
+Failure modes prevented:
+
+- recreating one unsynced subtree under new temp identities after a rename
+- orphaning planned upload or pending create rows after a local-only delete
+
+## First bound rename/delete mutation request path
+
+The next bound inode request path extends the client/server mutation protocol with:
+
+- `rename`
+- `delete_file`
+- `delete_subtree`
+
+Rules:
+
+- `rename` is used for both bound files and bound directories
+- `delete_file` is used only for bound files
+- `delete_subtree` is used only for bound directories
+- local-only delete/move never emits these authoritative request types
+- `sync-once` remains the same single-step executor path; it only gains the ability to dispatch
+  these new bound request kinds once planned
+
 ## Bound inode observation and replan
 
 For one already-bound inode, the supported observation API takes:

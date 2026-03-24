@@ -1509,6 +1509,8 @@ impl RawClientMutationResponse {
             committed_seq: self.committed_seq,
             created_inode: None,
             replaced_file: Some(self.replaced_file.into_row()),
+            renamed_inode: None,
+            deleted_inode: None,
         }
     }
 }

@@ -36,6 +36,11 @@ pub enum WalOp {
         base_revision: RevisionNo,
         content_manifest_digest: String,
     },
+    DeleteFile {
+        #[serde(default)]
+        op_index: u32,
+        inode_id: InodeId,
+    },
     Rename {
         #[serde(default)]
         op_index: u32,

@@ -159,6 +159,19 @@ impl MetadataState {
                         "replace_file_appends_new_revision_head",
                     );
                 }
+                WalOp::DeleteFile { op_index, inode_id } => {
+                    metadata_state
+                        .subtree_tombstones
+                        .push(SubtreeTombstoneRecord {
+                            root_inode_id: *inode_id,
+                            tombstone_seq: committed_seq,
+                            tombstone_op_index: *op_index,
+                        });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "delete_file_writes_tombstone_row",
+                    );
+                }
                 WalOp::Rename {
                     op_index,
                     inode_id,

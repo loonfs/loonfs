@@ -20,3 +20,4 @@ loon-model = { path = "../loon-model" }
 loon-testkit = { path = "../loon-testkit" }
 loon-server = { path = "../loon-server" }
 loon-core = { path = "../loon-core" }
+serde_yaml.workspace = true

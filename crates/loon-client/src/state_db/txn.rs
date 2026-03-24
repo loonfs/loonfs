@@ -12,18 +12,20 @@ use super::loads::{
     load_conflict_artifacts_for_namespace, load_conflicts_and_errors,
     load_conflicts_and_errors_for_namespace, load_inode_upload, load_local_file,
     load_local_only_candidates_for_namespace, load_local_only_conflicts_and_errors,
-    load_local_only_conflicts_and_errors_for_namespace, load_local_only_file,
+    load_local_only_conflicts_and_errors_for_namespace, load_local_only_descendants_under_subtree,
+    load_local_only_file, load_local_only_parent_link, load_local_only_parent_links_for_namespace,
     load_local_only_planned_actions_for_namespace, load_local_only_state_for_namespace,
     load_local_only_transfer_ledger, load_local_only_transfer_ledgers_for_namespace,
-    load_local_only_upload, load_local_state_for_namespace, load_next_deferred_planned_action,
-    load_next_executable_planned_action, load_next_planned_action,
-    load_next_planned_local_only_action, load_pending_client_mutation,
+    load_local_only_upload, load_local_state_for_namespace, load_local_subtree_inode_ids,
+    load_next_deferred_planned_action, load_next_executable_planned_action,
+    load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
     load_pending_client_mutation_for_client_file, load_pending_client_mutations_for_namespace,
     load_pending_inode_mutation, load_pending_inode_mutation_for_inode,
     load_pending_inode_mutations_for_namespace, load_planned_action,
     load_planned_actions_for_namespace, load_planned_local_only_action, load_remote_file,
-    load_remote_state_for_namespace, load_sync_anchor, load_sync_anchors_for_namespace,
-    load_transfer_ledger_for_inode, load_transfer_ledgers_for_namespace,
+    load_remote_state_for_namespace, load_remote_subtree_descendant_inode_ids, load_sync_anchor,
+    load_sync_anchors_for_namespace, load_transfer_ledger_for_inode,
+    load_transfer_ledgers_for_namespace,
 };
 use super::schema::initialize_connection;
 use super::*;
@@ -240,6 +242,13 @@ impl SqliteStateDb {
         load_local_only_candidates_for_namespace(&self.conn, namespace_id)
     }
 
+    pub fn load_local_only_parent_links_for_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Vec<LocalOnlyParentLinkRow>, StateDbError> {
+        load_local_only_parent_links_for_namespace(&self.conn, namespace_id)
+    }
+
     pub fn load_planned_local_only_action(
         &self,
         client_file_id: &ClientFileId,
@@ -424,6 +433,42 @@ impl SqliteStateDb {
     ) -> Result<ObservedLocalOnlyInodeResult, StateDbError> {
         self.planner_transaction("observe_local_only_inode_under_parent_and_plan", |tx| {
             tx.observe_local_only_inode_under_parent_and_plan(observed, planned_at_ms)
+        })
+    }
+
+    pub fn observe_local_only_move_and_plan(
+        &mut self,
+        client_file_id: &ClientFileId,
+        new_parent: &LocalOnlyParentRef,
+        inode_kind: InodeKind,
+        new_display_name: &str,
+        content_digest: Option<String>,
+        exists_on_disk: bool,
+        dirty: bool,
+        last_local_change_ms: u64,
+        planned_at_ms: u64,
+    ) -> Result<ObservedLocalOnlyInodeResult, StateDbError> {
+        self.planner_transaction("observe_local_only_move_and_plan", |tx| {
+            tx.observe_local_only_move_and_plan(
+                client_file_id,
+                new_parent,
+                inode_kind,
+                new_display_name,
+                content_digest,
+                exists_on_disk,
+                dirty,
+                last_local_change_ms,
+                planned_at_ms,
+            )
+        })
+    }
+
+    pub fn observe_local_only_delete(
+        &mut self,
+        client_file_id: &ClientFileId,
+    ) -> Result<ObservedLocalOnlyDeleteResult, StateDbError> {
+        self.planner_transaction("observe_local_only_delete", |tx| {
+            tx.observe_local_only_delete(client_file_id)
         })
     }
 
@@ -1242,6 +1287,41 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    pub fn upsert_local_only_parent_link(
+        &mut self,
+        client_file_id: &ClientFileId,
+        parent_client_file_id: &ClientFileId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "INSERT INTO local_only_parent_links (
+                client_file_id,
+                parent_client_file_id
+            ) VALUES (?1, ?2)
+            ON CONFLICT(client_file_id) DO UPDATE SET
+                parent_client_file_id = excluded.parent_client_file_id",
+            params![client_file_id.as_str(), parent_client_file_id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_local_only_parent_link(
+        &mut self,
+        client_file_id: &ClientFileId,
+    ) -> Result<(), StateDbError> {
+        self.tx.execute(
+            "DELETE FROM local_only_parent_links WHERE client_file_id = ?1",
+            params![client_file_id.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_local_only_parent_link(
+        &self,
+        client_file_id: &ClientFileId,
+    ) -> Result<Option<ClientFileId>, StateDbError> {
+        load_local_only_parent_link(&self.tx, client_file_id)
+    }
+
     pub fn observe_local_only_inode_under_parent(
         &mut self,
         observed: &ObservedLocalOnlyInode,
@@ -1261,6 +1341,7 @@ impl PlannerTxn<'_> {
             last_local_change_ms: observed.last_local_change_ms,
         };
         self.upsert_local_only_file(&row)?;
+        self.delete_local_only_parent_link(&row.client_file_id)?;
         Ok(row)
     }
 
@@ -1334,6 +1415,7 @@ impl PlannerTxn<'_> {
             last_local_change_ms: observed.last_local_change_ms,
         };
         self.upsert_local_only_file(&row)?;
+        self.delete_local_only_parent_link(&row.client_file_id)?;
 
         let action = decide_local_only_inode_action(&row, planned_at_ms)?;
         if action.decision == crate::planner::PlannerDecision::NoOp {
@@ -1346,6 +1428,130 @@ impl PlannerTxn<'_> {
             local_only: row,
             planned_action: action,
             reused_existing_identity,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_local_only_move_and_plan(
+        &mut self,
+        client_file_id: &ClientFileId,
+        new_parent: &LocalOnlyParentRef,
+        inode_kind: InodeKind,
+        new_display_name: &str,
+        content_digest: Option<String>,
+        exists_on_disk: bool,
+        dirty: bool,
+        last_local_change_ms: u64,
+        planned_at_ms: u64,
+    ) -> Result<ObservedLocalOnlyInodeResult, StateDbError> {
+        let existing = self.load_local_only_file(client_file_id)?.ok_or_else(|| {
+            StateDbError::LocalOnlyFileMissing {
+                client_file_id: client_file_id.as_str().to_owned(),
+            }
+        })?;
+        if existing.inode_kind != inode_kind {
+            return Err(StateDbError::UnsupportedLocalOnlyInodeKind(inode_kind));
+        }
+
+        self.ensure_local_only_parent_directory(&existing.namespace_id, new_parent)?;
+        let subtree_client_file_ids = self
+            .collect_local_only_subtree_client_file_ids(&existing.namespace_id, client_file_id)?;
+        if let LocalOnlyParentRef::LocalOnly {
+            parent_client_file_id,
+        } = new_parent
+        {
+            if subtree_client_file_ids.contains(parent_client_file_id) {
+                return Err(StateDbError::LocalOnlyMoveParentCycle {
+                    client_file_id: client_file_id.as_str().to_owned(),
+                    parent_client_file_id: parent_client_file_id.as_str().to_owned(),
+                });
+            }
+        }
+
+        let sibling_matches = self.load_local_only_rows_by_parent_ref_and_name(
+            &existing.namespace_id,
+            new_parent,
+            new_display_name,
+        )?;
+        if sibling_matches
+            .iter()
+            .any(|row| row.client_file_id != *client_file_id)
+        {
+            return Err(StateDbError::LocalOnlyMoveTargetOccupied {
+                namespace_id: existing.namespace_id.as_str().to_owned(),
+                display_name: new_display_name.to_owned(),
+            });
+        }
+
+        let row = LocalOnlyFileStateRow {
+            client_file_id: client_file_id.clone(),
+            namespace_id: existing.namespace_id.clone(),
+            inode_kind,
+            parent_inode_id: match new_parent {
+                LocalOnlyParentRef::Bound { parent_inode_id } => Some(*parent_inode_id),
+                LocalOnlyParentRef::LocalOnly { .. } => None,
+            },
+            display_name: new_display_name.to_owned(),
+            content_digest,
+            exists_on_disk,
+            dirty,
+            last_local_change_ms,
+        };
+        self.upsert_local_only_file(&row)?;
+        match new_parent {
+            LocalOnlyParentRef::Bound { .. } => {
+                self.delete_local_only_parent_link(client_file_id)?;
+            }
+            LocalOnlyParentRef::LocalOnly {
+                parent_client_file_id,
+            } => {
+                self.upsert_local_only_parent_link(client_file_id, parent_client_file_id)?;
+            }
+        }
+
+        let action = decide_local_only_inode_action(&row, planned_at_ms)?;
+        if action.decision == crate::planner::PlannerDecision::NoOp {
+            self.delete_planned_local_only_action(client_file_id)?;
+        } else {
+            self.upsert_planned_local_only_action(&action.to_row())?;
+        }
+
+        Ok(ObservedLocalOnlyInodeResult {
+            local_only: row,
+            planned_action: action,
+            reused_existing_identity: true,
+        })
+    }
+
+    pub fn observe_local_only_delete(
+        &mut self,
+        client_file_id: &ClientFileId,
+    ) -> Result<ObservedLocalOnlyDeleteResult, StateDbError> {
+        let existing = self.load_local_only_file(client_file_id)?.ok_or_else(|| {
+            StateDbError::LocalOnlyFileMissing {
+                client_file_id: client_file_id.as_str().to_owned(),
+            }
+        })?;
+        let subtree_rows =
+            self.collect_local_only_subtree_rows(&existing.namespace_id, client_file_id)?;
+        let mut removed_client_file_ids = Vec::with_capacity(subtree_rows.len());
+        for row in subtree_rows.iter().rev() {
+            removed_client_file_ids.push(row.client_file_id.clone());
+            self.delete_planned_local_only_action(&row.client_file_id)?;
+            self.delete_local_only_transfer_ledger(&row.client_file_id, TransferDirection::Upload)?;
+            self.delete_local_only_upload(&row.client_file_id)?;
+            if let Some(pending) =
+                load_pending_client_mutation_for_client_file(&self.tx, &row.client_file_id)?
+            {
+                self.delete_pending_client_mutation(&pending.client_request_id)?;
+            }
+            self.delete_local_only_conflicts_and_errors(&row.client_file_id)?;
+            self.delete_local_only_file(&row.client_file_id)?;
+        }
+
+        Ok(ObservedLocalOnlyDeleteResult {
+            root_client_file_id: client_file_id.clone(),
+            removed_client_file_ids,
         })
     }
 
@@ -1731,12 +1937,12 @@ impl PlannerTxn<'_> {
         &mut self,
         response: &ClientMutationResponse,
     ) -> Result<BoundLocalOnlyFile, StateDbError> {
-        if response.created_inode.is_none() && response.replaced_file.is_none() {
+        if client_mutation_response_result_count(response) == 0 {
             return Err(StateDbError::ClientMutationResponseMissingResult {
                 client_request_id: response.client_request_id.clone(),
             });
         }
-        if response.created_inode.is_some() && response.replaced_file.is_some() {
+        if client_mutation_response_result_count(response) > 1 {
             return Err(StateDbError::ClientMutationResponseConflictingResults {
                 client_request_id: response.client_request_id.clone(),
             });
@@ -1765,7 +1971,10 @@ impl PlannerTxn<'_> {
                 ..
             } => Some(content_manifest_digest.clone()),
             ClientMutationOp::CreateDir { .. } => None,
-            ClientMutationOp::ReplaceFile { .. } => None,
+            ClientMutationOp::ReplaceFile { .. }
+            | ClientMutationOp::Rename { .. }
+            | ClientMutationOp::DeleteFile { .. }
+            | ClientMutationOp::DeleteSubtree { .. } => None,
         };
         let remote = RemoteFileStateRow {
             namespace_id: response.namespace_id.clone(),
@@ -1832,6 +2041,14 @@ impl PlannerTxn<'_> {
                             client_file_id: pending.client_file_id.as_str().to_owned(),
                         })
                     }
+                    ClientMutationOp::Rename { .. }
+                    | ClientMutationOp::DeleteFile { .. }
+                    | ClientMutationOp::DeleteSubtree { .. } => {
+                        return Err(StateDbError::ClientMutationResponseUnexpectedResult {
+                            client_request_id: response.client_request_id.clone(),
+                            expected: "created_inode",
+                        })
+                    }
                 }
             }
             Err(error) => return Err(error),
@@ -1845,31 +2062,48 @@ impl PlannerTxn<'_> {
         &mut self,
         response: &ClientMutationResponse,
     ) -> Result<AppliedInodeMutation, StateDbError> {
-        if response.created_inode.is_none() && response.replaced_file.is_none() {
+        if client_mutation_response_result_count(response) == 0 {
             return Err(StateDbError::ClientMutationResponseMissingResult {
                 client_request_id: response.client_request_id.clone(),
             });
         }
-        if response.created_inode.is_some() && response.replaced_file.is_some() {
+        if client_mutation_response_result_count(response) > 1 {
             return Err(StateDbError::ClientMutationResponseConflictingResults {
                 client_request_id: response.client_request_id.clone(),
             });
         }
-
-        let replaced = response.replaced_file.as_ref().ok_or_else(|| {
-            StateDbError::ClientMutationResponseMissingResult {
-                client_request_id: response.client_request_id.clone(),
-            }
-        })?;
         let pending = match load_pending_inode_mutation(&self.tx, &response.client_request_id)? {
             Some(pending) => pending,
             None => {
-                let views = self.load_file_sync_views(&response.namespace_id, replaced.inode_id)?;
-                if replace_response_matches_current_state(response, replaced, &views) {
-                    return Ok(AppliedInodeMutation {
-                        namespace_id: response.namespace_id.clone(),
-                        inode_id: replaced.inode_id,
-                    });
+                if let Some(replaced) = response.replaced_file.as_ref() {
+                    let views =
+                        self.load_file_sync_views(&response.namespace_id, replaced.inode_id)?;
+                    if replace_response_matches_current_state(response, replaced, &views) {
+                        return Ok(AppliedInodeMutation {
+                            namespace_id: response.namespace_id.clone(),
+                            inode_id: replaced.inode_id,
+                        });
+                    }
+                }
+                if let Some(renamed) = response.renamed_inode.as_ref() {
+                    let views =
+                        self.load_file_sync_views(&response.namespace_id, renamed.inode_id)?;
+                    if rename_response_matches_current_state(response, renamed, &views) {
+                        return Ok(AppliedInodeMutation {
+                            namespace_id: response.namespace_id.clone(),
+                            inode_id: renamed.inode_id,
+                        });
+                    }
+                }
+                if let Some(deleted) = response.deleted_inode.as_ref() {
+                    let views =
+                        self.load_file_sync_views(&response.namespace_id, deleted.inode_id)?;
+                    if delete_response_matches_current_state(response, deleted, &views) {
+                        return Ok(AppliedInodeMutation {
+                            namespace_id: response.namespace_id.clone(),
+                            inode_id: deleted.inode_id,
+                        });
+                    }
                 }
                 return Err(StateDbError::PendingInodeMutationMissing {
                     client_request_id: response.client_request_id.clone(),
@@ -1885,64 +2119,261 @@ impl PlannerTxn<'_> {
             });
         }
 
-        let (remote, local, anchor) =
-            self.load_bound_upload_local_edit_views(&pending.namespace_id, pending.inode_id)?;
+        match (
+            &pending.request.op,
+            &response.replaced_file,
+            &response.renamed_inode,
+            &response.deleted_inode,
+        ) {
+            (ClientMutationOp::ReplaceFile { .. }, Some(replaced), None, None) => {
+                let (remote, local, anchor) = self
+                    .load_bound_upload_local_edit_views(&pending.namespace_id, pending.inode_id)?;
 
-        let next_remote = RemoteFileStateRow {
+                let next_remote = RemoteFileStateRow {
+                    namespace_id: pending.namespace_id.clone(),
+                    inode_id: pending.inode_id,
+                    inode_kind: replaced.inode_kind.clone(),
+                    observed_seq: response.committed_seq,
+                    revision_no: replaced.revision_no,
+                    content_digest: Some(replaced.content_digest.clone()),
+                    content_manifest_digest: match &pending.request.op {
+                        ClientMutationOp::ReplaceFile {
+                            content_manifest_digest,
+                            ..
+                        } => Some(content_manifest_digest.clone()),
+                        _ => None,
+                    },
+                    parent_inode_id: remote.parent_inode_id,
+                    display_name: remote.display_name,
+                    is_deleted: false,
+                };
+                let next_local = LocalFileStateRow {
+                    namespace_id: pending.namespace_id.clone(),
+                    inode_id: pending.inode_id,
+                    inode_kind: local.inode_kind,
+                    content_digest: Some(replaced.content_digest.clone()),
+                    parent_inode_id: local.parent_inode_id,
+                    display_name: local.display_name,
+                    exists_on_disk: local.exists_on_disk,
+                    dirty: false,
+                    last_local_change_ms: local.last_local_change_ms,
+                };
+                let next_anchor = SyncAnchorRow {
+                    namespace_id: pending.namespace_id.clone(),
+                    inode_id: pending.inode_id,
+                    inode_kind: anchor.inode_kind,
+                    synced_seq: response.committed_seq,
+                    revision_no: replaced.revision_no,
+                    content_digest: Some(replaced.content_digest.clone()),
+                    content_manifest_digest: match &pending.request.op {
+                        ClientMutationOp::ReplaceFile {
+                            content_manifest_digest,
+                            ..
+                        } => Some(content_manifest_digest.clone()),
+                        _ => None,
+                    },
+                    parent_inode_id: anchor.parent_inode_id,
+                    display_name: anchor.display_name,
+                };
+
+                self.upsert_remote_file(&next_remote)?;
+                self.upsert_local_file(&next_local)?;
+                self.upsert_sync_anchor(&next_anchor)?;
+                self.delete_planned_action(&pending.namespace_id, pending.inode_id)?;
+                self.delete_pending_inode_mutation(&response.client_request_id)?;
+
+                Ok(AppliedInodeMutation {
+                    namespace_id: pending.namespace_id,
+                    inode_id: pending.inode_id,
+                })
+            }
+            (ClientMutationOp::Rename { .. }, None, Some(renamed), None) => {
+                self.apply_local_rename_mutation_response(&pending, response, renamed)
+            }
+            (ClientMutationOp::DeleteFile { .. }, None, None, Some(deleted)) => {
+                self.apply_local_delete_file_mutation_response(&pending, response, deleted)
+            }
+            (ClientMutationOp::DeleteSubtree { .. }, None, None, Some(deleted)) => {
+                self.apply_local_delete_subtree_mutation_response(&pending, response, deleted)
+            }
+            (ClientMutationOp::ReplaceFile { .. }, _, _, _)
+            | (ClientMutationOp::Rename { .. }, _, _, _)
+            | (ClientMutationOp::DeleteFile { .. }, _, _, _)
+            | (ClientMutationOp::DeleteSubtree { .. }, _, _, _) => {
+                Err(StateDbError::ClientMutationResponseUnexpectedResult {
+                    client_request_id: response.client_request_id.clone(),
+                    expected: match pending.request.op {
+                        ClientMutationOp::ReplaceFile { .. } => "replaced_file",
+                        ClientMutationOp::Rename { .. } => "renamed_inode",
+                        ClientMutationOp::DeleteFile { .. }
+                        | ClientMutationOp::DeleteSubtree { .. } => "deleted_inode",
+                        _ => unreachable!(),
+                    },
+                })
+            }
+            _ => Err(StateDbError::ClientMutationResponseUnexpectedResult {
+                client_request_id: response.client_request_id.clone(),
+                expected: "inode mutation result",
+            }),
+        }
+    }
+
+    fn apply_local_rename_mutation_response(
+        &mut self,
+        pending: &PendingInodeMutationRow,
+        response: &ClientMutationResponse,
+        renamed: &loon_types::RenamedRemoteInode,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = self.load_file_sync_views(&pending.namespace_id, pending.inode_id)?;
+        let next_remote = rename_remote_state_from_response(pending, response, renamed, &views)?;
+        let current_local =
+            views
+                .local
+                .ok_or_else(|| StateDbError::ApplyRemoteRenameStateMissing {
+                    namespace_id: pending.namespace_id.as_str().to_owned(),
+                    inode_id: pending.inode_id.0,
+                })?;
+
+        let mut next_local = LocalFileStateRow {
             namespace_id: pending.namespace_id.clone(),
             inode_id: pending.inode_id,
-            inode_kind: replaced.inode_kind.clone(),
-            observed_seq: response.committed_seq,
-            revision_no: replaced.revision_no,
-            content_digest: Some(replaced.content_digest.clone()),
-            content_manifest_digest: match &pending.request.op {
-                ClientMutationOp::ReplaceFile {
-                    content_manifest_digest,
-                    ..
-                } => Some(content_manifest_digest.clone()),
-                _ => None,
-            },
-            parent_inode_id: remote.parent_inode_id,
-            display_name: remote.display_name,
-            is_deleted: false,
-        };
-        let next_local = LocalFileStateRow {
-            namespace_id: pending.namespace_id.clone(),
-            inode_id: pending.inode_id,
-            inode_kind: local.inode_kind,
-            content_digest: Some(replaced.content_digest.clone()),
-            parent_inode_id: local.parent_inode_id,
-            display_name: local.display_name,
-            exists_on_disk: local.exists_on_disk,
-            dirty: false,
-            last_local_change_ms: local.last_local_change_ms,
+            inode_kind: current_local.inode_kind,
+            content_digest: current_local.content_digest.clone(),
+            parent_inode_id: Some(renamed.parent_inode_id),
+            display_name: renamed.display_name.clone(),
+            exists_on_disk: current_local.exists_on_disk,
+            dirty: current_local.dirty,
+            last_local_change_ms: current_local.last_local_change_ms,
         };
         let next_anchor = SyncAnchorRow {
             namespace_id: pending.namespace_id.clone(),
             inode_id: pending.inode_id,
-            inode_kind: anchor.inode_kind,
+            inode_kind: next_remote.inode_kind.clone(),
             synced_seq: response.committed_seq,
-            revision_no: replaced.revision_no,
-            content_digest: Some(replaced.content_digest.clone()),
-            content_manifest_digest: match &pending.request.op {
-                ClientMutationOp::ReplaceFile {
-                    content_manifest_digest,
-                    ..
-                } => Some(content_manifest_digest.clone()),
-                _ => None,
-            },
-            parent_inode_id: anchor.parent_inode_id,
-            display_name: anchor.display_name,
+            revision_no: next_remote.revision_no,
+            content_digest: next_remote.content_digest.clone(),
+            content_manifest_digest: next_remote.content_manifest_digest.clone(),
+            parent_inode_id: next_remote.parent_inode_id,
+            display_name: next_remote.display_name.clone(),
         };
+
+        if next_local.exists_on_disk
+            && next_local.inode_kind == next_anchor.inode_kind
+            && next_local.content_digest == next_anchor.content_digest
+            && next_local.parent_inode_id == next_anchor.parent_inode_id
+            && next_local.display_name == next_anchor.display_name
+        {
+            next_local.dirty = false;
+        }
 
         self.upsert_remote_file(&next_remote)?;
         self.upsert_local_file(&next_local)?;
         self.upsert_sync_anchor(&next_anchor)?;
-        self.delete_planned_action(&pending.namespace_id, pending.inode_id)?;
         self.delete_pending_inode_mutation(&response.client_request_id)?;
+        self.delete_conflict_or_error_kind(
+            &pending.namespace_id,
+            pending.inode_id,
+            "apply_remote_rename_local_apply_failed",
+        )?;
+        let _ = plan_file_in_tx(
+            self,
+            &pending.namespace_id,
+            pending.inode_id,
+            next_local.last_local_change_ms,
+        )?;
 
         Ok(AppliedInodeMutation {
-            namespace_id: pending.namespace_id,
+            namespace_id: pending.namespace_id.clone(),
+            inode_id: pending.inode_id,
+        })
+    }
+
+    fn apply_local_delete_file_mutation_response(
+        &mut self,
+        pending: &PendingInodeMutationRow,
+        response: &ClientMutationResponse,
+        deleted: &loon_types::DeletedRemoteInode,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = self.load_file_sync_views(&pending.namespace_id, pending.inode_id)?;
+        let tombstone = delete_remote_state_from_response(pending, response, deleted, &views)?;
+        self.upsert_remote_file(&tombstone)?;
+        self.delete_pending_inode_mutation(&response.client_request_id)?;
+        self.delete_planned_action(&pending.namespace_id, pending.inode_id)?;
+        self.delete_inode_upload(&pending.namespace_id, pending.inode_id)?;
+        self.delete_transfer_ledger_for_inode(
+            &pending.namespace_id,
+            pending.inode_id,
+            TransferDirection::Upload,
+        )?;
+        self.delete_transfer_ledger_for_inode(
+            &pending.namespace_id,
+            pending.inode_id,
+            TransferDirection::Download,
+        )?;
+        self.delete_local_file(&pending.namespace_id, pending.inode_id)?;
+        self.delete_sync_anchor(&pending.namespace_id, pending.inode_id)?;
+        self.delete_conflict_or_error_kind(
+            &pending.namespace_id,
+            pending.inode_id,
+            "apply_remote_delete_local_apply_failed",
+        )?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: pending.namespace_id.clone(),
+            inode_id: pending.inode_id,
+        })
+    }
+
+    fn apply_local_delete_subtree_mutation_response(
+        &mut self,
+        pending: &PendingInodeMutationRow,
+        response: &ClientMutationResponse,
+        deleted: &loon_types::DeletedRemoteInode,
+    ) -> Result<AppliedInodeMutation, StateDbError> {
+        let views = self.load_file_sync_views(&pending.namespace_id, pending.inode_id)?;
+        let tombstone = delete_remote_state_from_response(pending, response, deleted, &views)?;
+        let subtree_inode_ids =
+            load_local_subtree_inode_ids(&self.tx, &pending.namespace_id, pending.inode_id)?;
+        let descendant_remote_inode_ids = load_remote_subtree_descendant_inode_ids(
+            &self.tx,
+            &pending.namespace_id,
+            pending.inode_id,
+        )?;
+        let local_only_descendants = load_local_only_descendants_under_subtree(
+            &self.tx,
+            &pending.namespace_id,
+            pending.inode_id,
+        )?;
+
+        self.upsert_remote_file(&tombstone)?;
+        self.delete_pending_inode_mutation(&response.client_request_id)?;
+        self.delete_planned_actions_for_inodes(&pending.namespace_id, &subtree_inode_ids)?;
+        self.delete_conflicts_and_errors_for_inodes(&pending.namespace_id, &subtree_inode_ids)?;
+        for inode_id in subtree_inode_ids.iter().copied() {
+            self.delete_inode_upload(&pending.namespace_id, inode_id)?;
+            self.delete_transfer_ledger_for_inode(
+                &pending.namespace_id,
+                inode_id,
+                TransferDirection::Upload,
+            )?;
+            self.delete_transfer_ledger_for_inode(
+                &pending.namespace_id,
+                inode_id,
+                TransferDirection::Download,
+            )?;
+            if let Some(descendant_pending) =
+                load_pending_inode_mutation_for_inode(&self.tx, &pending.namespace_id, inode_id)?
+            {
+                self.delete_pending_inode_mutation(&descendant_pending.client_request_id)?;
+            }
+        }
+        self.delete_remote_files_for_inodes(&pending.namespace_id, &descendant_remote_inode_ids)?;
+        self.delete_local_files_for_inodes(&pending.namespace_id, &subtree_inode_ids)?;
+        self.delete_sync_anchors_for_inodes(&pending.namespace_id, &subtree_inode_ids)?;
+        self.cleanup_local_only_subtree_roots(&local_only_descendants)?;
+
+        Ok(AppliedInodeMutation {
+            namespace_id: pending.namespace_id.clone(),
             inode_id: pending.inode_id,
         })
     }
@@ -2560,7 +2991,7 @@ impl PlannerTxn<'_> {
         self.delete_remote_files_for_inodes(namespace_id, &views.descendant_remote_inode_ids)?;
         self.delete_local_files_for_inodes(namespace_id, &views.subtree_inode_ids)?;
         self.delete_sync_anchors_for_inodes(namespace_id, &views.subtree_inode_ids)?;
-        self.cleanup_local_only_subtree_entries(&views.local_only_descendants)?;
+        self.cleanup_local_only_conflict_subtree_entries(&views.local_only_descendants)?;
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -2640,7 +3071,7 @@ impl PlannerTxn<'_> {
         }
 
         self.delete_conflicts_and_errors_for_inodes(namespace_id, &views.subtree_inode_ids)?;
-        self.cleanup_local_only_subtree_entries(&views.local_only_descendants)?;
+        self.cleanup_local_only_conflict_subtree_entries(&views.local_only_descendants)?;
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -2944,6 +3375,11 @@ impl PlannerTxn<'_> {
             parent_inode_id: remote.parent_inode_id,
             display_name: remote.display_name.clone(),
         };
+        let direct_local_only_children = if local_only.inode_kind == InodeKind::Dir {
+            self.load_direct_local_only_child_rows(&local_only.namespace_id, client_file_id)?
+        } else {
+            Vec::new()
+        };
 
         self.upsert_remote_file(remote)?;
         self.upsert_local_file(&local_row)?;
@@ -2954,6 +3390,22 @@ impl PlannerTxn<'_> {
         self.delete_local_only_upload(client_file_id)?;
         self.delete_local_only_conflicts_and_errors(client_file_id)?;
         self.delete_local_only_file(client_file_id)?;
+
+        for child in direct_local_only_children {
+            let next_child = LocalOnlyFileStateRow {
+                parent_inode_id: Some(remote.inode_id),
+                ..child.clone()
+            };
+            self.upsert_local_only_file(&next_child)?;
+            self.delete_local_only_parent_link(&next_child.client_file_id)?;
+            let action =
+                decide_local_only_inode_action(&next_child, next_child.last_local_change_ms)?;
+            if action.decision == crate::planner::PlannerDecision::NoOp {
+                self.delete_planned_local_only_action(&next_child.client_file_id)?;
+            } else {
+                self.upsert_planned_local_only_action(&action.to_row())?;
+            }
+        }
 
         Ok(BoundLocalOnlyFile {
             client_file_id: client_file_id.clone(),
@@ -3134,20 +3586,41 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
-    fn cleanup_local_only_subtree_entries(
+    fn cleanup_local_only_conflict_subtree_entries(
         &mut self,
         entries: &[ConflictLocalOnlySubtreeEntry],
     ) -> Result<(), StateDbError> {
+        let roots = entries
+            .iter()
+            .map(|entry| entry.local_only.clone())
+            .collect::<Vec<_>>();
+        self.cleanup_local_only_subtree_roots(&roots)
+    }
+
+    fn cleanup_local_only_subtree_roots(
+        &mut self,
+        entries: &[LocalOnlyFileStateRow],
+    ) -> Result<(), StateDbError> {
+        let mut removed = std::collections::BTreeSet::new();
         for entry in entries {
-            let client_file_id = &entry.local_only.client_file_id;
-            self.delete_planned_local_only_action(client_file_id)?;
-            self.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
-            self.delete_local_only_upload(client_file_id)?;
-            if let Some(pending) = entry.pending_client_mutation.as_ref() {
-                self.delete_pending_client_mutation(&pending.client_request_id)?;
+            let subtree_rows =
+                self.collect_local_only_subtree_rows(&entry.namespace_id, &entry.client_file_id)?;
+            for row in subtree_rows.iter().rev() {
+                if !removed.insert(row.client_file_id.clone()) {
+                    continue;
+                }
+                let client_file_id = &row.client_file_id;
+                self.delete_planned_local_only_action(client_file_id)?;
+                self.delete_local_only_transfer_ledger(client_file_id, TransferDirection::Upload)?;
+                self.delete_local_only_upload(client_file_id)?;
+                if let Some(pending) =
+                    load_pending_client_mutation_for_client_file(&self.tx, client_file_id)?
+                {
+                    self.delete_pending_client_mutation(&pending.client_request_id)?;
+                }
+                self.delete_local_only_conflicts_and_errors(client_file_id)?;
+                self.delete_local_only_file(client_file_id)?;
             }
-            self.delete_local_only_conflicts_and_errors(client_file_id)?;
-            self.delete_local_only_file(client_file_id)?;
         }
         Ok(())
     }
@@ -3381,6 +3854,35 @@ impl PlannerTxn<'_> {
         Ok(())
     }
 
+    fn ensure_local_only_parent_directory(
+        &self,
+        namespace_id: &NamespaceId,
+        parent: &LocalOnlyParentRef,
+    ) -> Result<(), StateDbError> {
+        match parent {
+            LocalOnlyParentRef::Bound { parent_inode_id } => {
+                self.ensure_bound_parent_directory(namespace_id, *parent_inode_id)
+            }
+            LocalOnlyParentRef::LocalOnly {
+                parent_client_file_id,
+            } => {
+                let parent_row = self
+                    .load_local_only_file(parent_client_file_id)?
+                    .ok_or_else(|| StateDbError::LocalOnlyParentClientFileMissing {
+                        client_file_id: parent_client_file_id.as_str().to_owned(),
+                    })?;
+                if parent_row.namespace_id != *namespace_id
+                    || parent_row.inode_kind != InodeKind::Dir
+                {
+                    return Err(StateDbError::LocalOnlyParentClientFileNotDirectory {
+                        client_file_id: parent_client_file_id.as_str().to_owned(),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn load_local_only_rows_by_parent_and_name(
         &self,
         namespace_id: &NamespaceId,
@@ -3434,6 +3936,171 @@ impl PlannerTxn<'_> {
             .map_err(StateDbError::from)
     }
 
+    fn load_local_only_rows_by_local_only_parent_and_name(
+        &self,
+        namespace_id: &NamespaceId,
+        parent_client_file_id: &ClientFileId,
+        display_name: &str,
+    ) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT
+                s.client_file_id,
+                s.namespace_id,
+                s.inode_kind,
+                s.parent_inode_id,
+                s.display_name,
+                s.content_digest,
+                s.exists_on_disk,
+                s.dirty,
+                s.last_local_change_ms
+            FROM local_only_state s
+            JOIN local_only_parent_links l ON l.client_file_id = s.client_file_id
+            WHERE s.namespace_id = ?1
+              AND l.parent_client_file_id = ?2
+              AND s.display_name = ?3
+            ORDER BY s.client_file_id",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                namespace_id.as_str(),
+                parent_client_file_id.as_str(),
+                display_name
+            ],
+            |row| {
+                let client_file_id = row.get::<_, String>(0)?;
+                let namespace_id = row.get::<_, String>(1)?;
+                let inode_kind = row.get::<_, String>(2)?;
+                Ok(LocalOnlyFileStateRow {
+                    client_file_id: ClientFileId::from(client_file_id.as_str()),
+                    namespace_id: NamespaceId::from(namespace_id.as_str()),
+                    inode_kind: inode_kind_from_str(&inode_kind).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })?,
+                    parent_inode_id: row.get::<_, Option<u64>>(3)?.map(InodeId),
+                    display_name: row.get(4)?,
+                    content_digest: row.get(5)?,
+                    exists_on_disk: row.get(6)?,
+                    dirty: row.get(7)?,
+                    last_local_change_ms: row.get(8)?,
+                })
+            },
+        )?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateDbError::from)
+    }
+
+    fn load_local_only_rows_by_parent_ref_and_name(
+        &self,
+        namespace_id: &NamespaceId,
+        parent: &LocalOnlyParentRef,
+        display_name: &str,
+    ) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+        match parent {
+            LocalOnlyParentRef::Bound { parent_inode_id } => self
+                .load_local_only_rows_by_parent_and_name(
+                    namespace_id,
+                    *parent_inode_id,
+                    display_name,
+                ),
+            LocalOnlyParentRef::LocalOnly {
+                parent_client_file_id,
+            } => self.load_local_only_rows_by_local_only_parent_and_name(
+                namespace_id,
+                parent_client_file_id,
+                display_name,
+            ),
+        }
+    }
+
+    fn load_direct_local_only_child_rows(
+        &self,
+        namespace_id: &NamespaceId,
+        parent_client_file_id: &ClientFileId,
+    ) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT
+                s.client_file_id,
+                s.namespace_id,
+                s.inode_kind,
+                s.parent_inode_id,
+                s.display_name,
+                s.content_digest,
+                s.exists_on_disk,
+                s.dirty,
+                s.last_local_change_ms
+            FROM local_only_state s
+            JOIN local_only_parent_links l ON l.client_file_id = s.client_file_id
+            WHERE s.namespace_id = ?1
+              AND l.parent_client_file_id = ?2
+            ORDER BY s.client_file_id",
+        )?;
+        let rows = stmt.query_map(
+            params![namespace_id.as_str(), parent_client_file_id.as_str()],
+            |row| {
+                let client_file_id = row.get::<_, String>(0)?;
+                let namespace_id = row.get::<_, String>(1)?;
+                let inode_kind = row.get::<_, String>(2)?;
+                Ok(LocalOnlyFileStateRow {
+                    client_file_id: ClientFileId::from(client_file_id.as_str()),
+                    namespace_id: NamespaceId::from(namespace_id.as_str()),
+                    inode_kind: inode_kind_from_str(&inode_kind).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(err),
+                        )
+                    })?,
+                    parent_inode_id: row.get::<_, Option<u64>>(3)?.map(InodeId),
+                    display_name: row.get(4)?,
+                    content_digest: row.get(5)?,
+                    exists_on_disk: row.get(6)?,
+                    dirty: row.get(7)?,
+                    last_local_change_ms: row.get(8)?,
+                })
+            },
+        )?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StateDbError::from)
+    }
+
+    fn collect_local_only_subtree_rows(
+        &self,
+        namespace_id: &NamespaceId,
+        root_client_file_id: &ClientFileId,
+    ) -> Result<Vec<LocalOnlyFileStateRow>, StateDbError> {
+        let root = self
+            .load_local_only_file(root_client_file_id)?
+            .ok_or_else(|| StateDbError::LocalOnlyFileMissing {
+                client_file_id: root_client_file_id.as_str().to_owned(),
+            })?;
+        let mut rows = vec![root];
+        let mut cursor = 0usize;
+        while cursor < rows.len() {
+            let parent = rows[cursor].client_file_id.clone();
+            rows.extend(self.load_direct_local_only_child_rows(namespace_id, &parent)?);
+            cursor += 1;
+        }
+        Ok(rows)
+    }
+
+    fn collect_local_only_subtree_client_file_ids(
+        &self,
+        namespace_id: &NamespaceId,
+        root_client_file_id: &ClientFileId,
+    ) -> Result<std::collections::BTreeSet<ClientFileId>, StateDbError> {
+        Ok(self
+            .collect_local_only_subtree_rows(namespace_id, root_client_file_id)?
+            .into_iter()
+            .map(|row| row.client_file_id)
+            .collect())
+    }
+
     pub fn load_bound_upload_local_edit_views(
         &self,
         namespace_id: &NamespaceId,
@@ -3479,6 +4146,176 @@ fn replace_response_matches_current_state(
         && anchor.content_digest.as_deref() == Some(replaced.content_digest.as_str())
         && anchor.parent_inode_id == remote.parent_inode_id
         && anchor.display_name == remote.display_name
+}
+
+fn rename_response_matches_current_state(
+    response: &ClientMutationResponse,
+    renamed: &loon_types::RenamedRemoteInode,
+    views: &FileSyncViews,
+) -> bool {
+    let (Some(remote), Some(local), Some(anchor)) = (
+        views.remote.as_ref(),
+        views.local.as_ref(),
+        views.sync_anchor.as_ref(),
+    ) else {
+        return false;
+    };
+
+    remote.namespace_id == response.namespace_id
+        && remote.inode_id == renamed.inode_id
+        && remote.inode_kind == renamed.inode_kind
+        && remote.observed_seq == response.committed_seq
+        && remote.parent_inode_id == Some(renamed.parent_inode_id)
+        && remote.display_name == renamed.display_name
+        && !remote.is_deleted
+        && local.namespace_id == response.namespace_id
+        && local.inode_id == renamed.inode_id
+        && local.inode_kind == renamed.inode_kind
+        && local.parent_inode_id == Some(renamed.parent_inode_id)
+        && local.display_name == renamed.display_name
+        && local.exists_on_disk
+        && !local.dirty
+        && anchor.namespace_id == response.namespace_id
+        && anchor.inode_id == renamed.inode_id
+        && anchor.inode_kind == renamed.inode_kind
+        && anchor.synced_seq == response.committed_seq
+        && anchor.parent_inode_id == Some(renamed.parent_inode_id)
+        && anchor.display_name == renamed.display_name
+}
+
+fn delete_response_matches_current_state(
+    response: &ClientMutationResponse,
+    deleted: &loon_types::DeletedRemoteInode,
+    views: &FileSyncViews,
+) -> bool {
+    let Some(remote) = views.remote.as_ref() else {
+        return false;
+    };
+
+    remote.namespace_id == response.namespace_id
+        && remote.inode_id == deleted.inode_id
+        && remote.inode_kind == deleted.inode_kind
+        && remote.observed_seq == response.committed_seq
+        && remote.is_deleted
+        && views.local.is_none()
+        && views.sync_anchor.is_none()
+}
+
+fn client_mutation_response_result_count(response: &ClientMutationResponse) -> usize {
+    usize::from(response.created_inode.is_some())
+        + usize::from(response.replaced_file.is_some())
+        + usize::from(response.renamed_inode.is_some())
+        + usize::from(response.deleted_inode.is_some())
+}
+
+fn rename_remote_state_from_response(
+    pending: &PendingInodeMutationRow,
+    response: &ClientMutationResponse,
+    renamed: &loon_types::RenamedRemoteInode,
+    views: &FileSyncViews,
+) -> Result<RemoteFileStateRow, StateDbError> {
+    let source = views
+        .remote
+        .as_ref()
+        .map(RemoteSourceState::from_remote)
+        .or_else(|| {
+            views
+                .sync_anchor
+                .as_ref()
+                .map(RemoteSourceState::from_anchor)
+        })
+        .or_else(|| views.local.as_ref().map(RemoteSourceState::from_local))
+        .ok_or_else(|| StateDbError::PendingInodeMutationRequestMissing {
+            client_request_id: pending.client_request_id.clone(),
+        })?;
+
+    Ok(RemoteFileStateRow {
+        namespace_id: pending.namespace_id.clone(),
+        inode_id: pending.inode_id,
+        inode_kind: renamed.inode_kind.clone(),
+        observed_seq: response.committed_seq,
+        revision_no: source.revision_no,
+        content_digest: source.content_digest,
+        content_manifest_digest: source.content_manifest_digest,
+        parent_inode_id: Some(renamed.parent_inode_id),
+        display_name: renamed.display_name.clone(),
+        is_deleted: false,
+    })
+}
+
+fn delete_remote_state_from_response(
+    pending: &PendingInodeMutationRow,
+    response: &ClientMutationResponse,
+    deleted: &loon_types::DeletedRemoteInode,
+    views: &FileSyncViews,
+) -> Result<RemoteFileStateRow, StateDbError> {
+    let source = views
+        .remote
+        .as_ref()
+        .map(RemoteSourceState::from_remote)
+        .or_else(|| {
+            views
+                .sync_anchor
+                .as_ref()
+                .map(RemoteSourceState::from_anchor)
+        })
+        .or_else(|| views.local.as_ref().map(RemoteSourceState::from_local))
+        .ok_or_else(|| StateDbError::PendingInodeMutationRequestMissing {
+            client_request_id: pending.client_request_id.clone(),
+        })?;
+
+    Ok(RemoteFileStateRow {
+        namespace_id: pending.namespace_id.clone(),
+        inode_id: pending.inode_id,
+        inode_kind: deleted.inode_kind.clone(),
+        observed_seq: response.committed_seq,
+        revision_no: source.revision_no,
+        content_digest: source.content_digest,
+        content_manifest_digest: source.content_manifest_digest,
+        parent_inode_id: source.parent_inode_id,
+        display_name: source.display_name,
+        is_deleted: true,
+    })
+}
+
+struct RemoteSourceState {
+    revision_no: RevisionNo,
+    content_digest: Option<String>,
+    content_manifest_digest: Option<String>,
+    parent_inode_id: Option<InodeId>,
+    display_name: String,
+}
+
+impl RemoteSourceState {
+    fn from_remote(remote: &RemoteFileStateRow) -> Self {
+        Self {
+            revision_no: remote.revision_no,
+            content_digest: remote.content_digest.clone(),
+            content_manifest_digest: remote.content_manifest_digest.clone(),
+            parent_inode_id: remote.parent_inode_id,
+            display_name: remote.display_name.clone(),
+        }
+    }
+
+    fn from_anchor(anchor: &SyncAnchorRow) -> Self {
+        Self {
+            revision_no: anchor.revision_no,
+            content_digest: anchor.content_digest.clone(),
+            content_manifest_digest: anchor.content_manifest_digest.clone(),
+            parent_inode_id: anchor.parent_inode_id,
+            display_name: anchor.display_name.clone(),
+        }
+    }
+
+    fn from_local(local: &LocalFileStateRow) -> Self {
+        Self {
+            revision_no: RevisionNo(1),
+            content_digest: local.content_digest.clone(),
+            content_manifest_digest: None,
+            parent_inode_id: local.parent_inode_id,
+            display_name: local.display_name.clone(),
+        }
+    }
 }
 
 fn create_file_response_matches_current_state(

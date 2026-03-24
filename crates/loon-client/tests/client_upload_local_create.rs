@@ -1215,6 +1215,8 @@ impl RawClientMutationResponse {
                 content_digest: created_inode.content_digest,
             }),
             replaced_file: None,
+            renamed_inode: None,
+            deleted_inode: None,
         }
     }
 }

@@ -71,6 +71,8 @@ Current local operability shell:
   - `xtask ops show-client-state --config <path> --namespace <id>`
   - `xtask ops import-remote-observations --config <path> --namespace <id>`
   - `xtask ops observe-local --config <path> --namespace <id> --path <path>`
+  - `xtask ops observe-delete --config <path> --namespace <id> --path <path>`
+  - `xtask ops observe-move --config <path> --namespace <id> --from <path> --to <path>`
   - `xtask ops sync-once --config <path> --namespace <id>`
   - `xtask ops smoke --config <path> --namespace <id>`
 
@@ -84,9 +86,11 @@ Constraints for that shell:
   re-implementing it
 - local observation of one existing file remains a supported client/library path first, and
   `xtask ops observe-local` is only a thin adapter over that path
+- explicit local delete and move observation remain supported client/library paths first, and
+  `xtask ops observe-delete` / `xtask ops observe-move` are thin adapters over those paths
 - `xtask ops sync-once` is intentionally single-step and executor-only
 - the shell is intentionally narrow in the current phase; there is still no workflow runner,
-  recursive scan, watcher, delete inference, rename inference, or `sync-until-idle`
+  recursive scan, watcher, delete inference, or `sync-until-idle`
 - `ops smoke` remains bootstrap/inspection-only and does not compose the import path yet
 - future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
 

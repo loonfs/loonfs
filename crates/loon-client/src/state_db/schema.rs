@@ -1,7 +1,7 @@
 use super::{SqliteStateDb, StateDbError};
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const SCHEMA_VERSION: i32 = 19;
+pub(crate) const SCHEMA_VERSION: i32 = 20;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
@@ -1107,6 +1107,52 @@ CREATE INDEX idx_conflict_artifact_archives_namespace_archived_at
     ON conflict_artifact_archives(namespace_id, archived_at_ms, conflict_id);
 "#;
 
+const SCHEMA_V20_SQL: &str = r#"
+DROP INDEX IF EXISTS idx_planned_actions_created_at;
+ALTER TABLE planned_actions RENAME TO planned_actions_old;
+CREATE TABLE planned_actions (
+    namespace_id TEXT NOT NULL,
+    inode_id INTEGER NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (namespace_id, inode_id),
+    FOREIGN KEY (namespace_id, inode_id)
+        REFERENCES local_state(namespace_id, inode_id),
+    CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'upload_local_edit', 'rename', 'delete_file', 'delete_subtree', 'download_remote_edit', 'resolve_same_inode_conflict', 'resolve_delete_vs_edit_conflict', 'resolve_rename_vs_edit_conflict', 'resolve_path_binding_collision', 'resolve_subtree_delete_conflict', 'resolve_subtree_rename_conflict', 'apply_remote_rename_and_replace', 'apply_remote_delete', 'apply_remote_subtree_delete', 'apply_remote_subtree_rename', 'apply_remote_rename', 'materialize_remote_dir', 'create_conflict_copy', 'no_op')),
+    CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'remote_deleted_from_anchor', 'remote_deleted_while_local_differs_from_anchor', 'remote_deleted_without_anchor', 'remote_subtree_deleted_from_anchor', 'remote_subtree_deleted_while_local_differs_from_anchor', 'remote_subtree_deleted_while_descendants_differ_from_anchor', 'remote_subtree_deleted_while_descendants_busy', 'remote_subtree_deleted_without_anchor', 'remote_subtree_path_differs_from_anchor', 'remote_subtree_path_differs_while_local_differs_from_anchor', 'remote_subtree_path_differs_while_descendants_differ_from_anchor', 'remote_subtree_path_differs_while_descendants_busy', 'remote_subtree_path_waiting_for_target_parent_materialization', 'remote_subtree_path_target_parent_unusable', 'remote_parent_waiting_for_materialization', 'remote_path_differs_from_anchor', 'remote_path_waiting_for_target_parent_materialization', 'remote_path_target_parent_unusable', 'remote_path_and_content_differ_from_anchor', 'local_only_path_binding_collision', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))
+);
+INSERT INTO planned_actions (
+    namespace_id,
+    inode_id,
+    decision,
+    reason,
+    created_at_ms
+)
+SELECT
+    namespace_id,
+    inode_id,
+    decision,
+    reason,
+    created_at_ms
+FROM planned_actions_old;
+DROP TABLE planned_actions_old;
+CREATE INDEX idx_planned_actions_created_at
+    ON planned_actions(created_at_ms, namespace_id, inode_id);
+CREATE TABLE local_only_parent_links (
+    client_file_id TEXT NOT NULL PRIMARY KEY,
+    parent_client_file_id TEXT NOT NULL,
+    FOREIGN KEY (client_file_id)
+        REFERENCES local_only_state(client_file_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (parent_client_file_id)
+        REFERENCES local_only_state(client_file_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX idx_local_only_parent_links_parent
+    ON local_only_parent_links(parent_client_file_id, client_file_id);
+"#;
+
 pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -1184,6 +1230,12 @@ pub(super) fn install_schema_version_for_test(
     }
     if target_version >= 18 {
         apply_v18_hardening(conn)?;
+    }
+    if target_version >= 19 {
+        apply_v19_hardening(conn)?;
+    }
+    if target_version >= 20 {
+        apply_v20_hardening(conn)?;
     }
 
     Ok(())
@@ -1318,6 +1370,11 @@ impl SqliteStateDb {
 
         if current_version == 18 {
             apply_v19_hardening(&mut self.conn)?;
+            current_version = 19;
+        }
+
+        if current_version == 19 {
+            apply_v20_hardening(&mut self.conn)?;
         }
 
         Ok(())
@@ -1474,6 +1531,14 @@ fn apply_v19_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
     let tx = conn.transaction()?;
     tx.execute_batch(SCHEMA_V19_SQL)?;
     tx.pragma_update(None, "user_version", 19)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn apply_v20_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(SCHEMA_V20_SQL)?;
+    tx.pragma_update(None, "user_version", 20)?;
     tx.commit()?;
     Ok(())
 }

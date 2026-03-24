@@ -306,6 +306,10 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
                 base_revision: *base_revision,
                 content_manifest_digest: content_manifest_digest.clone(),
             },
+            CommitOp::DeleteFile { inode_id } => WalOp::DeleteFile {
+                op_index,
+                inode_id: *inode_id,
+            },
             CommitOp::Rename {
                 inode_id,
                 new_parent_inode,
@@ -394,6 +398,7 @@ fn replay_next_inode_id(current_next_inode_id: InodeId, ops: &[WalOp]) -> InodeI
                 InodeId(next_inode_id.0.max(inode_id.0.saturating_add(1)))
             }
             WalOp::ReplaceFile { .. }
+            | WalOp::DeleteFile { .. }
             | WalOp::Rename { .. }
             | WalOp::DeleteSubtree { .. }
             | WalOp::RestoreRevision { .. } => next_inode_id,

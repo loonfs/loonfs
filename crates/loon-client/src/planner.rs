@@ -13,6 +13,9 @@ pub enum PlannerDecision {
     CreateRemoteDir,
     UploadLocalCreate,
     UploadLocalEdit,
+    Rename,
+    DeleteFile,
+    DeleteSubtree,
     DownloadRemoteEdit,
     ResolveSameInodeConflict,
     ResolveDeleteVsEditConflict,
@@ -258,10 +261,35 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
 
             match (local_matches_anchor, remote_matches_anchor) {
                 (true, true) => (PlannerDecision::NoOp, PlannerReason::AlreadyConverged),
-                (false, true) => (
-                    PlannerDecision::UploadLocalEdit,
-                    PlannerReason::LocalDiffersFromAnchor,
-                ),
+                (false, true) => {
+                    if !local.exists_on_disk {
+                        match anchor.inode_kind {
+                            InodeKind::File => (
+                                PlannerDecision::DeleteFile,
+                                PlannerReason::LocalDiffersFromAnchor,
+                            ),
+                            InodeKind::Dir => (
+                                PlannerDecision::DeleteSubtree,
+                                PlannerReason::LocalDiffersFromAnchor,
+                            ),
+                            InodeKind::Symlink | InodeKind::Mount => {
+                                (PlannerDecision::NoOp, PlannerReason::NoObservedState)
+                            }
+                        }
+                    } else if !local_path_matches_anchor(local, anchor) {
+                        (
+                            PlannerDecision::Rename,
+                            PlannerReason::LocalDiffersFromAnchor,
+                        )
+                    } else if anchor.inode_kind == InodeKind::File {
+                        (
+                            PlannerDecision::UploadLocalEdit,
+                            PlannerReason::LocalDiffersFromAnchor,
+                        )
+                    } else {
+                        (PlannerDecision::NoOp, PlannerReason::NoObservedState)
+                    }
+                }
                 (true, false)
                     if remote.inode_kind == InodeKind::File
                         && local.inode_kind == InodeKind::File
@@ -300,10 +328,35 @@ pub fn decide_file_action(views: &FileSyncViews, now_ms: u64) -> PlannedActionRe
             PlannerDecision::DownloadRemoteEdit,
             PlannerReason::RemoteDiffersFromAnchor,
         ),
-        (None, Some(_), Some(anchor)) if anchor.content_digest.is_some() => (
-            PlannerDecision::UploadLocalEdit,
-            PlannerReason::LocalDiffersFromAnchor,
-        ),
+        (None, Some(local), Some(anchor)) => {
+            if !local.exists_on_disk {
+                match anchor.inode_kind {
+                    InodeKind::File => (
+                        PlannerDecision::DeleteFile,
+                        PlannerReason::LocalDiffersFromAnchor,
+                    ),
+                    InodeKind::Dir => (
+                        PlannerDecision::DeleteSubtree,
+                        PlannerReason::LocalDiffersFromAnchor,
+                    ),
+                    InodeKind::Symlink | InodeKind::Mount => {
+                        (PlannerDecision::NoOp, PlannerReason::NoObservedState)
+                    }
+                }
+            } else if !local_path_matches_anchor(local, anchor) {
+                (
+                    PlannerDecision::Rename,
+                    PlannerReason::LocalDiffersFromAnchor,
+                )
+            } else if anchor.inode_kind == InodeKind::File {
+                (
+                    PlannerDecision::UploadLocalEdit,
+                    PlannerReason::LocalDiffersFromAnchor,
+                )
+            } else {
+                (PlannerDecision::NoOp, PlannerReason::NoObservedState)
+            }
+        }
         (Some(remote), None, None) => (
             match remote.inode_kind {
                 InodeKind::File => PlannerDecision::DownloadRemoteEdit,
@@ -368,7 +421,7 @@ pub fn decide_local_only_inode_action(
     local_only: &LocalOnlyFileStateRow,
     now_ms: u64,
 ) -> Result<PlannedLocalOnlyActionRecord, StateDbError> {
-    let (decision, reason) = if !local_only.exists_on_disk {
+    let (decision, reason) = if !local_only.exists_on_disk || local_only.parent_inode_id.is_none() {
         (PlannerDecision::NoOp, PlannerReason::NoObservedState)
     } else {
         match local_only.inode_kind {
@@ -461,6 +514,9 @@ impl PlannerDecision {
             Self::CreateRemoteDir => "create_remote_dir",
             Self::UploadLocalCreate => "upload_local_create",
             Self::UploadLocalEdit => "upload_local_edit",
+            Self::Rename => "rename",
+            Self::DeleteFile => "delete_file",
+            Self::DeleteSubtree => "delete_subtree",
             Self::DownloadRemoteEdit => "download_remote_edit",
             Self::ResolveSameInodeConflict => "resolve_same_inode_conflict",
             Self::ResolveDeleteVsEditConflict => "resolve_delete_vs_edit_conflict",
@@ -484,6 +540,9 @@ impl PlannerDecision {
             "create_remote_dir" => Ok(Self::CreateRemoteDir),
             "upload_local_create" => Ok(Self::UploadLocalCreate),
             "upload_local_edit" => Ok(Self::UploadLocalEdit),
+            "rename" => Ok(Self::Rename),
+            "delete_file" => Ok(Self::DeleteFile),
+            "delete_subtree" => Ok(Self::DeleteSubtree),
             "download_remote_edit" => Ok(Self::DownloadRemoteEdit),
             "resolve_same_inode_conflict" => Ok(Self::ResolveSameInodeConflict),
             "resolve_delete_vs_edit_conflict" => Ok(Self::ResolveDeleteVsEditConflict),

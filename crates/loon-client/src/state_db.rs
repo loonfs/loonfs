@@ -67,6 +67,10 @@ pub enum StateDbError {
         namespace_id: String,
         parent_inode_id: u64,
     },
+    #[error("local_only_parent_client_file_missing: `{client_file_id}`")]
+    LocalOnlyParentClientFileMissing { client_file_id: String },
+    #[error("local_only_parent_client_file_not_directory: `{client_file_id}`")]
+    LocalOnlyParentClientFileNotDirectory { client_file_id: String },
     #[error("bound_observation_missing: namespace `{namespace_id}` inode `{inode_id}`")]
     BoundObservationMissing { namespace_id: String, inode_id: u64 },
     #[error(
@@ -79,6 +83,20 @@ pub enum StateDbError {
     },
     #[error("local_only_file_missing: `{client_file_id}`")]
     LocalOnlyFileMissing { client_file_id: String },
+    #[error(
+        "local_only_move_target_occupied: namespace `{namespace_id}` display name `{display_name}`"
+    )]
+    LocalOnlyMoveTargetOccupied {
+        namespace_id: String,
+        display_name: String,
+    },
+    #[error(
+        "local_only_move_parent_cycle: `{client_file_id}` cannot move under descendant `{parent_client_file_id}`"
+    )]
+    LocalOnlyMoveParentCycle {
+        client_file_id: String,
+        parent_client_file_id: String,
+    },
     #[error("uploaded_content_missing: `{client_file_id}`")]
     UploadedContentMissing { client_file_id: String },
     #[error("uploaded_content_requires_file: `{client_file_id}` kind `{inode_kind}`")]
@@ -193,6 +211,13 @@ pub enum StateDbError {
     ClientMutationResponseMissingResult { client_request_id: String },
     #[error("client_mutation_response_conflicting_results: `{client_request_id}`")]
     ClientMutationResponseConflictingResults { client_request_id: String },
+    #[error(
+        "client_mutation_response_unexpected_result: `{client_request_id}` expected `{expected}`"
+    )]
+    ClientMutationResponseUnexpectedResult {
+        client_request_id: String,
+        expected: &'static str,
+    },
     #[error("upload_local_edit_state_missing: namespace `{namespace_id}` inode `{inode_id}`")]
     UploadLocalEditStateMissing { namespace_id: String, inode_id: u64 },
     #[error("upload_local_edit_requires_file: namespace `{namespace_id}` inode `{inode_id}` kind `{inode_kind}`")]
@@ -475,7 +500,7 @@ pub enum StateDbError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ClientFileId(pub String);
 
 impl ClientFileId {
@@ -665,6 +690,19 @@ pub struct LocalOnlyFileStateRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum LocalOnlyParentRef {
+    Bound { parent_inode_id: InodeId },
+    LocalOnly { parent_client_file_id: ClientFileId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalOnlyParentLinkRow {
+    pub client_file_id: ClientFileId,
+    pub parent_client_file_id: ClientFileId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedLocalOnlyInode {
     pub namespace_id: NamespaceId,
     pub inode_kind: InodeKind,
@@ -694,6 +732,12 @@ pub struct ObservedLocalOnlyInodeResult {
     pub local_only: LocalOnlyFileStateRow,
     pub planned_action: PlannedLocalOnlyActionRecord,
     pub reused_existing_identity: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLocalOnlyDeleteResult {
+    pub root_client_file_id: ClientFileId,
+    pub removed_client_file_ids: Vec<ClientFileId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

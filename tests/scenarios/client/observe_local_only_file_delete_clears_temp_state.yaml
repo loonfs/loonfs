@@ -1,0 +1,24 @@
+schema_version: 1
+scenario_kind: client
+name: observe_local_only_file_delete_clears_temp_state
+
+initial:
+  namespace_id: ns-1
+  bound_parent_directory:
+    inode_id: 1
+    relative_path: ""
+    exists_on_disk: true
+    dirty: false
+  local_only_child:
+    client_file_id: tmp:ns-1:00000000000000000001
+    parent_inode_id: 1
+    display_name: draft.txt
+    content_digest: sha256:draft-v1
+
+observe_delete:
+  kind: local_only_file
+  relative_path: draft.txt
+
+expect:
+  local_only_row_removed: true
+  planned_decision: no_op

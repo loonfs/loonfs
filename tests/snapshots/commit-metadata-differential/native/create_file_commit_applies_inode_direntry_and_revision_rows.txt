@@ -11,20 +11,22 @@ scenario=create_file_commit_applies_inode_direntry_and_revision_rows kind=native
   10. invariants[commit-model] subtree_tombstone_blocks_descendant_mutation=pass detail=op=CreateFile { op_index: 0, inode_id: InodeId(501), parent_inode: InodeId(2), display_name: "note.txt", content_manifest_digest: "sha256:note-v1" } parent_inode=2 covering_root=None
   11. invariants[commit-model] create_dir_writes_inode_and_direntry_rows=fail detail=no create_dir wal op
   12. invariants[commit-model] create_file_writes_inode_direntry_and_initial_revision=pass detail=seq=42 op_index=0 inode=501 parent=2 name=note.txt digest=sha256:note-v1
-  13. invariants[commit-model] delete_subtree_writes_tombstone_row=fail detail=no delete_subtree wal op
-  14. invariants[commit-model] rename_appends_new_direntry_binding=fail detail=no rename wal op
-  15. invariants[commit-model] replace_file_appends_new_revision_head=fail detail=no replace_file wal op
-  16. invariants[commit-model] restore_creates_new_revision_head=fail detail=no restore_revision wal op
-  17. invariants[commit-core] stale_writer_cannot_publish=pass detail=request_fence=8 head_fence=8 lease_fence=8 holder=writer-a lease_valid_at_now=true
-  18. invariants[commit-core] head_and_lease_fence_tokens_agree=pass detail=head_ns=ns-1 lease_ns=ns-1 head_fence=8 lease_fence=8
-  19. invariants[commit-core] next_inode_id_is_monotonic=pass detail=before_next_inode=501 after_next_inode=502
-  20. invariants[commit-core] create_mutation_consumes_next_inode_id=pass detail=initial_next_inode=501 allocated=[501] resulting_next_inode=502 expected_next_inode=502
-  21. invariants[commit-core] create_file_requires_durable_content=pass detail=op=CreateFile { op_index: 0, inode_id: InodeId(501), parent_inode: InodeId(2), display_name: "note.txt", content_manifest_digest: "sha256:note-v1" } passed=true
-  22. invariants[commit-core] replace_file_requires_durable_content=fail detail=no matching op
-  23. invariants[commit-core] subtree_tombstone_blocks_descendant_mutation=pass detail=op=CreateFile { op_index: 0, inode_id: InodeId(501), parent_inode: InodeId(2), display_name: "note.txt", content_manifest_digest: "sha256:note-v1" } parent_inode=2 covering_root=None
-  24. invariants[commit-core] create_dir_writes_inode_and_direntry_rows=fail detail=no create_dir wal op
-  25. invariants[commit-core] create_file_writes_inode_direntry_and_initial_revision=pass detail=seq=42 op_index=0 inode=501 parent=2 name=note.txt digest=sha256:note-v1
-  26. invariants[commit-core] delete_subtree_writes_tombstone_row=fail detail=no delete_subtree wal op
-  27. invariants[commit-core] rename_appends_new_direntry_binding=fail detail=no rename wal op
-  28. invariants[commit-core] replace_file_appends_new_revision_head=fail detail=no replace_file wal op
-  29. invariants[commit-core] restore_creates_new_revision_head=fail detail=no restore_revision wal op
+  13. invariants[commit-model] delete_file_writes_tombstone_row=fail detail=no delete_file wal op
+  14. invariants[commit-model] delete_subtree_writes_tombstone_row=fail detail=no delete_subtree wal op
+  15. invariants[commit-model] rename_appends_new_direntry_binding=fail detail=no rename wal op
+  16. invariants[commit-model] replace_file_appends_new_revision_head=fail detail=no replace_file wal op
+  17. invariants[commit-model] restore_creates_new_revision_head=fail detail=no restore_revision wal op
+  18. invariants[commit-core] stale_writer_cannot_publish=pass detail=request_fence=8 head_fence=8 lease_fence=8 holder=writer-a lease_valid_at_now=true
+  19. invariants[commit-core] head_and_lease_fence_tokens_agree=pass detail=head_ns=ns-1 lease_ns=ns-1 head_fence=8 lease_fence=8
+  20. invariants[commit-core] next_inode_id_is_monotonic=pass detail=before_next_inode=501 after_next_inode=502
+  21. invariants[commit-core] create_mutation_consumes_next_inode_id=pass detail=initial_next_inode=501 allocated=[501] resulting_next_inode=502 expected_next_inode=502
+  22. invariants[commit-core] create_file_requires_durable_content=pass detail=op=CreateFile { op_index: 0, inode_id: InodeId(501), parent_inode: InodeId(2), display_name: "note.txt", content_manifest_digest: "sha256:note-v1" } passed=true
+  23. invariants[commit-core] replace_file_requires_durable_content=fail detail=no matching op
+  24. invariants[commit-core] subtree_tombstone_blocks_descendant_mutation=pass detail=op=CreateFile { op_index: 0, inode_id: InodeId(501), parent_inode: InodeId(2), display_name: "note.txt", content_manifest_digest: "sha256:note-v1" } parent_inode=2 covering_root=None
+  25. invariants[commit-core] create_dir_writes_inode_and_direntry_rows=fail detail=no create_dir wal op
+  26. invariants[commit-core] create_file_writes_inode_direntry_and_initial_revision=pass detail=seq=42 op_index=0 inode=501 parent=2 name=note.txt digest=sha256:note-v1
+  27. invariants[commit-core] delete_file_writes_tombstone_row=fail detail=no delete_file wal op
+  28. invariants[commit-core] delete_subtree_writes_tombstone_row=fail detail=no delete_subtree wal op
+  29. invariants[commit-core] rename_appends_new_direntry_binding=fail detail=no rename wal op
+  30. invariants[commit-core] replace_file_appends_new_revision_head=fail detail=no replace_file wal op
+  31. invariants[commit-core] restore_creates_new_revision_head=fail detail=no restore_revision wal op

@@ -1,0 +1,29 @@
+schema_version: 1
+scenario_kind: client
+name: observe_bound_directory_move_plans_rename
+
+initial:
+  namespace_id: ns-1
+  bound_parent_directory:
+    inode_id: 1
+    relative_path: ""
+    exists_on_disk: true
+    dirty: false
+  bound_parent_directory_2:
+    inode_id: 9
+    relative_path: archive
+    exists_on_disk: true
+    dirty: false
+  bound_directory:
+    inode_id: 7
+    parent_inode_id: 1
+    display_name: docs
+
+observe_move:
+  kind: bound_directory
+  from_relative_path: docs
+  to_relative_path: archive/docs
+
+expect:
+  planned_decision: rename
+  planned_reason: local_differs_from_anchor

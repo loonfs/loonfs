@@ -1,0 +1,14 @@
+command=ops/observe-move
+namespace=demo
+from_relative_path=drafts
+to_relative_path=archive/drafts
+observation_kind=local_only_dir
+planned_decision=create_remote_dir
+---
+namespace_id: demo
+from_relative_path: drafts
+to_relative_path: archive/drafts
+observation_kind: local_only_dir
+planned_decision: create_remote_dir
+inode_id: null
+client_file_id: tmp:demo:00000000000000000001

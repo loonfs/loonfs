@@ -2,7 +2,11 @@ use super::*;
 use crate::client::{
     authoritative_snapshot_import_batch_rollback_is_atomic,
     authoritative_snapshot_import_discovers_remote_only_state,
-    authoritative_snapshot_import_is_idempotent, bound_file_observation_plans_upload_local_edit,
+    authoritative_snapshot_import_is_idempotent,
+    bound_directory_delete_observation_plans_delete_subtree,
+    bound_file_delete_observation_plans_delete_file,
+    bound_file_observation_plans_upload_local_edit, bound_move_observation_plans_rename,
+    local_only_delete_clears_temp_state, local_only_move_preserves_identity,
     local_only_observation_under_bound_parent_plans_upload_local_create,
     repeated_local_only_observation_reuses_identity,
 };
@@ -171,6 +175,63 @@ fn model_repeated_local_only_observation_reuses_temp_identity() {
         "tmp:ns-1:00000000000000000001"
     ));
     assert!(!repeated_local_only_observation_reuses_identity(
+        "tmp:ns-1:00000000000000000001",
+        "tmp:ns-1:00000000000000000002"
+    ));
+}
+
+#[test]
+fn model_bound_file_delete_observation_plans_delete_file() {
+    assert!(bound_file_delete_observation_plans_delete_file(
+        "delete_file",
+        false,
+        true
+    ));
+    assert!(!bound_file_delete_observation_plans_delete_file(
+        "upload_local_edit",
+        false,
+        true
+    ));
+}
+
+#[test]
+fn model_bound_directory_delete_observation_plans_delete_subtree() {
+    assert!(bound_directory_delete_observation_plans_delete_subtree(
+        "delete_subtree",
+        false,
+        true
+    ));
+    assert!(!bound_directory_delete_observation_plans_delete_subtree(
+        "rename", false, true
+    ));
+}
+
+#[test]
+fn model_bound_move_observation_plans_rename() {
+    assert!(bound_move_observation_plans_rename(
+        "rename", true, true, true
+    ));
+    assert!(!bound_move_observation_plans_rename(
+        "upload_local_edit",
+        true,
+        true,
+        true
+    ));
+}
+
+#[test]
+fn model_local_only_delete_clears_temp_state() {
+    assert!(local_only_delete_clears_temp_state(true, true));
+    assert!(!local_only_delete_clears_temp_state(true, false));
+}
+
+#[test]
+fn model_local_only_move_preserves_identity() {
+    assert!(local_only_move_preserves_identity(
+        "tmp:ns-1:00000000000000000001",
+        "tmp:ns-1:00000000000000000001"
+    ));
+    assert!(!local_only_move_preserves_identity(
         "tmp:ns-1:00000000000000000001",
         "tmp:ns-1:00000000000000000002"
     ));

@@ -1,0 +1,14 @@
+command=ops/observe-move
+namespace=demo
+from_relative_path=hello.txt
+to_relative_path=archive/hello.txt
+observation_kind=bound_file
+planned_decision=rename
+---
+namespace_id: demo
+from_relative_path: hello.txt
+to_relative_path: archive/hello.txt
+observation_kind: bound_file
+planned_decision: rename
+inode_id: 2
+client_file_id: null

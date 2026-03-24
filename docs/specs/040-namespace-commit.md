@@ -226,6 +226,43 @@ Failure modes named for the first implementation:
 - `replace_file_under_subtree_tombstone`
 - `replace_file_path_change_not_supported`
 
+## Delete-file mutation
+
+The next inode-keyed destructive file mutation is:
+
+- `delete_file(inode_id)`
+
+Rules:
+
+- `delete_file` applies only to an existing file inode
+- `delete_file` is authoritative file removal, not a subtree tombstone
+- `delete_file` does not consume inode ids and does not allocate replacement identity
+- `delete_file` leaves directory delete semantics to `delete_subtree`
+
+The first delete-file preconditions are:
+
+- `HeadSeqIs(current_head.seq)`
+- `AncestorsNotSubtreeDeleted(inode_id)`
+
+Why these rules exist:
+
+- bound file delete should use one explicit authoritative mutation instead of overloading subtree
+  semantics
+- file delete and directory delete have different failure modes and different client-local apply
+  behavior
+
+Failure modes prevented:
+
+- treating a file delete like a directory tombstone
+- silently deleting the wrong inode kind
+- publishing a delete under an already deleted ancestor path
+
+Failure modes named for the first implementation:
+
+- `delete_file_inode_missing`
+- `delete_file_inode_not_file`
+- `delete_file_under_subtree_tombstone`
+
 ## Rename mutation
 
 The first inode-keyed name-binding mutation is:

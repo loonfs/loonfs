@@ -24,7 +24,11 @@ pub use import::{
     import_authoritative_remote_observations, AuthoritativeObservationImportError,
     AuthoritativeObservationImportReport,
 };
-pub use observe::{observe_local_path, ObserveLocalError, ObserveLocalKind, ObserveLocalReport};
+pub use observe::{
+    observe_delete_path, observe_local_path, observe_move_path, ObserveDeleteError,
+    ObserveDeleteReport, ObserveLocalError, ObserveLocalReport, ObserveMoveError,
+    ObserveMoveReport, ObservedPathKind,
+};
 pub use sync::{sync_once, SyncOnceError, SyncOnceOutcome, SyncOnceReport};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +116,17 @@ pub enum OpsCommand {
         namespace_id: NamespaceId,
         path: PathBuf,
     },
+    ObserveDelete {
+        config_path: PathBuf,
+        namespace_id: NamespaceId,
+        path: PathBuf,
+    },
+    ObserveMove {
+        config_path: PathBuf,
+        namespace_id: NamespaceId,
+        from: PathBuf,
+        to: PathBuf,
+    },
     SyncOnce {
         config_path: PathBuf,
         namespace_id: NamespaceId,
@@ -195,6 +210,25 @@ pub fn run_command(command: OpsCommand) -> Result<String> {
             let config = OpsConfig::load(&config_path)?;
             let report = observe::observe_local_path(&config, &namespace_id, &path)?;
             observe::render_observe_local_report(&report)
+        }
+        OpsCommand::ObserveDelete {
+            config_path,
+            namespace_id,
+            path,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let report = observe::observe_delete_path(&config, &namespace_id, &path)?;
+            observe::render_observe_delete_report(&report)
+        }
+        OpsCommand::ObserveMove {
+            config_path,
+            namespace_id,
+            from,
+            to,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let report = observe::observe_move_path(&config, &namespace_id, &from, &to)?;
+            observe::render_observe_move_report(&report)
         }
         OpsCommand::SyncOnce {
             config_path,
@@ -333,6 +367,23 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<OpsCommand> {
                 path: parsed.path,
             })
         }
+        Some("observe-delete") => {
+            let parsed = parse_common_args_with_path(args)?;
+            Ok(OpsCommand::ObserveDelete {
+                config_path: parsed.config_path,
+                namespace_id: parsed.namespace_id,
+                path: parsed.path,
+            })
+        }
+        Some("observe-move") => {
+            let parsed = parse_common_args_with_from_to(args)?;
+            Ok(OpsCommand::ObserveMove {
+                config_path: parsed.config_path,
+                namespace_id: parsed.namespace_id,
+                from: parsed.from,
+                to: parsed.to,
+            })
+        }
         Some("sync-once") => {
             let parsed = parse_common_args(args, false)?;
             Ok(OpsCommand::SyncOnce {
@@ -349,7 +400,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<OpsCommand> {
         }
         Some(other) => bail!("unknown ops subcommand: {other}"),
         None => bail!(
-            "usage: ops <bootstrap-namespace|show-namespace-state|show-client-state|import-remote-observations|observe-local|sync-once|smoke> --config <path> --namespace <id> [--allow-existing] [--path <path>]"
+            "usage: ops <bootstrap-namespace|show-namespace-state|show-client-state|import-remote-observations|observe-local|observe-delete|observe-move|sync-once|smoke> --config <path> --namespace <id> [--allow-existing] [--path <path>] [--from <path> --to <path>]"
         ),
     }
 }
@@ -417,6 +468,13 @@ struct CommonArgsWithPath {
     config_path: PathBuf,
     namespace_id: NamespaceId,
     path: PathBuf,
+}
+
+struct CommonArgsWithFromTo {
+    config_path: PathBuf,
+    namespace_id: NamespaceId,
+    from: PathBuf,
+    to: PathBuf,
 }
 
 fn parse_common_args(
@@ -493,11 +551,60 @@ fn parse_common_args_with_path(
     })
 }
 
+fn parse_common_args_with_from_to(
+    mut args: impl Iterator<Item = String>,
+) -> Result<CommonArgsWithFromTo> {
+    let mut config_path = None;
+    let mut namespace_id = None;
+    let mut from = None;
+    let mut to = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                config_path = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --config"))?
+                        .into(),
+                );
+            }
+            "--namespace" => {
+                namespace_id = Some(NamespaceId::from(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --namespace"))?,
+                ));
+            }
+            "--from" => {
+                from = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --from"))?
+                        .into(),
+                );
+            }
+            "--to" => {
+                to = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --to"))?
+                        .into(),
+                );
+            }
+            other => bail!("unexpected ops argument: {other}"),
+        }
+    }
+
+    Ok(CommonArgsWithFromTo {
+        config_path: config_path.ok_or_else(|| anyhow!("missing --config"))?,
+        namespace_id: namespace_id.ok_or_else(|| anyhow!("missing --namespace"))?,
+        from: from.ok_or_else(|| anyhow!("missing --from"))?,
+        to: to.ok_or_else(|| anyhow!("missing --to"))?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{run_args, OpsConfig};
     use loon_client::state_db::{
-        LocalFileStateRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
+        LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow, RemoteFileStateRow,
+        SqliteStateDb, SyncAnchorRow,
     };
     use loon_client::upload::upload_small_file_from_path;
     use loon_core::checkpoint::prepare_checkpoint;
@@ -811,6 +918,277 @@ lease_duration_ms = 60000
     }
 
     #[test]
+    fn observe_delete_bound_file_renders_delete_file_report() {
+        let temp_dir = unique_temp_dir("ops-observe-delete-bound-file");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            "sha256:remote-hello-v1",
+            "sha256:manifest-remote-hello-v1",
+        );
+
+        let rendered = run_args([
+            "observe-delete".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+        ])
+        .expect("run observe-delete on bound file");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-delete/ops_observe_delete_bound_file.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn observe_delete_local_only_file_renders_noop_cleanup_report() {
+        let temp_dir = unique_temp_dir("ops-observe-delete-local-only-file");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_local_only_file(
+            &mut db,
+            "tmp:demo:00000000000000000001",
+            InodeId(1),
+            "draft.txt",
+            "sha256:draft-v1",
+        );
+
+        let rendered = run_args([
+            "observe-delete".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/draft.txt").display().to_string(),
+        ])
+        .expect("run observe-delete on local-only file");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-delete/ops_observe_delete_local_only_file.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn observe_move_bound_file_renders_rename_report() {
+        let temp_dir = unique_temp_dir("ops-observe-move-bound-file");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(9),
+            Some(InodeId(1)),
+            "archive",
+        );
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            "sha256:remote-hello-v1",
+            "sha256:manifest-remote-hello-v1",
+        );
+        fs::create_dir_all(temp_dir.join("mirror/archive")).expect("create archive dir");
+        fs::write(temp_dir.join("mirror/archive/hello.txt"), b"hello v1\n")
+            .expect("write moved bound file");
+
+        let rendered = run_args([
+            "observe-move".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--from".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+            "--to".to_owned(),
+            temp_dir
+                .join("mirror/archive/hello.txt")
+                .display()
+                .to_string(),
+        ])
+        .expect("run observe-move on bound file");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-move/ops_observe_move_bound_file.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn observe_move_local_only_directory_preserves_identity() {
+        let temp_dir = unique_temp_dir("ops-observe-move-local-only-dir");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(9),
+            Some(InodeId(1)),
+            "archive",
+        );
+        seed_local_only_directory_with_child(
+            &mut db,
+            "tmp:demo:00000000000000000001",
+            "tmp:demo:00000000000000000002",
+            InodeId(1),
+            "drafts",
+            "note.txt",
+        );
+        fs::create_dir_all(temp_dir.join("mirror/archive/drafts"))
+            .expect("create moved local-only dir");
+
+        let rendered = run_args([
+            "observe-move".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--from".to_owned(),
+            temp_dir.join("mirror/drafts").display().to_string(),
+            "--to".to_owned(),
+            temp_dir.join("mirror/archive/drafts").display().to_string(),
+        ])
+        .expect("run observe-move on local-only directory");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-move/ops_observe_move_local_only_directory.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn observe_move_rejects_bound_destination_local_only_parent() {
+        let temp_dir = unique_temp_dir("ops-observe-move-bound-into-local-only");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            "sha256:remote-hello-v1",
+            "sha256:manifest-remote-hello-v1",
+        );
+        seed_local_only_directory_with_child(
+            &mut db,
+            "tmp:demo:00000000000000000001",
+            "tmp:demo:00000000000000000002",
+            InodeId(1),
+            "drafts",
+            "note.txt",
+        );
+        fs::create_dir_all(temp_dir.join("mirror/drafts")).expect("create local-only target dir");
+        fs::write(temp_dir.join("mirror/drafts/hello.txt"), b"hello v1\n")
+            .expect("write moved file under local-only dir");
+
+        let error = run_args([
+            "observe-move".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--from".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+            "--to".to_owned(),
+            temp_dir
+                .join("mirror/drafts/hello.txt")
+                .display()
+                .to_string(),
+        ])
+        .expect_err("bound move into local-only parent should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("bound source requires a bound destination parent"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn observe_move_rejects_occupied_target_path() {
+        let temp_dir = unique_temp_dir("ops-observe-move-occupied");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(9),
+            Some(InodeId(1)),
+            "archive",
+        );
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            "sha256:remote-hello-v1",
+            "sha256:manifest-remote-hello-v1",
+        );
+        seed_local_only_file(
+            &mut db,
+            "tmp:demo:00000000000000000003",
+            InodeId(9),
+            "hello.txt",
+            "sha256:other-v1",
+        );
+        fs::create_dir_all(temp_dir.join("mirror/archive")).expect("create archive dir");
+        fs::write(temp_dir.join("mirror/archive/hello.txt"), b"hello v1\n")
+            .expect("write occupied target file");
+
+        let error = run_args([
+            "observe-move".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--from".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+            "--to".to_owned(),
+            temp_dir
+                .join("mirror/archive/hello.txt")
+                .display()
+                .to_string(),
+        ])
+        .expect_err("occupied target should fail");
+
+        assert!(
+            error.to_string().contains("target is already occupied"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn sync_once_returns_no_work_for_idle_client() {
         let temp_dir = unique_temp_dir("ops-sync-once-idle");
         let config_path = write_local_fs_config(&temp_dir);
@@ -905,6 +1283,55 @@ lease_duration_ms = 60000
             rendered,
             include_str!(
                 "../../../tests/snapshots/ops-sync-once/ops_sync_once_request_committed_upload_local_edit.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn sync_once_can_commit_bound_delete_through_real_client_server_path() {
+        let temp_dir = unique_temp_dir("ops-sync-once-delete");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_single_file_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+            "hello.txt",
+            b"v1\n",
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+
+        run_args([
+            "observe-delete".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+        ])
+        .expect("observe delete");
+
+        let rendered = run_args([
+            "sync-once".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-once for bound delete");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-sync-once/ops_sync_once_request_committed_delete_file.txt"
             )
         );
     }
@@ -1032,6 +1459,138 @@ now_ms = 1000
             Ok(())
         })
         .expect("seed bound file");
+    }
+
+    fn seed_bound_directory(
+        db: &mut SqliteStateDb,
+        namespace_id: NamespaceId,
+        inode_id: InodeId,
+        parent_inode_id: Option<InodeId>,
+        display_name: &str,
+    ) {
+        db.planner_transaction("seed-bound-directory", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id,
+                display_name: display_name.to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id,
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id,
+                display_name: display_name.to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id,
+                inode_id,
+                inode_kind: InodeKind::Dir,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id,
+                display_name: display_name.to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("seed bound directory");
+    }
+
+    fn seed_local_only_file(
+        db: &mut SqliteStateDb,
+        client_file_id: &str,
+        parent_inode_id: InodeId,
+        display_name: &str,
+        content_digest: &str,
+    ) {
+        db.planner_transaction("seed-local-only-file", |tx| {
+            tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+                client_file_id: client_file_id.into(),
+                namespace_id: NamespaceId::from("demo"),
+                inode_kind: InodeKind::File,
+                parent_inode_id: Some(parent_inode_id),
+                display_name: display_name.to_owned(),
+                content_digest: Some(content_digest.to_owned()),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+                client_file_id: client_file_id.into(),
+                namespace_id: NamespaceId::from("demo"),
+                decision: "upload_local_create".to_owned(),
+                reason: "local_only_file_without_remote_identity".to_owned(),
+                created_at_ms: 1_000,
+            })?;
+            Ok(())
+        })
+        .expect("seed local-only file");
+    }
+
+    fn seed_local_only_directory_with_child(
+        db: &mut SqliteStateDb,
+        root_client_file_id: &str,
+        child_client_file_id: &str,
+        parent_inode_id: InodeId,
+        root_display_name: &str,
+        child_display_name: &str,
+    ) {
+        db.planner_transaction("seed-local-only-directory-with-child", |tx| {
+            tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+                client_file_id: root_client_file_id.into(),
+                namespace_id: NamespaceId::from("demo"),
+                inode_kind: InodeKind::Dir,
+                parent_inode_id: Some(parent_inode_id),
+                display_name: root_display_name.to_owned(),
+                content_digest: None,
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+                client_file_id: root_client_file_id.into(),
+                namespace_id: NamespaceId::from("demo"),
+                decision: "create_remote_dir".to_owned(),
+                reason: "local_only_directory_without_remote_identity".to_owned(),
+                created_at_ms: 1_000,
+            })?;
+            tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+                client_file_id: child_client_file_id.into(),
+                namespace_id: NamespaceId::from("demo"),
+                inode_kind: InodeKind::File,
+                parent_inode_id: None,
+                display_name: child_display_name.to_owned(),
+                content_digest: Some("sha256:note-v1".to_owned()),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_local_only_parent_link(
+                &child_client_file_id.into(),
+                &root_client_file_id.into(),
+            )?;
+            tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+                client_file_id: child_client_file_id.into(),
+                namespace_id: NamespaceId::from("demo"),
+                decision: "upload_local_create".to_owned(),
+                reason: "local_only_file_without_remote_identity".to_owned(),
+                created_at_ms: 1_000,
+            })?;
+            Ok(())
+        })
+        .expect("seed local-only directory subtree");
     }
 
     fn seed_remote_only_root_materialization(db: &mut SqliteStateDb, namespace_id: NamespaceId) {
