@@ -1,0 +1,20 @@
+command=ops/observe-subtree
+namespace=demo
+relative_path=
+scanned_file_count=2
+scanned_dir_count=2
+applied_operation_count=3
+---
+namespace_id: demo
+relative_path: ''
+scanned_file_count: 2
+scanned_dir_count: 2
+applied_operation_count: 3
+bound_observe_count: 1
+local_only_observe_count: 2
+bound_delete_count: 0
+local_only_delete_count: 0
+planned_decision_counts:
+  create_remote_dir: 1
+  no_op: 1
+  upload_local_edit: 1

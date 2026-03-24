@@ -8,7 +8,13 @@ use crate::client::{
     bound_file_observation_plans_upload_local_edit, bound_move_observation_plans_rename,
     local_only_delete_clears_temp_state, local_only_move_preserves_identity,
     local_only_observation_under_bound_parent_plans_upload_local_create,
-    repeated_local_only_observation_reuses_identity,
+    recursive_subtree_missing_bound_directory_plans_delete_subtree,
+    recursive_subtree_missing_bound_file_plans_delete_file,
+    recursive_subtree_missing_local_only_directory_clears_subtree,
+    recursive_subtree_observation_updates_bound_edit_and_local_only_create,
+    recursive_subtree_repeat_reuses_local_only_identity,
+    repeated_local_only_observation_reuses_identity, subtree_observation_batch_rollback_is_atomic,
+    sync_until_idle_fails_on_max_steps, sync_until_idle_stops_on_no_work,
 };
 use loon_types::{
     ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
@@ -235,6 +241,85 @@ fn model_local_only_move_preserves_identity() {
         "tmp:ns-1:00000000000000000001",
         "tmp:ns-1:00000000000000000002"
     ));
+}
+
+#[test]
+fn model_recursive_subtree_observation_updates_bound_edit_and_local_only_create() {
+    assert!(
+        recursive_subtree_observation_updates_bound_edit_and_local_only_create(
+            "upload_local_edit",
+            "upload_local_create"
+        )
+    );
+    assert!(
+        !recursive_subtree_observation_updates_bound_edit_and_local_only_create(
+            "rename",
+            "upload_local_create"
+        )
+    );
+}
+
+#[test]
+fn model_recursive_subtree_missing_bound_file_plans_delete_file() {
+    assert!(recursive_subtree_missing_bound_file_plans_delete_file(
+        "delete_file"
+    ));
+    assert!(!recursive_subtree_missing_bound_file_plans_delete_file(
+        "upload_local_edit"
+    ));
+}
+
+#[test]
+fn model_recursive_subtree_missing_bound_directory_plans_delete_subtree() {
+    assert!(recursive_subtree_missing_bound_directory_plans_delete_subtree("delete_subtree"));
+    assert!(!recursive_subtree_missing_bound_directory_plans_delete_subtree("delete_file"));
+}
+
+#[test]
+fn model_recursive_subtree_missing_local_only_directory_clears_subtree() {
+    assert!(recursive_subtree_missing_local_only_directory_clears_subtree(2));
+    assert!(!recursive_subtree_missing_local_only_directory_clears_subtree(0));
+}
+
+#[test]
+fn model_recursive_subtree_repeat_reuses_local_only_identity() {
+    assert!(recursive_subtree_repeat_reuses_local_only_identity(
+        "tmp:ns-1:00000000000000000001",
+        "tmp:ns-1:00000000000000000001"
+    ));
+    assert!(!recursive_subtree_repeat_reuses_local_only_identity(
+        "tmp:ns-1:00000000000000000001",
+        "tmp:ns-1:00000000000000000002"
+    ));
+}
+
+#[test]
+fn model_subtree_observation_batch_rollback_is_atomic() {
+    let before = vec!["hello.txt", "drafts/note.txt"];
+    let after = vec!["hello.txt", "drafts/note.txt"];
+    let changed = vec!["hello.txt"];
+    assert!(subtree_observation_batch_rollback_is_atomic(
+        &before, &after
+    ));
+    assert!(!subtree_observation_batch_rollback_is_atomic(
+        &before, &changed
+    ));
+}
+
+#[test]
+fn model_sync_until_idle_stops_on_no_work() {
+    assert!(sync_until_idle_stops_on_no_work("no_work", 2, 50));
+    assert!(!sync_until_idle_stops_on_no_work(
+        "request_committed",
+        2,
+        50
+    ));
+}
+
+#[test]
+fn model_sync_until_idle_fails_on_max_steps() {
+    assert!(sync_until_idle_fails_on_max_steps(1, 1));
+    assert!(!sync_until_idle_fails_on_max_steps(1, 2));
 }
 
 #[test]

@@ -1,13 +1,16 @@
-use crate::paths::NamespacePathIndex;
+use crate::paths::{relative_path_is_under_prefix, NamespacePathIndex};
 use crate::{require_existing_file, OpsConfig};
 use anyhow::Result;
 use loon_client::planner::{PlannedActionRecord, PlannedLocalOnlyActionRecord};
 use loon_client::state_db::{
-    ClientFileId, LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyParentRef, ObservedBoundInode,
-    ObservedLocalOnlyDeleteResult, ObservedLocalOnlyInode, SqliteStateDb, StateDbError,
+    ClientFileId, LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyParentRef,
+    ObservedBoundDelete, ObservedBoundInode, ObservedLocalOnlyDeleteResult, ObservedLocalOnlyInode,
+    ObservedLocalOnlySubtreeInode, SqliteStateDb, StateDbError, SubtreeLocalOnlyParentRef,
+    SubtreeObservationOp, SubtreeObservationOutcome,
 };
 use loon_types::{sha256_digest, InodeId, InodeKind, NamespaceId};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -65,6 +68,20 @@ pub struct ObserveMoveReport {
     pub planned_decision: String,
     pub inode_id: Option<InodeId>,
     pub client_file_id: Option<ClientFileId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObserveSubtreeReport {
+    pub namespace_id: NamespaceId,
+    pub relative_path: String,
+    pub scanned_file_count: usize,
+    pub scanned_dir_count: usize,
+    pub applied_operation_count: usize,
+    pub bound_observe_count: usize,
+    pub local_only_observe_count: usize,
+    pub bound_delete_count: usize,
+    pub local_only_delete_count: usize,
+    pub planned_decision_counts: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Error)]
@@ -178,6 +195,45 @@ pub enum ObserveMoveError {
     },
     #[error("observe-move rejects cross-kind move from `{from_path}` to `{to_path}`")]
     CrossKindMove { from_path: String, to_path: String },
+}
+
+#[derive(Debug, Error)]
+pub enum ObserveSubtreeError {
+    #[error(transparent)]
+    StateDb(#[from] StateDbError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+    #[error(
+        "observe-subtree path is outside mirror_root: path `{path}` mirror_root `{mirror_root}`"
+    )]
+    PathOutsideMirrorRoot { path: String, mirror_root: String },
+    #[error("observe-subtree requires an existing directory path, got file `{path}`")]
+    FilePath { path: String },
+    #[error(
+        "observe-subtree path is ambiguous in namespace `{namespace_id}` at relative path `{relative_path}`"
+    )]
+    AmbiguousMatch {
+        namespace_id: String,
+        relative_path: String,
+    },
+    #[error(
+        "observe-subtree parent is not a tracked directory in namespace `{namespace_id}` for relative path `{relative_path}`"
+    )]
+    UntrackedParent {
+        namespace_id: String,
+        relative_path: String,
+    },
+    #[error(
+        "observe-subtree tracked kind mismatch in namespace `{namespace_id}` at relative path `{relative_path}`"
+    )]
+    KindMismatch {
+        namespace_id: String,
+        relative_path: String,
+    },
+    #[error("observe-subtree unsupported filesystem entry `{path}`")]
+    UnsupportedFilesystemEntry { path: String },
 }
 
 #[derive(Debug, Clone)]
@@ -589,6 +645,61 @@ pub fn observe_move_path(
     }
 }
 
+pub fn observe_subtree_path(
+    config: &OpsConfig,
+    namespace_id: &NamespaceId,
+    path: &Path,
+) -> Result<ObserveSubtreeReport, ObserveSubtreeError> {
+    require_existing_file(&config.client.state_db_path, "client state db")?;
+
+    let cwd = std::env::current_dir()?;
+    let requested_path = resolve_requested_path(&cwd, path);
+    let canonical_path = fs::canonicalize(&requested_path)?;
+    if canonical_path.is_file() {
+        return Err(ObserveSubtreeError::FilePath {
+            path: canonical_path.display().to_string(),
+        });
+    }
+
+    let mirror_root = fs::canonicalize(&config.client.mirror_root)?;
+    let relative_path = canonical_path
+        .strip_prefix(&mirror_root)
+        .map(normalize_relative_path)
+        .map_err(|_| ObserveSubtreeError::PathOutsideMirrorRoot {
+            path: canonical_path.display().to_string(),
+            mirror_root: mirror_root.display().to_string(),
+        })?;
+    let scanned_entries = scan_subtree_entries(&canonical_path, &relative_path)?;
+    let scanned_file_count = scanned_entries
+        .iter()
+        .filter(|entry| entry.kind == ScannedEntryKind::File)
+        .count();
+    let scanned_dir_count = scanned_entries
+        .iter()
+        .filter(|entry| entry.kind == ScannedEntryKind::Dir)
+        .count();
+
+    let now_ms = config.now_ms();
+    let mut db = SqliteStateDb::open(&config.client.state_db_path)?;
+    let path_index = load_namespace_path_index(&db, namespace_id)?;
+    let operations = build_subtree_operations(
+        &path_index,
+        namespace_id,
+        &scanned_entries,
+        &relative_path,
+        now_ms,
+    )?;
+    let outcomes = db.observe_subtree_and_plan(&operations, now_ms)?;
+
+    Ok(summarize_observe_subtree(
+        namespace_id,
+        &relative_path,
+        scanned_file_count,
+        scanned_dir_count,
+        &outcomes,
+    ))
+}
+
 pub(crate) fn render_observe_local_report(report: &ObserveLocalReport) -> Result<String> {
     let yaml = serde_yaml::to_string(report)?;
     Ok(format!(
@@ -626,10 +737,350 @@ pub(crate) fn render_observe_move_report(report: &ObserveMoveReport) -> Result<S
     ))
 }
 
+pub(crate) fn render_observe_subtree_report(report: &ObserveSubtreeReport) -> Result<String> {
+    let yaml = serde_yaml::to_string(report)?;
+    Ok(format!(
+        "command=ops/observe-subtree\nnamespace={}\nrelative_path={}\nscanned_file_count={}\nscanned_dir_count={}\napplied_operation_count={}\n---\n{}",
+        report.namespace_id.as_str(),
+        report.relative_path,
+        report.scanned_file_count,
+        report.scanned_dir_count,
+        report.applied_operation_count,
+        yaml
+    ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScannedEntryKind {
+    File,
+    Dir,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScannedEntry {
+    relative_path: String,
+    kind: ScannedEntryKind,
+    content_digest: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DestinationParentError {
     Ambiguous,
     Missing,
+}
+
+fn scan_subtree_entries(
+    canonical_root: &Path,
+    root_relative_path: &str,
+) -> Result<Vec<ScannedEntry>, ObserveSubtreeError> {
+    let mut entries = Vec::new();
+    scan_subtree_entries_recursive(canonical_root, root_relative_path, &mut entries)?;
+    Ok(entries)
+}
+
+fn scan_subtree_entries_recursive(
+    current_path: &Path,
+    current_relative_path: &str,
+    entries: &mut Vec<ScannedEntry>,
+) -> Result<(), ObserveSubtreeError> {
+    let metadata = fs::symlink_metadata(current_path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_dir() {
+        entries.push(ScannedEntry {
+            relative_path: current_relative_path.to_owned(),
+            kind: ScannedEntryKind::Dir,
+            content_digest: None,
+        });
+
+        let mut children = fs::read_dir(current_path)?
+            .map(|entry| entry.map(|entry| (entry.file_name(), entry.path())))
+            .collect::<Result<Vec<_>, _>>()?;
+        children.sort_by(|left, right| left.0.cmp(&right.0));
+
+        for (_, child_path) in children {
+            let child_name = child_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let child_relative_path = if current_relative_path.is_empty() {
+                child_name
+            } else {
+                format!("{current_relative_path}/{child_name}")
+            };
+            scan_subtree_entries_recursive(&child_path, &child_relative_path, entries)?;
+        }
+        return Ok(());
+    }
+
+    if file_type.is_file() {
+        entries.push(ScannedEntry {
+            relative_path: current_relative_path.to_owned(),
+            kind: ScannedEntryKind::File,
+            content_digest: Some(sha256_digest(&fs::read(current_path)?)),
+        });
+        return Ok(());
+    }
+
+    Err(ObserveSubtreeError::UnsupportedFilesystemEntry {
+        path: current_path.display().to_string(),
+    })
+}
+
+fn build_subtree_operations(
+    path_index: &NamespacePathIndex,
+    namespace_id: &NamespaceId,
+    scanned_entries: &[ScannedEntry],
+    subtree_relative_path: &str,
+    now_ms: u64,
+) -> Result<Vec<SubtreeObservationOp>, ObserveSubtreeError> {
+    let mut operations = Vec::new();
+    let mut present_paths = BTreeSet::new();
+    let mut new_local_only_dirs = BTreeSet::new();
+
+    for entry in scanned_entries {
+        present_paths.insert(entry.relative_path.clone());
+        let exact =
+            classify_exact_path(path_index, namespace_id, &entry.relative_path).map_err(|_| {
+                ObserveSubtreeError::AmbiguousMatch {
+                    namespace_id: namespace_id.as_str().to_owned(),
+                    relative_path: entry.relative_path.clone(),
+                }
+            })?;
+
+        match exact {
+            Some(PathMatch::Bound(row)) => {
+                if !matches_scanned_kind(row.inode_kind.clone(), entry.kind) {
+                    return Err(ObserveSubtreeError::KindMismatch {
+                        namespace_id: namespace_id.as_str().to_owned(),
+                        relative_path: entry.relative_path.clone(),
+                    });
+                }
+                if row.inode_kind == InodeKind::File {
+                    operations.push(SubtreeObservationOp::ObserveBound {
+                        observed: ObservedBoundInode {
+                            namespace_id: namespace_id.clone(),
+                            inode_id: row.inode_id,
+                            inode_kind: row.inode_kind,
+                            content_digest: entry.content_digest.clone(),
+                            parent_inode_id: row.parent_inode_id,
+                            display_name: row.display_name,
+                            exists_on_disk: true,
+                            dirty: true,
+                            last_local_change_ms: now_ms,
+                        },
+                    });
+                }
+            }
+            Some(PathMatch::LocalOnly(row)) => {
+                if !matches_scanned_kind(row.inode_kind.clone(), entry.kind) {
+                    return Err(ObserveSubtreeError::KindMismatch {
+                        namespace_id: namespace_id.as_str().to_owned(),
+                        relative_path: entry.relative_path.clone(),
+                    });
+                }
+                let parent = path_index.local_only_parent_ref_for(&row).ok_or_else(|| {
+                    ObserveSubtreeError::UntrackedParent {
+                        namespace_id: namespace_id.as_str().to_owned(),
+                        relative_path: entry.relative_path.clone(),
+                    }
+                })?;
+                operations.push(SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: entry.relative_path.clone(),
+                        namespace_id: namespace_id.clone(),
+                        inode_kind: row.inode_kind.clone(),
+                        parent: subtree_parent_ref_from_existing(parent),
+                        display_name: row.display_name.clone(),
+                        content_digest: entry.content_digest.clone(),
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: now_ms,
+                    },
+                });
+            }
+            None => {
+                let parent_relative_path = Path::new(&entry.relative_path)
+                    .parent()
+                    .map(normalize_relative_path)
+                    .unwrap_or_default();
+                let parent = if new_local_only_dirs.contains(&parent_relative_path) {
+                    SubtreeLocalOnlyParentRef::BatchLocalOnly {
+                        parent_relative_path: parent_relative_path.clone(),
+                    }
+                } else {
+                    match classify_destination_parent(
+                        path_index,
+                        namespace_id,
+                        &parent_relative_path,
+                    ) {
+                        Ok(ParentMatch::Bound(parent_inode_id)) => {
+                            SubtreeLocalOnlyParentRef::Bound { parent_inode_id }
+                        }
+                        Ok(ParentMatch::LocalOnly(parent_client_file_id)) => {
+                            SubtreeLocalOnlyParentRef::ExistingLocalOnly {
+                                parent_client_file_id,
+                            }
+                        }
+                        Err(_) => {
+                            return Err(ObserveSubtreeError::UntrackedParent {
+                                namespace_id: namespace_id.as_str().to_owned(),
+                                relative_path: entry.relative_path.clone(),
+                            });
+                        }
+                    }
+                };
+                let display_name = Path::new(&entry.relative_path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let inode_kind = match entry.kind {
+                    ScannedEntryKind::File => InodeKind::File,
+                    ScannedEntryKind::Dir => InodeKind::Dir,
+                };
+                operations.push(SubtreeObservationOp::ObserveLocalOnly {
+                    observed: ObservedLocalOnlySubtreeInode {
+                        relative_path: entry.relative_path.clone(),
+                        namespace_id: namespace_id.clone(),
+                        inode_kind,
+                        parent,
+                        display_name,
+                        content_digest: entry.content_digest.clone(),
+                        exists_on_disk: true,
+                        dirty: true,
+                        last_local_change_ms: now_ms,
+                    },
+                });
+                if entry.kind == ScannedEntryKind::Dir {
+                    new_local_only_dirs.insert(entry.relative_path.clone());
+                }
+            }
+        }
+    }
+
+    let mut missing_roots: BTreeSet<String> = BTreeSet::new();
+    for tracked_relative_path in
+        path_index.tracked_relative_paths_under_prefix(subtree_relative_path)
+    {
+        if present_paths.contains(&tracked_relative_path) {
+            continue;
+        }
+        if missing_roots
+            .iter()
+            .any(|root| relative_path_is_under_prefix(&tracked_relative_path, root))
+        {
+            continue;
+        }
+        missing_roots.insert(tracked_relative_path);
+    }
+
+    for missing_relative_path in missing_roots {
+        let source = classify_exact_path(path_index, namespace_id, &missing_relative_path)
+            .map_err(|_| ObserveSubtreeError::AmbiguousMatch {
+                namespace_id: namespace_id.as_str().to_owned(),
+                relative_path: missing_relative_path.clone(),
+            })?;
+        let Some(source) = source else {
+            continue;
+        };
+        match source {
+            PathMatch::Bound(row) => {
+                operations.push(SubtreeObservationOp::DeleteBound {
+                    observed: ObservedBoundDelete {
+                        namespace_id: namespace_id.clone(),
+                        inode_id: row.inode_id,
+                        inode_kind: row.inode_kind,
+                        content_digest: row.content_digest,
+                        parent_inode_id: row.parent_inode_id,
+                        display_name: row.display_name,
+                        last_local_change_ms: now_ms,
+                    },
+                });
+            }
+            PathMatch::LocalOnly(row) => {
+                operations.push(SubtreeObservationOp::DeleteLocalOnly {
+                    client_file_id: row.client_file_id,
+                });
+            }
+        }
+    }
+
+    Ok(operations)
+}
+
+fn summarize_observe_subtree(
+    namespace_id: &NamespaceId,
+    relative_path: &str,
+    scanned_file_count: usize,
+    scanned_dir_count: usize,
+    outcomes: &[SubtreeObservationOutcome],
+) -> ObserveSubtreeReport {
+    let mut report = ObserveSubtreeReport {
+        namespace_id: namespace_id.clone(),
+        relative_path: relative_path.to_owned(),
+        scanned_file_count,
+        scanned_dir_count,
+        applied_operation_count: outcomes.len(),
+        bound_observe_count: 0,
+        local_only_observe_count: 0,
+        bound_delete_count: 0,
+        local_only_delete_count: 0,
+        planned_decision_counts: BTreeMap::new(),
+    };
+
+    for outcome in outcomes {
+        match outcome {
+            SubtreeObservationOutcome::ObservedBound { planned_action, .. } => {
+                report.bound_observe_count += 1;
+                *report
+                    .planned_decision_counts
+                    .entry(planned_action.decision.as_str().to_owned())
+                    .or_insert(0) += 1;
+            }
+            SubtreeObservationOutcome::ObservedLocalOnly { result, .. } => {
+                report.local_only_observe_count += 1;
+                *report
+                    .planned_decision_counts
+                    .entry(result.planned_action.decision.as_str().to_owned())
+                    .or_insert(0) += 1;
+            }
+            SubtreeObservationOutcome::DeletedBound { planned_action, .. } => {
+                report.bound_delete_count += 1;
+                *report
+                    .planned_decision_counts
+                    .entry(planned_action.decision.as_str().to_owned())
+                    .or_insert(0) += 1;
+            }
+            SubtreeObservationOutcome::DeletedLocalOnly { .. } => {
+                report.local_only_delete_count += 1;
+                *report
+                    .planned_decision_counts
+                    .entry("no_op".to_owned())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    report
+}
+
+fn subtree_parent_ref_from_existing(parent: LocalOnlyParentRef) -> SubtreeLocalOnlyParentRef {
+    match parent {
+        LocalOnlyParentRef::Bound { parent_inode_id } => {
+            SubtreeLocalOnlyParentRef::Bound { parent_inode_id }
+        }
+        LocalOnlyParentRef::LocalOnly {
+            parent_client_file_id,
+        } => SubtreeLocalOnlyParentRef::ExistingLocalOnly {
+            parent_client_file_id,
+        },
+    }
+}
+
+fn matches_scanned_kind(inode_kind: InodeKind, scanned_kind: ScannedEntryKind) -> bool {
+    matches!(
+        (inode_kind, scanned_kind),
+        (InodeKind::File, ScannedEntryKind::File) | (InodeKind::Dir, ScannedEntryKind::Dir)
+    )
 }
 
 fn load_namespace_path_index(

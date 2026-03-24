@@ -345,7 +345,7 @@ Rules:
   - local-only file/dir exact match first
   - then bound file/dir exact match
   - otherwise fail closed
-- this slice still does not add a watcher, recursive scan, or `sync-until-idle`
+- this slice still does not add a watcher or move inference
 
 Why this rule exists:
 
@@ -356,6 +356,44 @@ Failure modes prevented:
 
 - deleting or moving the wrong tracked identity because two paths happened to look similar
 - letting one frontend treat a path as a delete while another treats it as a rename
+
+## Recursive subtree observation
+
+The next supported shell-facing local observation surface adds one explicit recursive scan command:
+
+- `observe-subtree`
+
+Rules:
+
+- it is directory-only and requires an existing directory under `mirror_root`
+- it recursively enumerates on-disk files and directories in deterministic relative-path order
+- it computes one concrete subtree observation set first and applies it atomically in one planner
+  transaction
+- present exact-path classification remains deterministic:
+  - local-only file/dir exact match first
+  - then bound file/dir exact match
+  - otherwise new local-only child under a tracked bound or local-only directory parent
+- missing tracked descendants inside the scanned prefix are treated as explicit delete
+  observations
+- missing detection uses only currently local-tracked rows:
+  - `local_state`
+  - `local_only_state`
+- remote-only rows are not candidates for subtree local delete detection
+- move inference remains out of scope:
+  - subtree scan never rewrites one delete plus one create into a rename
+  - explicit `observe-move` remains the only supported rename/move observation path
+
+Why this rule exists:
+
+- normal local work often changes several files under one directory at once
+- batch observation must remain restart-safe and deterministic instead of becoming best-effort
+  shell mutation
+
+Failure modes prevented:
+
+- persisting half a scanned tree when a later observation in the same scan is invalid
+- recreating nested unsynced files under duplicate temporary identities during one recursive scan
+- inferring a rename from unrelated create/delete pairs
 
 ## Bound delete observation and replan
 
@@ -637,16 +675,21 @@ Rules:
   `local_only_uploads(client_file_id)` row, not from caller memory and not from the local observed
   file digest
 
-## Supported single-step sync shell composition
+## Supported shell-facing sync composition
 
-The first shell-facing sync command is `sync-once`.
+The first shell-facing sync commands are:
+
+- `sync-once`
+- `sync-until-idle`
 
 Rules:
 
-- it is a thin composition layer over `execute_next_client_action`
-- it executes at most one real client scheduler step
-- it does not become `sync-until-idle` in this slice
-- it does not implicitly import authoritative remote observations
+- both are thin composition layers over `execute_next_client_action`
+- `sync-once` executes at most one real client scheduler step
+- `sync-until-idle` only repeats the existing real `sync-once` path until:
+  - `no_work`, or
+  - `max_steps`
+- neither command implicitly imports authoritative remote observations
 
 Path resolution policy for the first shell slice:
 
@@ -670,7 +713,7 @@ Why this rule exists:
 Failure modes prevented:
 
 - a shell-specific upload-only fast path that bypasses planner ordering
-- hidden implicit remote refresh during a supposedly single-step local sync command
+- hidden implicit remote refresh during a supposedly local sync command
 - for `replace_file`, the executor must load `content_manifest_digest` from a durable inode-keyed
   upload row, not from caller memory and not from the local observed file digest
 - `replace_file` must carry canonical `inode_id` plus the current bound `base_revision_no`, never

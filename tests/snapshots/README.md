@@ -17,7 +17,9 @@ Rendered scenario traces and summaries live here, grouped by the xtask command t
 - `ops-observe-local/`
 - `ops-observe-delete/`
 - `ops-observe-move/`
+- `ops-observe-subtree/`
 - `ops-sync-once/`
+- `ops-sync-until-idle/`
 - `ops-smoke/`
 - `rc-local/`
 - `sim-interleavings/`

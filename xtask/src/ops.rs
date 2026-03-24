@@ -260,6 +260,49 @@ mod tests {
     }
 
     #[test]
+    fn forwards_observe_subtree_to_loon_ops() {
+        let temp_dir = unique_temp_dir("xtask-ops-observe-subtree");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            "sha256:remote-hello-v1",
+            "sha256:manifest-remote-hello-v1",
+        );
+        fs::create_dir_all(temp_dir.join("mirror/drafts")).expect("create local-only dir");
+        fs::write(
+            temp_dir.join("mirror/hello.txt"),
+            b"hello from subtree edit\n",
+        )
+        .expect("write bound file edit");
+        fs::write(temp_dir.join("mirror/drafts/note.txt"), b"draft note\n")
+            .expect("write nested local-only file");
+
+        let rendered = run([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run xtask ops observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_bound_edit_and_nested_local_only_create.txt"
+            )
+        );
+    }
+
+    #[test]
     fn forwards_sync_once_to_loon_ops() {
         let temp_dir = unique_temp_dir("xtask-ops-sync-once");
         let config_path = write_local_fs_config(&temp_dir);
@@ -277,6 +320,29 @@ mod tests {
         assert_eq!(
             rendered,
             include_str!("../../tests/snapshots/ops-sync-once/ops_sync_once_no_work.txt")
+        );
+    }
+
+    #[test]
+    fn forwards_sync_until_idle_to_loon_ops() {
+        let temp_dir = unique_temp_dir("xtask-ops-sync-until-idle");
+        let config_path = write_local_fs_config(&temp_dir);
+        let _db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+
+        let rendered = run([
+            "sync-until-idle".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run xtask ops sync-until-idle");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../tests/snapshots/ops-sync-until-idle/ops_sync_until_idle_no_work.txt"
+            )
         );
     }
 

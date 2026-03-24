@@ -12,7 +12,10 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
   `loon-ops` composition
 - supported explicit client-local delete and move observation through `loon-client` plus thin
   `loon-ops` composition
+- supported recursive subtree observation through `loon-client` batch observation plus thin
+  `loon-ops` composition
 - supported single-step client execution through the real scheduler and real server mutation path
+- supported thin repeat-until-idle execution through the same real scheduler step
 - a thin internal shell in `xtask`
 - one shared command/config/rendering layer that can later move into `loon-cli` unchanged
 
@@ -74,7 +77,9 @@ Deliverables:
   - `observe-local`
   - `observe-delete`
   - `observe-move`
+  - `observe-subtree`
   - `sync-once`
+  - `sync-until-idle`
   - `smoke`
 
 Required rules:
@@ -82,10 +87,12 @@ Required rules:
 - `xtask` stays thin and must not become the owner of config parsing or business logic
 - `loon-ops` is the shared shell core that future `loon-cli` work must reuse
 - no `demo-*` command family
-- no recursive local scan, watcher, delete inference, or `sync-until-idle`
+- no watcher or delete/move inference inside `observe-local` / `observe-subtree`
 - `observe-local` is still file-first and existing-file-only
 - delete and move remain explicit shell commands, not inference inside `observe-local`
+- `observe-subtree` is directory-only, recursive, and atomic
 - `sync-once` is executor-only and progresses at most one real scheduler step
+- `sync-until-idle` is only a loop over the real `sync-once` path
 - `xtask ops import-remote-observations` is the first shell exposure of authoritative import and
   it must reuse the `loon-ops` import API unchanged
 - `ops smoke` remains inspect/bootstrap only in this milestone
@@ -103,7 +110,9 @@ cargo run -p xtask -- ops import-remote-observations --config ./loondb-demo.toml
 cargo run -p xtask -- ops observe-local --config ./loondb-demo.toml --namespace demo --path ./mirror/hello.txt
 cargo run -p xtask -- ops observe-delete --config ./loondb-demo.toml --namespace demo --path ./mirror/hello.txt
 cargo run -p xtask -- ops observe-move --config ./loondb-demo.toml --namespace demo --from ./mirror/hello.txt --to ./mirror/archive/hello.txt
+cargo run -p xtask -- ops observe-subtree --config ./loondb-demo.toml --namespace demo --path ./mirror/docs
 cargo run -p xtask -- ops sync-once --config ./loondb-demo.toml --namespace demo
+cargo run -p xtask -- ops sync-until-idle --config ./loondb-demo.toml --namespace demo --max-steps 50
 cargo run -p xtask -- ops smoke --config ./loondb-demo.toml --namespace demo
 ```
 
@@ -119,7 +128,10 @@ Exit criteria:
   through shell-local SQLite mutation
 - explicit local delete and move can be observed through the same supported client API surface,
   with bound rename/delete syncing through the real mutation path
-- one honest client scheduler step can be exercised locally without inventing a second sync path
+- one recursive subtree scan can batch create/edit/delete observations without inventing move
+  inference
+- one honest client scheduler step or idle loop can be exercised locally without inventing a
+  second sync path
 - future `loon-cli` work can reuse `loon-ops` instead of re-implementing config and renderers
 
 ## Milestone 16: provider-backed RC hardening

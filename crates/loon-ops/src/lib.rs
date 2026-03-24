@@ -25,11 +25,15 @@ pub use import::{
     AuthoritativeObservationImportReport,
 };
 pub use observe::{
-    observe_delete_path, observe_local_path, observe_move_path, ObserveDeleteError,
-    ObserveDeleteReport, ObserveLocalError, ObserveLocalReport, ObserveMoveError,
-    ObserveMoveReport, ObservedPathKind,
+    observe_delete_path, observe_local_path, observe_move_path, observe_subtree_path,
+    ObserveDeleteError, ObserveDeleteReport, ObserveLocalError, ObserveLocalReport,
+    ObserveMoveError, ObserveMoveReport, ObserveSubtreeError, ObserveSubtreeReport,
+    ObservedPathKind,
 };
-pub use sync::{sync_once, SyncOnceError, SyncOnceOutcome, SyncOnceReport};
+pub use sync::{
+    sync_once, sync_until_idle, SyncOnceError, SyncOnceOutcome, SyncOnceReport, SyncUntilIdleError,
+    SyncUntilIdleReport,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpsConfig {
@@ -90,6 +94,8 @@ pub struct OpsServerConfig {
 pub struct OpsSection {
     #[serde(default)]
     pub now_ms: Option<u64>,
+    #[serde(default)]
+    pub max_steps: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,9 +133,19 @@ pub enum OpsCommand {
         from: PathBuf,
         to: PathBuf,
     },
+    ObserveSubtree {
+        config_path: PathBuf,
+        namespace_id: NamespaceId,
+        path: PathBuf,
+    },
     SyncOnce {
         config_path: PathBuf,
         namespace_id: NamespaceId,
+    },
+    SyncUntilIdle {
+        config_path: PathBuf,
+        namespace_id: NamespaceId,
+        max_steps: Option<u64>,
     },
     Smoke {
         config_path: PathBuf,
@@ -230,6 +246,15 @@ pub fn run_command(command: OpsCommand) -> Result<String> {
             let report = observe::observe_move_path(&config, &namespace_id, &from, &to)?;
             observe::render_observe_move_report(&report)
         }
+        OpsCommand::ObserveSubtree {
+            config_path,
+            namespace_id,
+            path,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let report = observe::observe_subtree_path(&config, &namespace_id, &path)?;
+            observe::render_observe_subtree_report(&report)
+        }
         OpsCommand::SyncOnce {
             config_path,
             namespace_id,
@@ -237,6 +262,15 @@ pub fn run_command(command: OpsCommand) -> Result<String> {
             let config = OpsConfig::load(&config_path)?;
             let report = sync::sync_once(&config, &namespace_id)?;
             sync::render_sync_once_report(&report)
+        }
+        OpsCommand::SyncUntilIdle {
+            config_path,
+            namespace_id,
+            max_steps,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let report = sync::sync_until_idle(&config, &namespace_id, max_steps)?;
+            sync::render_sync_until_idle_report(&report)
         }
         OpsCommand::Smoke {
             config_path,
@@ -384,11 +418,27 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<OpsCommand> {
                 to: parsed.to,
             })
         }
+        Some("observe-subtree") => {
+            let parsed = parse_common_args_with_path(args)?;
+            Ok(OpsCommand::ObserveSubtree {
+                config_path: parsed.config_path,
+                namespace_id: parsed.namespace_id,
+                path: parsed.path,
+            })
+        }
         Some("sync-once") => {
             let parsed = parse_common_args(args, false)?;
             Ok(OpsCommand::SyncOnce {
                 config_path: parsed.config_path,
                 namespace_id: parsed.namespace_id,
+            })
+        }
+        Some("sync-until-idle") => {
+            let parsed = parse_common_args_with_optional_max_steps(args)?;
+            Ok(OpsCommand::SyncUntilIdle {
+                config_path: parsed.config_path,
+                namespace_id: parsed.namespace_id,
+                max_steps: parsed.max_steps,
             })
         }
         Some("smoke") => {
@@ -400,7 +450,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<OpsCommand> {
         }
         Some(other) => bail!("unknown ops subcommand: {other}"),
         None => bail!(
-            "usage: ops <bootstrap-namespace|show-namespace-state|show-client-state|import-remote-observations|observe-local|observe-delete|observe-move|sync-once|smoke> --config <path> --namespace <id> [--allow-existing] [--path <path>] [--from <path> --to <path>]"
+            "usage: ops <bootstrap-namespace|show-namespace-state|show-client-state|import-remote-observations|observe-local|observe-delete|observe-move|observe-subtree|sync-once|sync-until-idle|smoke> --config <path> --namespace <id> [--allow-existing] [--path <path>] [--from <path> --to <path>] [--max-steps <n>]"
         ),
     }
 }
@@ -475,6 +525,12 @@ struct CommonArgsWithFromTo {
     namespace_id: NamespaceId,
     from: PathBuf,
     to: PathBuf,
+}
+
+struct CommonArgsWithOptionalMaxSteps {
+    config_path: PathBuf,
+    namespace_id: NamespaceId,
+    max_steps: Option<u64>,
 }
 
 fn parse_common_args(
@@ -596,6 +652,46 @@ fn parse_common_args_with_from_to(
         namespace_id: namespace_id.ok_or_else(|| anyhow!("missing --namespace"))?,
         from: from.ok_or_else(|| anyhow!("missing --from"))?,
         to: to.ok_or_else(|| anyhow!("missing --to"))?,
+    })
+}
+
+fn parse_common_args_with_optional_max_steps(
+    mut args: impl Iterator<Item = String>,
+) -> Result<CommonArgsWithOptionalMaxSteps> {
+    let mut config_path = None;
+    let mut namespace_id = None;
+    let mut max_steps = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                config_path = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --config"))?
+                        .into(),
+                );
+            }
+            "--namespace" => {
+                namespace_id = Some(NamespaceId::from(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --namespace"))?,
+                ));
+            }
+            "--max-steps" => {
+                max_steps = Some(
+                    args.next()
+                        .ok_or_else(|| anyhow!("missing value for --max-steps"))?
+                        .parse()
+                        .context("parse --max-steps")?,
+                );
+            }
+            other => bail!("unexpected ops argument: {other}"),
+        }
+    }
+
+    Ok(CommonArgsWithOptionalMaxSteps {
+        config_path: config_path.ok_or_else(|| anyhow!("missing --config"))?,
+        namespace_id: namespace_id.ok_or_else(|| anyhow!("missing --namespace"))?,
+        max_steps,
     })
 }
 
@@ -1189,6 +1285,50 @@ lease_duration_ms = 60000
     }
 
     #[test]
+    fn observe_subtree_renders_bound_edit_and_nested_local_only_create_report() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            "sha256:remote-hello-v1",
+            "sha256:manifest-remote-hello-v1",
+        );
+
+        fs::create_dir_all(temp_dir.join("mirror/drafts")).expect("create local-only dir");
+        fs::write(
+            temp_dir.join("mirror/hello.txt"),
+            b"hello from subtree edit\n",
+        )
+        .expect("write bound file edit");
+        fs::write(temp_dir.join("mirror/drafts/note.txt"), b"draft note\n")
+            .expect("write nested local-only file");
+
+        let rendered = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_bound_edit_and_nested_local_only_create.txt"
+            )
+        );
+    }
+
+    #[test]
     fn sync_once_returns_no_work_for_idle_client() {
         let temp_dir = unique_temp_dir("ops-sync-once-idle");
         let config_path = write_local_fs_config(&temp_dir);
@@ -1333,6 +1473,139 @@ lease_duration_ms = 60000
             include_str!(
                 "../../../tests/snapshots/ops-sync-once/ops_sync_once_request_committed_delete_file.txt"
             )
+        );
+    }
+
+    #[test]
+    fn sync_until_idle_returns_no_work_for_idle_client() {
+        let temp_dir = unique_temp_dir("ops-sync-until-idle-idle");
+        let config_path = write_local_fs_config(&temp_dir);
+        let _db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+
+        let rendered = run_args([
+            "sync-until-idle".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-until-idle on idle client");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-sync-until-idle/ops_sync_until_idle_no_work.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn sync_until_idle_reaches_idle_after_real_local_edit_flow() {
+        let temp_dir = unique_temp_dir("ops-sync-until-idle-local-edit");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_single_file_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+            "hello.txt",
+            b"v1\n",
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+
+        fs::write(
+            temp_dir.join("mirror/hello.txt"),
+            b"hello from local edit\n",
+        )
+        .expect("write local edit file");
+        run_args([
+            "observe-local".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+        ])
+        .expect("observe local edit");
+
+        let rendered = run_args([
+            "sync-until-idle".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-until-idle for local edit");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-sync-until-idle/ops_sync_until_idle_request_committed_upload_local_edit.txt"
+            )
+        );
+    }
+
+    #[test]
+    fn sync_until_idle_fails_on_max_steps() {
+        let temp_dir = unique_temp_dir("ops-sync-until-idle-max-steps");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_single_file_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+            "hello.txt",
+            b"v1\n",
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+
+        fs::write(
+            temp_dir.join("mirror/hello.txt"),
+            b"hello from local edit\n",
+        )
+        .expect("write local edit file");
+        run_args([
+            "observe-local".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+        ])
+        .expect("observe local edit");
+
+        let error = run_args([
+            "sync-until-idle".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--max-steps".to_owned(),
+            "1".to_owned(),
+        ])
+        .expect_err("sync-until-idle should fail on max steps");
+
+        assert!(
+            error
+                .to_string()
+                .contains("reached max steps without becoming idle"),
+            "{error:#}"
         );
     }
 

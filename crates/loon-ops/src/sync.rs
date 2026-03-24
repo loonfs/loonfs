@@ -56,6 +56,15 @@ pub struct SyncOnceReport {
     pub transfer: Option<SyncOnceTransferReport>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncUntilIdleReport {
+    pub namespace_id: NamespaceId,
+    pub steps_run: usize,
+    pub max_steps: u64,
+    pub reached_idle: bool,
+    pub steps: Vec<SyncOnceReport>,
+}
+
 #[derive(Debug, Error)]
 pub enum SyncOnceError {
     #[error(transparent)]
@@ -72,6 +81,16 @@ impl From<ExecuteNextClientActionError> for SyncOnceError {
     fn from(value: ExecuteNextClientActionError) -> Self {
         Self::Execute(Box::new(value))
     }
+}
+
+#[derive(Debug, Error)]
+pub enum SyncUntilIdleError {
+    #[error(transparent)]
+    SyncOnce(#[from] SyncOnceError),
+    #[error(
+        "sync-until-idle reached max steps without becoming idle: max_steps={max_steps} steps_run={steps_run}"
+    )]
+    MaxStepsExceeded { max_steps: u64, steps_run: usize },
 }
 
 pub fn sync_once(
@@ -146,6 +165,35 @@ pub fn sync_once(
     }
 }
 
+pub fn sync_until_idle(
+    config: &OpsConfig,
+    namespace_id: &NamespaceId,
+    max_steps_override: Option<u64>,
+) -> Result<SyncUntilIdleReport, SyncUntilIdleError> {
+    let max_steps = max_steps_override.or(config.ops.max_steps).unwrap_or(50);
+    let mut steps = Vec::new();
+
+    for _ in 0..max_steps {
+        let step = sync_once(config, namespace_id)?;
+        let reached_idle = step.outcome == SyncOnceOutcome::NoWork;
+        steps.push(step);
+        if reached_idle {
+            return Ok(SyncUntilIdleReport {
+                namespace_id: namespace_id.clone(),
+                steps_run: steps.len(),
+                max_steps,
+                reached_idle: true,
+                steps,
+            });
+        }
+    }
+
+    Err(SyncUntilIdleError::MaxStepsExceeded {
+        max_steps,
+        steps_run: steps.len(),
+    })
+}
+
 pub(crate) fn render_sync_once_report(report: &SyncOnceReport) -> Result<String> {
     let yaml = serde_yaml::to_string(report)?;
     Ok(format!(
@@ -153,6 +201,23 @@ pub(crate) fn render_sync_once_report(report: &SyncOnceReport) -> Result<String>
         report.namespace_id.as_str(),
         report.outcome.as_str(),
         report.action_kind.as_deref().unwrap_or("none"),
+        yaml
+    ))
+}
+
+pub(crate) fn render_sync_until_idle_report(report: &SyncUntilIdleReport) -> Result<String> {
+    let yaml = serde_yaml::to_string(report)?;
+    let final_outcome = report
+        .steps
+        .last()
+        .map(|step| step.outcome.as_str())
+        .unwrap_or("no_work");
+    Ok(format!(
+        "command=ops/sync-until-idle\nnamespace={}\nsteps_run={}\nmax_steps={}\nfinal_outcome={}\n---\n{}",
+        report.namespace_id.as_str(),
+        report.steps_run,
+        report.max_steps,
+        final_outcome,
         yaml
     ))
 }

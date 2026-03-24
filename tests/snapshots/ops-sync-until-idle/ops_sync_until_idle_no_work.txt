@@ -1,0 +1,20 @@
+command=ops/sync-until-idle
+namespace=demo
+steps_run=1
+max_steps=50
+final_outcome=no_work
+---
+namespace_id: demo
+steps_run: 1
+max_steps: 50
+reached_idle: true
+steps:
+- namespace_id: demo
+  outcome: no_work
+  action_kind: null
+  inode_id: null
+  client_file_id: null
+  client_request_id: null
+  committed_seq: null
+  conflict_id: null
+  transfer: null

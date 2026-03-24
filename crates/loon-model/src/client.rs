@@ -137,6 +137,67 @@ pub fn local_only_move_preserves_identity(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_observation_updates_bound_edit_and_local_only_create(
+    bound_planned_decision: &str,
+    local_only_planned_decision: &str,
+) -> bool {
+    bound_planned_decision == "upload_local_edit"
+        && local_only_planned_decision == "upload_local_create"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_missing_bound_file_plans_delete_file(planned_decision: &str) -> bool {
+    planned_decision == "delete_file"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_missing_bound_directory_plans_delete_subtree(
+    planned_decision: &str,
+) -> bool {
+    planned_decision == "delete_subtree"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_missing_local_only_directory_clears_subtree(
+    removed_client_file_count: usize,
+) -> bool {
+    removed_client_file_count > 0
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_repeat_reuses_local_only_identity(
+    first_client_file_id: &str,
+    second_client_file_id: &str,
+) -> bool {
+    repeated_local_only_observation_reuses_identity(first_client_file_id, second_client_file_id)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn subtree_observation_batch_rollback_is_atomic<T>(
+    before_failed_batch: &T,
+    after_failed_batch: &T,
+) -> bool
+where
+    T: PartialEq,
+{
+    before_failed_batch == after_failed_batch
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn sync_until_idle_stops_on_no_work(
+    final_outcome: &str,
+    steps_run: usize,
+    max_steps: u64,
+) -> bool {
+    final_outcome == "no_work" && steps_run > 0 && (steps_run as u64) <= max_steps
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn sync_until_idle_fails_on_max_steps(steps_run: usize, max_steps: u64) -> bool {
+    max_steps > 0 && steps_run == max_steps as usize
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn authoritative_snapshot_import_discovers_remote_only_state(
     translated_observation_count: usize,
     discovered_remote_only_count: usize,

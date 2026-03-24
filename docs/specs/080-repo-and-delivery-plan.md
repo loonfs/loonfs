@@ -73,7 +73,9 @@ Current local operability shell:
   - `xtask ops observe-local --config <path> --namespace <id> --path <path>`
   - `xtask ops observe-delete --config <path> --namespace <id> --path <path>`
   - `xtask ops observe-move --config <path> --namespace <id> --from <path> --to <path>`
+  - `xtask ops observe-subtree --config <path> --namespace <id> --path <path>`
   - `xtask ops sync-once --config <path> --namespace <id>`
+  - `xtask ops sync-until-idle --config <path> --namespace <id> [--max-steps <n>]`
   - `xtask ops smoke --config <path> --namespace <id>`
 
 Constraints for that shell:
@@ -88,9 +90,12 @@ Constraints for that shell:
   `xtask ops observe-local` is only a thin adapter over that path
 - explicit local delete and move observation remain supported client/library paths first, and
   `xtask ops observe-delete` / `xtask ops observe-move` are thin adapters over those paths
+- recursive local subtree observation remains a supported client/library path first, and
+  `xtask ops observe-subtree` is only a thin adapter over that path
 - `xtask ops sync-once` is intentionally single-step and executor-only
-- the shell is intentionally narrow in the current phase; there is still no workflow runner,
-  recursive scan, watcher, delete inference, or `sync-until-idle`
+- `xtask ops sync-until-idle` is only a thin loop over `sync-once`
+- the shell is intentionally narrow in the current phase; there is still no watcher or move
+  inference inside subtree scans
 - `ops smoke` remains bootstrap/inspection-only and does not compose the import path yet
 - future `loon-cli` work must reuse the `loon-ops` command contract rather than fork it
 

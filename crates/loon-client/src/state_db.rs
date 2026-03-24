@@ -97,6 +97,8 @@ pub enum StateDbError {
         client_file_id: String,
         parent_client_file_id: String,
     },
+    #[error("subtree_observation_batch_parent_missing: relative path `{parent_relative_path}`")]
+    SubtreeObservationBatchParentMissing { parent_relative_path: String },
     #[error("uploaded_content_missing: `{client_file_id}`")]
     UploadedContentMissing { client_file_id: String },
     #[error("uploaded_content_requires_file: `{client_file_id}` kind `{inode_kind}`")]
@@ -738,6 +740,77 @@ pub struct ObservedLocalOnlyInodeResult {
 pub struct ObservedLocalOnlyDeleteResult {
     pub root_client_file_id: ClientFileId,
     pub removed_client_file_ids: Vec<ClientFileId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SubtreeLocalOnlyParentRef {
+    Bound { parent_inode_id: InodeId },
+    ExistingLocalOnly { parent_client_file_id: ClientFileId },
+    BatchLocalOnly { parent_relative_path: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLocalOnlySubtreeInode {
+    pub relative_path: String,
+    pub namespace_id: NamespaceId,
+    pub inode_kind: InodeKind,
+    pub parent: SubtreeLocalOnlyParentRef,
+    pub display_name: String,
+    pub content_digest: Option<String>,
+    pub exists_on_disk: bool,
+    pub dirty: bool,
+    pub last_local_change_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedBoundDelete {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub content_digest: Option<String>,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+    pub last_local_change_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SubtreeObservationOp {
+    ObserveBound {
+        observed: ObservedBoundInode,
+    },
+    ObserveLocalOnly {
+        observed: ObservedLocalOnlySubtreeInode,
+    },
+    DeleteBound {
+        observed: ObservedBoundDelete,
+    },
+    DeleteLocalOnly {
+        client_file_id: ClientFileId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SubtreeObservationOutcome {
+    ObservedBound {
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+        planned_action: crate::planner::PlannedActionRecord,
+    },
+    ObservedLocalOnly {
+        relative_path: String,
+        result: ObservedLocalOnlyInodeResult,
+    },
+    DeletedBound {
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+        planned_action: crate::planner::PlannedActionRecord,
+    },
+    DeletedLocalOnly {
+        result: ObservedLocalOnlyDeleteResult,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

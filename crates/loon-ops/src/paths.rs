@@ -1,6 +1,6 @@
 use loon_client::state_db::{
     ClientFileId, ClientNamespaceStateSummary, LocalFileStateRow, LocalOnlyFileStateRow,
-    LocalOnlyParentLinkRow, RemoteFileStateRow, SyncAnchorRow,
+    LocalOnlyParentLinkRow, LocalOnlyParentRef, RemoteFileStateRow, SyncAnchorRow,
 };
 use loon_types::InodeId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +11,7 @@ pub(crate) struct NamespacePathIndex {
     anchor_paths_by_inode: BTreeMap<InodeId, String>,
     remote_paths_by_inode: BTreeMap<InodeId, String>,
     local_only_paths_by_client_file_id: BTreeMap<String, String>,
+    local_only_parent_links_by_client_file_id: BTreeMap<String, ClientFileId>,
     bound_files_by_path: BTreeMap<String, Vec<LocalFileStateRow>>,
     bound_dirs_by_path: BTreeMap<String, Vec<LocalFileStateRow>>,
     local_only_files_by_path: BTreeMap<String, Vec<LocalOnlyFileStateRow>>,
@@ -30,6 +31,15 @@ impl NamespacePathIndex {
             local_only_parent_links,
             &local_paths_by_inode,
         );
+        let local_only_parent_links_by_client_file_id = local_only_parent_links
+            .iter()
+            .map(|row| {
+                (
+                    row.client_file_id.as_str().to_owned(),
+                    row.parent_client_file_id.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
 
         let mut bound_files_by_path = BTreeMap::new();
         let mut bound_dirs_by_path = BTreeMap::new();
@@ -84,6 +94,7 @@ impl NamespacePathIndex {
             anchor_paths_by_inode,
             remote_paths_by_inode,
             local_only_paths_by_client_file_id,
+            local_only_parent_links_by_client_file_id,
             bound_files_by_path,
             bound_dirs_by_path,
             local_only_files_by_path,
@@ -126,6 +137,30 @@ impl NamespacePathIndex {
         self.local_only_paths_by_client_file_id
             .get(client_file_id.as_str())
             .map(String::as_str)
+    }
+
+    pub(crate) fn local_only_parent_ref_for(
+        &self,
+        row: &LocalOnlyFileStateRow,
+    ) -> Option<LocalOnlyParentRef> {
+        if let Some(parent_inode_id) = row.parent_inode_id {
+            return Some(LocalOnlyParentRef::Bound { parent_inode_id });
+        }
+        self.local_only_parent_links_by_client_file_id
+            .get(row.client_file_id.as_str())
+            .cloned()
+            .map(|parent_client_file_id| LocalOnlyParentRef::LocalOnly {
+                parent_client_file_id,
+            })
+    }
+
+    pub(crate) fn tracked_relative_paths_under_prefix(&self, prefix: &str) -> BTreeSet<String> {
+        let mut paths = BTreeSet::new();
+        collect_paths_under_prefix(self.bound_files_by_path.keys(), prefix, &mut paths);
+        collect_paths_under_prefix(self.bound_dirs_by_path.keys(), prefix, &mut paths);
+        collect_paths_under_prefix(self.local_only_files_by_path.keys(), prefix, &mut paths);
+        collect_paths_under_prefix(self.local_only_dirs_by_path.keys(), prefix, &mut paths);
+        paths
     }
 
     pub(crate) fn resolve_current_inode_relative_path(&self, inode_id: InodeId) -> Option<&str> {
@@ -290,6 +325,25 @@ fn build_local_only_paths(
         );
     }
     resolved
+}
+
+fn collect_paths_under_prefix<'a, I>(keys: I, prefix: &str, paths: &mut BTreeSet<String>)
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    for key in keys {
+        if relative_path_is_under_prefix(key, prefix) {
+            paths.insert(key.clone());
+        }
+    }
+}
+
+pub(crate) fn relative_path_is_under_prefix(relative_path: &str, prefix: &str) -> bool {
+    prefix.is_empty()
+        || relative_path == prefix
+        || relative_path
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
