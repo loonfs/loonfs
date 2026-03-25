@@ -421,6 +421,7 @@ pub fn run_namespace_scenario_report(
                             writer_id: writer_id.clone(),
                             writer_version: writer_version.clone(),
                             now_ms: action.now_ms,
+                            lease_duration_ms: 60_000,
                         },
                     )
                     .expect("execute server mutation");

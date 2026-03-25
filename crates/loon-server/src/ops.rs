@@ -695,6 +695,7 @@ mod tests {
                 writer_id: "writer-a".to_owned(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                lease_duration_ms: 60_000,
             },
         )
         .expect("execute replace-file mutation");

@@ -121,8 +121,15 @@ Required rules:
 - `ops smoke` remains inspect/bootstrap only in this milestone
 - no ambient provider env lookup in core crates
 - bootstrap fails closed by default if the namespace already exists
+- `bootstrap-namespace --allow-existing` remains read-only and idempotent; it does not refresh or
+  repair leases
 - bootstrap seeds the canonical namespace root directory as inode `1` at `seq = 0`, so fresh
   authoritative import and state inspection include root instead of an empty metadata basis
+- authoritative writes must acquire or renew the namespace lease on the real server mutation path:
+  - same-holder unexpired renewal extends lease expiry without rotating the fence token
+  - any reacquire after expiry rotates the head fence token before lease publish, even for the same
+    writer
+  - an expired foreign writer lease may be taken over by the next real write
 - the shell output stays stable and human-readable
 
 Command contract:
@@ -153,6 +160,8 @@ Exit criteria:
   unchanged
 - a fresh bootstrap/import/sync sequence now materializes the canonical root without any extra
   planner-tick or observe-root command
+- an expired namespace lease no longer permanently locks out real writes; the next authoritative
+  write renews or reacquires through the shared server mutation path
 - one existing local file can be observed and planned through the supported client API rather than
   through shell-local SQLite mutation
 - explicit local delete and move can be observed through the same supported client API surface,

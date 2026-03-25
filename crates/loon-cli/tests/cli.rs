@@ -328,6 +328,254 @@ fn import_then_sync_once_materializes_root_directory() {
 }
 
 #[test]
+fn expired_same_writer_lease_is_reacquired_on_sync_once() {
+    let temp_dir = TestDir::new("loon-cli-expired-same-writer");
+    let object_store_root = temp_dir.path().join("object-store");
+    let state_db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    let bootstrap_config = write_demo_local_fs_config_with_spec(
+        temp_dir.path(),
+        object_store_root.clone(),
+        state_db_path.clone(),
+        mirror_root.clone(),
+        "bootstrap.toml",
+        true,
+        "writer-a",
+        1_000,
+    );
+    let run_config = write_demo_local_fs_config_with_spec(
+        temp_dir.path(),
+        object_store_root,
+        state_db_path,
+        mirror_root.clone(),
+        "run.toml",
+        true,
+        "writer-a",
+        70_000,
+    );
+    let namespace_id = NamespaceId::from("demo");
+
+    assert!(run_loon([
+        "ops",
+        "bootstrap-namespace",
+        "--config",
+        bootstrap_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+    assert!(run_loon([
+        "ops",
+        "import-remote-observations",
+        "--config",
+        bootstrap_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+    assert!(run_loon([
+        "ops",
+        "sync-once",
+        "--config",
+        bootstrap_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+
+    fs::write(mirror_root.join("hello.txt"), b"hello from writer a\n").expect("write local file");
+    assert!(run_loon([
+        "ops",
+        "observe-local",
+        "--config",
+        run_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+        "--path",
+        mirror_root.join("hello.txt").to_str().expect("utf-8 path"),
+    ])
+    .status
+    .success());
+
+    let sync = run_loon([
+        "ops",
+        "sync-once",
+        "--config",
+        run_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ]);
+    assert!(sync.status.success());
+
+    let namespace_state = run_loon([
+        "ops",
+        "show-namespace-state",
+        "--config",
+        run_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ]);
+    assert!(namespace_state.status.success());
+    let stdout = String::from_utf8(namespace_state.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("active_fence_token: 1"));
+    assert!(stdout.contains("holder_id: writer-a"));
+    assert!(stdout.contains("lease_expires_at_ms: 130000"));
+}
+
+#[test]
+fn writer_b_can_take_over_after_expiry_and_writer_a_is_then_rejected() {
+    let temp_dir = TestDir::new("loon-cli-writer-takeover");
+    let object_store_root = temp_dir.path().join("object-store");
+    let writer_a_db = temp_dir.path().join("writer-a.sqlite3");
+    let writer_a_mirror = temp_dir.path().join("mirror-a");
+    let writer_b_db = temp_dir.path().join("writer-b.sqlite3");
+    let writer_b_mirror = temp_dir.path().join("mirror-b");
+    let bootstrap_config = write_demo_local_fs_config_with_spec(
+        temp_dir.path(),
+        object_store_root.clone(),
+        writer_a_db.clone(),
+        writer_a_mirror.clone(),
+        "bootstrap-a.toml",
+        true,
+        "writer-a",
+        1_000,
+    );
+    let writer_a_run = write_demo_local_fs_config_with_spec(
+        temp_dir.path(),
+        object_store_root.clone(),
+        writer_a_db,
+        writer_a_mirror.clone(),
+        "run-a.toml",
+        true,
+        "writer-a",
+        70_000,
+    );
+    let writer_b_run = write_demo_local_fs_config_with_spec(
+        temp_dir.path(),
+        object_store_root,
+        writer_b_db,
+        writer_b_mirror.clone(),
+        "run-b.toml",
+        true,
+        "writer-b",
+        70_000,
+    );
+    let namespace_id = NamespaceId::from("demo");
+
+    assert!(run_loon([
+        "ops",
+        "bootstrap-namespace",
+        "--config",
+        bootstrap_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+    assert!(run_loon([
+        "ops",
+        "import-remote-observations",
+        "--config",
+        bootstrap_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+    assert!(run_loon([
+        "ops",
+        "sync-once",
+        "--config",
+        bootstrap_config.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+
+    assert!(run_loon([
+        "ops",
+        "import-remote-observations",
+        "--config",
+        writer_b_run.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+    assert!(run_loon([
+        "ops",
+        "sync-once",
+        "--config",
+        writer_b_run.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+
+    fs::write(writer_b_mirror.join("hello.txt"), b"writer b takeover\n").expect("write b file");
+    assert!(run_loon([
+        "ops",
+        "observe-local",
+        "--config",
+        writer_b_run.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+        "--path",
+        writer_b_mirror
+            .join("hello.txt")
+            .to_str()
+            .expect("utf-8 path"),
+    ])
+    .status
+    .success());
+    assert!(run_loon([
+        "ops",
+        "sync-once",
+        "--config",
+        writer_b_run.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ])
+    .status
+    .success());
+
+    fs::write(writer_a_mirror.join("stale.txt"), b"writer a stale\n").expect("write a file");
+    assert!(run_loon([
+        "ops",
+        "observe-local",
+        "--config",
+        writer_a_run.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+        "--path",
+        writer_a_mirror
+            .join("stale.txt")
+            .to_str()
+            .expect("utf-8 path"),
+    ])
+    .status
+    .success());
+
+    let stale_sync = run_loon([
+        "ops",
+        "sync-once",
+        "--config",
+        writer_a_run.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ]);
+    assert!(!stale_sync.status.success());
+    let stderr = String::from_utf8(stale_sync.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("writer-b"));
+    assert!(stderr.contains("held by another active writer"));
+}
+
+#[test]
 fn parse_failure_writes_to_stderr_and_exits_non_zero() {
     let output = run_loon([
         "ops",
@@ -409,13 +657,15 @@ fn write_demo_local_fs_config(base_dir: &Path) -> PathBuf {
 }
 
 fn write_demo_local_fs_config_with_name(base_dir: &Path, name: &str) -> PathBuf {
-    write_demo_local_fs_config_with_paths(
+    write_demo_local_fs_config_with_spec(
         base_dir,
         base_dir.join("object-store"),
         base_dir.join("client.sqlite3"),
         base_dir.join("mirror"),
         name,
         true,
+        "loon-cli-test",
+        1_700_000_000_000,
     )
 }
 
@@ -426,6 +676,28 @@ fn write_demo_local_fs_config_with_paths(
     mirror_root: PathBuf,
     name: &str,
     create_mirror_root: bool,
+) -> PathBuf {
+    write_demo_local_fs_config_with_spec(
+        base_dir,
+        object_store_root,
+        state_db_path,
+        mirror_root,
+        name,
+        create_mirror_root,
+        "loon-cli-test",
+        1_700_000_000_000,
+    )
+}
+
+fn write_demo_local_fs_config_with_spec(
+    base_dir: &Path,
+    object_store_root: PathBuf,
+    state_db_path: PathBuf,
+    mirror_root: PathBuf,
+    name: &str,
+    create_mirror_root: bool,
+    writer_id: &str,
+    now_ms: u64,
 ) -> PathBuf {
     let config_path = base_dir.join(name);
     fs::create_dir_all(&object_store_root).expect("create object store root");
@@ -444,12 +716,12 @@ state_db_path = "{}"
 mirror_root = "{}"
 
 [server]
-writer_id = "loon-cli-test"
+writer_id = "{writer_id}"
 writer_version = "v1"
 lease_duration_ms = 60000
 
 [ops]
-now_ms = 1700000000000
+now_ms = {now_ms}
 "#,
             object_store_root.display(),
             state_db_path.display(),

@@ -32,6 +32,7 @@ use crate::client::{
     repeated_local_only_observation_reuses_identity, subtree_observation_batch_rollback_is_atomic,
     sync_until_idle_fails_on_max_steps, sync_until_idle_stops_on_no_work,
 };
+use crate::namespace::ModelLeaseAcquireError;
 use loon_types::{
     ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
     SubtreeConflictArtifactEntry, CONTENT_BLOCK_SIZE_BYTES,
@@ -2442,6 +2443,124 @@ fn model_accepts_active_commit_attempt() {
             next_seq: ChangeSeq(42),
         }
     );
+}
+
+#[test]
+fn model_renews_active_holder_without_rotating_fence() {
+    let ns = ModelNamespace {
+        namespace_id: NamespaceId::from("ns-1"),
+        head_seq: ChangeSeq(41),
+        active_fence_token: FenceToken(8),
+        next_inode_id: InodeId(501),
+        snapshot_hint_seq: Some(ChangeSeq(40)),
+        retention_floor_seq: ChangeSeq(40),
+        metadata_state: bootstrapped_metadata_state(),
+    };
+    let lease = LeaseState {
+        namespace_id: NamespaceId::from("ns-1"),
+        holder_id: "writer-a".to_owned(),
+        fence_token: FenceToken(8),
+        lease_expires_at_ms: 2_000,
+    };
+
+    let acquired = ns
+        .acquire_or_renew_lease(&lease, "writer-a", 1_500, 60_000)
+        .expect("renew active holder");
+
+    assert_eq!(acquired.resulting_head_fence_token, FenceToken(8));
+    assert_eq!(acquired.resulting_lease.holder_id, "writer-a");
+    assert_eq!(acquired.resulting_lease.fence_token, FenceToken(8));
+    assert_eq!(acquired.resulting_lease.lease_expires_at_ms, 61_500);
+    assert!(!acquired.rotated_fence);
+}
+
+#[test]
+fn model_expired_reacquire_rotates_fence_even_for_same_holder() {
+    let ns = ModelNamespace {
+        namespace_id: NamespaceId::from("ns-1"),
+        head_seq: ChangeSeq(41),
+        active_fence_token: FenceToken(8),
+        next_inode_id: InodeId(501),
+        snapshot_hint_seq: Some(ChangeSeq(40)),
+        retention_floor_seq: ChangeSeq(40),
+        metadata_state: bootstrapped_metadata_state(),
+    };
+    let lease = LeaseState {
+        namespace_id: NamespaceId::from("ns-1"),
+        holder_id: "writer-a".to_owned(),
+        fence_token: FenceToken(8),
+        lease_expires_at_ms: 1_000,
+    };
+
+    let acquired = ns
+        .acquire_or_renew_lease(&lease, "writer-a", 1_500, 60_000)
+        .expect("expired reacquire");
+
+    assert_eq!(acquired.resulting_head_fence_token, FenceToken(9));
+    assert_eq!(acquired.resulting_lease.holder_id, "writer-a");
+    assert_eq!(acquired.resulting_lease.fence_token, FenceToken(9));
+    assert_eq!(acquired.resulting_lease.lease_expires_at_ms, 61_500);
+    assert!(acquired.rotated_fence);
+}
+
+#[test]
+fn model_rejects_active_foreign_holder_during_lease_acquire() {
+    let ns = ModelNamespace {
+        namespace_id: NamespaceId::from("ns-1"),
+        head_seq: ChangeSeq(41),
+        active_fence_token: FenceToken(8),
+        next_inode_id: InodeId(501),
+        snapshot_hint_seq: Some(ChangeSeq(40)),
+        retention_floor_seq: ChangeSeq(40),
+        metadata_state: bootstrapped_metadata_state(),
+    };
+    let lease = LeaseState {
+        namespace_id: NamespaceId::from("ns-1"),
+        holder_id: "writer-a".to_owned(),
+        fence_token: FenceToken(8),
+        lease_expires_at_ms: 2_000,
+    };
+
+    let error = ns
+        .acquire_or_renew_lease(&lease, "writer-b", 1_500, 60_000)
+        .expect_err("foreign active holder should block acquire");
+
+    assert_eq!(
+        error,
+        ModelLeaseAcquireError::HeldByOtherWriter {
+            holder_id: "writer-a".to_owned(),
+            lease_expires_at_ms: 2_000,
+        }
+    );
+}
+
+#[test]
+fn model_repairs_one_step_takeover_recovery_shape() {
+    let ns = ModelNamespace {
+        namespace_id: NamespaceId::from("ns-1"),
+        head_seq: ChangeSeq(41),
+        active_fence_token: FenceToken(9),
+        next_inode_id: InodeId(501),
+        snapshot_hint_seq: Some(ChangeSeq(40)),
+        retention_floor_seq: ChangeSeq(40),
+        metadata_state: bootstrapped_metadata_state(),
+    };
+    let lease = LeaseState {
+        namespace_id: NamespaceId::from("ns-1"),
+        holder_id: "writer-a".to_owned(),
+        fence_token: FenceToken(8),
+        lease_expires_at_ms: 1_000,
+    };
+
+    let acquired = ns
+        .acquire_or_renew_lease(&lease, "writer-b", 1_500, 60_000)
+        .expect("repair recovery shape");
+
+    assert_eq!(acquired.resulting_head_fence_token, FenceToken(9));
+    assert_eq!(acquired.resulting_lease.holder_id, "writer-b");
+    assert_eq!(acquired.resulting_lease.fence_token, FenceToken(9));
+    assert_eq!(acquired.resulting_lease.lease_expires_at_ms, 61_500);
+    assert!(!acquired.rotated_fence);
 }
 
 #[test]

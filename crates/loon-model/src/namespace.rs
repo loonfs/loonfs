@@ -14,6 +14,33 @@ use crate::{
     ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass, ModelWalCommit,
 };
 use loon_types::{ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId};
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelLeaseAcquireOutcome {
+    pub(crate) resulting_head_fence_token: FenceToken,
+    pub(crate) resulting_lease: LeaseState,
+    pub(crate) rotated_fence: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModelLeaseAcquireError {
+    EmptyWriterId,
+    ZeroLeaseDuration,
+    HeldByOtherWriter {
+        holder_id: String,
+        lease_expires_at_ms: u64,
+    },
+    UnexpectedControlState {
+        head_fence_token: FenceToken,
+        lease_fence_token: FenceToken,
+        lease_expires_at_ms: u64,
+        now_ms: u64,
+    },
+    FenceTokenOverflow {
+        active: FenceToken,
+    },
+}
 
 impl ModelNamespace {
     pub fn new(namespace_id: NamespaceId) -> Self {
@@ -148,6 +175,78 @@ impl ModelNamespace {
             .ok_or(ModelCommitValidationError::SeqOverflow)?;
 
         Ok(ModelCommitValidationOutcome { next_seq })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acquire_or_renew_lease(
+        &self,
+        lease: &LeaseState,
+        writer_id: &str,
+        now_ms: u64,
+        lease_duration_ms: u64,
+    ) -> Result<ModelLeaseAcquireOutcome, ModelLeaseAcquireError> {
+        if writer_id.trim().is_empty() {
+            return Err(ModelLeaseAcquireError::EmptyWriterId);
+        }
+        if lease_duration_ms == 0 {
+            return Err(ModelLeaseAcquireError::ZeroLeaseDuration);
+        }
+
+        if lease.is_valid_at(now_ms) {
+            if self.active_fence_token != lease.fence_token {
+                return Err(ModelLeaseAcquireError::UnexpectedControlState {
+                    head_fence_token: self.active_fence_token,
+                    lease_fence_token: lease.fence_token,
+                    lease_expires_at_ms: lease.lease_expires_at_ms,
+                    now_ms,
+                });
+            }
+            if lease.holder_id != writer_id {
+                return Err(ModelLeaseAcquireError::HeldByOtherWriter {
+                    holder_id: lease.holder_id.clone(),
+                    lease_expires_at_ms: lease.lease_expires_at_ms,
+                });
+            }
+
+            return Ok(ModelLeaseAcquireOutcome {
+                resulting_head_fence_token: self.active_fence_token,
+                resulting_lease: LeaseState {
+                    namespace_id: self.namespace_id.clone(),
+                    holder_id: writer_id.to_owned(),
+                    fence_token: self.active_fence_token,
+                    lease_expires_at_ms: now_ms.saturating_add(lease_duration_ms),
+                },
+                rotated_fence: false,
+            });
+        }
+
+        let resulting_head_fence_token = if self.active_fence_token == lease.fence_token {
+            FenceToken(self.active_fence_token.0.checked_add(1).ok_or(
+                ModelLeaseAcquireError::FenceTokenOverflow {
+                    active: self.active_fence_token,
+                },
+            )?)
+        } else if self.active_fence_token.0 == lease.fence_token.0.saturating_add(1) {
+            self.active_fence_token
+        } else {
+            return Err(ModelLeaseAcquireError::UnexpectedControlState {
+                head_fence_token: self.active_fence_token,
+                lease_fence_token: lease.fence_token,
+                lease_expires_at_ms: lease.lease_expires_at_ms,
+                now_ms,
+            });
+        };
+
+        Ok(ModelLeaseAcquireOutcome {
+            resulting_head_fence_token,
+            resulting_lease: LeaseState {
+                namespace_id: self.namespace_id.clone(),
+                holder_id: writer_id.to_owned(),
+                fence_token: resulting_head_fence_token,
+                lease_expires_at_ms: now_ms.saturating_add(lease_duration_ms),
+            },
+            rotated_fence: resulting_head_fence_token != self.active_fence_token,
+        })
     }
 
     pub fn replay_wal_commit(&mut self, wal: &ModelWalCommit) -> Result<(), ModelError> {

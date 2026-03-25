@@ -105,6 +105,14 @@ Constraints for that shell:
 - namespace bootstrap seeds the canonical root inode directly into the authoritative basis at
   `seq = 0`, and frontend code must treat that root as ordinary authoritative metadata rather than
   a synthetic sentinel
+- `bootstrap-namespace --allow-existing` remains read-only and idempotent; lease renewal and
+  takeover happen only on the authoritative mutation path
+- the server mutation path must acquire or renew the namespace lease before authoritative basis
+  loading:
+  - same-holder unexpired renewal extends `lease_expires_at_ms` without rotating the fence token
+  - any reacquire after expiry rotates `head.active_fence_token` before publishing a new lease,
+    even for the same writer
+  - an expired foreign-writer lease may be taken over by the next real write
 - full-namespace authoritative remote observation import remains a supported library path in
   `loon-ops`, and `xtask ops import-remote-observations` must call that API verbatim rather than
   re-implementing it
@@ -141,6 +149,7 @@ Constraints for that shell:
   - unique exact-subtree directory pairs
 - explicit `observe-move` remains the override for non-exact directory refactors
 - `ops smoke` remains bootstrap/inspection-only and does not compose the import path yet
+- stale writers are fenced by control-plane head rotation, not by a special shell recovery command
 - broader future `loon-cli` work must continue to reuse the `loon-ops` command contract rather
   than fork it
 - native filesystem object ids in the reducer are advisory within one batch only and are never

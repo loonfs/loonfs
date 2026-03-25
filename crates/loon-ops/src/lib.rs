@@ -1793,6 +1793,71 @@ lease_duration_ms = 60000
     }
 
     #[test]
+    fn sync_once_reacquires_expired_lease_for_real_local_edit_flow() {
+        let temp_dir = unique_temp_dir("ops-sync-once-expired-lease");
+        let config_path = write_local_fs_config_with_params(&temp_dir, 70_000, "writer-a");
+        let snapshot = seed_authoritative_single_file_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+            "hello.txt",
+            b"v1\n",
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "hello.txt",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+
+        fs::write(
+            temp_dir.join("mirror/hello.txt"),
+            b"hello from local edit\n",
+        )
+        .expect("write local edit file");
+        run_args([
+            "observe-local".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror/hello.txt").display().to_string(),
+        ])
+        .expect("observe local edit");
+
+        let rendered = run_args([
+            "sync-once".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-once after lease expiry");
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-sync-once/ops_sync_once_request_committed_upload_local_edit.txt"
+            )
+        );
+
+        let namespace_state = run_args([
+            "show-namespace-state".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("show namespace state after reacquire");
+        assert!(namespace_state.contains("active_fence_token: 1"));
+        assert!(namespace_state.contains("holder_id: writer-a"));
+        assert!(namespace_state.contains("lease_expires_at_ms: 130000"));
+    }
+
+    #[test]
     fn sync_once_can_commit_bound_delete_through_real_client_server_path() {
         let temp_dir = unique_temp_dir("ops-sync-once-delete");
         let config_path = write_local_fs_config(&temp_dir);
@@ -2131,6 +2196,10 @@ lease_duration_ms = 60000
     }
 
     fn write_local_fs_config(temp_dir: &Path) -> PathBuf {
+        write_local_fs_config_with_params(temp_dir, 1_000, "writer-a")
+    }
+
+    fn write_local_fs_config_with_params(temp_dir: &Path, now_ms: u64, writer_id: &str) -> PathBuf {
         let config_path = temp_dir.join("loondb-demo.toml");
         fs::write(
             &config_path,
@@ -2145,12 +2214,12 @@ state_db_path = "{}"
 mirror_root = "{}"
 
 [server]
-writer_id = "writer-a"
+writer_id = "{writer_id}"
 writer_version = "loon-ops-test"
 lease_duration_ms = 60000
 
 [ops]
-now_ms = 1000
+now_ms = {now_ms}
 "#,
                 temp_dir.join("store").display(),
                 temp_dir.join("client.sqlite3").display(),

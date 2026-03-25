@@ -760,6 +760,7 @@ fn dispatch_request(
             writer_id: "writer-a".to_owned(),
             writer_version: "loon-server-test".to_owned(),
             now_ms,
+            lease_duration_ms: 60_000,
         },
     )
     .map(|executed| executed.response)

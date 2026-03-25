@@ -137,6 +137,7 @@ pub fn sync_once(
                     writer_id: writer_id.clone(),
                     writer_version: writer_version.clone(),
                     now_ms,
+                    lease_duration_ms: config.server.lease_duration_ms,
                 },
             )
             .map(|executed| executed.response)

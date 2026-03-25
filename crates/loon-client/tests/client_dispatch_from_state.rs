@@ -104,6 +104,7 @@ fn dispatch_retry_reuses_pending_request_id_after_failure() {
                         writer_id: "writer-a".to_owned(),
                         writer_version: "loon-server-test".to_owned(),
                         now_ms: 1_700_000_107_000,
+                        lease_duration_ms: 60_000,
                     },
                 )
                 .map(|executed| executed.response)
@@ -187,6 +188,7 @@ fn run_fixture(relative_path: &str) {
                         writer_id: dispatch.writer_id.clone(),
                         writer_version: dispatch.writer_version.clone(),
                         now_ms: dispatch.now_ms,
+                        lease_duration_ms: 60_000,
                     },
                 )
                 .map(|executed| executed.response)

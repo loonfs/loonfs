@@ -152,7 +152,12 @@ fn ensure_reconstructed_head_matches(
     current_head: &HeadStateEnvelope,
     reconstructed: &HeadState,
 ) -> Result<(), BasisLoadError> {
-    if &current_head.state != reconstructed {
+    if current_head.state.namespace_id != reconstructed.namespace_id
+        || current_head.state.seq != reconstructed.seq
+        || current_head.state.next_inode_id != reconstructed.next_inode_id
+        || current_head.state.snapshot_hint_seq != reconstructed.snapshot_hint_seq
+        || current_head.state.retention_floor_seq != reconstructed.retention_floor_seq
+    {
         return Err(BasisLoadError::ReconstructedHeadMismatch {
             expected: Box::new(current_head.state.clone()),
             actual: Box::new(reconstructed.clone()),

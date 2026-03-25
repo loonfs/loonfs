@@ -1,8 +1,10 @@
 pub(crate) mod basis;
+mod lease;
 pub(crate) mod loading;
 mod translate;
 
 use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::mutation::lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
 use crate::mutation::translate::{
     build_client_mutation_response, translate_client_mutation_request,
     validate_referenced_durable_content,
@@ -27,6 +29,7 @@ pub struct ClientMutationExecutionParams {
     pub writer_id: String,
     pub writer_version: String,
     pub now_ms: u64,
+    pub lease_duration_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +49,8 @@ pub struct ExecutedClientMutation {
 pub enum ClientMutationExecutionError {
     #[error(transparent)]
     Basis(Box<BasisLoadError>),
+    #[error(transparent)]
+    LeaseAcquire(Box<LeaseAcquireError>),
     #[error("durable content validation failed: {0}")]
     DurableContent(loon_core::content::DurableContentValidationError),
     #[error(transparent)]
@@ -72,12 +77,19 @@ impl From<BasisLoadError> for ClientMutationExecutionError {
     }
 }
 
+impl From<LeaseAcquireError> for ClientMutationExecutionError {
+    fn from(value: LeaseAcquireError) -> Self {
+        Self::LeaseAcquire(Box::new(value))
+    }
+}
+
 pub fn execute_client_mutation<S: ObjectStore>(
     store: &S,
     request: &ClientMutationRequest,
     params: &ClientMutationExecutionParams,
 ) -> Result<ExecutedClientMutation, ClientMutationExecutionError> {
     let validated_content = validate_referenced_durable_content(store, request)?;
+    acquire_or_renew_namespace_lease(store, &request.namespace_id, params)?;
     let basis = load_verified_namespace_basis(store, &request.namespace_id)?;
     let commit_request = translate_client_mutation_request(request, params, &basis.head)?;
     let context = CommitValidationContext {
@@ -170,6 +182,7 @@ mod tests {
         execute_client_mutation, translate_client_mutation_request, ClientMutationExecutionError,
         ClientMutationExecutionParams,
     };
+    use crate::mutation::loading::{read_head_object, read_lease_object};
     use loon_core::checkpoint::prepare_checkpoint;
     use loon_core::content::DurableContentValidationError;
     use loon_core::metadata::MetadataState;
@@ -183,7 +196,7 @@ mod tests {
         decode_wal_commit_envelope_zstd, encode_content_manifest_json,
         encode_wal_commit_envelope_zstd, sha256_digest, ChangeSeq, ClientMutationRequest,
         ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, FenceToken, HeadState,
-        HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,
+        HeadStateEnvelope, InodeId, LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,
         WalCommitEnvelope, WalCommitPayload, WalOp,
     };
     use serde::Deserialize;
@@ -205,6 +218,7 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "loon-server-test".to_owned(),
             now_ms: 1_500,
+            lease_duration_ms: 60_000,
         };
         let head = HeadState {
             namespace_id: loon_types::NamespaceId::from("ns-1"),
@@ -257,6 +271,7 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "loon-server-test".to_owned(),
             now_ms: 1_500,
+            lease_duration_ms: 60_000,
         };
         let head = HeadState {
             namespace_id: loon_types::NamespaceId::from("ns-1"),
@@ -329,6 +344,7 @@ mod tests {
                 writer_id: initial.lease.holder_id.clone(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                lease_duration_ms: 60_000,
             },
         )
         .expect("execute client create-file mutation");
@@ -435,6 +451,7 @@ mod tests {
                 writer_id: initial.lease.holder_id.clone(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                lease_duration_ms: 60_000,
             },
         )
         .expect("execute client replace-file mutation");
@@ -510,6 +527,7 @@ mod tests {
                 writer_id: initial.lease.holder_id,
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                lease_duration_ms: 60_000,
             },
         )
         .expect_err("missing content block should reject create-file mutation");
@@ -886,6 +904,7 @@ mod tests {
                 writer_id: "writer-a".to_owned(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                lease_duration_ms: 60_000,
             },
         )
         .expect("execute mutation with reconstructed basis");
@@ -937,6 +956,7 @@ mod tests {
                 writer_id: "writer-a".to_owned(),
                 writer_version: "loon-server-test".to_owned(),
                 now_ms: 1_500,
+                lease_duration_ms: 60_000,
             },
         )
         .expect_err("missing checkpoint basis should fail closed");
@@ -947,6 +967,155 @@ mod tests {
                 if matches!(
                     error.as_ref(),
                     super::BasisLoadError::MissingCheckpointManifest { .. }
+                )
+        ));
+    }
+
+    #[test]
+    fn execute_client_mutation_reacquires_expired_same_holder_and_commits() {
+        let temp_dir = TestDir::new("mutation-reacquire-expired-same-holder");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        let namespace_id = NamespaceId::from("demo");
+        let head = HeadState::initial(namespace_id.clone());
+        let lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(0),
+            lease_expires_at_ms: 1_000,
+        };
+        seed_head_and_lease(&store, &head, &lease);
+
+        let executed = execute_client_mutation(
+            &store,
+            &ClientMutationRequest {
+                namespace_id: namespace_id.clone(),
+                client_request_id: "request-1".to_owned(),
+                op: loon_types::ClientMutationOp::CreateDir {
+                    parent_inode_id: InodeId(1),
+                    display_name: "docs".to_owned(),
+                },
+            },
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("execute mutation after expired lease");
+
+        assert_eq!(executed.response.committed_seq, ChangeSeq(1));
+        assert_eq!(
+            executed.head_publish.resulting_head.active_fence_token,
+            FenceToken(1)
+        );
+        let head = read_head_object(&store, &namespace_id)
+            .expect("load head")
+            .envelope
+            .state;
+        let lease = read_lease_object(&store, &namespace_id)
+            .expect("load lease")
+            .envelope
+            .state;
+        assert_eq!(head.seq, ChangeSeq(1));
+        assert_eq!(head.active_fence_token, FenceToken(1));
+        assert_eq!(lease.holder_id, "writer-a");
+        assert_eq!(lease.fence_token, FenceToken(1));
+        assert_eq!(lease.lease_expires_at_ms, 61_500);
+    }
+
+    #[test]
+    fn execute_client_mutation_takes_over_expired_foreign_holder_and_commits() {
+        let temp_dir = TestDir::new("mutation-expired-foreign-takeover");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        let namespace_id = NamespaceId::from("demo");
+        let head = HeadState::initial(namespace_id.clone());
+        let lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(0),
+            lease_expires_at_ms: 1_000,
+        };
+        seed_head_and_lease(&store, &head, &lease);
+
+        let executed = execute_client_mutation(
+            &store,
+            &ClientMutationRequest {
+                namespace_id: namespace_id.clone(),
+                client_request_id: "request-1".to_owned(),
+                op: loon_types::ClientMutationOp::CreateDir {
+                    parent_inode_id: InodeId(1),
+                    display_name: "docs".to_owned(),
+                },
+            },
+            &ClientMutationExecutionParams {
+                writer_id: "writer-b".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("execute mutation after foreign takeover");
+
+        assert_eq!(executed.response.committed_seq, ChangeSeq(1));
+        assert_eq!(
+            executed.head_publish.resulting_head.active_fence_token,
+            FenceToken(1)
+        );
+        let head = read_head_object(&store, &namespace_id)
+            .expect("load head")
+            .envelope
+            .state;
+        let lease = read_lease_object(&store, &namespace_id)
+            .expect("load lease")
+            .envelope
+            .state;
+        assert_eq!(head.seq, ChangeSeq(1));
+        assert_eq!(head.active_fence_token, FenceToken(1));
+        assert_eq!(lease.holder_id, "writer-b");
+        assert_eq!(lease.fence_token, FenceToken(1));
+        assert_eq!(lease.lease_expires_at_ms, 61_500);
+    }
+
+    #[test]
+    fn execute_client_mutation_rejects_active_foreign_holder() {
+        let temp_dir = TestDir::new("mutation-active-foreign-holder");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        let namespace_id = NamespaceId::from("demo");
+        let head = HeadState::initial(namespace_id.clone());
+        let lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(0),
+            lease_expires_at_ms: 2_000,
+        };
+        seed_head_and_lease(&store, &head, &lease);
+
+        let error = execute_client_mutation(
+            &store,
+            &ClientMutationRequest {
+                namespace_id,
+                client_request_id: "request-1".to_owned(),
+                op: loon_types::ClientMutationOp::CreateDir {
+                    parent_inode_id: InodeId(1),
+                    display_name: "docs".to_owned(),
+                },
+            },
+            &ClientMutationExecutionParams {
+                writer_id: "writer-b".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect_err("active foreign holder should be rejected");
+
+        assert!(matches!(
+            error,
+            ClientMutationExecutionError::LeaseAcquire(error)
+                if matches!(
+                    error.as_ref(),
+                    super::lease::LeaseAcquireError::HeldByOtherWriter { .. }
                 )
         ));
     }

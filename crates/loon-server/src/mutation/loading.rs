@@ -18,6 +18,7 @@ pub(crate) struct LoadedHeadObject {
 #[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
 pub(crate) struct LoadedLeaseObject {
     pub(crate) object_key: String,
+    pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: LeaseStateEnvelope,
 }
 
@@ -93,10 +94,16 @@ pub(crate) fn read_lease_object<S: ObjectStore>(
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedLeaseObject, ControlObjectLoadError> {
     let object_key = namespace_lease(expected_namespace.as_str());
+    let metadata = store
+        .head(&object_key)
+        .map_err(map_store_load_error)?
+        .ok_or_else(|| ControlObjectLoadError::MissingObject {
+            object_key: object_key.clone(),
+        })?;
     let encoded_bytes = store
         .get(&object_key, None)
         .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObject {
+        .ok_or_else(|| ControlObjectLoadError::MissingObjectAfterHead {
             object_key: object_key.clone(),
         })?;
     let envelope: LeaseStateEnvelope =
@@ -108,6 +115,7 @@ pub(crate) fn read_lease_object<S: ObjectStore>(
 
     Ok(LoadedLeaseObject {
         object_key,
+        metadata,
         envelope,
     })
 }

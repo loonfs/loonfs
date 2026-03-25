@@ -491,6 +491,7 @@ fn execute_next_client_action_retries_upload_local_edit_without_source_path_once
                         writer_id: execute.writer_id.clone(),
                         writer_version: execute.writer_version.clone(),
                         now_ms: execute.now_ms,
+                        lease_duration_ms: 60_000,
                     },
                 )
                 .map(|executed| executed.response)
@@ -1088,6 +1089,7 @@ fn run_execute_next_client_action(
                     writer_id: action.writer_id.clone(),
                     writer_version: action.writer_version.clone(),
                     now_ms: action.now_ms,
+                    lease_duration_ms: 60_000,
                 },
             )
             .map(|executed| executed.response)

@@ -316,6 +316,7 @@ fn run_execute(
                     writer_id: action.writer_id.clone(),
                     writer_version: action.writer_version.clone(),
                     now_ms: action.now_ms,
+                    lease_duration_ms: 60_000,
                 },
             )
             .map(|executed| executed.response)

@@ -44,7 +44,15 @@ Rules:
   - no parent binding
   - no revision row
 - reject the mutation if basis reconstruction is missing, partial, stale, or does not reproduce the
-  current head exactly
+  current metadata basis and publish cursor:
+  - `namespace_id`
+  - `seq`
+  - `next_inode_id`
+  - `snapshot_hint_seq`
+  - `retention_floor_seq`
+- `active_fence_token` is not part of replayed metadata basis verification because lease takeover
+  may publish a head-only control-plane fence rotation without a WAL commit or metadata `seq`
+  advance
 
 Why it exists:
 commit validation is only authoritative when the metadata basis is proven fresh and complete for
@@ -785,6 +793,47 @@ Failure modes prevented:
 - old writers publishing after a leadership handoff
 - silent disagreement between head state and lease state
 - validation logic depending on ambient wall-clock reads
+
+## Lease acquisition and takeover rule
+
+The authoritative mutation path is the only supported lease renewal and takeover path.
+
+Rules:
+
+- `bootstrap-namespace --allow-existing` remains read-only and idempotent; it does not refresh,
+  repair, or reacquire leases
+- before authoritative basis loading and metadata validation, the write path must acquire or renew
+  the namespace lease against the latest control state
+- if the requesting `writer_id` already holds an unexpired lease, the server must CAS-update only
+  `lease.json` with a new `lease_expires_at_ms` and must preserve the current fence token
+- if the lease is expired, any reacquire, including by the same `writer_id`, must create a new
+  fenced generation by CAS-updating `head.json` to the same head state with
+  `active_fence_token + 1`
+- after that head-only fence rotation, the server must CAS-update `lease.json` so
+  `holder_id = requesting writer_id`, `fence_token = head.active_fence_token`, and
+  `lease_expires_at_ms = now_ms + lease_duration_ms`
+- a one-step interrupted takeover is recoverable: if the current control state shows
+  `head.active_fence_token = lease.fence_token + 1` and the lease is expired, the next write may
+  finish the lease publish without another head rotation
+- if another writer still holds an unexpired lease, the authoritative write must fail closed rather
+  than stealing the lease
+- lease renewal or takeover is a control-plane handoff only:
+  - it does not write a WAL commit
+  - it does not advance metadata `seq`
+  - it does not change `next_inode_id`
+  - it does not mutate checkpoint state
+
+Why it exists:
+lease renewal should be automatic on real writes, while expired takeover must still fence stale
+writers before normal commit validation begins.
+
+Failure modes prevented:
+
+- namespaces becoming permanently unwritable after lease expiry because no supported renewal path
+  exists
+- same-holder expired reacquire silently continuing on an old fence generation
+- foreign-writer takeover publishing new metadata without first fencing stale writers
+- interrupted takeover leaving head and lease permanently unrecoverable
 
 ## Frame validation before metadata evaluation
 

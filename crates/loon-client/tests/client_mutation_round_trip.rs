@@ -107,6 +107,7 @@ fn run_fixture(relative_path: &str) {
                 writer_id: execute.writer_id,
                 writer_version: execute.writer_version,
                 now_ms: execute.now_ms,
+                lease_duration_ms: 60_000,
             },
         )
         .expect("execute authoritative client mutation");

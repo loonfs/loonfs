@@ -236,6 +236,7 @@ fn run_native_success_fixture_report(relative_path: &str) -> ContentFixtureRunRe
             writer_id: initial.lease.holder_id.clone(),
             writer_version: TEST_WRITER_VERSION.to_owned(),
             now_ms: NOW_MS,
+            lease_duration_ms: 60_000,
         },
     )
     .expect("execute client mutation");
@@ -354,6 +355,7 @@ fn run_native_missing_block_fixture_report(relative_path: &str) -> ContentFixtur
             writer_id: initial.lease.holder_id.clone(),
             writer_version: TEST_WRITER_VERSION.to_owned(),
             now_ms: NOW_MS,
+            lease_duration_ms: 60_000,
         },
     )
     .expect_err("execute_client_mutation should fail for missing block");

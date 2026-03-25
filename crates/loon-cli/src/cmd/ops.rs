@@ -52,7 +52,7 @@ struct BootstrapNamespaceArgs {
     common: CommonArgs,
     #[arg(
         long,
-        help = "Allow bootstrap to succeed when the namespace already exists."
+        help = "Allow bootstrap to succeed when the namespace already exists without mutating existing lease state."
     )]
     allow_existing: bool,
 }
