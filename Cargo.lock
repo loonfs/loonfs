@@ -1100,6 +1100,7 @@ dependencies = [
  "loon-ops",
  "loon-testkit",
  "loon-types",
+ "toml",
 ]
 
 [[package]]

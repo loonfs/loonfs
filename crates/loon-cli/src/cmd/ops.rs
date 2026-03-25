@@ -3,7 +3,10 @@ use loon_ops::OpsCommand;
 use loon_types::NamespaceId;
 use std::path::PathBuf;
 
+const OPS_AFTER_HELP: &str = "Examples:\n  loon help ops bootstrap-namespace\n  loon ops bootstrap-namespace --config ./loondb-demo.local.toml --namespace demo\n  loon ops observe-local --config ./loondb-demo.local.toml --namespace demo --path ./mirror/hello.txt\n  loon ops sync-until-idle --config ./loondb-demo.local.toml --namespace demo --max-steps 50\n\nUse `bootstrap-namespace` to initialize namespace control state today.";
+
 #[derive(Debug, Args)]
+#[command(after_help = OPS_AFTER_HELP)]
 pub struct OpsArgs {
     #[command(subcommand)]
     command: OpsSubcommand,
@@ -37,9 +40,9 @@ enum OpsSubcommand {
 
 #[derive(Debug, Clone, Args)]
 struct CommonArgs {
-    #[arg(long)]
+    #[arg(long, value_name = "PATH", help = "Path to the ops TOML config file.")]
     config: PathBuf,
-    #[arg(long)]
+    #[arg(long, value_name = "ID", help = "Namespace identifier to operate on.")]
     namespace: String,
 }
 
@@ -47,7 +50,10 @@ struct CommonArgs {
 struct BootstrapNamespaceArgs {
     #[command(flatten)]
     common: CommonArgs,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Allow bootstrap to succeed when the namespace already exists."
+    )]
     allow_existing: bool,
 }
 
@@ -55,7 +61,11 @@ struct BootstrapNamespaceArgs {
 struct CommonArgsWithPath {
     #[command(flatten)]
     common: CommonArgs,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Filesystem path to observe under the configured mirror root."
+    )]
     path: PathBuf,
 }
 
@@ -63,9 +73,17 @@ struct CommonArgsWithPath {
 struct CommonArgsWithFromTo {
     #[command(flatten)]
     common: CommonArgs,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Original filesystem path under the configured mirror root."
+    )]
     from: PathBuf,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Destination filesystem path under the configured mirror root."
+    )]
     to: PathBuf,
 }
 
@@ -73,7 +91,11 @@ struct CommonArgsWithFromTo {
 struct CommonArgsWithOptionalMaxSteps {
     #[command(flatten)]
     common: CommonArgs,
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Maximum number of real scheduler steps before failing."
+    )]
     max_steps: Option<u64>,
 }
 

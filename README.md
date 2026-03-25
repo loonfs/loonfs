@@ -28,6 +28,7 @@ For now, this repository is a **development bootstrap**, not a finished product.
 - `loon-client` contains the active SQLite/planner/executor work
 - `loon-ops` owns the shared operability command/config/rendering contract
 - `xtask ops ...` and `loon ops ...` are the active local operability frontends
+- `loon-cli` also owns built-in help, manpage generation, config inspection, and `doctor`
 - `xtask rc-local` remains the canonical repo release-candidate path
 - `loon-testkit` remains the active review and debugging toolkit
 - the `loond` binary shell and `loon-macos` are still reserved later-phase delivery surfaces
@@ -105,6 +106,11 @@ cargo run -p xtask -- rc-local --config ./loondb-demo.toml --namespace demo
 # Run the active thin CLI frontend over the same loon-ops contract
 cargo run -p loon-cli -- ops smoke --config ./loondb-demo.toml --namespace demo
 
+# Discover the active CLI surface and validate a local config
+cargo run -p loon-cli -- help ops bootstrap-namespace
+cargo run -p loon-cli -- config validate --config ./loondb-demo.toml
+cargo run -p loon-cli -- doctor --config ./loondb-demo.toml
+
 # Run the same tests with nextest (optional, if installed)
 cargo nextest run
 
@@ -122,3 +128,9 @@ A feature is not done when the code compiles. A feature is done when all of the 
 - at least one readable scenario fixture covers the behavior
 - invariants are named explicitly
 - the implementation and tests agree on the same vocabulary
+
+## CLI manual
+
+The current operator-facing CLI manual is:
+
+- [docs/runbooks/loon-cli.md](/Users/conormccarter/Code/loondb/docs/runbooks/loon-cli.md)

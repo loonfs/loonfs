@@ -16,6 +16,7 @@ clap_complete = "4.5"
 clap_mangen = "0.2"
 loon-ops = { path = "../loon-ops" }
 loon-types = { path = "../loon-types" }
+toml.workspace = true
 
 [dev-dependencies]
 loon-testkit = { path = "../loon-testkit" }

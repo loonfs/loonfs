@@ -18,6 +18,11 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
   adapters without adding one yet
 - supported single-step client execution through the real scheduler and real server mutation path
 - supported thin repeat-until-idle execution through the same real scheduler step
+- supported `loon-cli` discovery/diagnostic affordances:
+  - built-in help and generated manpages
+  - checked-in CLI manual
+  - config inspection over the existing ops TOML shape
+  - local `doctor` diagnostics
 - a thin internal shell in `xtask`
 - one shared command/config/rendering layer now reused by both `xtask ops ...` and `loon ops ...`
 

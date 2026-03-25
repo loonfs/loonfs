@@ -88,6 +88,10 @@ Current local operability shell:
   - `loon ops sync-once --config <path> --namespace <id>`
   - `loon ops sync-until-idle --config <path> --namespace <id> [--max-steps <n>]`
   - `loon ops smoke --config <path> --namespace <id>`
+  - `loon config path [--config <path>]`
+  - `loon config show [--config <path>]`
+  - `loon config validate [--config <path>]`
+  - `loon doctor [--config <path>]`
   - `loon completion <bash|zsh|fish|powershell|elvish>`
   - `loon manpages <output-dir>`
   - `loon version`
@@ -114,8 +118,11 @@ Constraints for that shell:
 - `xtask ops sync-once` is intentionally single-step and executor-only
 - `xtask ops sync-until-idle` is only a thin loop over `sync-once`
 - `loon ops ...` must preserve the same subcommand grammar and stdout rendering as `xtask ops ...`
-- `loon-cli` may add CLI-only affordances such as completions, manpage generation, and version
-  output, but it must not become a second owner of config, semantics, or rendering
+- `loon-cli` may add CLI-only affordances such as help text, completions, manpage generation,
+  config inspection, `doctor`, and version output, but it must not become a second owner of
+  `loon-ops` config semantics, command behavior, or stdout rendering
+- `loon ops ...` still requires explicit `--config`
+- config discovery convenience is limited to `loon config ...` and `loon doctor`
 - the shell is intentionally narrow in the current phase; there is still no watcher, and subtree
   move inference is restricted to:
   - unique digest-equal file pairs
@@ -161,7 +168,9 @@ These quarantined surfaces stay in the repository to preserve delivery intent an
 they should not advertise themselves as active product entrypoints until they wrap real behavior.
 
 For `loon-cli`, the intended activation path is now active: it is a frontend over `loon-ops`, not
-a second owner of config parsing, command grammar, or rendering semantics.
+a second owner of config parsing, command grammar, or rendering semantics. The current checked-in
+operator manual is `docs/runbooks/loon-cli.md`, and generated `loon manpages ...` output must stay
+consistent with the active clap grammar.
 
 ## What should happen early
 
