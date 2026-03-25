@@ -76,6 +76,10 @@ pub struct ObserveSubtreeReport {
     pub scanned_file_count: usize,
     pub scanned_dir_count: usize,
     pub applied_operation_count: usize,
+    #[serde(default, skip_serializing_if = "usize_is_zero")]
+    pub skipped_unsupported_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_unsupported_paths: Vec<String>,
     pub bound_observe_count: usize,
     pub local_only_observe_count: usize,
     pub paired_bound_move_count: usize,
@@ -317,6 +321,18 @@ struct ScannedEntry {
     relative_path: String,
     kind: ScannedEntryKind,
     content_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScannedSubtree {
+    entries: Vec<ScannedEntry>,
+    skipped_unsupported_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SamePathReplacementRoot {
+    relative_path: String,
+    source: PathMatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -734,12 +750,14 @@ pub fn observe_subtree_path(
             path: canonical_path.display().to_string(),
             mirror_root: mirror_root.display().to_string(),
         })?;
-    let scanned_entries = scan_subtree_entries(&canonical_path, &relative_path)?;
-    let scanned_file_count = scanned_entries
+    let scanned_subtree = scan_subtree_entries(&canonical_path, &relative_path)?;
+    let scanned_file_count = scanned_subtree
+        .entries
         .iter()
         .filter(|entry| entry.kind == ScannedEntryKind::File)
         .count();
-    let scanned_dir_count = scanned_entries
+    let scanned_dir_count = scanned_subtree
+        .entries
         .iter()
         .filter(|entry| entry.kind == ScannedEntryKind::Dir)
         .count();
@@ -749,7 +767,8 @@ pub fn observe_subtree_path(
     let operations = build_subtree_operations(
         &path_index,
         namespace_id,
-        &scanned_entries,
+        &scanned_subtree.entries,
+        &scanned_subtree.skipped_unsupported_paths,
         &relative_path,
         now_ms,
     )?;
@@ -760,6 +779,7 @@ pub fn observe_subtree_path(
         &relative_path,
         scanned_file_count,
         scanned_dir_count,
+        &scanned_subtree.skipped_unsupported_paths,
         &outcomes,
     ))
 }
@@ -767,21 +787,24 @@ pub fn observe_subtree_path(
 fn scan_subtree_entries(
     canonical_root: &Path,
     root_relative_path: &str,
-) -> Result<Vec<ScannedEntry>, ObserveSubtreeError> {
-    let mut entries = Vec::new();
-    scan_subtree_entries_recursive(canonical_root, root_relative_path, &mut entries)?;
-    Ok(entries)
+) -> Result<ScannedSubtree, ObserveSubtreeError> {
+    let mut subtree = ScannedSubtree {
+        entries: Vec::new(),
+        skipped_unsupported_paths: Vec::new(),
+    };
+    scan_subtree_entries_recursive(canonical_root, root_relative_path, &mut subtree)?;
+    Ok(subtree)
 }
 
 fn scan_subtree_entries_recursive(
     current_path: &Path,
     current_relative_path: &str,
-    entries: &mut Vec<ScannedEntry>,
+    subtree: &mut ScannedSubtree,
 ) -> Result<(), ObserveSubtreeError> {
     let metadata = fs::symlink_metadata(current_path)?;
     let file_type = metadata.file_type();
     if file_type.is_dir() {
-        entries.push(ScannedEntry {
+        subtree.entries.push(ScannedEntry {
             relative_path: current_relative_path.to_owned(),
             kind: ScannedEntryKind::Dir,
             content_digest: None,
@@ -802,13 +825,13 @@ fn scan_subtree_entries_recursive(
             } else {
                 format!("{current_relative_path}/{child_name}")
             };
-            scan_subtree_entries_recursive(&child_path, &child_relative_path, entries)?;
+            scan_subtree_entries_recursive(&child_path, &child_relative_path, subtree)?;
         }
         return Ok(());
     }
 
     if file_type.is_file() {
-        entries.push(ScannedEntry {
+        subtree.entries.push(ScannedEntry {
             relative_path: current_relative_path.to_owned(),
             kind: ScannedEntryKind::File,
             content_digest: Some(sha256_digest(&fs::read(current_path)?)),
@@ -816,15 +839,17 @@ fn scan_subtree_entries_recursive(
         return Ok(());
     }
 
-    Err(ObserveSubtreeError::UnsupportedFilesystemEntry {
-        path: current_path.display().to_string(),
-    })
+    subtree
+        .skipped_unsupported_paths
+        .push(current_relative_path.to_owned());
+    Ok(())
 }
 
 fn build_subtree_operations(
     path_index: &NamespacePathIndex,
     namespace_id: &NamespaceId,
     scanned_entries: &[ScannedEntry],
+    skipped_unsupported_paths: &[String],
     subtree_relative_path: &str,
     now_ms: u64,
 ) -> Result<Vec<SubtreeObservationOp>, ObserveSubtreeError> {
@@ -832,9 +857,18 @@ fn build_subtree_operations(
     let mut present_paths = BTreeSet::new();
     let mut unmatched_present_dirs = Vec::new();
     let mut unmatched_present_files = Vec::new();
+    let skipped_unsupported_roots = skipped_unsupported_paths
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut replacement_roots = Vec::new();
+    let mut replacement_root_paths = BTreeSet::new();
 
     for entry in scanned_entries {
         present_paths.insert(entry.relative_path.clone());
+        if is_descendant_of_any_root(&entry.relative_path, &replacement_root_paths) {
+            continue;
+        }
         let exact =
             classify_exact_path(path_index, namespace_id, &entry.relative_path).map_err(|_| {
                 ObserveSubtreeError::AmbiguousMatch {
@@ -846,10 +880,12 @@ fn build_subtree_operations(
         match exact {
             Some(PathMatch::Bound(row)) => {
                 if !matches_scanned_kind(row.inode_kind.clone(), entry.kind) {
-                    return Err(ObserveSubtreeError::KindMismatch {
-                        namespace_id: namespace_id.as_str().to_owned(),
+                    replacement_root_paths.insert(entry.relative_path.clone());
+                    replacement_roots.push(SamePathReplacementRoot {
                         relative_path: entry.relative_path.clone(),
+                        source: PathMatch::Bound(row),
                     });
+                    continue;
                 }
                 if row.inode_kind == InodeKind::File {
                     let (dirty, last_local_change_ms) = derive_exact_bound_file_observation_state(
@@ -871,14 +907,30 @@ fn build_subtree_operations(
                             last_local_change_ms,
                         },
                     });
+                } else if !row.exists_on_disk {
+                    operations.push(SubtreeObservationOp::ObserveBound {
+                        observed: ObservedBoundInode {
+                            namespace_id: namespace_id.clone(),
+                            inode_id: row.inode_id,
+                            inode_kind: row.inode_kind,
+                            content_digest: None,
+                            parent_inode_id: row.parent_inode_id,
+                            display_name: row.display_name,
+                            exists_on_disk: true,
+                            dirty: false,
+                            last_local_change_ms: now_ms,
+                        },
+                    });
                 }
             }
             Some(PathMatch::LocalOnly(row)) => {
                 if !matches_scanned_kind(row.inode_kind.clone(), entry.kind) {
-                    return Err(ObserveSubtreeError::KindMismatch {
-                        namespace_id: namespace_id.as_str().to_owned(),
+                    replacement_root_paths.insert(entry.relative_path.clone());
+                    replacement_roots.push(SamePathReplacementRoot {
                         relative_path: entry.relative_path.clone(),
+                        source: PathMatch::LocalOnly(row),
                     });
+                    continue;
                 }
                 let parent = path_index.local_only_parent_ref_for(&row).ok_or_else(|| {
                     ObserveSubtreeError::UntrackedParent {
@@ -933,6 +985,11 @@ fn build_subtree_operations(
         path_index.tracked_relative_paths_under_prefix(subtree_relative_path)
     {
         if present_paths.contains(&tracked_relative_path) {
+            continue;
+        }
+        if path_is_at_or_under_any_root(&tracked_relative_path, &replacement_root_paths)
+            || path_is_at_or_under_any_root(&tracked_relative_path, &skipped_unsupported_roots)
+        {
             continue;
         }
         if missing_roots
@@ -1012,6 +1069,10 @@ fn build_subtree_operations(
         .into_iter()
         .map(|source| (source.relative_path.clone(), source.source))
         .collect::<BTreeMap<_, _>>();
+
+    for replacement in &replacement_roots {
+        push_replacement_delete(&mut operations, namespace_id, replacement, now_ms);
+    }
 
     let mut new_local_only_dirs = BTreeSet::new();
     for target in &unmatched_present_dirs {
@@ -1096,15 +1157,31 @@ fn build_subtree_operations(
         }
     }
 
+    for replacement in &replacement_roots {
+        push_replacement_create_operations(
+            &mut operations,
+            path_index,
+            namespace_id,
+            scanned_entries,
+            &mut new_local_only_dirs,
+            replacement,
+            now_ms,
+        )?;
+    }
+
     let remaining_unmatched_present_files = unmatched_present_files
         .into_iter()
         .filter(|target| {
             !path_is_at_or_under_any_root(&target.relative_path, &paired_directory_target_roots)
+                && !path_is_at_or_under_any_root(&target.relative_path, &replacement_root_paths)
         })
         .collect::<Vec<_>>();
     let remaining_missing_tracked_files = missing_tracked_files
         .into_iter()
-        .filter(|source| !paired_directory_source_roots.contains(&source.relative_path))
+        .filter(|source| {
+            !paired_directory_source_roots.contains(&source.relative_path)
+                && !path_is_at_or_under_any_root(&source.relative_path, &replacement_root_paths)
+        })
         .collect::<Vec<_>>();
 
     let mut candidate_targets_by_source = BTreeMap::<String, Vec<String>>::new();
@@ -1257,6 +1334,11 @@ fn build_subtree_operations(
             continue;
         }
         if paired_source_to_target.contains_key(&missing_relative_path) {
+            continue;
+        }
+        if path_is_at_or_under_any_root(&missing_relative_path, &skipped_unsupported_roots)
+            || path_is_at_or_under_any_root(&missing_relative_path, &replacement_root_paths)
+        {
             continue;
         }
         if let Some(source) = missing_directory_sources.get(&missing_relative_path) {
@@ -1438,6 +1520,7 @@ fn summarize_observe_subtree(
     relative_path: &str,
     scanned_file_count: usize,
     scanned_dir_count: usize,
+    skipped_unsupported_paths: &[String],
     outcomes: &[SubtreeObservationOutcome],
 ) -> ObserveSubtreeReport {
     let mut report = ObserveSubtreeReport {
@@ -1446,6 +1529,8 @@ fn summarize_observe_subtree(
         scanned_file_count,
         scanned_dir_count,
         applied_operation_count: outcomes.len(),
+        skipped_unsupported_count: skipped_unsupported_paths.len(),
+        skipped_unsupported_paths: skipped_unsupported_paths.to_vec(),
         bound_observe_count: 0,
         local_only_observe_count: 0,
         paired_bound_move_count: 0,
@@ -1503,6 +1588,81 @@ fn summarize_observe_subtree(
     }
 
     report
+}
+
+fn push_replacement_delete(
+    operations: &mut Vec<SubtreeObservationOp>,
+    namespace_id: &NamespaceId,
+    replacement: &SamePathReplacementRoot,
+    now_ms: u64,
+) {
+    match &replacement.source {
+        PathMatch::Bound(row) => operations.push(SubtreeObservationOp::DeleteBound {
+            observed: ObservedBoundDelete {
+                namespace_id: namespace_id.clone(),
+                inode_id: row.inode_id,
+                inode_kind: row.inode_kind.clone(),
+                content_digest: row.content_digest.clone(),
+                parent_inode_id: row.parent_inode_id,
+                display_name: row.display_name.clone(),
+                last_local_change_ms: now_ms,
+            },
+        }),
+        PathMatch::LocalOnly(row) => operations.push(SubtreeObservationOp::DeleteLocalOnly {
+            client_file_id: row.client_file_id.clone(),
+        }),
+    }
+}
+
+fn push_replacement_create_operations(
+    operations: &mut Vec<SubtreeObservationOp>,
+    path_index: &NamespacePathIndex,
+    namespace_id: &NamespaceId,
+    scanned_entries: &[ScannedEntry],
+    new_local_only_dirs: &mut BTreeSet<String>,
+    replacement: &SamePathReplacementRoot,
+    now_ms: u64,
+) -> Result<(), ObserveSubtreeError> {
+    let replacement_entries = scanned_entries
+        .iter()
+        .filter(|entry| {
+            entry.relative_path == replacement.relative_path
+                || relative_path_is_under_prefix(&entry.relative_path, &replacement.relative_path)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for entry in replacement_entries {
+        let parent = resolve_subtree_destination_parent(
+            path_index,
+            namespace_id,
+            new_local_only_dirs,
+            &entry.relative_path,
+        )?;
+        let display_name = path_display_name(&entry.relative_path);
+        let inode_kind = match entry.kind {
+            ScannedEntryKind::File => InodeKind::File,
+            ScannedEntryKind::Dir => InodeKind::Dir,
+        };
+        operations.push(SubtreeObservationOp::ObserveLocalOnly {
+            observed: ObservedLocalOnlySubtreeInode {
+                relative_path: entry.relative_path.clone(),
+                namespace_id: namespace_id.clone(),
+                inode_kind,
+                parent: subtree_parent_ref_from_destination_parent(&parent),
+                display_name,
+                content_digest: entry.content_digest.clone(),
+                exists_on_disk: true,
+                dirty: true,
+                last_local_change_ms: now_ms,
+            },
+        });
+        if entry.kind == ScannedEntryKind::Dir {
+            new_local_only_dirs.insert(entry.relative_path);
+        }
+    }
+
+    Ok(())
 }
 
 fn subtree_parent_ref_from_existing(parent: LocalOnlyParentRef) -> SubtreeLocalOnlyParentRef {
@@ -1643,6 +1803,12 @@ fn path_is_at_or_under_any_root(relative_path: &str, roots: &BTreeSet<String>) -
     roots
         .iter()
         .any(|root| root == relative_path || relative_path_is_under_prefix(relative_path, root))
+}
+
+fn is_descendant_of_any_root(relative_path: &str, roots: &BTreeSet<String>) -> bool {
+    roots
+        .iter()
+        .any(|root| root != relative_path && relative_path_is_under_prefix(relative_path, root))
 }
 
 fn source_path_content_digest(source: &PathMatch) -> Option<&str> {
@@ -1817,6 +1983,17 @@ fn relative_absent_path_under_root(
 
 fn normalize_relative_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn path_display_name(relative_path: &str) -> String {
+    Path::new(relative_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn usize_is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 fn report_bound(

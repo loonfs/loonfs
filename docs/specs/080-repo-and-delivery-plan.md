@@ -127,6 +127,14 @@ Constraints for that shell:
   `loon-client` paths
 - recursive local subtree observation remains a supported client/library path first, and
   `xtask ops observe-subtree` is only a thin adapter over that `loon-client` path
+- `observe-subtree` must restore same-path bound-directory reappearance as the existing bound
+  inode, not as delete+create replacement
+- `observe-subtree` must treat same-path file↔directory changes as one atomic delete+create
+  replacement batch
+- unsupported descendant entries such as symlinks must be skipped and reported instead of aborting
+  the whole subtree scan
+- tracked paths at or under a skipped unsupported root must be excluded from delete inference in
+  that scan
 - any future watcher adapter must feed the generic `loon-client` event reducer rather than adding
   a second local observation path
 - `xtask ops sync-once` is intentionally single-step and executor-only

@@ -2,11 +2,17 @@ use loon_client::local_fs::{
     observe_local_path, observe_subtree_path, reduce_fs_event_batch, NormalizedFsEvent,
     NormalizedFsEventBatch, ReducedLocalObservationIntent,
 };
-use loon_client::state_db::{LocalFileStateRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow};
+use loon_client::state_db::{
+    LocalFileStateRow, ObservedBoundInode, ObservedLocalOnlySubtreeInode, RemoteFileStateRow,
+    SqliteStateDb, SubtreeLocalOnlyParentRef, SubtreeObservationOp, SubtreeObservationOutcome,
+    SyncAnchorRow,
+};
 use loon_testkit::tempdir::TestDir;
 use loon_types::{sha256_digest, ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 use serde::Deserialize;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 #[test]
 fn reducer_fixtures_cover_generic_filesystem_event_normalization() {
@@ -180,6 +186,292 @@ fn client_local_fs_observe_subtree_reobserve_after_idle_keeps_bound_files_clean(
             None
         );
     }
+}
+
+#[test]
+fn client_local_fs_observe_subtree_recreated_bound_directory_restores_parent_usability() {
+    let temp_dir = TestDir::new("client-local-fs-observe-subtree-restored-dir");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open db");
+    seed_bound_root_directory(&mut db);
+    seed_bound_directory(&mut db, InodeId(2), "docs", Some(InodeId(1)));
+    db.observe_bound_inode_and_plan(
+        &ObservedBoundInode {
+            namespace_id: demo_namespace(),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "docs".to_owned(),
+            exists_on_disk: false,
+            dirty: true,
+            last_local_change_ms: 1_500,
+        },
+        1_500,
+    )
+    .expect("mark bound directory deleted");
+
+    fs::create_dir_all(mirror_root.join("docs")).expect("recreate docs dir");
+    fs::write(mirror_root.join("docs/note.txt"), b"note v1\n").expect("write child file");
+
+    let report = observe_subtree_path(
+        &db_path,
+        &demo_namespace(),
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        2_000,
+    )
+    .expect("observe subtree path");
+
+    assert_eq!(report.bound_observe_count, 1);
+    assert_eq!(report.local_only_observe_count, 1);
+    assert_eq!(report.planned_decision_counts.get("no_op"), Some(&1));
+    assert_eq!(
+        report.planned_decision_counts.get("upload_local_create"),
+        Some(&1)
+    );
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen db");
+    let docs_views = db
+        .load_file_sync_views(&demo_namespace(), InodeId(2))
+        .expect("load docs views");
+    let docs_local = docs_views.local.expect("restored local docs row");
+    assert!(docs_local.exists_on_disk);
+    assert!(!docs_local.dirty);
+    assert_eq!(
+        db.load_planned_action(&demo_namespace(), InodeId(2))
+            .expect("load planned action"),
+        None
+    );
+}
+
+#[test]
+fn client_local_fs_observe_subtree_replaces_bound_file_with_directory() {
+    let temp_dir = TestDir::new("client-local-fs-observe-subtree-file-to-dir");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open db");
+    seed_bound_root_directory(&mut db);
+    let note_digest = sha256_digest(b"note v1\n");
+    seed_bound_file(&mut db, InodeId(2), "notes", InodeId(1), &note_digest);
+
+    fs::create_dir_all(mirror_root.join("notes")).expect("create replacement dir");
+    fs::write(mirror_root.join("notes/child.txt"), b"child v1\n").expect("write child file");
+
+    let report = observe_subtree_path(
+        &db_path,
+        &demo_namespace(),
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        2_000,
+    )
+    .expect("observe subtree path");
+
+    assert_eq!(report.bound_delete_count, 1);
+    assert_eq!(report.local_only_observe_count, 2);
+    assert_eq!(report.planned_decision_counts.get("delete_file"), Some(&1));
+    assert_eq!(
+        report.planned_decision_counts.get("create_remote_dir"),
+        Some(&1)
+    );
+    assert_eq!(report.planned_decision_counts.get("no_op"), Some(&1));
+}
+
+#[test]
+fn client_local_fs_observe_subtree_replaces_bound_directory_with_file() {
+    let temp_dir = TestDir::new("client-local-fs-observe-subtree-dir-to-file");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open db");
+    seed_bound_root_directory(&mut db);
+    seed_bound_directory(&mut db, InodeId(2), "notes", Some(InodeId(1)));
+    let child_digest = sha256_digest(b"child v1\n");
+    seed_bound_file(&mut db, InodeId(3), "child.txt", InodeId(2), &child_digest);
+
+    fs::write(mirror_root.join("notes"), b"replacement file\n").expect("write replacement file");
+
+    let report = observe_subtree_path(
+        &db_path,
+        &demo_namespace(),
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        2_000,
+    )
+    .expect("observe subtree path");
+
+    assert_eq!(report.bound_delete_count, 1);
+    assert_eq!(report.local_only_observe_count, 1);
+    assert_eq!(
+        report.planned_decision_counts.get("delete_subtree"),
+        Some(&1)
+    );
+    assert_eq!(
+        report.planned_decision_counts.get("upload_local_create"),
+        Some(&1)
+    );
+}
+
+#[test]
+fn client_local_fs_observe_subtree_local_only_kind_change_replaces_temp_identity() {
+    let temp_dir = TestDir::new("client-local-fs-observe-subtree-local-only-replacement");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open db");
+    seed_bound_root_directory(&mut db);
+    let created = db
+        .observe_subtree_and_plan(
+            &[SubtreeObservationOp::ObserveLocalOnly {
+                observed: ObservedLocalOnlySubtreeInode {
+                    relative_path: "draft".to_owned(),
+                    namespace_id: demo_namespace(),
+                    inode_kind: InodeKind::File,
+                    parent: SubtreeLocalOnlyParentRef::Bound {
+                        parent_inode_id: InodeId(1),
+                    },
+                    display_name: "draft".to_owned(),
+                    content_digest: Some("sha256:draft-v1".to_owned()),
+                    exists_on_disk: true,
+                    dirty: true,
+                    last_local_change_ms: 1_000,
+                },
+            }],
+            1_000,
+        )
+        .expect("seed local-only file");
+    let original_id = match &created[0] {
+        SubtreeObservationOutcome::ObservedLocalOnly { result, .. } => {
+            result.local_only.client_file_id.clone()
+        }
+        other => panic!("unexpected local-only seed outcome: {other:?}"),
+    };
+
+    fs::create_dir_all(mirror_root.join("draft")).expect("create replacement dir");
+    fs::write(mirror_root.join("draft/note.txt"), b"note v1\n").expect("write child file");
+
+    let report = observe_subtree_path(
+        &db_path,
+        &demo_namespace(),
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        2_000,
+    )
+    .expect("observe subtree path");
+
+    assert_eq!(report.local_only_delete_count, 1);
+    assert_eq!(report.local_only_observe_count, 2);
+    assert_eq!(
+        report.planned_decision_counts.get("create_remote_dir"),
+        Some(&1)
+    );
+    assert_eq!(report.planned_decision_counts.get("no_op"), Some(&2));
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen db");
+    assert_eq!(
+        db.load_local_only_file(&original_id)
+            .expect("load original local-only file"),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn client_local_fs_observe_subtree_skips_untracked_symlink_and_processes_siblings() {
+    let temp_dir = TestDir::new("client-local-fs-observe-subtree-skipped-symlink");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open db");
+    seed_bound_root_directory(&mut db);
+
+    fs::write(mirror_root.join("alpha.txt"), b"alpha v1\n").expect("write regular sibling");
+    let symlink_target = temp_dir.path().join("outside-target.txt");
+    fs::write(&symlink_target, b"target\n").expect("write symlink target");
+    symlink(&symlink_target, mirror_root.join("link.txt")).expect("create symlink");
+
+    let report = observe_subtree_path(
+        &db_path,
+        &demo_namespace(),
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        2_000,
+    )
+    .expect("observe subtree path");
+
+    assert_eq!(report.skipped_unsupported_count, 1);
+    assert_eq!(
+        report.skipped_unsupported_paths,
+        vec!["link.txt".to_owned()]
+    );
+    assert_eq!(report.local_only_observe_count, 1);
+    assert_eq!(
+        report.planned_decision_counts.get("upload_local_create"),
+        Some(&1)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn client_local_fs_observe_subtree_skipped_tracked_symlink_root_suppresses_delete_inference() {
+    let temp_dir = TestDir::new("client-local-fs-observe-subtree-tracked-symlink");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open db");
+    seed_bound_root_directory(&mut db);
+    let link_digest = sha256_digest(b"link v1\n");
+    seed_bound_file(&mut db, InodeId(2), "link.txt", InodeId(1), &link_digest);
+
+    fs::write(mirror_root.join("fresh.txt"), b"fresh v1\n").expect("write regular sibling");
+    let symlink_target = temp_dir.path().join("outside-target.txt");
+    fs::write(&symlink_target, b"target\n").expect("write symlink target");
+    symlink(&symlink_target, mirror_root.join("link.txt")).expect("create symlink");
+
+    let report = observe_subtree_path(
+        &db_path,
+        &demo_namespace(),
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        2_000,
+    )
+    .expect("observe subtree path");
+
+    assert_eq!(report.skipped_unsupported_count, 1);
+    assert_eq!(
+        report.skipped_unsupported_paths,
+        vec!["link.txt".to_owned()]
+    );
+    assert_eq!(report.bound_delete_count, 0);
+    assert_eq!(report.local_only_observe_count, 1);
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen db");
+    let link_views = db
+        .load_file_sync_views(&demo_namespace(), InodeId(2))
+        .expect("load link views");
+    let link_local = link_views.local.expect("tracked local file should remain");
+    assert!(link_local.exists_on_disk);
+    assert!(!link_local.dirty);
+    assert_eq!(
+        db.load_planned_action(&demo_namespace(), InodeId(2))
+            .expect("load planned action"),
+        None
+    );
 }
 
 fn run_reducer_fixture(relative_path: &str) {

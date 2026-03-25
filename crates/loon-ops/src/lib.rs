@@ -1589,6 +1589,80 @@ lease_duration_ms = 60000
     }
 
     #[test]
+    fn observe_subtree_renders_same_path_bound_file_replacement_report() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree-bound-file-replacement");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        let file_digest = sha256_digest(b"note v1\n");
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "notes",
+            &file_digest,
+            &format!("manifest:{file_digest}"),
+        );
+
+        fs::create_dir_all(temp_dir.join("mirror/notes")).expect("create replacement directory");
+        fs::write(temp_dir.join("mirror/notes/child.txt"), b"child v1\n")
+            .expect("write replacement child file");
+
+        let rendered = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_same_path_bound_file_replacement.txt"
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observe_subtree_renders_skipped_unsupported_entry_report() {
+        let temp_dir = unique_temp_dir("ops-observe-subtree-skipped-unsupported");
+        let config_path = write_local_fs_config(&temp_dir);
+        let db_path = temp_dir.join("client.sqlite3");
+        let mut db = SqliteStateDb::open(&db_path).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+
+        fs::write(temp_dir.join("mirror/alpha.txt"), b"alpha v1\n").expect("write regular file");
+        let symlink_target = temp_dir.join("outside-target.txt");
+        fs::write(&symlink_target, b"target\n").expect("write symlink target");
+        std::os::unix::fs::symlink(&symlink_target, temp_dir.join("mirror/link.txt"))
+            .expect("create symlink");
+
+        let rendered = run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("run observe-subtree");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-observe-subtree/ops_observe_subtree_skipped_unsupported_entry.txt"
+            )
+        );
+    }
+
+    #[test]
     fn observe_subtree_rejects_ambiguous_same_digest_file_pairing() {
         let temp_dir = unique_temp_dir("ops-observe-subtree-ambiguous-move");
         let config_path = write_local_fs_config(&temp_dir);

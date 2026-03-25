@@ -106,10 +106,18 @@ Required rules:
 - `observe-subtree` may infer:
   - unique digest-equal file moves
   - unique exact-subtree directory moves
+- exact same-path bound-directory reappearance restores the existing bound inode instead of
+  degrading to delete+create
+- exact same-path file↔directory changes are treated as atomic delete+create replacement, not a
+  tracked-kind hard error
 - directory inference remains strict:
   - rooted subtree fingerprints must match exactly
   - descendant add/delete/edit blocks pairing
   - ambiguity fails closed
+- unsupported descendant entries such as symlinks are skipped and reported:
+  - they do not abort the whole subtree scan
+  - tracked paths at or under a skipped unsupported root are excluded from delete inference in that
+    scan
 - explicit `observe-move` remains the override for non-exact refactors
 - `sync-once` is executor-only and progresses at most one real scheduler step
 - `sync-until-idle` is only a loop over the real `sync-once` path

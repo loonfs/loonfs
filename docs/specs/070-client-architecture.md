@@ -379,6 +379,16 @@ Rules:
   - `local_state`
   - `local_only_state`
 - remote-only rows are not candidates for subtree local delete detection
+- exact same-path bound-directory reappearance is restorative, not replacement:
+  - if a bound directory was previously observed missing and later reappears at the same tracked
+    path before sync, subtree observation restores that bound local row and replans immediately
+  - the existing bound inode identity is preserved
+- exact same-path kind change is replacement, not restoration:
+  - file-to-directory and directory-to-file replacements at the same tracked path become one atomic
+    delete-plus-create subtree batch
+  - the old tracked identity is deleted
+  - the replacement starts as a new local-only identity
+  - replacement roots are not candidates for move pairing
 - subtree scan may infer file moves when all of the following are true:
   - one missing tracked file and one unmatched present file form a unique candidate pair
   - the source and target content digests match exactly
@@ -404,6 +414,11 @@ Rules:
 - move-plus-edit remains out of scope:
   - subtree scan does not infer rename when the content digest changed
   - non-qualifying candidates continue to behave as create plus delete
+- unsupported descendant filesystem entries are skipped and reported:
+  - they do not abort the whole scan
+  - they contribute skipped-entry counts and skipped relative paths in the subtree report
+  - any tracked path at or under a skipped unsupported root is excluded from delete inference in
+    that scan
 
 Why this rule exists:
 
@@ -417,6 +432,7 @@ Failure modes prevented:
 - recreating nested unsynced files under duplicate temporary identities during one recursive scan
 - inferring a rename from unrelated create/delete pairs
 - silently guessing between multiple same-digest move candidates
+- turning one unsupported entry into destructive delete inference for the tracked subtree beneath it
 
 ## Generic filesystem event normalization
 

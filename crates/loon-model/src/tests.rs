@@ -25,7 +25,10 @@ use crate::client::{
     recursive_subtree_missing_bound_file_plans_delete_file,
     recursive_subtree_missing_local_only_directory_clears_subtree,
     recursive_subtree_observation_updates_bound_edit_and_local_only_create,
+    recursive_subtree_recreated_bound_directory_restores_bound_usability,
     recursive_subtree_repeat_reuses_local_only_identity,
+    recursive_subtree_same_path_replacement_becomes_delete_plus_create,
+    recursive_subtree_skipped_unsupported_root_blocks_delete_inference,
     recursive_subtree_unique_bound_directory_move_is_paired,
     recursive_subtree_unique_bound_file_move_is_paired,
     recursive_subtree_unique_local_only_directory_move_preserves_identity,
@@ -427,6 +430,50 @@ fn model_recursive_subtree_directory_move_with_descendant_drift_does_not_pair() 
 fn model_recursive_subtree_changed_digest_file_does_not_pair() {
     assert!(recursive_subtree_changed_digest_file_does_not_pair(0, 0));
     assert!(!recursive_subtree_changed_digest_file_does_not_pair(0, 1));
+}
+
+#[test]
+fn model_recursive_subtree_recreated_bound_directory_restores_bound_usability() {
+    assert!(
+        recursive_subtree_recreated_bound_directory_restores_bound_usability(
+            "no_op",
+            "upload_local_create"
+        )
+    );
+    assert!(
+        !recursive_subtree_recreated_bound_directory_restores_bound_usability(
+            "delete_subtree",
+            "upload_local_create"
+        )
+    );
+}
+
+#[test]
+fn model_recursive_subtree_same_path_replacement_becomes_delete_plus_create() {
+    assert!(
+        recursive_subtree_same_path_replacement_becomes_delete_plus_create(
+            "delete_file",
+            "create_remote_dir"
+        )
+    );
+    assert!(
+        recursive_subtree_same_path_replacement_becomes_delete_plus_create(
+            "delete_subtree",
+            "upload_local_create"
+        )
+    );
+    assert!(
+        !recursive_subtree_same_path_replacement_becomes_delete_plus_create(
+            "rename",
+            "upload_local_create"
+        )
+    );
+}
+
+#[test]
+fn model_recursive_subtree_skipped_unsupported_root_blocks_delete_inference() {
+    assert!(recursive_subtree_skipped_unsupported_root_blocks_delete_inference(1, 0));
+    assert!(!recursive_subtree_skipped_unsupported_root_blocks_delete_inference(1, 1));
 }
 
 #[test]

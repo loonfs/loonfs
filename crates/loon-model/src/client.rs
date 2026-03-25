@@ -253,6 +253,34 @@ pub fn recursive_subtree_changed_digest_file_does_not_pair(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_recreated_bound_directory_restores_bound_usability(
+    parent_planned_decision: &str,
+    child_planned_decision: &str,
+) -> bool {
+    parent_planned_decision == "no_op" && child_planned_decision == "upload_local_create"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_same_path_replacement_becomes_delete_plus_create(
+    delete_planned_decision: &str,
+    replacement_planned_decision: &str,
+) -> bool {
+    matches!(delete_planned_decision, "delete_file" | "delete_subtree")
+        && matches!(
+            replacement_planned_decision,
+            "upload_local_create" | "create_remote_dir"
+        )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn recursive_subtree_skipped_unsupported_root_blocks_delete_inference(
+    skipped_unsupported_count: usize,
+    bound_delete_count: usize,
+) -> bool {
+    skipped_unsupported_count > 0 && bound_delete_count == 0
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn subtree_observation_batch_rollback_is_atomic<T>(
     before_failed_batch: &T,
     after_failed_batch: &T,
