@@ -1341,7 +1341,15 @@ Rules:
     `decision not in {upload_local_edit, download_remote_edit, materialize_remote_dir}`
 - the tick must load at most one candidate row from each scheduler bucket
 - bucket priority is strict:
-  - `local_only_create` always wins over `executable_inode_action`
+  - `local_only_create` normally wins over `executable_inode_action`
+  - one narrow exact-path replacement guard is allowed:
+    when the selected `local_only_create` targets a path still occupied by one unique bound inode
+    whose already planned action would vacate that exact path, the tick must run that bound action
+    first even though it would otherwise remain in the inode-action queue
+  - the vacating bound action may only be one of:
+    `delete_file`, `delete_subtree`, or `rename`
+  - this guard is exact-path only; it must not widen into subtree-wide or prefix-wide path
+    heuristics
   - `executable_inode_action` always wins over `deferred_inode_action`
   - `created_at_ms` is only a tie-break inside one bucket, not across different buckets
 - deterministic row order inside each bucket must be:
@@ -1373,6 +1381,12 @@ Why this rule exists:
 - we should not fake support for inode-keyed conflict actions before their executors exist
 - bucketed selection plus deterministic intra-bucket ordering keeps restart behavior and tests
   reproducible
+- the exact-path replacement guard lets same-path file↔directory replacements observed through
+  `observe-subtree` sync safely without inventing a second planner wait-state or persistent
+  scheduler marker
+- this exception is intentionally narrow; if more collision or dependency cases appear, the next
+  step is to move this dependency into planner-visible waiting state rather than adding more
+  scheduler-only overrides
 
 Failure modes prevented:
 
@@ -1381,6 +1395,8 @@ Failure modes prevented:
 - a partial implementation pretending it executed an inode-keyed action when it only selected it
 - a bound-file edit staying permanently stuck in `planned_actions` after the upload and replace
   path already exists
+- a same-path bound replacement local-only create racing ahead of the bound delete or rename that
+  must vacate the path first
 
 ## Bind-after-publish loop
 

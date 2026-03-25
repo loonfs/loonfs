@@ -281,6 +281,18 @@ pub fn recursive_subtree_skipped_unsupported_root_blocks_delete_inference(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn same_path_replacement_guard_prefers_bound_vacate(
+    selected_action_kind: &str,
+    selected_bound_decision: &str,
+) -> bool {
+    selected_action_kind == "deferred_inode_action"
+        && matches!(
+            selected_bound_decision,
+            "delete_file" | "delete_subtree" | "rename"
+        )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn subtree_observation_batch_rollback_is_atomic<T>(
     before_failed_batch: &T,
     after_failed_batch: &T,

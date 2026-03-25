@@ -131,6 +131,9 @@ Constraints for that shell:
   inode, not as delete+create replacement
 - `observe-subtree` must treat same-path file↔directory changes as one atomic delete+create
   replacement batch
+- the real scheduler must preserve that replacement semantics by running one unique bound
+  `delete_file`, `delete_subtree`, or `rename` first when a planned local-only create targets that
+  exact still-occupied path
 - unsupported descendant entries such as symlinks must be skipped and reported instead of aborting
   the whole subtree scan
 - tracked paths at or under a skipped unsupported root must be excluded from delete inference in

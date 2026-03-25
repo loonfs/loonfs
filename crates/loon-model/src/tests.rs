@@ -33,7 +33,8 @@ use crate::client::{
     recursive_subtree_unique_bound_file_move_is_paired,
     recursive_subtree_unique_local_only_directory_move_preserves_identity,
     recursive_subtree_unique_local_only_file_move_preserves_identity,
-    repeated_local_only_observation_reuses_identity, subtree_observation_batch_rollback_is_atomic,
+    repeated_local_only_observation_reuses_identity,
+    same_path_replacement_guard_prefers_bound_vacate, subtree_observation_batch_rollback_is_atomic,
     sync_until_idle_fails_on_max_steps, sync_until_idle_stops_on_no_work,
 };
 use crate::namespace::ModelLeaseAcquireError;
@@ -474,6 +475,22 @@ fn model_recursive_subtree_same_path_replacement_becomes_delete_plus_create() {
 fn model_recursive_subtree_skipped_unsupported_root_blocks_delete_inference() {
     assert!(recursive_subtree_skipped_unsupported_root_blocks_delete_inference(1, 0));
     assert!(!recursive_subtree_skipped_unsupported_root_blocks_delete_inference(1, 1));
+}
+
+#[test]
+fn model_same_path_replacement_guard_prefers_bound_vacate() {
+    assert!(same_path_replacement_guard_prefers_bound_vacate(
+        "deferred_inode_action",
+        "delete_file"
+    ));
+    assert!(same_path_replacement_guard_prefers_bound_vacate(
+        "deferred_inode_action",
+        "delete_subtree"
+    ));
+    assert!(!same_path_replacement_guard_prefers_bound_vacate(
+        "local_only_create",
+        "delete_file"
+    ));
 }
 
 #[test]

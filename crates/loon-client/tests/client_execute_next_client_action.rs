@@ -5,7 +5,8 @@ use loon_client::executor::{
     execute_next_client_action, ExecutedNextLocalOnlyCreate, NextClientAction,
     UploadLocalCreateExecution,
 };
-use loon_client::planner::PlannedActionRecord;
+use loon_client::local_fs::{observe_subtree_path, NamespacePathIndex};
+use loon_client::planner::{PlannedActionRecord, PlannerDecision};
 use loon_client::state_db::{
     BoundLocalOnlyFile, ClientFileId, LocalFileStateRow, LocalOnlyFileStateRow,
     LocalOnlyPlannedActionRow, PlannedActionRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
@@ -16,8 +17,9 @@ use loon_objectstore::ObjectStore;
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
 use loon_testkit::scenario::Scenario;
 use loon_types::{
-    ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind, HeadState,
-    HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId,
+    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind,
+    HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId,
+    RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -382,6 +384,343 @@ fn execute_next_client_action_prefers_local_only_create_on_equal_created_at_ms()
     );
 }
 
+#[test]
+fn execute_next_client_action_prefers_bound_delete_file_for_same_path_replacement() {
+    let temp_dir = TestDir::new("client-execute-next-client-action-replacement-file");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let namespace_id = demo_namespace();
+    seed_head_and_lease(
+        &store,
+        &demo_head(namespace_id.clone()),
+        &demo_lease(namespace_id.clone()),
+    );
+
+    let replacement_id = ClientFileId::from("tmp:demo:00000000000000000001");
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    seed_bound_root_directory_for_namespace(&mut db, &namespace_id);
+    seed_bound_file_for_namespace(
+        &mut db,
+        &namespace_id,
+        InodeId(2),
+        "notes",
+        InodeId(1),
+        "sha256:notes-v1",
+    );
+    db.planner_transaction("seed-same-path-file-replacement", |tx| {
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(2),
+            decision: PlannerDecision::DeleteFile.as_str().to_owned(),
+            reason: "local_observed_without_anchor".to_owned(),
+            created_at_ms: 1_700_000_100_000,
+        })?;
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: replacement_id.clone(),
+            namespace_id: namespace_id.clone(),
+            inode_kind: InodeKind::Dir,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "notes".to_owned(),
+            content_digest: None,
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_101_000,
+        })?;
+        tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+            client_file_id: replacement_id.clone(),
+            namespace_id: namespace_id.clone(),
+            decision: PlannerDecision::CreateRemoteDir.as_str().to_owned(),
+            reason: "local_only_directory_without_remote_identity".to_owned(),
+            created_at_ms: 1_700_000_102_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed same-path file replacement state");
+
+    let executed = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        &ExecuteNextClientActionAction {
+            source_path_relative: None,
+            uploaded_at_ms: 1_700_000_103_000,
+            created_at_ms: 1_700_000_104_000,
+            writer_id: "writer-a".to_owned(),
+            writer_version: "loon-server-test".to_owned(),
+            now_ms: 1_700_000_105_000,
+        },
+    )
+    .expect("one action should be scheduled");
+
+    match executed {
+        NextClientAction::ExecutedDispatchInodeMutation(executed) => {
+            assert_eq!(executed.decision, PlannerDecision::DeleteFile);
+        }
+        other => panic!("expected bound delete_file to win same-path replacement, got {other:?}"),
+    }
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen client db");
+    assert_eq!(
+        db.load_planned_local_only_action(&replacement_id)
+            .expect("load retained replacement planned action")
+            .map(|row| row.decision),
+        Some(PlannerDecision::CreateRemoteDir.as_str().to_owned())
+    );
+}
+
+#[test]
+fn execute_next_client_action_prefers_bound_delete_subtree_for_same_path_replacement() {
+    let temp_dir = TestDir::new("client-execute-next-client-action-replacement-dir");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let namespace_id = demo_namespace();
+    seed_head_and_lease(
+        &store,
+        &demo_head(namespace_id.clone()),
+        &demo_lease(namespace_id.clone()),
+    );
+
+    let replacement_id = ClientFileId::from("tmp:demo:00000000000000000001");
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    seed_bound_root_directory_for_namespace(&mut db, &namespace_id);
+    seed_bound_directory_for_namespace(
+        &mut db,
+        &namespace_id,
+        InodeId(2),
+        "notes",
+        Some(InodeId(1)),
+    );
+    db.planner_transaction("seed-same-path-dir-replacement", |tx| {
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(2),
+            decision: PlannerDecision::DeleteSubtree.as_str().to_owned(),
+            reason: "local_observed_without_anchor".to_owned(),
+            created_at_ms: 1_700_000_200_000,
+        })?;
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: replacement_id.clone(),
+            namespace_id: namespace_id.clone(),
+            inode_kind: InodeKind::File,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "notes".to_owned(),
+            content_digest: Some("sha256:replacement-v1".to_owned()),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_201_000,
+        })?;
+        tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+            client_file_id: replacement_id.clone(),
+            namespace_id: namespace_id.clone(),
+            decision: PlannerDecision::UploadLocalCreate.as_str().to_owned(),
+            reason: "local_only_file_without_remote_identity".to_owned(),
+            created_at_ms: 1_700_000_202_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed same-path dir replacement state");
+
+    let executed = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        &ExecuteNextClientActionAction {
+            source_path_relative: None,
+            uploaded_at_ms: 1_700_000_203_000,
+            created_at_ms: 1_700_000_204_000,
+            writer_id: "writer-a".to_owned(),
+            writer_version: "loon-server-test".to_owned(),
+            now_ms: 1_700_000_205_000,
+        },
+    )
+    .expect("one action should be scheduled");
+
+    match executed {
+        NextClientAction::ExecutedDispatchInodeMutation(executed) => {
+            assert_eq!(executed.decision, PlannerDecision::DeleteSubtree);
+        }
+        other => {
+            panic!("expected bound delete_subtree to win same-path replacement, got {other:?}")
+        }
+    }
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen client db");
+    assert_eq!(
+        db.load_planned_local_only_action(&replacement_id)
+            .expect("load retained replacement planned action")
+            .map(|row| row.decision),
+        Some(PlannerDecision::UploadLocalCreate.as_str().to_owned())
+    );
+}
+
+#[test]
+fn execute_next_client_action_bound_file_to_dir_replacement_reaches_idle() {
+    let temp_dir = TestDir::new("client-execute-next-client-action-file-to-dir-idle");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let namespace_id = demo_namespace();
+    seed_head_and_lease(
+        &store,
+        &demo_head(namespace_id.clone()),
+        &demo_lease(namespace_id.clone()),
+    );
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    seed_bound_root_directory_for_namespace(&mut db, &namespace_id);
+    seed_bound_file_for_namespace(
+        &mut db,
+        &namespace_id,
+        InodeId(2),
+        "notes",
+        InodeId(1),
+        "sha256:notes-v1",
+    );
+
+    fs::create_dir_all(mirror_root.join("notes")).expect("create replacement directory");
+    observe_subtree_path(
+        &db_path,
+        &namespace_id,
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        1_700_000_300_000,
+    )
+    .expect("observe subtree replacement");
+
+    let executed = run_execute_next_until_idle(
+        &db_path,
+        &store,
+        &mirror_root,
+        &namespace_id,
+        "writer-a",
+        "loon-server-test",
+        1_700_000_301_000,
+        8,
+    );
+
+    assert_eq!(executed.len(), 2, "expected delete then create directory");
+    assert!(matches!(
+        executed.first(),
+        Some(NextClientAction::ExecutedDispatchInodeMutation(result))
+            if result.decision == PlannerDecision::DeleteFile
+    ));
+    assert!(matches!(
+        executed.get(1),
+        Some(NextClientAction::ExecutedLocalOnlyCreate(_))
+    ));
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen client state DB");
+    let summary = db
+        .load_namespace_state_summary(&namespace_id)
+        .expect("load namespace summary");
+    let parent_links = db
+        .load_local_only_parent_links_for_namespace(&namespace_id)
+        .expect("load parent links");
+    let path_index = NamespacePathIndex::build(&summary, &parent_links);
+    assert!(path_index.bound_file_matches("notes").is_empty());
+    assert_eq!(path_index.bound_dir_matches("notes").len(), 1);
+    assert!(summary.local_only_state.is_empty());
+    assert!(summary.local_only_planned_actions.is_empty());
+}
+
+#[test]
+fn execute_next_client_action_bound_dir_to_file_replacement_reaches_idle() {
+    let temp_dir = TestDir::new("client-execute-next-client-action-dir-to-file-idle");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let namespace_id = demo_namespace();
+    seed_head_and_lease(
+        &store,
+        &demo_head(namespace_id.clone()),
+        &demo_lease(namespace_id.clone()),
+    );
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    seed_bound_root_directory_for_namespace(&mut db, &namespace_id);
+    seed_bound_directory_for_namespace(
+        &mut db,
+        &namespace_id,
+        InodeId(2),
+        "notes",
+        Some(InodeId(1)),
+    );
+    seed_bound_file_for_namespace(
+        &mut db,
+        &namespace_id,
+        InodeId(3),
+        "todo.txt",
+        InodeId(2),
+        "sha256:todo-v1",
+    );
+
+    fs::write(mirror_root.join("notes"), b"replacement file\n").expect("write replacement file");
+    observe_subtree_path(
+        &db_path,
+        &namespace_id,
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        1_700_000_400_000,
+    )
+    .expect("observe subtree replacement");
+
+    let executed = run_execute_next_until_idle(
+        &db_path,
+        &store,
+        &mirror_root,
+        &namespace_id,
+        "writer-a",
+        "loon-server-test",
+        1_700_000_401_000,
+        8,
+    );
+
+    assert_eq!(
+        executed.len(),
+        2,
+        "expected delete subtree then create file"
+    );
+    assert!(matches!(
+        executed.first(),
+        Some(NextClientAction::ExecutedDispatchInodeMutation(result))
+            if result.decision == PlannerDecision::DeleteSubtree
+    ));
+    assert!(matches!(
+        executed.get(1),
+        Some(NextClientAction::ExecutedLocalOnlyCreate(_))
+    ));
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen client state DB");
+    let summary = db
+        .load_namespace_state_summary(&namespace_id)
+        .expect("load namespace summary");
+    let parent_links = db
+        .load_local_only_parent_links_for_namespace(&namespace_id)
+        .expect("load parent links");
+    let path_index = NamespacePathIndex::build(&summary, &parent_links);
+    assert!(path_index.bound_dir_matches("notes").is_empty());
+    assert_eq!(path_index.bound_file_matches("notes").len(), 1);
+    assert!(path_index.bound_file_matches("notes/todo.txt").is_empty());
+    assert!(summary.local_only_state.is_empty());
+    assert!(summary.local_only_planned_actions.is_empty());
+}
+
 fn run_execute_next_client_action(
     db_path: &Path,
     store: &LocalFsStore,
@@ -414,6 +753,78 @@ fn run_execute_next_client_action(
         },
     )
     .expect("execute next client action")
+}
+
+fn run_execute_next_until_idle(
+    db_path: &Path,
+    store: &LocalFsStore,
+    mirror_root: &Path,
+    namespace_id: &NamespaceId,
+    writer_id: &str,
+    writer_version: &str,
+    start_now_ms: u64,
+    max_steps: usize,
+) -> Vec<NextClientAction> {
+    let mut executed = Vec::new();
+    for step in 0..max_steps {
+        let step_ms = start_now_ms + (step as u64 * 1_000);
+        let mut db = SqliteStateDb::open(db_path).expect("open client state DB for loop step");
+        let summary = db
+            .load_namespace_state_summary(namespace_id)
+            .expect("load namespace summary for loop step");
+        let parent_links = db
+            .load_local_only_parent_links_for_namespace(namespace_id)
+            .expect("load parent links for loop step");
+        let path_index = NamespacePathIndex::build(&summary, &parent_links);
+        let local_only_paths = path_index.clone();
+        let current_paths = path_index.clone();
+        let target_paths = path_index;
+
+        let next = execute_next_client_action(
+            &mut db,
+            store,
+            |client_file_id| {
+                local_only_paths
+                    .resolve_local_only_source_relative_path(client_file_id)
+                    .map(|relative_path| mirror_root.join(relative_path))
+            },
+            |_namespace_id, inode_id| {
+                current_paths
+                    .resolve_current_inode_relative_path(inode_id)
+                    .map(|relative_path| mirror_root.join(relative_path))
+            },
+            |_namespace_id, inode_id, parent_inode_id, display_name| {
+                target_paths
+                    .resolve_target_inode_relative_path(inode_id, parent_inode_id, display_name)
+                    .map(|relative_path| mirror_root.join(relative_path))
+            },
+            step_ms,
+            step_ms + 1,
+            |request| {
+                support::seed_server_basis_for_request(store, request, writer_version);
+                execute_client_mutation(
+                    store,
+                    request,
+                    &ClientMutationExecutionParams {
+                        writer_id: writer_id.to_owned(),
+                        writer_version: writer_version.to_owned(),
+                        now_ms: step_ms + 2,
+                        lease_duration_ms: 60_000,
+                    },
+                )
+                .map(|executed| executed.response)
+                .map_err(|err| err.to_string())
+            },
+        )
+        .expect("execute next client action in loop");
+
+        match next {
+            Some(next) => executed.push(next),
+            None => return executed,
+        }
+    }
+
+    panic!("client did not reach idle within {max_steps} steps");
 }
 
 #[derive(Debug, Deserialize)]
@@ -664,6 +1075,166 @@ fn seed_head_and_lease(store: &LocalFsStore, head: &HeadState, lease: &LeaseStat
     store
         .put_if_absent(&namespace_lease(lease.namespace_id.as_str()), &lease_bytes)
         .expect("seed lease object");
+}
+
+fn seed_bound_root_directory_for_namespace(db: &mut SqliteStateDb, namespace_id: &NamespaceId) {
+    db.planner_transaction("seed-bound-root-directory", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(1),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            synced_seq: ChangeSeq(1),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+        })?;
+        Ok(())
+    })
+    .expect("seed bound root directory");
+}
+
+fn seed_bound_file_for_namespace(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    display_name: &str,
+    parent_inode_id: InodeId,
+    content_digest: &str,
+) {
+    db.planner_transaction("seed-bound-file", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(1),
+            revision_no: RevisionNo(1),
+            content_digest: Some(content_digest.to_owned()),
+            content_manifest_digest: Some(format!("manifest:{content_digest}")),
+            parent_inode_id: Some(parent_inode_id),
+            display_name: display_name.to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            content_digest: Some(content_digest.to_owned()),
+            parent_inode_id: Some(parent_inode_id),
+            display_name: display_name.to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::File,
+            synced_seq: ChangeSeq(1),
+            revision_no: RevisionNo(1),
+            content_digest: Some(content_digest.to_owned()),
+            content_manifest_digest: Some(format!("manifest:{content_digest}")),
+            parent_inode_id: Some(parent_inode_id),
+            display_name: display_name.to_owned(),
+        })?;
+        Ok(())
+    })
+    .expect("seed bound file");
+}
+
+fn seed_bound_directory_for_namespace(
+    db: &mut SqliteStateDb,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    display_name: &str,
+    parent_inode_id: Option<InodeId>,
+) {
+    db.planner_transaction("seed-bound-directory", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(1),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id,
+            display_name: display_name.to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id,
+            display_name: display_name.to_owned(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id,
+            inode_kind: InodeKind::Dir,
+            synced_seq: ChangeSeq(1),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id,
+            display_name: display_name.to_owned(),
+        })?;
+        Ok(())
+    })
+    .expect("seed bound directory");
+}
+
+fn demo_namespace() -> NamespaceId {
+    NamespaceId::from("demo")
+}
+
+fn demo_head(namespace_id: NamespaceId) -> HeadState {
+    HeadState {
+        namespace_id,
+        seq: ChangeSeq(41),
+        active_fence_token: loon_types::FenceToken(8),
+        next_inode_id: InodeId(501),
+        snapshot_hint_seq: Some(ChangeSeq(40)),
+        retention_floor_seq: ChangeSeq(40),
+    }
+}
+
+fn demo_lease(namespace_id: NamespaceId) -> LeaseState {
+    LeaseState {
+        namespace_id,
+        holder_id: "writer-a".to_owned(),
+        fence_token: loon_types::FenceToken(8),
+        lease_expires_at_ms: 1_700_000_600_000,
+    }
 }
 
 fn write_source_file(

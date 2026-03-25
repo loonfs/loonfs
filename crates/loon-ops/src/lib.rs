@@ -697,6 +697,7 @@ fn parse_common_args_with_optional_max_steps(
 #[cfg(test)]
 mod tests {
     use super::{run_args, OpsConfig};
+    use loon_client::local_fs::NamespacePathIndex;
     use loon_client::state_db::{
         LocalFileStateRow, LocalOnlyFileStateRow, LocalOnlyPlannedActionRow, RemoteFileStateRow,
         SqliteStateDb, SyncAnchorRow,
@@ -2207,6 +2208,187 @@ lease_duration_ms = 60000
                 "../../../tests/snapshots/ops-sync-until-idle/ops_sync_until_idle_request_committed_directory_rename.txt"
             )
         );
+    }
+
+    #[test]
+    fn sync_until_idle_reaches_idle_after_same_path_bound_file_to_directory_replacement() {
+        let temp_dir = unique_temp_dir("ops-sync-until-idle-bound-file-to-dir");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_single_file_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+            "notes",
+            b"notes v1\n",
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "notes",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+
+        fs::create_dir_all(temp_dir.join("mirror/notes")).expect("create replacement directory");
+        run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("observe subtree replacement");
+
+        let rendered = run_args([
+            "sync-until-idle".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-until-idle for same-path file replacement");
+
+        assert!(rendered.contains("final_outcome=no_work"), "{rendered}");
+        assert!(rendered.contains("action_kind: delete_file"), "{rendered}");
+        assert!(
+            rendered.contains("action_kind: create_remote_dir"),
+            "{rendered}"
+        );
+
+        let db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("reopen client db");
+        let summary = db
+            .load_namespace_state_summary(&NamespaceId::from("demo"))
+            .expect("load namespace summary");
+        let parent_links = db
+            .load_local_only_parent_links_for_namespace(&NamespaceId::from("demo"))
+            .expect("load parent links");
+        let path_index = NamespacePathIndex::build(&summary, &parent_links);
+        assert!(path_index.bound_file_matches("notes").is_empty());
+        assert_eq!(path_index.bound_dir_matches("notes").len(), 1);
+        assert!(summary.local_only_state.is_empty());
+        assert!(summary.local_only_planned_actions.is_empty());
+    }
+
+    #[test]
+    fn sync_until_idle_reaches_idle_after_same_path_bound_directory_to_file_replacement() {
+        let temp_dir = unique_temp_dir("ops-sync-until-idle-bound-dir-to-file");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_directory_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            Some(InodeId(1)),
+            "docs",
+        );
+        seed_bound_directory(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(3),
+            Some(InodeId(1)),
+            "archive",
+        );
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(4),
+            "note.txt",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+        db.planner_transaction("reparent-note-under-docs", |tx| {
+            tx.upsert_remote_file(&RemoteFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                observed_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(snapshot.file_digest.clone()),
+                content_manifest_digest: Some(snapshot.manifest_digest.clone()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+                is_deleted: false,
+            })?;
+            tx.upsert_local_file(&LocalFileStateRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                content_digest: Some(snapshot.file_digest.clone()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+                exists_on_disk: true,
+                dirty: false,
+                last_local_change_ms: 1_000,
+            })?;
+            tx.upsert_sync_anchor(&SyncAnchorRow {
+                namespace_id: NamespaceId::from("demo"),
+                inode_id: InodeId(4),
+                inode_kind: InodeKind::File,
+                synced_seq: ChangeSeq(1),
+                revision_no: RevisionNo(1),
+                content_digest: Some(snapshot.file_digest.clone()),
+                content_manifest_digest: Some(snapshot.manifest_digest.clone()),
+                parent_inode_id: Some(InodeId(2)),
+                display_name: "note.txt".to_owned(),
+            })?;
+            Ok(())
+        })
+        .expect("reparent note under docs");
+
+        fs::write(temp_dir.join("mirror/docs"), b"replacement file\n")
+            .expect("write replacement file");
+        run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("observe subtree replacement");
+
+        let rendered = run_args([
+            "sync-until-idle".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("run sync-until-idle for same-path directory replacement");
+
+        assert!(rendered.contains("final_outcome=no_work"), "{rendered}");
+        assert!(
+            rendered.contains("action_kind: delete_subtree"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("action_kind: upload_local_create"),
+            "{rendered}"
+        );
+
+        let db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("reopen client db");
+        let summary = db
+            .load_namespace_state_summary(&NamespaceId::from("demo"))
+            .expect("load namespace summary");
+        let parent_links = db
+            .load_local_only_parent_links_for_namespace(&NamespaceId::from("demo"))
+            .expect("load parent links");
+        let path_index = NamespacePathIndex::build(&summary, &parent_links);
+        assert!(path_index.bound_dir_matches("docs").is_empty());
+        assert_eq!(path_index.bound_file_matches("docs").len(), 1);
+        assert!(path_index.bound_file_matches("docs/note.txt").is_empty());
+        assert!(summary.local_only_state.is_empty());
+        assert!(summary.local_only_planned_actions.is_empty());
     }
 
     #[test]
