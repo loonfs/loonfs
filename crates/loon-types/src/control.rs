@@ -29,7 +29,7 @@ impl HeadState {
             namespace_id,
             seq: ChangeSeq(0),
             active_fence_token: FenceToken(0),
-            next_inode_id: InodeId(1),
+            next_inode_id: InodeId(2),
             snapshot_hint_seq: None,
             retention_floor_seq: ChangeSeq(0),
         }

@@ -41,6 +41,11 @@ fn seeded_metadata_state() -> ModelMetadataState {
     ModelMetadataState {
         inodes: vec![
             ModelInodeRecord {
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(0),
+            },
+            ModelInodeRecord {
                 inode_id: InodeId(2),
                 inode_kind: InodeKind::Dir,
                 created_seq: ChangeSeq(1),
@@ -62,6 +67,14 @@ fn seeded_metadata_state() -> ModelMetadataState {
             },
         ],
         direntries: vec![
+            ModelDirentryRecord {
+                parent_inode_id: InodeId(1),
+                name_key: "workspace".to_owned(),
+                display_name: "workspace".to_owned(),
+                child_inode_id: InodeId(2),
+                bind_seq: ChangeSeq(1),
+                bind_op_index: 0,
+            },
             ModelDirentryRecord {
                 parent_inode_id: InodeId(2),
                 name_key: "note.txt".to_owned(),
@@ -118,6 +131,19 @@ fn seeded_metadata_state() -> ModelMetadataState {
     }
 }
 
+fn bootstrapped_metadata_state() -> ModelMetadataState {
+    ModelMetadataState {
+        inodes: vec![ModelInodeRecord {
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            created_seq: ChangeSeq(0),
+        }],
+        direntries: Vec::new(),
+        revisions: Vec::new(),
+        subtree_tombstones: Vec::new(),
+    }
+}
+
 #[test]
 fn model_advances_seq() {
     let mut ns = ModelNamespace::new(NamespaceId::from("ns-1"));
@@ -126,6 +152,27 @@ fn model_advances_seq() {
     })
     .expect("active writer should advance seq");
     assert_eq!(ns.head_seq.0, 1);
+}
+
+#[test]
+fn model_new_namespace_seeds_root_inode_and_allocator() {
+    let ns = ModelNamespace::new(NamespaceId::from("ns-1"));
+
+    assert_eq!(ns.head_seq, ChangeSeq(0));
+    assert_eq!(ns.next_inode_id, InodeId(2));
+    assert_eq!(
+        ns.metadata_state,
+        ModelMetadataState {
+            inodes: vec![ModelInodeRecord {
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(0),
+            }],
+            direntries: Vec::new(),
+            revisions: Vec::new(),
+            subtree_tombstones: Vec::new(),
+        }
+    );
 }
 
 #[test]
@@ -2341,7 +2388,7 @@ fn model_accepts_active_commit_attempt() {
         next_inode_id: InodeId(501),
         snapshot_hint_seq: Some(ChangeSeq(40)),
         retention_floor_seq: ChangeSeq(40),
-        metadata_state: ModelMetadataState::default(),
+        metadata_state: bootstrapped_metadata_state(),
     };
     let lease = LeaseState {
         namespace_id: NamespaceId::from("ns-1"),
@@ -2377,7 +2424,7 @@ fn model_stale_commit_attempt_hits_planned_head_seq_mismatch_after_handover_publ
         next_inode_id: InodeId(504),
         snapshot_hint_seq: Some(ChangeSeq(40)),
         retention_floor_seq: ChangeSeq(40),
-        metadata_state: ModelMetadataState::default(),
+        metadata_state: bootstrapped_metadata_state(),
     };
     let lease = LeaseState {
         namespace_id: NamespaceId::from("ns-1"),
@@ -2838,9 +2885,16 @@ fn model_checkpoint_includes_one_empty_segment_per_family() {
         .tables
         .iter()
         .all(|table| table.segments[0].segment_index == 0));
+    let inode_table = checkpoint
+        .tables
+        .iter()
+        .find(|table| table.family == ModelCheckpointFamily::Inodes)
+        .expect("inode table");
+    assert_eq!(inode_table.segments[0].row_count, 1);
     assert!(checkpoint
         .tables
         .iter()
+        .filter(|table| table.family != ModelCheckpointFamily::Inodes)
         .all(|table| table.segments[0].row_count == 0));
     assert!(checkpoint
         .tables

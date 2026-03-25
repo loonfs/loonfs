@@ -2410,7 +2410,7 @@ now_ms = 1000
                 InodeRecord {
                     inode_id: InodeId(1),
                     inode_kind: InodeKind::Dir,
-                    created_seq: ChangeSeq(1),
+                    created_seq: ChangeSeq(0),
                 },
                 InodeRecord {
                     inode_id: InodeId(2),
@@ -2506,7 +2506,7 @@ now_ms = 1000
                 InodeRecord {
                     inode_id: InodeId(1),
                     inode_kind: InodeKind::Dir,
-                    created_seq: ChangeSeq(1),
+                    created_seq: ChangeSeq(0),
                 },
                 InodeRecord {
                     inode_id: InodeId(2),

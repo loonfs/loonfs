@@ -8,12 +8,12 @@ use crate::queue::{
 use crate::{
     ModelAction, ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPublishAuthorizers,
     ModelCheckpointSegment, ModelCheckpointTable, ModelCommitValidationError,
-    ModelCommitValidationOutcome, ModelCommitValidationRequest, ModelError,
+    ModelCommitValidationOutcome, ModelCommitValidationRequest, ModelError, ModelInodeRecord,
     ModelMetadataApplyError, ModelMetadataMutation, ModelMetadataState, ModelNamespace,
     ModelProgressObject, ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome,
     ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass, ModelWalCommit,
 };
-use loon_types::{ChangeSeq, FenceToken, InodeId, LeaseState, NamespaceId};
+use loon_types::{ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId};
 
 impl ModelNamespace {
     pub fn new(namespace_id: NamespaceId) -> Self {
@@ -21,10 +21,10 @@ impl ModelNamespace {
             namespace_id,
             head_seq: ChangeSeq(0),
             active_fence_token: FenceToken(0),
-            next_inode_id: InodeId(1),
+            next_inode_id: InodeId(2),
             snapshot_hint_seq: None,
             retention_floor_seq: ChangeSeq(0),
-            metadata_state: ModelMetadataState::default(),
+            metadata_state: bootstrap_metadata_state(),
         }
     }
 
@@ -516,5 +516,18 @@ impl ModelNamespace {
             retention_floor_seq: checkpoint.retention_floor_seq,
             metadata_state: metadata_state_from_checkpoint(checkpoint)?,
         })
+    }
+}
+
+fn bootstrap_metadata_state() -> ModelMetadataState {
+    ModelMetadataState {
+        inodes: vec![ModelInodeRecord {
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            created_seq: ChangeSeq(0),
+        }],
+        direntries: Vec::new(),
+        revisions: Vec::new(),
+        subtree_tombstones: Vec::new(),
     }
 }

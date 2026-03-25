@@ -1,3 +1,4 @@
+use crate::genesis::bootstrap_basis_metadata_state;
 use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use loon_core::checkpoint::{
@@ -6,7 +7,6 @@ use loon_core::checkpoint::{
     CheckpointPublishError, CheckpointReplayError, StoredCheckpointManifest,
     StoredCheckpointSegment,
 };
-use loon_core::metadata::MetadataState;
 use loon_objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
 };
@@ -240,9 +240,10 @@ pub fn bootstrap_namespace<S: ObjectStore>(
         .put_if_absent(&lease_key, &lease_bytes)
         .map_err(|err| NamespaceBootstrapError::LeaseWrite(err.to_string()))?;
 
+    let bootstrap_metadata_state = bootstrap_basis_metadata_state();
     let checkpoint = prepare_checkpoint(
         &initial_head,
-        &MetadataState::default(),
+        &bootstrap_metadata_state,
         &params.writer_version,
     )
     .map_err(NamespaceBootstrapError::CheckpointBuild)?;
@@ -543,6 +544,7 @@ mod tests {
         translate_authoritative_state_to_remote_observations, NamespaceBootstrapError,
         NamespaceBootstrapParams,
     };
+    use crate::genesis::bootstrap_basis_metadata_state;
     use crate::mutation::{execute_client_mutation, ClientMutationExecutionParams};
     use loon_core::checkpoint::prepare_checkpoint;
     use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
@@ -579,12 +581,47 @@ mod tests {
         .expect("bootstrap namespace");
 
         assert!(bootstrapped.created);
+        assert_eq!(bootstrapped.head.next_inode_id, InodeId(2));
         assert_eq!(bootstrapped.head.snapshot_hint_seq, Some(ChangeSeq(0)));
 
         let summary =
             load_namespace_state_summary(&store, &namespace_id).expect("load namespace summary");
         assert_eq!(summary.head.snapshot_hint_seq, Some(ChangeSeq(0)));
-        assert_eq!(summary.metadata.inode_count, 0);
+        assert_eq!(summary.metadata.inode_count, 1);
+        assert_eq!(summary.metadata.visible_inode_count, 1);
+        assert_eq!(summary.metadata.direntry_count, 0);
+        assert_eq!(summary.metadata.revision_count, 0);
+    }
+
+    #[test]
+    fn freshly_bootstrapped_namespace_translates_root_observation() {
+        let temp_dir = unique_temp_dir("server-ops-bootstrap-root-translation");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+
+        let observations =
+            translate_authoritative_state_to_remote_observations(&store, &namespace_id)
+                .expect("translate observations");
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].inode_id, InodeId(1));
+        assert_eq!(observations[0].inode_kind, InodeKind::Dir);
+        assert_eq!(observations[0].observed_seq, ChangeSeq(0));
+        assert_eq!(observations[0].parent_inode_id, None);
+        assert_eq!(observations[0].display_name, "");
+        assert!(!observations[0].is_deleted);
     }
 
     #[test]
@@ -785,36 +822,27 @@ mod tests {
             .expect("seed lease object");
 
         let uploaded = write_uploaded_content(store, &head.namespace_id, b"hello from loon\n");
-        let metadata_state = MetadataState {
-            inodes: vec![
-                InodeRecord {
-                    inode_id: InodeId(1),
-                    inode_kind: InodeKind::Dir,
-                    created_seq: ChangeSeq(1),
-                },
-                InodeRecord {
-                    inode_id: InodeId(2),
-                    inode_kind: InodeKind::File,
-                    created_seq: ChangeSeq(1),
-                },
-            ],
-            direntries: vec![DirentryRecord {
-                parent_inode_id: InodeId(1),
-                name_key: "hello.txt".to_owned(),
-                display_name: "hello.txt".to_owned(),
-                child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_op_index: 0,
-            }],
-            revisions: vec![RevisionRecord {
-                inode_id: InodeId(2),
-                revision_no: RevisionNo(1),
-                committed_seq: ChangeSeq(1),
-                revision_op_index: 0,
-                content_manifest_digest: uploaded.content_manifest_digest.clone(),
-            }],
-            subtree_tombstones: Vec::new(),
-        };
+        let mut metadata_state = bootstrap_basis_metadata_state();
+        metadata_state.inodes.push(InodeRecord {
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            created_seq: ChangeSeq(1),
+        });
+        metadata_state.direntries.push(DirentryRecord {
+            parent_inode_id: InodeId(1),
+            name_key: "hello.txt".to_owned(),
+            display_name: "hello.txt".to_owned(),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(1),
+            bind_op_index: 0,
+        });
+        metadata_state.revisions.push(RevisionRecord {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(1),
+            committed_seq: ChangeSeq(1),
+            revision_op_index: 0,
+            content_manifest_digest: uploaded.content_manifest_digest.clone(),
+        });
         seed_verified_basis(store, head, &metadata_state);
         uploaded
     }

@@ -1,3 +1,4 @@
+use crate::genesis::bootstrap_basis_metadata_state;
 use crate::mutation::loading::{
     read_head_object, read_lease_object, ControlObjectLoadError, LoadedHeadObject,
 };
@@ -134,15 +135,15 @@ fn load_metadata_from_genesis_basis<S: ObjectStore>(
     expected_namespace: &NamespaceId,
 ) -> Result<MetadataState, BasisLoadError> {
     let initial_head = HeadState::initial(expected_namespace.clone());
+    let initial_metadata_state = bootstrap_basis_metadata_state();
     let wal_tail = load_stored_wal_tail(
         store,
         expected_namespace,
         initial_head.seq,
         loaded_head.envelope.state.seq,
     )?;
-    let replayed =
-        replay_wal_tail_with_metadata(&initial_head, &MetadataState::default(), &wal_tail)
-            .map_err(BasisLoadError::WalReplay)?;
+    let replayed = replay_wal_tail_with_metadata(&initial_head, &initial_metadata_state, &wal_tail)
+        .map_err(BasisLoadError::WalReplay)?;
     ensure_reconstructed_head_matches(&loaded_head.envelope, &replayed.resulting_head)?;
     Ok(replayed.resulting_metadata_state)
 }

@@ -37,6 +37,12 @@ Rules:
   WAL tail through `head.seq`
 - if `head.snapshot_hint_seq` is absent, replay contiguous WAL from `HeadState::initial(...)`
   through `head.seq`
+- `HeadState::initial(...)` already includes the canonical namespace root inode in the replay basis:
+  - `inode_id = 1`
+  - `inode_kind = dir`
+  - `created_seq = 0`
+  - no parent binding
+  - no revision row
 - reject the mutation if basis reconstruction is missing, partial, stale, or does not reproduce the
   current head exactly
 
@@ -49,6 +55,31 @@ Failure modes prevented:
 - validating a mutation against stale cached metadata
 - treating partial metadata state as if it were authoritative
 - allowing callers to bypass checkpoint/WAL replay rules by injecting process-local state
+
+## Bootstrap basis rule
+
+Namespace bootstrap seeds the canonical root directory directly into the authoritative basis at
+`seq = 0`.
+
+Rules:
+
+- bootstrap writes one inode row for `inode_id = 1`
+- that root row uses `inode_kind = dir` and `created_seq = 0`
+- bootstrap writes no direntry row for the root
+- bootstrap writes no revision row for the root
+- bootstrap writes no WAL object for root creation
+- bootstrap publishes `head.next_inode_id = 2`
+
+Why it exists:
+the namespace root should be ordinary canonical metadata, not a synthetic sentinel that later
+write, replay, and import paths have to special-case differently.
+
+Failure modes prevented:
+
+- bootstrapping a namespace whose first create references a parent inode that does not exist in the
+  authoritative basis
+- checkpoint restore and genesis replay disagreeing about whether root exists
+- authoritative translation treating the root as out-of-band state
 
 ## Same-request operation ordering rule
 
@@ -160,6 +191,9 @@ The first create preconditions are:
 - `HeadSeqIs(current_head.seq)`
 - `ChildNameAbsent(parent_inode, name_key)`
 - `AncestorsNotSubtreeDeleted(parent_inode)`
+
+For the initial bootstrapped basis, the first create under `/` uses `parent_inode = 1` directly.
+There is no synthetic root-parent exception.
 
 For the current create-mutation contract, `name_key` may equal `display_name` until the shared versioned
 name-policy layer is wired into request construction.
@@ -832,6 +866,7 @@ Why this rule exists:
 
 - inode allocation is part of authoritative metadata publish, not a side channel
 - replay and live publish should agree on how create mutations consume head state
+- the canonical root inode is already allocated before any later create mutation is published
 
 Failure modes prevented:
 
@@ -906,6 +941,9 @@ If those checks pass, replay must:
 
 The current replay path still preserves `snapshot_hint_seq` and `retention_floor_seq` from the
 replay basis, but it no longer treats WAL as head-summary-only history.
+
+When replay starts from `HeadState::initial(...)`, the basis metadata already contains the root
+inode `1` directory row at `seq = 0`. Genesis replay does not reconstruct that root from WAL.
 
 Why this section exists:
 
@@ -1000,6 +1038,9 @@ live publish:
 - direntry rows
 - revision rows
 - subtree tombstone rows
+
+For the bootstrap checkpoint at `checkpoint_seq = 0`, those basis rows still include the canonical
+root inode row even though direntries, revisions, and subtree tombstones are empty.
 
 If the manifest namespace does not match, the manifest key does not match `checkpoint_seq`, `verified` is false, a referenced segment object is missing, or any descriptor does not match its decoded segment body, replay must fail before any WAL is applied.
 

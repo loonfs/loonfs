@@ -118,6 +118,8 @@ Required rules:
 - `ops smoke` remains inspect/bootstrap only in this milestone
 - no ambient provider env lookup in core crates
 - bootstrap fails closed by default if the namespace already exists
+- bootstrap seeds the canonical namespace root directory as inode `1` at `seq = 0`, so fresh
+  authoritative import and state inspection include root instead of an empty metadata basis
 - the shell output stays stable and human-readable
 
 Command contract:

@@ -404,7 +404,7 @@ mod tests {
                     InodeRecord {
                         inode_id: InodeId(1),
                         inode_kind: InodeKind::Dir,
-                        created_seq: ChangeSeq(1),
+                        created_seq: ChangeSeq(0),
                     },
                     InodeRecord {
                         inode_id: InodeId(2),
@@ -445,7 +445,7 @@ mod tests {
                     InodeRecord {
                         inode_id: InodeId(1),
                         inode_kind: InodeKind::Dir,
-                        created_seq: ChangeSeq(1),
+                        created_seq: ChangeSeq(0),
                     },
                     InodeRecord {
                         inode_id: InodeId(2),
@@ -482,7 +482,7 @@ mod tests {
                 InodeRecord {
                     inode_id: InodeId(1),
                     inode_kind: InodeKind::Dir,
-                    created_seq: ChangeSeq(1),
+                    created_seq: ChangeSeq(0),
                 },
                 InodeRecord {
                     inode_id: InodeId(2),

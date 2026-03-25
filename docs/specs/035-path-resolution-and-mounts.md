@@ -27,6 +27,9 @@ A `MOUNT` inode contains:
 Most mounts point at the target namespace root.
 Some mounts point at a subtree.
 
+The namespace root is canonical authoritative metadata, not a synthetic sentinel. Bootstrap seeds
+that root as inode `1` in the namespace basis at `seq = 0`.
+
 Example:
 
 - namespace B root inode is `1`

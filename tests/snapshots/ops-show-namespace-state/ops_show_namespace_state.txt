@@ -6,7 +6,7 @@ head:
   namespace_id: demo
   seq: 0
   active_fence_token: 0
-  next_inode_id: 1
+  next_inode_id: 2
   snapshot_hint_seq: 0
   retention_floor_seq: 0
 lease:
@@ -23,8 +23,8 @@ wal_tail:
   first_seq: null
   last_seq: null
 metadata:
-  inode_count: 0
-  visible_inode_count: 0
+  inode_count: 1
+  visible_inode_count: 1
   direntry_count: 0
   revision_count: 0
   subtree_tombstone_count: 0

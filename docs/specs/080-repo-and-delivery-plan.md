@@ -102,6 +102,9 @@ Constraints for that shell:
   belong in `loon-ops`
 - namespace bootstrap and authoritative-state inspection belong in supported library code,
   primarily `loon-server::ops`
+- namespace bootstrap seeds the canonical root inode directly into the authoritative basis at
+  `seq = 0`, and frontend code must treat that root as ordinary authoritative metadata rather than
+  a synthetic sentinel
 - full-namespace authoritative remote observation import remains a supported library path in
   `loon-ops`, and `xtask ops import-remote-observations` must call that API verbatim rather than
   re-implementing it

@@ -1676,6 +1676,13 @@ Rules:
 - after successful directory materialization, the planner transaction must replan direct
   authoritative children whose `remote_state.parent_inode_id` equals the materialized directory
   inode so waiting child work can become executable without a separate global sweep
+- bootstrap/authoritative import still use the existing observation wire shape for root:
+  - `inode_id = 1`
+  - `inode_kind = dir`
+  - `parent_inode_id = None`
+  - `display_name = ""`
+  - `observed_seq = 0` for a freshly bootstrapped namespace
+- the first allocatable authoritative inode after bootstrap is `2`
 
 Why this rule exists:
 
