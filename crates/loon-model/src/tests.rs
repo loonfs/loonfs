@@ -8,7 +8,8 @@ use crate::client::{
     bound_directory_delete_observation_plans_delete_subtree,
     bound_file_delete_observation_plans_delete_file,
     bound_file_observation_plans_upload_local_edit, bound_move_observation_plans_rename,
-    fs_event_atomic_save_returns_error, fs_event_conflicting_native_id_reuse_returns_error,
+    converged_bound_file_reobservation_is_noop, fs_event_atomic_save_returns_error,
+    fs_event_conflicting_native_id_reuse_returns_error,
     fs_event_conflicting_rename_edges_return_error,
     fs_event_create_then_write_reduces_to_observe_local,
     fs_event_delete_burst_reduces_to_highest_root_delete,
@@ -215,6 +216,18 @@ fn model_bound_file_observation_plans_upload_local_edit() {
         "download_remote_edit",
         true,
         true
+    ));
+}
+
+#[test]
+fn model_converged_bound_file_reobservation_is_noop() {
+    assert!(converged_bound_file_reobservation_is_noop(
+        "no_op", true, false
+    ));
+    assert!(!converged_bound_file_reobservation_is_noop(
+        "upload_local_edit",
+        true,
+        false
     ));
 }
 

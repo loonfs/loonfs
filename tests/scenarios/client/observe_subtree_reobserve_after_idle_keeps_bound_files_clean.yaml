@@ -1,0 +1,50 @@
+schema_version: 1
+scenario_kind: client
+name: observe_subtree_reobserve_after_idle_keeps_bound_files_clean
+
+initial:
+  namespace_id: ns-1
+  bound_directories:
+    - inode_id: 1
+      parent_inode_id:
+      display_name: ""
+      relative_path: ""
+      exists_on_disk: true
+      dirty: false
+  bound_files:
+    - inode_id: 42
+      parent_inode_id: 1
+      display_name: alpha.txt
+      relative_path: alpha.txt
+      remote_content_digest: sha256:alpha-v1
+      local_content_digest: sha256:alpha-v1
+      sync_anchor_content_digest: sha256:alpha-v1
+    - inode_id: 43
+      parent_inode_id: 1
+      display_name: beta.txt
+      relative_path: beta.txt
+      remote_content_digest: sha256:beta-v1
+      local_content_digest: sha256:beta-v1
+      sync_anchor_content_digest: sha256:beta-v1
+
+observe_subtree:
+  relative_path: ""
+  present_entries:
+    - kind: dir
+      relative_path: ""
+    - kind: file
+      relative_path: alpha.txt
+      content_digest: sha256:alpha-v1
+    - kind: file
+      relative_path: beta.txt
+      content_digest: sha256:beta-v1
+
+expect:
+  scanned_dir_count: 1
+  scanned_file_count: 2
+  bound_observe_count: 2
+  local_only_observe_count: 0
+  bound_delete_count: 0
+  local_only_delete_count: 0
+  planned_decisions:
+    no_op: 2

@@ -405,6 +405,8 @@ pub fn observe_local_path(
     }
 
     if let Some(bound) = bound_file_matches.first() {
+        let (dirty, last_local_change_ms) =
+            derive_exact_bound_file_observation_state(bound, Some(&content_digest), true, now_ms);
         let planned = db.observe_bound_inode_and_plan(
             &ObservedBoundInode {
                 namespace_id: namespace_id.clone(),
@@ -414,8 +416,8 @@ pub fn observe_local_path(
                 parent_inode_id: bound.parent_inode_id,
                 display_name: bound.display_name.clone(),
                 exists_on_disk: true,
-                dirty: true,
-                last_local_change_ms: now_ms,
+                dirty,
+                last_local_change_ms,
             },
             now_ms,
         )?;
@@ -850,6 +852,12 @@ fn build_subtree_operations(
                     });
                 }
                 if row.inode_kind == InodeKind::File {
+                    let (dirty, last_local_change_ms) = derive_exact_bound_file_observation_state(
+                        &row,
+                        entry.content_digest.as_ref(),
+                        true,
+                        now_ms,
+                    );
                     operations.push(SubtreeObservationOp::ObserveBound {
                         observed: ObservedBoundInode {
                             namespace_id: namespace_id.clone(),
@@ -859,8 +867,8 @@ fn build_subtree_operations(
                             parent_inode_id: row.parent_inode_id,
                             display_name: row.display_name,
                             exists_on_disk: true,
-                            dirty: true,
-                            last_local_change_ms: now_ms,
+                            dirty,
+                            last_local_change_ms,
                         },
                     });
                 }
@@ -1406,6 +1414,23 @@ fn build_directory_pairings(
     }
 
     Ok(pairings)
+}
+
+fn derive_exact_bound_file_observation_state(
+    existing: &LocalFileStateRow,
+    observed_content_digest: Option<&String>,
+    exists_on_disk: bool,
+    now_ms: u64,
+) -> (bool, u64) {
+    let observed_changed = existing.exists_on_disk != exists_on_disk
+        || existing.content_digest.as_ref() != observed_content_digest;
+    let dirty = existing.dirty || observed_changed;
+    let last_local_change_ms = if observed_changed {
+        now_ms
+    } else {
+        existing.last_local_change_ms
+    };
+    (dirty, last_local_change_ms)
 }
 
 fn summarize_observe_subtree(

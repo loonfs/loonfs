@@ -62,6 +62,42 @@ fn client_local_fs_observe_local_path_preserves_bound_edit_behavior() {
 }
 
 #[test]
+fn client_local_fs_observe_local_path_keeps_clean_bound_file_noop_when_digest_matches() {
+    let temp_dir = TestDir::new("client-local-fs-observe-local-noop");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open db");
+    seed_bound_root_directory(&mut db);
+    let hello_bytes = b"hello v1\n";
+    let hello_digest = sha256_digest(hello_bytes);
+    seed_bound_file(&mut db, InodeId(2), "hello.txt", InodeId(1), &hello_digest);
+
+    fs::write(mirror_root.join("hello.txt"), hello_bytes).expect("write current file");
+
+    let report = observe_local_path(
+        &db_path,
+        &demo_namespace(),
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root.join("hello.txt"),
+        2_000,
+    )
+    .expect("observe local path");
+
+    assert_eq!(report.planned_decision, "no_op");
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen db");
+    let views = db
+        .load_file_sync_views(&demo_namespace(), InodeId(2))
+        .expect("load sync views");
+    let local = views.local.expect("local row");
+    assert!(!local.dirty);
+    assert_eq!(local.last_local_change_ms, 1_000);
+}
+
+#[test]
 fn client_local_fs_observe_subtree_path_preserves_bound_directory_move_pairing() {
     let temp_dir = TestDir::new("client-local-fs-observe-subtree");
     let db_path = temp_dir.path().join("client.sqlite3");
@@ -92,6 +128,58 @@ fn client_local_fs_observe_subtree_path_preserves_bound_directory_move_pairing()
     assert_eq!(report.relative_path, "");
     assert_eq!(report.paired_bound_move_count, 1);
     assert_eq!(report.planned_decision_counts.get("rename"), Some(&1));
+}
+
+#[test]
+fn client_local_fs_observe_subtree_reobserve_after_idle_keeps_bound_files_clean() {
+    let temp_dir = TestDir::new("client-local-fs-observe-subtree-noop");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    fs::create_dir_all(&mirror_root).expect("create mirror root");
+
+    let mut db = SqliteStateDb::open(&db_path).expect("open db");
+    seed_bound_root_directory(&mut db);
+    let alpha_bytes = b"alpha v1\n";
+    let beta_bytes = b"beta v1\n";
+    let alpha_digest = sha256_digest(alpha_bytes);
+    let beta_digest = sha256_digest(beta_bytes);
+    seed_bound_file(&mut db, InodeId(2), "alpha.txt", InodeId(1), &alpha_digest);
+    seed_bound_file(&mut db, InodeId(3), "beta.txt", InodeId(1), &beta_digest);
+
+    fs::write(mirror_root.join("alpha.txt"), alpha_bytes).expect("write alpha file");
+    fs::write(mirror_root.join("beta.txt"), beta_bytes).expect("write beta file");
+
+    let report = observe_subtree_path(
+        &db_path,
+        &demo_namespace(),
+        &mirror_root,
+        temp_dir.path(),
+        &mirror_root,
+        2_000,
+    )
+    .expect("observe subtree path");
+
+    assert_eq!(report.bound_observe_count, 2);
+    assert_eq!(
+        report.planned_decision_counts.get("upload_local_edit"),
+        None
+    );
+    assert_eq!(report.planned_decision_counts.get("no_op"), Some(&2));
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen db");
+    for inode_id in [InodeId(2), InodeId(3)] {
+        let views = db
+            .load_file_sync_views(&demo_namespace(), inode_id)
+            .expect("load sync views");
+        let local = views.local.expect("local row");
+        assert!(!local.dirty);
+        assert_eq!(local.last_local_change_ms, 1_000);
+        assert_eq!(
+            db.load_planned_action(&demo_namespace(), inode_id)
+                .expect("load planned action"),
+            None
+        );
+    }
 }
 
 fn run_reducer_fixture(relative_path: &str) {

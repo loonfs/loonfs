@@ -72,6 +72,15 @@ pub fn bound_file_observation_plans_upload_local_edit(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn converged_bound_file_reobservation_is_noop(
+    planned_decision: &str,
+    exists_on_disk: bool,
+    dirty: bool,
+) -> bool {
+    exists_on_disk && !dirty && planned_decision == "no_op"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn local_only_observation_under_bound_parent_plans_upload_local_create(
     planned_decision: &str,
     parent_is_bound_directory: bool,
