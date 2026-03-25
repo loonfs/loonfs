@@ -892,6 +892,46 @@ lease_duration_ms = 60000
     }
 
     #[test]
+    fn import_remote_observations_plans_root_materialization_for_fresh_namespace() {
+        let temp_dir = unique_temp_dir("ops-import-root-materialization");
+        let config_path = write_local_fs_config(&temp_dir);
+        let namespace_id = "demo";
+
+        run_args([
+            "bootstrap-namespace".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            namespace_id.to_owned(),
+        ])
+        .expect("bootstrap namespace before import");
+        run_args([
+            "import-remote-observations".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            namespace_id.to_owned(),
+        ])
+        .expect("import remote observations");
+
+        let rendered = run_args([
+            "show-client-state".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            namespace_id.to_owned(),
+        ])
+        .expect("show client state after import");
+
+        assert_eq!(
+            rendered,
+            include_str!(
+                "../../../tests/snapshots/ops-show-client-state/ops_show_client_state_after_import_plans_root_materialization.txt"
+            )
+        );
+    }
+
+    #[test]
     fn observe_local_rejects_path_outside_mirror_root() {
         let temp_dir = unique_temp_dir("ops-observe-outside-root");
         let config_path = write_local_fs_config(&temp_dir);
@@ -1664,8 +1704,22 @@ lease_duration_ms = 60000
     fn sync_once_can_progress_non_dispatch_materialization_action() {
         let temp_dir = unique_temp_dir("ops-sync-once-materialize");
         let config_path = write_local_fs_config(&temp_dir);
-        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
-        seed_remote_only_root_materialization(&mut db, NamespaceId::from("demo"));
+        run_args([
+            "bootstrap-namespace".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("bootstrap namespace before import");
+        run_args([
+            "import-remote-observations".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("import remote observations before sync-once");
 
         let rendered = run_args([
             "sync-once".to_owned(),
@@ -2347,43 +2401,6 @@ now_ms = 1000
             Ok(())
         })
         .expect("seed local-only directory subtree");
-    }
-
-    fn seed_remote_only_root_materialization(db: &mut SqliteStateDb, namespace_id: NamespaceId) {
-        db.planner_transaction("seed-remote-only-root-materialization", |tx| {
-            tx.upsert_remote_file(&RemoteFileStateRow {
-                namespace_id: namespace_id.clone(),
-                inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
-                observed_seq: ChangeSeq(1),
-                revision_no: RevisionNo(1),
-                content_digest: None,
-                content_manifest_digest: None,
-                parent_inode_id: None,
-                display_name: String::new(),
-                is_deleted: false,
-            })?;
-            tx.upsert_local_file(&LocalFileStateRow {
-                namespace_id: namespace_id.clone(),
-                inode_id: InodeId(1),
-                inode_kind: InodeKind::Dir,
-                content_digest: None,
-                parent_inode_id: None,
-                display_name: String::new(),
-                exists_on_disk: false,
-                dirty: false,
-                last_local_change_ms: 0,
-            })?;
-            tx.upsert_planned_action(&loon_client::state_db::PlannedActionRow {
-                namespace_id,
-                inode_id: InodeId(1),
-                decision: "materialize_remote_dir".to_owned(),
-                reason: "remote_observed_without_anchor".to_owned(),
-                created_at_ms: 1_000,
-            })?;
-            Ok(())
-        })
-        .expect("seed remote-only root materialization");
     }
 
     #[derive(Debug, Clone)]

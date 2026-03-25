@@ -108,6 +108,9 @@ Constraints for that shell:
 - full-namespace authoritative remote observation import remains a supported library path in
   `loon-ops`, and `xtask ops import-remote-observations` must call that API verbatim rather than
   re-implementing it
+- authoritative remote observation apply must restart plannable client state in the same client
+  transaction for actionable outcomes, so imported remote-only placeholders do not rely on a
+  separate shell-exposed planner tick
 - `loon-client` owns local filesystem event normalization and path-based local observation routing
 - local observation of one existing file remains a supported client/library path first, and
   `xtask ops observe-local` is only a thin adapter over that `loon-client` path
@@ -120,6 +123,12 @@ Constraints for that shell:
   a second local observation path
 - `xtask ops sync-once` is intentionally single-step and executor-only
 - `xtask ops sync-until-idle` is only a thin loop over `sync-once`
+- the supported bootstrap path is:
+  - bootstrap namespace
+  - import remote observations
+  - sync once or until idle
+  and a freshly bootstrapped namespace root must become a planned `materialize_remote_dir`
+  placeholder immediately after import
 - `loon ops ...` must preserve the same subcommand grammar and stdout rendering as `xtask ops ...`
 - `loon-cli` may add CLI-only affordances such as help text, completions, manpage generation,
   config inspection, `doctor`, and version output, but it must not become a second owner of

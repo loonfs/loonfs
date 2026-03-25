@@ -1,0 +1,40 @@
+command=ops/show-client-state
+namespace=demo
+---
+namespace_id: demo
+remote_state:
+- namespace_id: demo
+  inode_id: 1
+  inode_kind: dir
+  observed_seq: 0
+  revision_no: 1
+  content_digest: null
+  content_manifest_digest: null
+  parent_inode_id: null
+  display_name: ''
+  is_deleted: false
+local_state:
+- namespace_id: demo
+  inode_id: 1
+  inode_kind: dir
+  content_digest: null
+  parent_inode_id: null
+  display_name: ''
+  exists_on_disk: false
+  dirty: false
+  last_local_change_ms: 1000
+sync_anchors: []
+local_only_state: []
+planned_actions:
+- namespace_id: demo
+  inode_id: 1
+  decision: materialize_remote_dir
+  reason: remote_observed_without_anchor
+  created_at_ms: 1000
+local_only_planned_actions: []
+pending_client_mutations: []
+pending_inode_mutations: []
+transfer_ledgers: []
+local_only_transfer_ledgers: []
+conflicts_and_errors: []
+local_only_conflicts_and_errors: []

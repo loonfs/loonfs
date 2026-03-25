@@ -3,6 +3,8 @@ use crate::client::{
     authoritative_snapshot_import_batch_rollback_is_atomic,
     authoritative_snapshot_import_discovers_remote_only_state,
     authoritative_snapshot_import_is_idempotent,
+    authoritative_snapshot_import_keeps_child_waiting_for_parent,
+    authoritative_snapshot_import_replans_root_materialization,
     bound_directory_delete_observation_plans_delete_subtree,
     bound_file_delete_observation_plans_delete_file,
     bound_file_observation_plans_upload_local_edit, bound_move_observation_plans_rename,
@@ -1514,6 +1516,33 @@ fn model_authoritative_snapshot_import_discovers_remote_only_state_deterministic
 fn model_authoritative_snapshot_import_is_idempotent_on_repeat() {
     assert!(authoritative_snapshot_import_is_idempotent(2, 2, 0));
     assert!(!authoritative_snapshot_import_is_idempotent(2, 1, 1));
+}
+
+#[test]
+fn model_authoritative_snapshot_import_replans_root_materialization() {
+    assert!(authoritative_snapshot_import_replans_root_materialization(
+        "materialize_remote_dir",
+        true
+    ));
+    assert!(!authoritative_snapshot_import_replans_root_materialization(
+        "no_op", true
+    ));
+}
+
+#[test]
+fn model_authoritative_snapshot_import_keeps_child_waiting_for_parent_materialization() {
+    assert!(
+        authoritative_snapshot_import_keeps_child_waiting_for_parent(
+            "materialize_remote_dir",
+            false
+        )
+    );
+    assert!(
+        !authoritative_snapshot_import_keeps_child_waiting_for_parent(
+            "materialize_remote_dir",
+            true
+        )
+    );
 }
 
 #[test]

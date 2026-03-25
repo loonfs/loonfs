@@ -329,6 +329,22 @@ pub fn authoritative_snapshot_import_discovers_remote_only_state(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub fn authoritative_snapshot_import_replans_root_materialization(
+    planned_decision: &str,
+    parent_inode_id_is_none: bool,
+) -> bool {
+    parent_inode_id_is_none && planned_decision == "materialize_remote_dir"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn authoritative_snapshot_import_keeps_child_waiting_for_parent(
+    parent_planned_decision: &str,
+    child_planned_action_present: bool,
+) -> bool {
+    parent_planned_decision == "materialize_remote_dir" && !child_planned_action_present
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn authoritative_snapshot_import_is_idempotent(
     translated_observation_count: usize,
     ignored_stale_count: usize,

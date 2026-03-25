@@ -264,6 +264,70 @@ fn bootstrap_namespace_stdout_matches_loon_ops_exactly() {
 }
 
 #[test]
+fn import_then_sync_once_materializes_root_directory() {
+    let temp_dir = TestDir::new("loon-cli-root-materialization");
+    let config_path = write_demo_local_fs_config(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+
+    let bootstrap = run_loon([
+        "ops",
+        "bootstrap-namespace",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ]);
+    assert!(bootstrap.status.success());
+
+    let import = run_loon([
+        "ops",
+        "import-remote-observations",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ]);
+    assert!(import.status.success());
+
+    let imported_state = run_loon([
+        "ops",
+        "show-client-state",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ]);
+    assert!(imported_state.status.success());
+    let imported_stdout = String::from_utf8(imported_state.stdout).expect("utf-8 stdout");
+    assert!(imported_stdout.contains("decision: materialize_remote_dir"));
+    assert!(imported_stdout.contains("exists_on_disk: false"));
+
+    let sync = run_loon([
+        "ops",
+        "sync-once",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ]);
+    assert!(sync.status.success());
+
+    let final_state = run_loon([
+        "ops",
+        "show-client-state",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "--namespace",
+        namespace_id.as_str(),
+    ]);
+    assert!(final_state.status.success());
+    let final_stdout = String::from_utf8(final_state.stdout).expect("utf-8 stdout");
+    assert!(final_stdout.contains("exists_on_disk: true"));
+    assert!(final_stdout.contains("synced_seq: 0"));
+    assert!(final_stdout.contains("planned_actions: []"));
+}
+
+#[test]
 fn parse_failure_writes_to_stderr_and_exits_non_zero() {
     let output = run_loon([
         "ops",

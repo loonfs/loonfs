@@ -115,6 +115,9 @@ Required rules:
 - `sync-until-idle` is only a loop over the real `sync-once` path
 - `xtask ops import-remote-observations` is the first shell exposure of authoritative import and
   it must reuse the `loon-ops` import API unchanged; `loon ops ...` must do the same
+- authoritative import must leave the client DB in already-replanned state for any actionable
+  remote observation, so a fresh bootstrap/import root placeholder immediately schedules
+  `materialize_remote_dir`
 - `ops smoke` remains inspect/bootstrap only in this milestone
 - no ambient provider env lookup in core crates
 - bootstrap fails closed by default if the namespace already exists
@@ -148,6 +151,8 @@ Exit criteria:
 - client-state inspection is available through the same shell contract
 - authoritative observation import is shell-exposed only by calling the existing `loon-ops` API
   unchanged
+- a fresh bootstrap/import/sync sequence now materializes the canonical root without any extra
+  planner-tick or observe-root command
 - one existing local file can be observed and planned through the supported client API rather than
   through shell-local SQLite mutation
 - explicit local delete and move can be observed through the same supported client API surface,

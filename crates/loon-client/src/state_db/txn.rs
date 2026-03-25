@@ -756,7 +756,9 @@ impl SqliteStateDb {
         applied_at_ms: u64,
     ) -> Result<AppliedRemoteObservation, StateDbError> {
         self.planner_transaction("apply_remote_observation", |tx| {
-            tx.apply_remote_observation(observed, applied_at_ms)
+            let outcome = tx.apply_remote_observation(observed, applied_at_ms)?;
+            tx.replan_after_remote_observation(&outcome, applied_at_ms)?;
+            Ok(outcome)
         })
     }
 
@@ -778,7 +780,9 @@ impl SqliteStateDb {
                         });
                     }
                 }
-                outcomes.push(tx.apply_remote_observation(observed, applied_at_ms)?);
+                let outcome = tx.apply_remote_observation(observed, applied_at_ms)?;
+                tx.replan_after_remote_observation(&outcome, applied_at_ms)?;
+                outcomes.push(outcome);
             }
             Ok(outcomes)
         })
@@ -888,6 +892,38 @@ impl SqliteStateDb {
 }
 
 impl PlannerTxn<'_> {
+    fn replan_after_remote_observation(
+        &mut self,
+        outcome: &AppliedRemoteObservation,
+        now_ms: u64,
+    ) -> Result<(), StateDbError> {
+        let target = match outcome {
+            AppliedRemoteObservation::BoundLocalOnly(bound) => {
+                Some((&bound.namespace_id, bound.inode_id))
+            }
+            AppliedRemoteObservation::ConvergedBoundInode(applied) => {
+                Some((&applied.namespace_id, applied.inode_id))
+            }
+            AppliedRemoteObservation::DiscoveredRemoteOnly {
+                namespace_id,
+                inode_id,
+            }
+            | AppliedRemoteObservation::UpdatedBoundRemoteState {
+                namespace_id,
+                inode_id,
+            } => Some((namespace_id, *inode_id)),
+            AppliedRemoteObservation::RecordedConflictOrError { .. }
+            | AppliedRemoteObservation::IgnoredStale { .. }
+            | AppliedRemoteObservation::IgnoredUnmatched { .. } => None,
+        };
+
+        if let Some((namespace_id, inode_id)) = target {
+            let _ = plan_file_in_tx(self, namespace_id, inode_id, now_ms)?;
+        }
+
+        Ok(())
+    }
+
     pub fn load_planned_action(
         &self,
         namespace_id: &NamespaceId,

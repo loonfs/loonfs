@@ -31,6 +31,14 @@ fn remote_observation_discovers_remote_only_directory_and_restarts_plannable() {
 }
 
 #[test]
+fn remote_observation_discovers_remote_only_root_directory_and_plans_materialization() {
+    run_remote_only_discovery_scenario(
+        "client/client_remote_observation_discovers_remote_only_root_directory.yaml",
+        "client-remote-only-discovery-root",
+    );
+}
+
+#[test]
 fn remote_only_file_discovery_invariant_trace_matches_checked_in_artifact() {
     let report = run_remote_only_discovery_invariant_report(
         "client/client_remote_observation_discovers_remote_only_file.yaml",
@@ -65,6 +73,16 @@ fn run_remote_only_discovery_scenario(relative_path: &str, temp_dir_name: &str) 
     };
 
     assert_eq!(outcome, expect.outcome.clone().into_outcome());
+
+    let db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
+    if let Some(planned_action_after_apply) = expect.planned_action_after_apply.as_ref() {
+        assert_eq!(
+            db.load_planned_action(&planner_tick.namespace_id, planner_tick.inode_id)
+                .expect("load planned action after observation"),
+            Some(planned_action_after_apply.clone())
+        );
+    }
+    drop(db);
 
     let mut db = SqliteStateDb::open(&db_path).expect("reopen DB after observation");
     let planner_result = plan_file(
@@ -193,6 +211,8 @@ struct RemoteOnlyDiscoveryExpect {
     remote_state: RemoteFileStateRow,
     local_state: LocalFileStateRow,
     sync_anchor: Option<SyncAnchorRow>,
+    #[serde(default)]
+    planned_action_after_apply: Option<PlannedActionRow>,
     planned_action: Option<PlannedActionRow>,
     planner_result: PlannedActionRecord,
     #[serde(default)]

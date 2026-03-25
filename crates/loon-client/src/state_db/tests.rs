@@ -2725,6 +2725,145 @@ fn apply_remote_observations_batch_preserves_ordered_outcomes() {
 }
 
 #[test]
+fn apply_remote_observation_replans_discovered_root_directory_materialization() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let observed = ObservedRemoteInode {
+        namespace_id: namespace_id.clone(),
+        inode_id: InodeId(1),
+        inode_kind: InodeKind::Dir,
+        observed_seq: ChangeSeq(0),
+        revision_no: RevisionNo(1),
+        content_digest: None,
+        content_manifest_digest: None,
+        parent_inode_id: None,
+        display_name: "".to_owned(),
+        is_deleted: false,
+    };
+
+    let outcome = db
+        .apply_remote_observation(&observed, 1_700_000_608_000)
+        .expect("apply remote root observation");
+
+    assert_eq!(
+        outcome,
+        AppliedRemoteObservation::DiscoveredRemoteOnly {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+        }
+    );
+    assert_eq!(
+        db.load_file_sync_views(&namespace_id, InodeId(1))
+            .expect("load root sync views"),
+        FileSyncViews {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            remote: Some(RemoteFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                observed_seq: ChangeSeq(0),
+                revision_no: RevisionNo(1),
+                content_digest: None,
+                content_manifest_digest: None,
+                parent_inode_id: None,
+                display_name: "".to_owned(),
+                is_deleted: false,
+            }),
+            local: Some(LocalFileStateRow {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                content_digest: None,
+                parent_inode_id: None,
+                display_name: "".to_owned(),
+                exists_on_disk: false,
+                dirty: false,
+                last_local_change_ms: 1_700_000_608_000,
+            }),
+            sync_anchor: None,
+        }
+    );
+    assert_eq!(
+        db.load_planned_action(&namespace_id, InodeId(1))
+            .expect("load root planned action"),
+        Some(PlannedActionRow {
+            namespace_id,
+            inode_id: InodeId(1),
+            decision: "materialize_remote_dir".to_owned(),
+            reason: "remote_observed_without_anchor".to_owned(),
+            created_at_ms: 1_700_000_608_000,
+        })
+    );
+}
+
+#[test]
+fn apply_remote_observations_batch_replans_parent_and_leaves_child_waiting() {
+    let mut db = SqliteStateDb::open_in_memory().expect("open in-memory DB");
+    let namespace_id = NamespaceId::from("ns-1");
+    let observations = vec![
+        ObservedRemoteInode {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            observed_seq: ChangeSeq(0),
+            revision_no: RevisionNo(1),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: "".to_owned(),
+            is_deleted: false,
+        },
+        ObservedRemoteInode {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(0),
+            revision_no: RevisionNo(1),
+            content_digest: Some("sha256:welcome-v1".to_owned()),
+            content_manifest_digest: Some("sha256:manifest-welcome-v1".to_owned()),
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "welcome.txt".to_owned(),
+            is_deleted: false,
+        },
+    ];
+
+    let outcomes = db
+        .apply_remote_observations_batch(&observations, 1_700_000_608_100)
+        .expect("apply remote observation batch");
+
+    assert_eq!(
+        outcomes,
+        vec![
+            AppliedRemoteObservation::DiscoveredRemoteOnly {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(1),
+            },
+            AppliedRemoteObservation::DiscoveredRemoteOnly {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(2),
+            },
+        ]
+    );
+    assert_eq!(
+        db.load_planned_action(&namespace_id, InodeId(1))
+            .expect("load root planned action after batch"),
+        Some(PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            decision: "materialize_remote_dir".to_owned(),
+            reason: "remote_observed_without_anchor".to_owned(),
+            created_at_ms: 1_700_000_608_100,
+        })
+    );
+    assert_eq!(
+        db.load_planned_action(&namespace_id, InodeId(2))
+            .expect("load child planned action after batch"),
+        None
+    );
+}
+
+#[test]
 fn apply_remote_observations_batch_matches_sequential_single_apply_state() {
     let observations = vec![
         sample_observed_remote_with(

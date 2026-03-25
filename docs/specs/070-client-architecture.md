@@ -1569,9 +1569,17 @@ Rules:
     - `exists_on_disk = false`
     - `dirty = false`
   - leave `sync_anchor(namespace_id, inode_id)` absent until local materialization succeeds
+  - replan that same inode in the same planner transaction so discovery immediately restarts
+    executable work when the current planner rules allow it
 - if a later newer observation arrives for that same remote-only placeholder before local
   materialization, the client may advance `remote_state` and refresh the placeholder path view from
   the newer authoritative observation
+- remote observation application must use the same `apply + targeted replan` transaction boundary
+  for any normal actionable state change:
+  - remote-only discovery
+  - bound late bind
+  - bound convergence
+  - bound remote-state refresh
 - deleted inodes and unsupported kinds may still be ignored in this first slice
 
 Why this rule exists:
@@ -1591,6 +1599,8 @@ Failure modes prevented:
 - dropping a remote-only authoritative file on the floor because no immediate local bind exists
 - dropping a remote-only authoritative directory on the floor because no immediate local bind
   exists
+- importing authoritative state for the canonical root and then observing `sync-once = no_work`
+  because discovery never scheduled `materialize_remote_dir`
 
 Failure modes named for the first implementation:
 
