@@ -1629,6 +1629,58 @@ lease_duration_ms = 60000
         );
     }
 
+    #[test]
+    fn show_client_state_renders_same_path_replacement_waiting_state_before_sync() {
+        let temp_dir = unique_temp_dir("ops-show-client-state-replacement-wait");
+        let config_path = write_local_fs_config(&temp_dir);
+        let snapshot = seed_authoritative_single_file_snapshot(
+            &temp_dir.join("store"),
+            &NamespaceId::from("demo"),
+            "notes",
+            b"notes v1\n",
+        );
+        let mut db = SqliteStateDb::open(temp_dir.join("client.sqlite3")).expect("open client db");
+        seed_bound_root_directory(&mut db, NamespaceId::from("demo"));
+        seed_bound_file(
+            &mut db,
+            NamespaceId::from("demo"),
+            InodeId(2),
+            "notes",
+            &snapshot.file_digest,
+            &snapshot.manifest_digest,
+        );
+
+        fs::create_dir_all(temp_dir.join("mirror/notes")).expect("create replacement directory");
+        run_args([
+            "observe-subtree".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+            "--path".to_owned(),
+            temp_dir.join("mirror").display().to_string(),
+        ])
+        .expect("observe subtree replacement");
+
+        let rendered = run_args([
+            "show-client-state".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--namespace".to_owned(),
+            "demo".to_owned(),
+        ])
+        .expect("show client state");
+
+        assert!(
+            rendered.contains("decision: wait_for_exact_path_vacate"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("reason: exact_path_blocked_by_bound_occupant"),
+            "{rendered}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn observe_subtree_renders_skipped_unsupported_entry_report() {

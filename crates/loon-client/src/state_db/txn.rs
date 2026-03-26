@@ -18,7 +18,8 @@ use super::loads::{
     load_local_only_transfer_ledger, load_local_only_transfer_ledgers_for_namespace,
     load_local_only_upload, load_local_state_for_namespace, load_local_subtree_inode_ids,
     load_next_deferred_planned_action, load_next_executable_planned_action,
-    load_next_planned_action, load_next_planned_local_only_action, load_pending_client_mutation,
+    load_next_planned_action, load_next_planned_local_only_action,
+    load_next_runnable_planned_local_only_action, load_pending_client_mutation,
     load_pending_client_mutation_for_client_file, load_pending_client_mutations_for_namespace,
     load_pending_inode_mutation, load_pending_inode_mutation_for_inode,
     load_pending_inode_mutations_for_namespace, load_planned_action,
@@ -29,7 +30,7 @@ use super::loads::{
 };
 use super::schema::initialize_connection;
 use super::*;
-use crate::planner::{decide_local_only_inode_action, plan_file_in_tx};
+use crate::planner::{plan_file_in_tx, plan_local_only_inode_in_tx, PlannerDecision};
 use crate::upload::UploadedContent;
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -260,6 +261,12 @@ impl SqliteStateDb {
         &self,
     ) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
         load_next_planned_local_only_action(&self.conn)
+    }
+
+    pub fn load_next_runnable_planned_local_only_action(
+        &self,
+    ) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
+        load_next_runnable_planned_local_only_action(&self.conn)
     }
 
     pub fn load_local_only_upload(
@@ -932,6 +939,56 @@ impl PlannerTxn<'_> {
         load_planned_action(&self.tx, namespace_id, inode_id)
     }
 
+    pub fn load_planned_local_only_action(
+        &self,
+        client_file_id: &ClientFileId,
+    ) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
+        load_planned_local_only_action(&self.tx, client_file_id)
+    }
+
+    pub fn load_local_only_parent_links_for_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Vec<LocalOnlyParentLinkRow>, StateDbError> {
+        load_local_only_parent_links_for_namespace(&self.tx, namespace_id)
+    }
+
+    pub fn load_namespace_state_summary(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ClientNamespaceStateSummary, StateDbError> {
+        Ok(ClientNamespaceStateSummary {
+            namespace_id: namespace_id.clone(),
+            remote_state: load_remote_state_for_namespace(&self.tx, namespace_id)?,
+            local_state: load_local_state_for_namespace(&self.tx, namespace_id)?,
+            sync_anchors: load_sync_anchors_for_namespace(&self.tx, namespace_id)?,
+            local_only_state: load_local_only_state_for_namespace(&self.tx, namespace_id)?,
+            planned_actions: load_planned_actions_for_namespace(&self.tx, namespace_id)?,
+            local_only_planned_actions: load_local_only_planned_actions_for_namespace(
+                &self.tx,
+                namespace_id,
+            )?,
+            pending_client_mutations: load_pending_client_mutations_for_namespace(
+                &self.tx,
+                namespace_id,
+            )?,
+            pending_inode_mutations: load_pending_inode_mutations_for_namespace(
+                &self.tx,
+                namespace_id,
+            )?,
+            transfer_ledgers: load_transfer_ledgers_for_namespace(&self.tx, namespace_id)?,
+            local_only_transfer_ledgers: load_local_only_transfer_ledgers_for_namespace(
+                &self.tx,
+                namespace_id,
+            )?,
+            conflicts_and_errors: load_conflicts_and_errors_for_namespace(&self.tx, namespace_id)?,
+            local_only_conflicts_and_errors: load_local_only_conflicts_and_errors_for_namespace(
+                &self.tx,
+                namespace_id,
+            )?,
+        })
+    }
+
     pub fn load_pending_inode_mutation_for_inode(
         &self,
         namespace_id: &NamespaceId,
@@ -1553,12 +1610,7 @@ impl PlannerTxn<'_> {
             }
         }
 
-        let action = decide_local_only_inode_action(&row, planned_at_ms)?;
-        if action.decision == crate::planner::PlannerDecision::NoOp {
-            self.delete_planned_local_only_action(&client_file_id)?;
-        } else {
-            self.upsert_planned_local_only_action(&action.to_row())?;
-        }
+        let action = plan_local_only_inode_in_tx(self, &client_file_id, planned_at_ms)?;
 
         Ok(ObservedLocalOnlyInodeResult {
             local_only: row,
@@ -1645,12 +1697,7 @@ impl PlannerTxn<'_> {
             }
         }
 
-        let action = decide_local_only_inode_action(&row, planned_at_ms)?;
-        if action.decision == crate::planner::PlannerDecision::NoOp {
-            self.delete_planned_local_only_action(client_file_id)?;
-        } else {
-            self.upsert_planned_local_only_action(&action.to_row())?;
-        }
+        let action = plan_local_only_inode_in_tx(self, client_file_id, planned_at_ms)?;
 
         Ok(ObservedLocalOnlyInodeResult {
             local_only: row,
@@ -2506,6 +2553,8 @@ impl PlannerTxn<'_> {
         response: &ClientMutationResponse,
         renamed: &loon_types::RenamedRemoteInode,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(&pending.namespace_id, pending.inode_id)?;
         let views = self.load_file_sync_views(&pending.namespace_id, pending.inode_id)?;
         let next_remote = rename_remote_state_from_response(pending, response, renamed, &views)?;
         let current_local =
@@ -2563,6 +2612,9 @@ impl PlannerTxn<'_> {
             pending.inode_id,
             next_local.last_local_change_ms,
         )?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(&pending.namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: pending.namespace_id.clone(),
@@ -2576,6 +2628,8 @@ impl PlannerTxn<'_> {
         response: &ClientMutationResponse,
         deleted: &loon_types::DeletedRemoteInode,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(&pending.namespace_id, pending.inode_id)?;
         let views = self.load_file_sync_views(&pending.namespace_id, pending.inode_id)?;
         let tombstone = delete_remote_state_from_response(pending, response, deleted, &views)?;
         self.upsert_remote_file(&tombstone)?;
@@ -2599,6 +2653,9 @@ impl PlannerTxn<'_> {
             pending.inode_id,
             "apply_remote_delete_local_apply_failed",
         )?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(&pending.namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: pending.namespace_id.clone(),
@@ -2612,6 +2669,8 @@ impl PlannerTxn<'_> {
         response: &ClientMutationResponse,
         deleted: &loon_types::DeletedRemoteInode,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(&pending.namespace_id, pending.inode_id)?;
         let views = self.load_file_sync_views(&pending.namespace_id, pending.inode_id)?;
         let tombstone = delete_remote_state_from_response(pending, response, deleted, &views)?;
         let subtree_inode_ids =
@@ -2653,6 +2712,9 @@ impl PlannerTxn<'_> {
         self.delete_local_files_for_inodes(&pending.namespace_id, &subtree_inode_ids)?;
         self.delete_sync_anchors_for_inodes(&pending.namespace_id, &subtree_inode_ids)?;
         self.cleanup_local_only_subtree_roots(&local_only_descendants)?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(&pending.namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: pending.namespace_id.clone(),
@@ -2854,6 +2916,8 @@ impl PlannerTxn<'_> {
         inode_id: InodeId,
         applied_at_ms: u64,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(namespace_id, inode_id)?;
         let (remote, local, _anchor) =
             load_bound_apply_remote_rename_views_from_conn(&self.tx, namespace_id, inode_id)?;
 
@@ -2888,6 +2952,9 @@ impl PlannerTxn<'_> {
             inode_id,
             "apply_remote_rename_local_apply_failed",
         )?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -2960,6 +3027,8 @@ impl PlannerTxn<'_> {
         inode_id: InodeId,
         _applied_at_ms: u64,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(namespace_id, inode_id)?;
         self.delete_planned_action(namespace_id, inode_id)?;
         self.delete_inode_upload(namespace_id, inode_id)?;
         self.delete_transfer_ledger_for_inode(namespace_id, inode_id, TransferDirection::Upload)?;
@@ -2975,6 +3044,9 @@ impl PlannerTxn<'_> {
             inode_id,
             "resolve_delete_vs_edit_conflict_local_apply_failed",
         )?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -2988,6 +3060,8 @@ impl PlannerTxn<'_> {
         inode_id: InodeId,
         applied_at_ms: u64,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(namespace_id, inode_id)?;
         let views = self.load_file_sync_views(namespace_id, inode_id)?;
         let remote = views
             .remote
@@ -3034,6 +3108,9 @@ impl PlannerTxn<'_> {
             inode_id,
             "resolve_rename_vs_edit_conflict_local_apply_failed",
         )?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -3047,6 +3124,8 @@ impl PlannerTxn<'_> {
         inode_id: InodeId,
         applied_at_ms: u64,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(namespace_id, inode_id)?;
         let views = self.load_file_sync_views(namespace_id, inode_id)?;
         let remote = views
             .remote
@@ -3086,6 +3165,9 @@ impl PlannerTxn<'_> {
             inode_id,
             "apply_remote_rename_and_replace_local_apply_failed",
         )?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -3162,6 +3244,8 @@ impl PlannerTxn<'_> {
         inode_id: InodeId,
         _applied_at_ms: u64,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(namespace_id, inode_id)?;
         let (_remote, _local, _anchor) =
             load_bound_apply_remote_delete_views_from_conn(&self.tx, namespace_id, inode_id)?;
 
@@ -3174,6 +3258,9 @@ impl PlannerTxn<'_> {
             inode_id,
             "apply_remote_delete_local_apply_failed",
         )?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -3187,6 +3274,8 @@ impl PlannerTxn<'_> {
         inode_id: InodeId,
         applied_at_ms: u64,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(namespace_id, inode_id)?;
         let views = load_bound_apply_remote_subtree_rename_views_from_conn(
             &self.tx,
             namespace_id,
@@ -3225,6 +3314,9 @@ impl PlannerTxn<'_> {
             "apply_remote_subtree_rename_local_apply_failed",
         )?;
         self.replan_direct_authoritative_children(namespace_id, inode_id, applied_at_ms)?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -3238,6 +3330,8 @@ impl PlannerTxn<'_> {
         inode_id: InodeId,
         _applied_at_ms: u64,
     ) -> Result<AppliedInodeMutation, StateDbError> {
+        let vacated_relative_path =
+            self.resolve_current_relative_path_for_inode(namespace_id, inode_id)?;
         let views = load_bound_apply_remote_subtree_delete_views_from_conn(
             &self.tx,
             namespace_id,
@@ -3249,6 +3343,9 @@ impl PlannerTxn<'_> {
         self.delete_remote_files_for_inodes(namespace_id, &views.descendant_remote_inode_ids)?;
         self.delete_local_files_for_inodes(namespace_id, &views.subtree_inode_ids)?;
         self.delete_sync_anchors_for_inodes(namespace_id, &views.subtree_inode_ids)?;
+        if let Some(relative_path) = vacated_relative_path.as_deref() {
+            self.replan_waiting_local_only_at_relative_path(namespace_id, relative_path)?;
+        }
 
         Ok(AppliedInodeMutation {
             namespace_id: namespace_id.clone(),
@@ -3680,13 +3777,11 @@ impl PlannerTxn<'_> {
             };
             self.upsert_local_only_file(&next_child)?;
             self.delete_local_only_parent_link(&next_child.client_file_id)?;
-            let action =
-                decide_local_only_inode_action(&next_child, next_child.last_local_change_ms)?;
-            if action.decision == crate::planner::PlannerDecision::NoOp {
-                self.delete_planned_local_only_action(&next_child.client_file_id)?;
-            } else {
-                self.upsert_planned_local_only_action(&action.to_row())?;
-            }
+            let _ = plan_local_only_inode_in_tx(
+                self,
+                &next_child.client_file_id,
+                next_child.last_local_change_ms,
+            )?;
         }
 
         Ok(BoundLocalOnlyFile {
@@ -3865,6 +3960,47 @@ impl PlannerTxn<'_> {
         {
             plan_file_in_tx(self, namespace_id, child_inode_id, now_ms)?;
         }
+        Ok(())
+    }
+
+    fn resolve_current_relative_path_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<Option<String>, StateDbError> {
+        let summary = self.load_namespace_state_summary(namespace_id)?;
+        let parent_links = self.load_local_only_parent_links_for_namespace(namespace_id)?;
+        let path_index = crate::local_fs::NamespacePathIndex::build(&summary, &parent_links);
+        Ok(path_index
+            .resolve_current_inode_relative_path(inode_id)
+            .map(str::to_owned))
+    }
+
+    fn replan_waiting_local_only_at_relative_path(
+        &mut self,
+        namespace_id: &NamespaceId,
+        relative_path: &str,
+    ) -> Result<(), StateDbError> {
+        let summary = self.load_namespace_state_summary(namespace_id)?;
+        let parent_links = self.load_local_only_parent_links_for_namespace(namespace_id)?;
+        let path_index = crate::local_fs::NamespacePathIndex::build(&summary, &parent_links);
+        let client_file_ids = path_index
+            .local_only_file_matches(relative_path)
+            .iter()
+            .chain(path_index.local_only_dir_matches(relative_path).iter())
+            .map(|row| row.client_file_id.clone())
+            .collect::<Vec<_>>();
+
+        for client_file_id in client_file_ids {
+            let Some(planned) = self.load_planned_local_only_action(&client_file_id)? else {
+                continue;
+            };
+            if planned.decision.as_str() != PlannerDecision::WaitForExactPathVacate.as_str() {
+                continue;
+            }
+            let _ = plan_local_only_inode_in_tx(self, &client_file_id, planned.created_at_ms)?;
+        }
+
         Ok(())
     }
 

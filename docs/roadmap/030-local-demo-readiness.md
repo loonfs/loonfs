@@ -177,19 +177,14 @@ Exit criteria:
 - one recursive subtree scan can batch create/edit/delete observations and preserve unambiguous
   file and directory move identity without widening into heuristic move guesses
 - same-path bound replacements observed through `observe-subtree` can reach idle through the real
-  sync path because exact-path local-only creates yield to the bound delete or rename already
-  queued to vacate that path
+  sync path because exact-path local-only replacements now surface as planner-visible waiting
+  state and wake once the bound delete or rename really vacates that path
 - one honest client scheduler step or idle loop can be exercised locally without inventing a
   second sync path
 - broader future `loon-cli` work can continue to reuse `loon-ops` instead of re-implementing
   config and renderers
 - the repo now has a generic watcher-ready local event reducer without committing to an OS watcher
   adapter yet
-
-Follow-up debt to retire:
-
-- replace the exact-path same-path replacement scheduler guard with planner-visible waiting state
-  before widening any broader path-collision or dependency handling
 
 ## Milestone 16: provider-backed RC hardening
 

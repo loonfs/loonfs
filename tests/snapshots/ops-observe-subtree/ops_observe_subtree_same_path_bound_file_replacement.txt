@@ -17,6 +17,6 @@ paired_local_only_move_count: 0
 bound_delete_count: 1
 local_only_delete_count: 0
 planned_decision_counts:
-  create_remote_dir: 1
   delete_file: 1
   no_op: 1
+  wait_for_exact_path_vacate: 1

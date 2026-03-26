@@ -34,8 +34,10 @@ use crate::client::{
     recursive_subtree_unique_local_only_directory_move_preserves_identity,
     recursive_subtree_unique_local_only_file_move_preserves_identity,
     repeated_local_only_observation_reuses_identity,
-    same_path_replacement_guard_prefers_bound_vacate, subtree_observation_batch_rollback_is_atomic,
-    sync_until_idle_fails_on_max_steps, sync_until_idle_stops_on_no_work,
+    same_path_replacement_uses_planner_visible_wait_state,
+    same_path_replacement_wait_state_wakes_after_vacate,
+    subtree_observation_batch_rollback_is_atomic, sync_until_idle_fails_on_max_steps,
+    sync_until_idle_stops_on_no_work,
 };
 use crate::namespace::ModelLeaseAcquireError;
 use loon_types::{
@@ -478,18 +480,30 @@ fn model_recursive_subtree_skipped_unsupported_root_blocks_delete_inference() {
 }
 
 #[test]
-fn model_same_path_replacement_guard_prefers_bound_vacate() {
-    assert!(same_path_replacement_guard_prefers_bound_vacate(
-        "deferred_inode_action",
-        "delete_file"
+fn model_same_path_replacement_uses_planner_visible_wait_state() {
+    assert!(same_path_replacement_uses_planner_visible_wait_state(
+        "wait_for_exact_path_vacate",
+        "exact_path_blocked_by_bound_occupant"
     ));
-    assert!(same_path_replacement_guard_prefers_bound_vacate(
-        "deferred_inode_action",
-        "delete_subtree"
+    assert!(!same_path_replacement_uses_planner_visible_wait_state(
+        "create_remote_dir",
+        "local_only_directory_without_remote_identity"
     ));
-    assert!(!same_path_replacement_guard_prefers_bound_vacate(
-        "local_only_create",
-        "delete_file"
+}
+
+#[test]
+fn model_same_path_replacement_wait_state_wakes_after_vacate() {
+    assert!(same_path_replacement_wait_state_wakes_after_vacate(
+        "wait_for_exact_path_vacate",
+        "create_remote_dir"
+    ));
+    assert!(same_path_replacement_wait_state_wakes_after_vacate(
+        "wait_for_exact_path_vacate",
+        "upload_local_create"
+    ));
+    assert!(!same_path_replacement_wait_state_wakes_after_vacate(
+        "wait_for_exact_path_vacate",
+        "wait_for_exact_path_vacate"
     ));
 }
 

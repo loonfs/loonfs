@@ -1,3 +1,4 @@
+use crate::local_fs::NamespacePathIndex;
 use crate::state_db::{
     ClientFileId, FileSyncViews, HierarchyParentMaterializationAssessment, LocalOnlyFileStateRow,
     LocalOnlyPlannedActionRow, PlannedActionRow, RemoteSubtreeDeleteAssessment,
@@ -12,6 +13,7 @@ use thiserror::Error;
 pub enum PlannerDecision {
     CreateRemoteDir,
     UploadLocalCreate,
+    WaitForExactPathVacate,
     UploadLocalEdit,
     Rename,
     DeleteFile,
@@ -40,6 +42,7 @@ pub enum PlannerReason {
     NoObservedState,
     LocalOnlyDirectoryWithoutRemoteIdentity,
     LocalOnlyFileWithoutRemoteIdentity,
+    ExactPathBlockedByBoundOccupant,
     LocalDiffersFromAnchor,
     RemoteDiffersFromAnchor,
     RemoteDeletedFromAnchor,
@@ -214,18 +217,7 @@ pub fn plan_local_only_inode(
     now_ms: u64,
 ) -> Result<PlannedLocalOnlyActionRecord, PlannerError> {
     db.planner_transaction("plan_local_only_inode", |tx| {
-        let local_only = tx
-            .load_local_only_file(client_file_id)?
-            .ok_or_else(|| StateDbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-        let action = decide_local_only_inode_action(&local_only, now_ms)?;
-
-        if action.decision == PlannerDecision::NoOp {
-            tx.delete_planned_local_only_action(client_file_id)?;
-        } else {
-            tx.upsert_planned_local_only_action(&action.to_row())?;
-        }
-
-        Ok(action)
+        plan_local_only_inode_in_tx(tx, client_file_id, now_ms)
     })
     .map_err(PlannerError::from)
 }
@@ -456,6 +448,92 @@ pub fn decide_local_only_inode_action(
     })
 }
 
+pub(crate) fn plan_local_only_inode_in_tx(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    client_file_id: &ClientFileId,
+    now_ms: u64,
+) -> Result<PlannedLocalOnlyActionRecord, StateDbError> {
+    let local_only = tx
+        .load_local_only_file(client_file_id)?
+        .ok_or_else(|| StateDbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+    let action = decide_local_only_inode_action_in_tx(tx, &local_only, now_ms)?;
+
+    if action.decision == PlannerDecision::NoOp {
+        tx.delete_planned_local_only_action(client_file_id)?;
+    } else {
+        tx.upsert_planned_local_only_action(&action.to_row())?;
+    }
+
+    Ok(action)
+}
+
+pub(crate) fn is_local_only_create_decision(decision: &str) -> bool {
+    matches!(
+        decision,
+        value
+            if value == PlannerDecision::UploadLocalCreate.as_str()
+                || value == PlannerDecision::CreateRemoteDir.as_str()
+    )
+}
+
+pub(crate) fn is_path_vacating_bound_decision(decision: &str) -> bool {
+    matches!(
+        decision,
+        value
+            if value == PlannerDecision::DeleteFile.as_str()
+                || value == PlannerDecision::DeleteSubtree.as_str()
+                || value == PlannerDecision::Rename.as_str()
+    )
+}
+
+fn decide_local_only_inode_action_in_tx(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    local_only: &LocalOnlyFileStateRow,
+    now_ms: u64,
+) -> Result<PlannedLocalOnlyActionRecord, StateDbError> {
+    let mut action = decide_local_only_inode_action(local_only, now_ms)?;
+    if !is_local_only_create_decision(action.decision.as_str()) {
+        return Ok(action);
+    }
+
+    if local_only_waits_for_exact_path_vacate(tx, local_only)? {
+        action.decision = PlannerDecision::WaitForExactPathVacate;
+        action.reason = PlannerReason::ExactPathBlockedByBoundOccupant;
+    }
+
+    Ok(action)
+}
+
+fn local_only_waits_for_exact_path_vacate(
+    tx: &mut crate::state_db::PlannerTxn<'_>,
+    local_only: &LocalOnlyFileStateRow,
+) -> Result<bool, StateDbError> {
+    let summary = tx.load_namespace_state_summary(&local_only.namespace_id)?;
+    let parent_links = tx.load_local_only_parent_links_for_namespace(&local_only.namespace_id)?;
+    let path_index = NamespacePathIndex::build(&summary, &parent_links);
+    let Some(relative_path) =
+        path_index.resolve_local_only_source_relative_path(&local_only.client_file_id)
+    else {
+        return Ok(false);
+    };
+
+    let mut bound_matches = path_index
+        .bound_file_matches(relative_path)
+        .iter()
+        .chain(path_index.bound_dir_matches(relative_path).iter());
+    let Some(occupying_bound) = bound_matches.next() else {
+        return Ok(false);
+    };
+    if bound_matches.next().is_some() {
+        return Ok(false);
+    }
+
+    Ok(tx
+        .load_planned_action(&local_only.namespace_id, occupying_bound.inode_id)?
+        .filter(|planned_action| is_path_vacating_bound_decision(planned_action.decision.as_str()))
+        .is_some())
+}
+
 impl PlannedActionRecord {
     pub fn to_row(&self) -> PlannedActionRow {
         PlannedActionRow {
@@ -513,6 +591,7 @@ impl PlannerDecision {
         match self {
             Self::CreateRemoteDir => "create_remote_dir",
             Self::UploadLocalCreate => "upload_local_create",
+            Self::WaitForExactPathVacate => "wait_for_exact_path_vacate",
             Self::UploadLocalEdit => "upload_local_edit",
             Self::Rename => "rename",
             Self::DeleteFile => "delete_file",
@@ -539,6 +618,7 @@ impl PlannerDecision {
         match value {
             "create_remote_dir" => Ok(Self::CreateRemoteDir),
             "upload_local_create" => Ok(Self::UploadLocalCreate),
+            "wait_for_exact_path_vacate" => Ok(Self::WaitForExactPathVacate),
             "upload_local_edit" => Ok(Self::UploadLocalEdit),
             "rename" => Ok(Self::Rename),
             "delete_file" => Ok(Self::DeleteFile),
@@ -572,6 +652,7 @@ impl PlannerReason {
                 "local_only_directory_without_remote_identity"
             }
             Self::LocalOnlyFileWithoutRemoteIdentity => "local_only_file_without_remote_identity",
+            Self::ExactPathBlockedByBoundOccupant => "exact_path_blocked_by_bound_occupant",
             Self::LocalDiffersFromAnchor => "local_differs_from_anchor",
             Self::RemoteDiffersFromAnchor => "remote_differs_from_anchor",
             Self::RemoteDeletedFromAnchor => "remote_deleted_from_anchor",
@@ -635,6 +716,7 @@ impl PlannerReason {
             "local_only_file_without_remote_identity" => {
                 Ok(Self::LocalOnlyFileWithoutRemoteIdentity)
             }
+            "exact_path_blocked_by_bound_occupant" => Ok(Self::ExactPathBlockedByBoundOccupant),
             "local_differs_from_anchor" => Ok(Self::LocalDiffersFromAnchor),
             "remote_differs_from_anchor" => Ok(Self::RemoteDiffersFromAnchor),
             "remote_deleted_from_anchor" => Ok(Self::RemoteDeletedFromAnchor),

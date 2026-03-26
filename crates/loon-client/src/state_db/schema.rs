@@ -1,7 +1,7 @@
 use super::{SqliteStateDb, StateDbError};
 use rusqlite::{Connection, OptionalExtension};
 
-pub(crate) const SCHEMA_VERSION: i32 = 20;
+pub(crate) const SCHEMA_VERSION: i32 = 21;
 
 const SCHEMA_V1_SQL: &str = r#"
 CREATE TABLE remote_state (
@@ -1153,6 +1153,40 @@ CREATE INDEX idx_local_only_parent_links_parent
     ON local_only_parent_links(parent_client_file_id, client_file_id);
 "#;
 
+const SCHEMA_V21_SQL: &str = r#"
+DROP INDEX IF EXISTS idx_planned_local_only_actions_created_at;
+ALTER TABLE planned_local_only_actions RENAME TO planned_local_only_actions_old;
+CREATE TABLE planned_local_only_actions (
+    client_file_id TEXT NOT NULL PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    FOREIGN KEY (client_file_id)
+        REFERENCES local_only_state(client_file_id)
+        ON DELETE CASCADE,
+    CHECK (decision IN ('create_remote_dir', 'upload_local_create', 'wait_for_exact_path_vacate', 'upload_local_edit', 'download_remote_edit', 'materialize_remote_dir', 'create_conflict_copy', 'no_op')),
+    CHECK (reason IN ('already_converged', 'no_observed_state', 'local_only_directory_without_remote_identity', 'local_only_file_without_remote_identity', 'exact_path_blocked_by_bound_occupant', 'local_differs_from_anchor', 'remote_differs_from_anchor', 'local_and_remote_differ_from_anchor', 'local_observed_without_anchor', 'remote_observed_without_anchor', 'local_and_remote_observed_without_anchor'))
+);
+INSERT INTO planned_local_only_actions (
+    client_file_id,
+    namespace_id,
+    decision,
+    reason,
+    created_at_ms
+)
+SELECT
+    client_file_id,
+    namespace_id,
+    decision,
+    reason,
+    created_at_ms
+FROM planned_local_only_actions_old;
+DROP TABLE planned_local_only_actions_old;
+CREATE INDEX idx_planned_local_only_actions_created_at
+    ON planned_local_only_actions(created_at_ms, client_file_id);
+"#;
+
 pub(super) fn initialize_connection(conn: &Connection) -> Result<(), StateDbError> {
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -1236,6 +1270,9 @@ pub(super) fn install_schema_version_for_test(
     }
     if target_version >= 20 {
         apply_v20_hardening(conn)?;
+    }
+    if target_version >= 21 {
+        apply_v21_hardening(conn)?;
     }
 
     Ok(())
@@ -1375,8 +1412,15 @@ impl SqliteStateDb {
 
         if current_version == 19 {
             apply_v20_hardening(&mut self.conn)?;
+            current_version = 20;
         }
 
+        if current_version == 20 {
+            apply_v21_hardening(&mut self.conn)?;
+            current_version = 21;
+        }
+
+        debug_assert_eq!(current_version, SCHEMA_VERSION);
         Ok(())
     }
 }
@@ -1539,6 +1583,14 @@ fn apply_v20_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
     let tx = conn.transaction()?;
     tx.execute_batch(SCHEMA_V20_SQL)?;
     tx.pragma_update(None, "user_version", 20)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn apply_v21_hardening(conn: &mut Connection) -> Result<(), StateDbError> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(SCHEMA_V21_SQL)?;
+    tx.pragma_update(None, "user_version", 21)?;
     tx.commit()?;
     Ok(())
 }

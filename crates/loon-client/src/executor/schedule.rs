@@ -12,7 +12,6 @@ use super::inode::{
 use super::local_only::{execute_local_only_create, execute_local_only_create_with_hooks};
 use super::*;
 use crate::executor::dispatch::dispatch_inode_mutation_from_state_with_hooks;
-use crate::local_fs::NamespacePathIndex;
 use crate::state_db::{ClientFileId, SqliteStateDb};
 use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use loon_objectstore::ObjectStore;
@@ -76,19 +75,14 @@ where
     ITP: FnOnce(&NamespaceId, InodeId, Option<InodeId>, &str) -> Option<PathBuf>,
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
-    let next_local_only = db.load_next_planned_local_only_action()?;
+    let next_local_only = db.load_next_runnable_planned_local_only_action()?;
     let next_executable = db.load_next_executable_planned_action()?;
     let next_deferred = db.load_next_deferred_planned_action()?;
-    let same_path_replacement_override = match next_local_only.as_ref() {
-        Some(local_only) => load_same_path_replacement_override(db, local_only)?,
-        None => None,
-    };
 
     let next_action = match select_next_client_action_candidate(
         next_local_only,
         next_executable,
         next_deferred,
-        same_path_replacement_override,
     ) {
         Some(action) => action,
         None => return Ok(None),
@@ -446,7 +440,7 @@ where
     P: FnOnce(&ClientFileId) -> Option<PathBuf>,
     F: FnOnce(&ClientMutationRequest) -> Result<ClientMutationResponse, String>,
 {
-    let planned_action = match db.load_next_planned_local_only_action()? {
+    let planned_action = match db.load_next_runnable_planned_local_only_action()? {
         Some(action) => action,
         None => return Ok(None),
     };
@@ -473,7 +467,6 @@ fn select_next_client_action_candidate(
     next_local_only: Option<LocalOnlyPlannedActionRow>,
     next_executable_planned_action: Option<PlannedActionRow>,
     next_deferred_planned_action: Option<PlannedActionRow>,
-    same_path_replacement_override: Option<PlannedActionRow>,
 ) -> Option<NextClientActionCandidate> {
     if let Some(planned_action) = next_executable_planned_action.as_ref() {
         if matches!(
@@ -486,12 +479,6 @@ fn select_next_client_action_candidate(
                 planned_action.clone(),
             ));
         }
-    }
-
-    if let Some(planned_action) = same_path_replacement_override {
-        return Some(NextClientActionCandidate::DeferredPlannedAction(
-            planned_action,
-        ));
     }
 
     match (
@@ -508,61 +495,4 @@ fn select_next_client_action_candidate(
         ),
         (None, None, None) => None,
     }
-}
-
-fn load_same_path_replacement_override(
-    db: &SqliteStateDb,
-    local_only_action: &LocalOnlyPlannedActionRow,
-) -> Result<Option<PlannedActionRow>, StateDbError> {
-    // This is a narrow correctness guard for exact same-path replacements observed through
-    // observe-subtree. If this class of dependency grows, move it into planner-visible waiting
-    // state instead of adding more scheduler-only path exceptions here.
-    if !is_local_only_create_decision(local_only_action.decision.as_str()) {
-        return Ok(None);
-    }
-
-    let summary = db.load_namespace_state_summary(&local_only_action.namespace_id)?;
-    let parent_links =
-        db.load_local_only_parent_links_for_namespace(&local_only_action.namespace_id)?;
-    let path_index = NamespacePathIndex::build(&summary, &parent_links);
-    let Some(relative_path) =
-        path_index.resolve_local_only_source_relative_path(&local_only_action.client_file_id)
-    else {
-        return Ok(None);
-    };
-
-    let mut bound_matches = path_index
-        .bound_file_matches(relative_path)
-        .iter()
-        .chain(path_index.bound_dir_matches(relative_path).iter());
-    let Some(occupying_bound) = bound_matches.next() else {
-        return Ok(None);
-    };
-    if bound_matches.next().is_some() {
-        return Ok(None);
-    }
-
-    let planned_action =
-        db.load_planned_action(&local_only_action.namespace_id, occupying_bound.inode_id)?;
-    Ok(planned_action
-        .filter(|planned_action| is_path_vacating_bound_decision(planned_action.decision.as_str())))
-}
-
-fn is_local_only_create_decision(decision: &str) -> bool {
-    matches!(
-        decision,
-        value
-            if value == PlannerDecision::UploadLocalCreate.as_str()
-                || value == PlannerDecision::CreateRemoteDir.as_str()
-    )
-}
-
-fn is_path_vacating_bound_decision(decision: &str) -> bool {
-    matches!(
-        decision,
-        value
-            if value == PlannerDecision::DeleteFile.as_str()
-                || value == PlannerDecision::DeleteSubtree.as_str()
-                || value == PlannerDecision::Rename.as_str()
-    )
 }

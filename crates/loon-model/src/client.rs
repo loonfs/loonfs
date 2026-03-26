@@ -281,14 +281,23 @@ pub fn recursive_subtree_skipped_unsupported_root_blocks_delete_inference(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn same_path_replacement_guard_prefers_bound_vacate(
-    selected_action_kind: &str,
-    selected_bound_decision: &str,
+pub fn same_path_replacement_uses_planner_visible_wait_state(
+    replacement_planned_decision: &str,
+    replacement_planned_reason: &str,
 ) -> bool {
-    selected_action_kind == "deferred_inode_action"
+    replacement_planned_decision == "wait_for_exact_path_vacate"
+        && replacement_planned_reason == "exact_path_blocked_by_bound_occupant"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn same_path_replacement_wait_state_wakes_after_vacate(
+    before_vacate_planned_decision: &str,
+    after_vacate_planned_decision: &str,
+) -> bool {
+    before_vacate_planned_decision == "wait_for_exact_path_vacate"
         && matches!(
-            selected_bound_decision,
-            "delete_file" | "delete_subtree" | "rename"
+            after_vacate_planned_decision,
+            "upload_local_create" | "create_remote_dir"
         )
 }
 

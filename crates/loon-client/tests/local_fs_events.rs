@@ -278,7 +278,9 @@ fn client_local_fs_observe_subtree_replaces_bound_file_with_directory() {
     assert_eq!(report.local_only_observe_count, 2);
     assert_eq!(report.planned_decision_counts.get("delete_file"), Some(&1));
     assert_eq!(
-        report.planned_decision_counts.get("create_remote_dir"),
+        report
+            .planned_decision_counts
+            .get("wait_for_exact_path_vacate"),
         Some(&1)
     );
     assert_eq!(report.planned_decision_counts.get("no_op"), Some(&1));
@@ -316,7 +318,9 @@ fn client_local_fs_observe_subtree_replaces_bound_directory_with_file() {
         Some(&1)
     );
     assert_eq!(
-        report.planned_decision_counts.get("upload_local_create"),
+        report
+            .planned_decision_counts
+            .get("wait_for_exact_path_vacate"),
         Some(&1)
     );
 }

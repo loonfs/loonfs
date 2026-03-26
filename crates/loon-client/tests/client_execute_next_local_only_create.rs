@@ -5,7 +5,7 @@ use loon_client::executor::{
     execute_next_local_only_create, ExecutedLocalOnlyCreate, ExecutedNextLocalOnlyCreate,
     UploadLocalCreateExecution,
 };
-use loon_client::planner::PlannedActionRecord;
+use loon_client::planner::{PlannedActionRecord, PlannerDecision};
 use loon_client::state_db::{
     BoundLocalOnlyFile, ClientFileId, LocalFileStateRow, LocalOnlyFileStateRow,
     LocalOnlyPlannedActionRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
@@ -51,6 +51,51 @@ fn execute_next_local_only_create_returns_none_without_work() {
         |_request| unreachable!("dispatch should not run without work"),
     )
     .expect("empty queue should return Ok(None)");
+
+    assert_eq!(result, None);
+}
+
+#[test]
+fn execute_next_local_only_create_returns_none_when_only_waiting_local_only_exists() {
+    let temp_dir = TestDir::new("client-execute-next-local-only-create-waiting");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+    let mut db = SqliteStateDb::open(&db_path).expect("open empty client state DB");
+
+    db.planner_transaction("seed-waiting-local-only-action", |tx| {
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            namespace_id: NamespaceId::from("ns-1"),
+            inode_kind: loon_types::InodeKind::Dir,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "notes".to_owned(),
+            content_digest: None,
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_500_000,
+        })?;
+        tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+            client_file_id: ClientFileId::from("tmp:ns-1:00000000000000000001"),
+            namespace_id: NamespaceId::from("ns-1"),
+            decision: PlannerDecision::WaitForExactPathVacate.as_str().to_owned(),
+            reason: "exact_path_blocked_by_bound_occupant".to_owned(),
+            created_at_ms: 1_700_000_500_100,
+        })?;
+        Ok(())
+    })
+    .expect("seed waiting local-only action");
+
+    let result = execute_next_local_only_create(
+        &mut db,
+        &store,
+        |_client_file_id| unreachable!("source path resolver should not run without runnable work"),
+        1_700_000_500_200,
+        1_700_000_500_300,
+        |_request| unreachable!("dispatch should not run without runnable work"),
+    )
+    .expect("waiting local-only action should not be runnable");
 
     assert_eq!(result, None);
 }

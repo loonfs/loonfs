@@ -1,8 +1,11 @@
 use loon_client::planner::{
     plan_local_only_file, PlannedLocalOnlyActionRecord, PlannerDecision, PlannerReason,
 };
-use loon_client::state_db::{LocalOnlyFileStateRow, SqliteStateDb};
+use loon_client::state_db::{
+    LocalFileStateRow, LocalOnlyFileStateRow, PlannedActionRow, SqliteStateDb, SyncAnchorRow,
+};
 use loon_testkit::scenario::Scenario;
+use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 use serde::Deserialize;
 
 #[test]
@@ -43,6 +46,141 @@ fn local_only_fixture_persists_create_upload_plan() {
         PlannedLocalOnlyActionRecord::try_from(persisted)
             .expect("decode persisted local-only action"),
         expected
+    );
+}
+
+#[test]
+fn local_only_planner_marks_same_path_bound_file_replacement_as_waiting() {
+    let namespace_id = NamespaceId::from("ns-1");
+    let replacement_id = loon_client::state_db::ClientFileId::from("tmp:ns-1:00000000000000000042");
+    let mut db = SqliteStateDb::open_in_memory().expect("open state DB");
+
+    db.planner_transaction("seed-waiting-file-replacement", |tx| {
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_000,
+        })?;
+        tx.upsert_sync_anchor(&SyncAnchorRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            synced_seq: ChangeSeq(0),
+            revision_no: RevisionNo(0),
+            content_digest: None,
+            content_manifest_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:notes-v1".to_owned()),
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "notes".to_owned(),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 2_000,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(2),
+            decision: PlannerDecision::DeleteFile.as_str().to_owned(),
+            reason: PlannerReason::LocalObservedWithoutAnchor
+                .as_str()
+                .to_owned(),
+            created_at_ms: 3_000,
+        })?;
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: replacement_id.clone(),
+            namespace_id: namespace_id.clone(),
+            inode_kind: InodeKind::Dir,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "notes".to_owned(),
+            content_digest: None,
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 4_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed file replacement state");
+
+    let planned =
+        plan_local_only_file(&mut db, &replacement_id, 5_000).expect("plan waiting state");
+
+    assert_eq!(planned.decision, PlannerDecision::WaitForExactPathVacate);
+    assert_eq!(
+        planned.reason,
+        PlannerReason::ExactPathBlockedByBoundOccupant
+    );
+}
+
+#[test]
+fn local_only_planner_marks_same_path_bound_rename_replacement_as_waiting() {
+    let namespace_id = NamespaceId::from("ns-1");
+    let replacement_id = loon_client::state_db::ClientFileId::from("tmp:ns-1:00000000000000000043");
+    let mut db = SqliteStateDb::open_in_memory().expect("open state DB");
+
+    db.planner_transaction("seed-waiting-rename-replacement", |tx| {
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            content_digest: None,
+            parent_inode_id: None,
+            display_name: String::new(),
+            exists_on_disk: true,
+            dirty: false,
+            last_local_change_ms: 1_000,
+        })?;
+        tx.upsert_local_file(&LocalFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            content_digest: Some("sha256:notes-v1".to_owned()),
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "notes".to_owned(),
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 2_000,
+        })?;
+        tx.upsert_planned_action(&PlannedActionRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(2),
+            decision: PlannerDecision::Rename.as_str().to_owned(),
+            reason: PlannerReason::LocalDiffersFromAnchor.as_str().to_owned(),
+            created_at_ms: 3_000,
+        })?;
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: replacement_id.clone(),
+            namespace_id: namespace_id.clone(),
+            inode_kind: InodeKind::Dir,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "notes".to_owned(),
+            content_digest: None,
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 4_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed rename replacement state");
+
+    let planned =
+        plan_local_only_file(&mut db, &replacement_id, 5_000).expect("plan waiting state");
+
+    assert_eq!(planned.decision, PlannerDecision::WaitForExactPathVacate);
+    assert_eq!(
+        planned.reason,
+        PlannerReason::ExactPathBlockedByBoundOccupant
     );
 }
 

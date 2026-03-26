@@ -432,13 +432,19 @@ fn execute_next_client_action_prefers_bound_delete_file_for_same_path_replacemen
         tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
             client_file_id: replacement_id.clone(),
             namespace_id: namespace_id.clone(),
-            decision: PlannerDecision::CreateRemoteDir.as_str().to_owned(),
-            reason: "local_only_directory_without_remote_identity".to_owned(),
+            decision: PlannerDecision::WaitForExactPathVacate.as_str().to_owned(),
+            reason: "exact_path_blocked_by_bound_occupant".to_owned(),
             created_at_ms: 1_700_000_102_000,
         })?;
         Ok(())
     })
     .expect("seed same-path file replacement state");
+
+    assert_eq!(
+        db.load_next_runnable_planned_local_only_action()
+            .expect("load next runnable local-only action"),
+        None
+    );
 
     let executed = run_execute_next_client_action(
         &db_path,
@@ -518,13 +524,19 @@ fn execute_next_client_action_prefers_bound_delete_subtree_for_same_path_replace
         tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
             client_file_id: replacement_id.clone(),
             namespace_id: namespace_id.clone(),
-            decision: PlannerDecision::UploadLocalCreate.as_str().to_owned(),
-            reason: "local_only_file_without_remote_identity".to_owned(),
+            decision: PlannerDecision::WaitForExactPathVacate.as_str().to_owned(),
+            reason: "exact_path_blocked_by_bound_occupant".to_owned(),
             created_at_ms: 1_700_000_202_000,
         })?;
         Ok(())
     })
     .expect("seed same-path dir replacement state");
+
+    assert_eq!(
+        db.load_next_runnable_planned_local_only_action()
+            .expect("load next runnable local-only action"),
+        None
+    );
 
     let executed = run_execute_next_client_action(
         &db_path,
@@ -557,6 +569,114 @@ fn execute_next_client_action_prefers_bound_delete_subtree_for_same_path_replace
             .map(|row| row.decision),
         Some(PlannerDecision::UploadLocalCreate.as_str().to_owned())
     );
+}
+
+#[test]
+fn exact_path_waiting_local_only_create_wakes_after_bound_remote_rename() {
+    let temp_dir = TestDir::new("client-execute-next-client-action-wake-after-rename");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let store_root = temp_dir.path().join("objectstore");
+    fs::create_dir_all(&store_root).expect("create local object store root");
+    let store = LocalFsStore::new(&store_root).expect("create local object store");
+
+    let namespace_id = demo_namespace();
+    seed_head_and_lease(
+        &store,
+        &demo_head(namespace_id.clone()),
+        &demo_lease(namespace_id.clone()),
+    );
+
+    let replacement_id = ClientFileId::from("tmp:demo:00000000000000000009");
+    let mut db = SqliteStateDb::open(&db_path).expect("open client state DB");
+    seed_bound_root_directory_for_namespace(&mut db, &namespace_id);
+    seed_bound_directory_for_namespace(
+        &mut db,
+        &namespace_id,
+        InodeId(3),
+        "archive",
+        Some(InodeId(1)),
+    );
+    seed_bound_file_for_namespace(
+        &mut db,
+        &namespace_id,
+        InodeId(2),
+        "notes",
+        InodeId(1),
+        "sha256:notes-v1",
+    );
+    db.planner_transaction("seed-waiting-replacement-before-remote-rename", |tx| {
+        tx.upsert_remote_file(&RemoteFileStateRow {
+            namespace_id: namespace_id.clone(),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            observed_seq: ChangeSeq(2),
+            revision_no: RevisionNo(1),
+            content_digest: Some("sha256:notes-v1".to_owned()),
+            content_manifest_digest: Some("manifest:sha256:notes-v1".to_owned()),
+            parent_inode_id: Some(InodeId(3)),
+            display_name: "notes.txt".to_owned(),
+            is_deleted: false,
+        })?;
+        tx.upsert_local_only_file(&LocalOnlyFileStateRow {
+            client_file_id: replacement_id.clone(),
+            namespace_id: namespace_id.clone(),
+            inode_kind: InodeKind::Dir,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "notes".to_owned(),
+            content_digest: None,
+            exists_on_disk: true,
+            dirty: true,
+            last_local_change_ms: 1_700_000_301_000,
+        })?;
+        tx.upsert_planned_local_only_action(&LocalOnlyPlannedActionRow {
+            client_file_id: replacement_id.clone(),
+            namespace_id: namespace_id.clone(),
+            decision: PlannerDecision::WaitForExactPathVacate.as_str().to_owned(),
+            reason: "exact_path_blocked_by_bound_occupant".to_owned(),
+            created_at_ms: 1_700_000_302_000,
+        })?;
+        Ok(())
+    })
+    .expect("seed waiting replacement");
+
+    db.apply_remote_rename(&namespace_id, InodeId(2), 1_700_000_303_000)
+        .expect("apply remote rename should wake waiting replacement");
+
+    assert_eq!(
+        db.load_planned_local_only_action(&replacement_id)
+            .expect("load replanned local-only action")
+            .map(|row| row.decision),
+        Some(PlannerDecision::CreateRemoteDir.as_str().to_owned())
+    );
+
+    let executed = run_execute_next_client_action(
+        &db_path,
+        &store,
+        None,
+        &ExecuteNextClientActionAction {
+            source_path_relative: None,
+            uploaded_at_ms: 1_700_000_304_000,
+            created_at_ms: 1_700_000_305_000,
+            writer_id: "writer-a".to_owned(),
+            writer_version: "loon-server-test".to_owned(),
+            now_ms: 1_700_000_306_000,
+        },
+    )
+    .expect("woken local-only create should run");
+
+    match executed {
+        NextClientAction::ExecutedLocalOnlyCreate(ExecutedNextLocalOnlyCreate {
+            planned_action,
+            ..
+        }) => {
+            assert_eq!(planned_action.client_file_id, replacement_id);
+            assert_eq!(
+                planned_action.decision,
+                PlannerDecision::CreateRemoteDir.as_str().to_owned()
+            );
+        }
+        other => panic!("expected woken local-only create after rename, got {other:?}"),
+    }
 }
 
 #[test]

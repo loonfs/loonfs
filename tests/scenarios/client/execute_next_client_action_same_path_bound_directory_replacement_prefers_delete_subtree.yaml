@@ -16,6 +16,6 @@ initial:
     planned_decision: upload_local_create
 
 expect:
-  selected_action_kind: deferred_inode_action
+  selected_action_kind: executable_inode_action
   selected_bound_decision: delete_subtree
-  reason: exact_same_path_bound_replacement_guard
+  reason: replacement_local_only_create_waits_in_planner

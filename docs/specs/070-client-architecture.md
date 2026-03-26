@@ -1332,7 +1332,7 @@ Rules:
 - the first mixed tick uses one explicit scheduler policy, `client_tick_scheduler_v1`
 - `client_tick_scheduler_v1` has three priority buckets:
   - `local_only_create`:
-    the deterministic next row from `planned_local_only_actions`
+    the deterministic next **runnable** row from `planned_local_only_actions`
   - `executable_inode_action`:
     the deterministic next row from `planned_actions` where
     `decision in {upload_local_edit, download_remote_edit, materialize_remote_dir}`
@@ -1342,16 +1342,18 @@ Rules:
 - the tick must load at most one candidate row from each scheduler bucket
 - bucket priority is strict:
   - `local_only_create` normally wins over `executable_inode_action`
-  - one narrow exact-path replacement guard is allowed:
-    when the selected `local_only_create` targets a path still occupied by one unique bound inode
-    whose already planned action would vacate that exact path, the tick must run that bound action
-    first even though it would otherwise remain in the inode-action queue
-  - the vacating bound action may only be one of:
-    `delete_file`, `delete_subtree`, or `rename`
-  - this guard is exact-path only; it must not widen into subtree-wide or prefix-wide path
-    heuristics
   - `executable_inode_action` always wins over `deferred_inode_action`
   - `created_at_ms` is only a tie-break inside one bucket, not across different buckets
+- exact same-path bound replacement dependencies are modeled in planner-visible local-only state:
+  - if a local-only create targets a path still occupied by exactly one bound inode whose planned
+    action will vacate that same path, local-only planning must persist
+    `decision = wait_for_exact_path_vacate`
+  - the qualifying vacating bound actions remain:
+    `delete_file`, `delete_subtree`, or `rename`
+  - waiting rows stay visible in `show-client-state`, but they are not runnable scheduler
+    candidates
+  - once the occupying bound path is actually vacated by delete or rename apply, the client must
+    replan the waiting local-only row so it becomes a normal runnable create on the next tick
 - deterministic row order inside each bucket must be:
   - for `planned_local_only_actions`: lower `created_at_ms`, then lexicographically smaller
     `client_file_id`
@@ -1381,12 +1383,8 @@ Why this rule exists:
 - we should not fake support for inode-keyed conflict actions before their executors exist
 - bucketed selection plus deterministic intra-bucket ordering keeps restart behavior and tests
   reproducible
-- the exact-path replacement guard lets same-path file↔directory replacements observed through
-  `observe-subtree` sync safely without inventing a second planner wait-state or persistent
-  scheduler marker
-- this exception is intentionally narrow; if more collision or dependency cases appear, the next
-  step is to move this dependency into planner-visible waiting state rather than adding more
-  scheduler-only overrides
+- planner-visible exact-path waiting keeps same-path file↔directory replacements observed through
+  `observe-subtree` safe without hiding correctness dependencies inside scheduler-only logic
 
 Failure modes prevented:
 
@@ -1397,6 +1395,7 @@ Failure modes prevented:
   path already exists
 - a same-path bound replacement local-only create racing ahead of the bound delete or rename that
   must vacate the path first
+- scheduler-only path exceptions drifting out of sync with visible planned state
 
 ## Bind-after-publish loop
 

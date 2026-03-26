@@ -2874,6 +2874,43 @@ pub(super) fn load_next_planned_local_only_action(
     .transpose()
 }
 
+pub(super) fn load_next_runnable_planned_local_only_action(
+    conn: &Connection,
+) -> Result<Option<LocalOnlyPlannedActionRow>, StateDbError> {
+    let raw = conn
+        .query_row(
+            "SELECT client_file_id, namespace_id, decision, reason, created_at_ms
+            FROM planned_local_only_actions
+            WHERE decision IN ('upload_local_create', 'create_remote_dir')
+            ORDER BY created_at_ms ASC, client_file_id ASC
+            LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    raw.map(
+        |(client_file_id, namespace_id, decision, reason, created_at_ms)| {
+            Ok(LocalOnlyPlannedActionRow {
+                client_file_id: ClientFileId::from(client_file_id.as_str()),
+                namespace_id: NamespaceId::from(namespace_id),
+                decision,
+                reason,
+                created_at_ms: from_sql_u64(created_at_ms, "created_at_ms")?,
+            })
+        },
+    )
+    .transpose()
+}
+
 pub(super) fn load_local_only_upload(
     conn: &Connection,
     client_file_id: &ClientFileId,
