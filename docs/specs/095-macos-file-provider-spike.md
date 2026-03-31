@@ -11,7 +11,7 @@ This slice is intentionally narrow:
 - DB-backed only
 - one account/root domain
 - namespaces exposed as top-level directories
-- native app and extension shell remain out of tree
+- native app and extension shell live in repo as a developer sample
 
 ## Bridge rule
 
@@ -136,14 +136,14 @@ Failure modes prevented:
 
 ## Native sample rule
 
-The first runnable Finder shell stays out of tree.
+The first runnable Finder shell now lives in repo as a developer sample.
 
 Rules:
 
 - the containing app owns File Provider domain registration and reset
 - the extension owns enumeration, item lookup, and targeted hydration
-- the out-of-tree sample owns its own app bundle, extension bundle, plist, entitlements, and build
-  files
+- the sample lives under `native/macos/LoonFileProviderSample/`
+- the sample owns its own app bundle, extension bundle, plist, entitlements, and build files
 - Swift must call `loon-macos` through a small C ABI rather than re-implementing provider logic
 - C ABI payloads are UTF-8 JSON envelopes
 - the sample points at an existing `OpsConfig` plus a namespace allowlist
@@ -157,12 +157,13 @@ Rules:
 - the sample does not auto-refresh authoritative state
 
 Why this rule exists:
-the repo should first prove the semantic bridge before it accumulates native shell packaging.
+the repo now has enough bridge stability to keep the developer sample versioned next to the Rust
+interop layer while still keeping native packaging clearly separated from product code.
 
 Failure modes prevented:
 
 - committing a Finder shell that re-implements client truth model decisions
-- widening the main repo's delivery surface before the Rust bridge contract is proven
+- shipping native sample logic that drifts away from the Rust bridge as the crate evolves
 - path-derived Finder item ids drifting after rename or local-only replacement
 - app/extension code disagreeing about domain registration ownership or sample config shape
 
@@ -189,6 +190,9 @@ Rules:
 - the native shell treats provider item ids as opaque encoded strings and passes them back to the
   bridge unchanged
 - the bridge must not require callbacks, background threads, or an async runtime in this slice
+- the first in-repo sample uses a checked-in C header rather than a generated binding step
+- repo-safe native tests should live in a Swift package inside the sample directory, while Finder
+  packaging remains in the Xcode project
 
 Why this rule exists:
 the first native sample needs a stable interop boundary that is easy to call from Swift without

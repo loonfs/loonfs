@@ -1,0 +1,50 @@
+import Foundation
+
+enum SampleErrorCode {
+    static let unavailable = 1
+    static let bridgeFailure = 2
+    static let invalidConfig = 3
+}
+
+func sampleNSError(from error: Error) -> NSError {
+    if let providerError = error as? SampleProviderError {
+        switch providerError {
+        case let .unavailable(message):
+            return NSError(
+                domain: "dev.loondb.LoonFileProviderSample",
+                code: SampleErrorCode.unavailable,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+        case let .bridgeFailure(code, message):
+            return NSError(
+                domain: "dev.loondb.LoonFileProviderSample",
+                code: SampleErrorCode.bridgeFailure,
+                userInfo: [
+                    NSLocalizedDescriptionKey: message,
+                    "bridge_code": code,
+                ]
+            )
+        }
+    }
+
+    if let error = error as? SampleDomainRegistrationError {
+        switch error {
+        case let .invalidConfig(errors):
+            return NSError(
+                domain: "dev.loondb.LoonFileProviderSample",
+                code: SampleErrorCode.invalidConfig,
+                userInfo: [NSLocalizedDescriptionKey: errors.joined(separator: "\n")]
+            )
+        }
+    }
+
+    let nsError = error as NSError
+    return NSError(
+        domain: nsError.domain,
+        code: nsError.code,
+        userInfo: nsError.userInfo.merging(
+            [NSLocalizedDescriptionKey: nsError.localizedDescription],
+            uniquingKeysWith: { current, _ in current }
+        )
+    )
+}

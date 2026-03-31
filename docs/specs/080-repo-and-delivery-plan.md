@@ -40,6 +40,7 @@ Current real delivery surfaces:
 - `loon-server::ops`
 - `loon-client`
 - `loon-macos` Rust bridge and native interop surface
+- `native/macos/LoonFileProviderSample` developer sample shell
 - `loon-testkit`
 - `xtask`
 
@@ -225,9 +226,10 @@ Rules:
 - it projects from existing client SQLite state plus local-only parent links
 - it uses one account/root domain with namespaces as top-level directories
 - it exposes a static-library C ABI with UTF-8 JSON payloads for the out-of-tree native sample
+- it now includes an in-repo developer sample app and extension that call that C ABI
 - the containing app owns domain registration; the extension owns enumeration, lookup, and targeted
   hydration
 - File Provider item ids exposed to native code are opaque encoded bridge ids
-- it does not add in-repo app/extension packaging, plist files, entitlements, or Swift code
-- the runnable native shell remains out of tree and must call the Rust bridge rather than
-  re-implementing projection or hydration logic
+- the native sample must still call the Rust bridge rather than re-implementing projection or
+  hydration logic
+- ordinary workspace validation must stay cargo-safe; Xcode validation is opt-in/manual

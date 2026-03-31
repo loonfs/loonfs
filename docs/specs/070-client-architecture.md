@@ -2968,8 +2968,9 @@ Rules:
 - the extension owns enumeration, lookup, and targeted hydration
 - the first native boundary is a C ABI with UTF-8 JSON payloads over `loon-macos`
 - File Provider item identifiers are opaque bridge ids, not path-derived ids
+- the first runnable native shell may now live in repo, but only as a developer sample
 - it does not add implicit authoritative import, implicit sync, a watcher, or a daemon loop
-- the native app and extension shell stay out of tree in this slice
+- the repo must not make ordinary workspace tests depend on a full Xcode installation
 
 Why this rule exists:
 the first Finder integration slice should prove that the existing client truth model is sufficient

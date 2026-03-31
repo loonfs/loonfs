@@ -1,11 +1,21 @@
 # Runbook: macOS File Provider sample contract
 
-This runbook describes the expected contract for the out-of-tree native macOS File Provider sample.
+This runbook describes the checked-in native macOS File Provider sample.
 
 ## Purpose
 
-The sample exists to prove Finder integration against the in-repo Rust bridge without forcing the
-main repo to carry native app packaging yet.
+The sample exists to prove Finder integration against the in-repo Rust bridge while keeping the
+native shell clearly marked as developer-only packaging.
+
+## Sample location
+
+The sample lives under `native/macos/LoonFileProviderSample/`.
+
+It contains:
+
+- a Swift package for repo-safe shared logic and tests
+- an Xcode project for the containing app and File Provider extension
+- a checked-in build script that rebuilds `loon-macos` for the extension target
 
 ## Sample inputs
 
@@ -15,7 +25,7 @@ The sample should point at:
 - a namespace allowlist
 
 The sample owns its own thin wrapper configuration in an App Group container. The main repo does
-not add a second in-repo config format for this spike.
+not add a second ops-side config format for this spike.
 
 Expected sample config fields:
 
@@ -24,6 +34,9 @@ Expected sample config fields:
 - `domain_identifier`
 - `domain_display_name`
 - `app_group_identifier`
+
+The containing app creates the config file as `loon-file-provider-sample.json` inside the sample
+App Group container if it is missing.
 
 ## Expected Rust bridge calls
 
@@ -39,6 +52,8 @@ Swift should call into `loon-macos` through the C ABI + JSON surface for:
 
 The sample should treat bridge item ids as opaque encoded strings.
 
+The checked-in C header for this surface lives at `crates/loon-macos/include/loon_macos.h`.
+
 ## App Group and process boundary
 
 - the containing app and the File Provider extension share the sample wrapper config through an App
@@ -46,6 +61,11 @@ The sample should treat bridge item ids as opaque encoded strings.
 - the containing app reads that config and registers or removes the File Provider domain
 - the extension opens the Rust bridge from the shared config and serves Finder callbacks against the
   current SQLite snapshot
+- the sample README should instruct developers to set their own signing team and keep the App Group
+  identifier in sync with the committed entitlements and the sample config
+- the first in-repo sample does not manage security-scoped bookmarks, so the easiest local setup is
+  to point `ops_config_path` at an ops config whose DB, mirror, and object-store paths are also in
+  a location the App Group container can access
 
 ## Domain registration and reset flow
 
@@ -58,6 +78,12 @@ Containing app responsibilities:
 
 This keeps domain lifecycle in the containing app instead of splitting it across app and extension
 code.
+
+## Build and validation
+
+- repo-safe validation uses `swift test` in the sample directory plus the existing cargo tests
+- Finder-visible validation requires a full Xcode install
+- the checked-in sample should not make ordinary workspace validation depend on `xcodebuild`
 
 ## Expected sample behavior
 

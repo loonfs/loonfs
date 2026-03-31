@@ -23,7 +23,7 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
   - DB-backed enumeration only
   - targeted hydration without using the global scheduler
   - static-library C ABI with JSON payloads for an out-of-tree native sample
-  - out-of-tree native app/extension shell
+  - in-repo native developer sample app/extension shell
 - supported `loon-cli` discovery/diagnostic affordances:
   - built-in help and generated manpages
   - checked-in CLI manual
@@ -151,7 +151,8 @@ Required rules:
   - containing app owns domain registration and reset
   - extension owns enumeration, lookup, and targeted hydration
   - native interop is a C ABI with UTF-8 JSON payloads and opaque bridge item ids
-  - native shell packaging stays out of tree
+  - native shell packaging may live in repo as a developer sample, but workspace tests stay
+    independent from full Xcode
 - the shell output stays stable and human-readable
 
 Command contract:
