@@ -140,14 +140,19 @@ The first runnable Finder shell stays out of tree.
 
 Rules:
 
+- the containing app owns File Provider domain registration and reset
+- the extension owns enumeration, item lookup, and targeted hydration
 - the out-of-tree sample owns its own app bundle, extension bundle, plist, entitlements, and build
   files
+- Swift must call `loon-macos` through a small C ABI rather than re-implementing provider logic
+- C ABI payloads are UTF-8 JSON envelopes
 - the sample points at an existing `OpsConfig` plus a namespace allowlist
 - the sample calls the Rust bridge for:
   - root listing
   - item lookup
   - child listing
   - targeted materialization
+- File Provider item identifiers in the sample are opaque bridge ids, not path-derived ids
 - the sample does not support create/modify/delete/rename in this slice
 - the sample does not auto-refresh authoritative state
 
@@ -158,3 +163,39 @@ Failure modes prevented:
 
 - committing a Finder shell that re-implements client truth model decisions
 - widening the main repo's delivery surface before the Rust bridge contract is proven
+- path-derived Finder item ids drifting after rename or local-only replacement
+- app/extension code disagreeing about domain registration ownership or sample config shape
+
+## Native interop rule
+
+The first native callable surface is a C ABI over the Rust bridge.
+
+Rules:
+
+- `loon-macos` exports a small static-library C ABI:
+  - `open`
+  - `close`
+  - `list_root`
+  - `lookup_item`
+  - `list_children`
+  - `materialize_item`
+  - `string_free`
+- `open` accepts JSON containing:
+  - `ops_config_path`
+  - `exposed_namespaces`
+- list/lookup/materialize calls return JSON envelopes containing either:
+  - a success payload
+  - a typed error code and message
+- the native shell treats provider item ids as opaque encoded strings and passes them back to the
+  bridge unchanged
+- the bridge must not require callbacks, background threads, or an async runtime in this slice
+
+Why this rule exists:
+the first native sample needs a stable interop boundary that is easy to call from Swift without
+copying bridge logic into native code.
+
+Failure modes prevented:
+
+- introducing a second typed native object model that drifts from the Rust bridge
+- coupling the first sample to direct Rust enum layouts or path-derived identifiers
+- turning the bridge into a callback-driven runtime before the Finder projection contract is proven

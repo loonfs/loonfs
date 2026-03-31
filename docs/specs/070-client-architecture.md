@@ -2964,6 +2964,10 @@ Rules:
 - it uses one account/root domain with namespaces as top-level directories
 - it reuses the current `OpsConfig` and current client `mirror_root`
 - it uses targeted hydration helpers instead of the global next-action scheduler
+- the containing app owns File Provider domain registration
+- the extension owns enumeration, lookup, and targeted hydration
+- the first native boundary is a C ABI with UTF-8 JSON payloads over `loon-macos`
+- File Provider item identifiers are opaque bridge ids, not path-derived ids
 - it does not add implicit authoritative import, implicit sync, a watcher, or a daemon loop
 - the native app and extension shell stay out of tree in this slice
 

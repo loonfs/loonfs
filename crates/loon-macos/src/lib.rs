@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use loon_client::local_fs::{join_under_mirror_root, NamespacePathIndex};
 use loon_client::provider::{
@@ -11,10 +11,14 @@ use loon_client::state_db::{
 };
 use loon_ops::OpsConfig;
 use loon_types::{InodeId, InodeKind, NamespaceId, RevisionNo};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{CStr, CString};
 use std::fs;
-use std::path::PathBuf;
+use std::os::raw::c_char;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +41,104 @@ pub enum ProviderItemId {
         namespace_id: NamespaceId,
         client_file_id: ClientFileId,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProviderItemIdDecodeError {
+    #[error("provider_item_id_invalid_prefix: `{0}`")]
+    InvalidPrefix(String),
+    #[error("provider_item_id_missing_parts: `{0}`")]
+    MissingParts(String),
+    #[error("provider_item_id_invalid_hex: `{0}`")]
+    InvalidHex(String),
+    #[error("provider_item_id_invalid_utf8")]
+    InvalidUtf8,
+    #[error("provider_item_id_invalid_inode: `{0}`")]
+    InvalidInode(String),
+}
+
+impl ProviderItemId {
+    pub fn to_opaque_string(&self) -> String {
+        match self {
+            Self::Root => "root".to_owned(),
+            Self::NamespaceRoot { namespace_id } => {
+                format!("ns:{}", encode_hex(namespace_id.as_str()))
+            }
+            Self::BoundInode {
+                namespace_id,
+                inode_id,
+            } => format!(
+                "inode:{}:{:016x}",
+                encode_hex(namespace_id.as_str()),
+                inode_id.0
+            ),
+            Self::LocalOnly {
+                namespace_id,
+                client_file_id,
+            } => format!(
+                "local:{}:{}",
+                encode_hex(namespace_id.as_str()),
+                encode_hex(client_file_id.as_str())
+            ),
+        }
+    }
+
+    pub fn from_opaque_str(value: &str) -> Result<Self, ProviderItemIdDecodeError> {
+        if value == "root" {
+            return Ok(Self::Root);
+        }
+
+        let mut parts = value.split(':');
+        let Some(prefix) = parts.next() else {
+            return Err(ProviderItemIdDecodeError::MissingParts(value.to_owned()));
+        };
+        match prefix {
+            "ns" => {
+                let namespace_hex = parts
+                    .next()
+                    .ok_or_else(|| ProviderItemIdDecodeError::MissingParts(value.to_owned()))?;
+                if parts.next().is_some() {
+                    return Err(ProviderItemIdDecodeError::MissingParts(value.to_owned()));
+                }
+                Ok(Self::NamespaceRoot {
+                    namespace_id: NamespaceId::from(decode_hex(namespace_hex)?),
+                })
+            }
+            "inode" => {
+                let namespace_hex = parts
+                    .next()
+                    .ok_or_else(|| ProviderItemIdDecodeError::MissingParts(value.to_owned()))?;
+                let inode_hex = parts
+                    .next()
+                    .ok_or_else(|| ProviderItemIdDecodeError::MissingParts(value.to_owned()))?;
+                if parts.next().is_some() {
+                    return Err(ProviderItemIdDecodeError::MissingParts(value.to_owned()));
+                }
+                let inode_id = u64::from_str_radix(inode_hex, 16)
+                    .map_err(|_| ProviderItemIdDecodeError::InvalidInode(inode_hex.to_owned()))?;
+                Ok(Self::BoundInode {
+                    namespace_id: NamespaceId::from(decode_hex(namespace_hex)?),
+                    inode_id: InodeId(inode_id),
+                })
+            }
+            "local" => {
+                let namespace_hex = parts
+                    .next()
+                    .ok_or_else(|| ProviderItemIdDecodeError::MissingParts(value.to_owned()))?;
+                let client_file_hex = parts
+                    .next()
+                    .ok_or_else(|| ProviderItemIdDecodeError::MissingParts(value.to_owned()))?;
+                if parts.next().is_some() {
+                    return Err(ProviderItemIdDecodeError::MissingParts(value.to_owned()));
+                }
+                Ok(Self::LocalOnly {
+                    namespace_id: NamespaceId::from(decode_hex(namespace_hex)?),
+                    client_file_id: ClientFileId::new(decode_hex(client_file_hex)?),
+                })
+            }
+            other => Err(ProviderItemIdDecodeError::InvalidPrefix(other.to_owned())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +198,11 @@ pub struct FileProviderBridge {
     config: FileProviderSpikeConfig,
 }
 
+struct ProviderLookupResult {
+    item: Option<ProviderItemSnapshot>,
+    warnings: Vec<ProviderProjectionWarning>,
+}
+
 impl FileProviderBridge {
     pub fn new(config: FileProviderSpikeConfig) -> Result<Self, FileProviderBridgeError> {
         config.ops_config.open_store()?;
@@ -132,19 +239,38 @@ impl FileProviderBridge {
         &self,
         item_id: &ProviderItemId,
     ) -> Result<Option<ProviderItemSnapshot>, FileProviderBridgeError> {
+        Ok(self.lookup_item_with_warnings(item_id)?.item)
+    }
+
+    fn lookup_item_with_warnings(
+        &self,
+        item_id: &ProviderItemId,
+    ) -> Result<ProviderLookupResult, FileProviderBridgeError> {
         match item_id {
-            ProviderItemId::Root => Ok(Some(self.root_snapshot())),
+            ProviderItemId::Root => Ok(ProviderLookupResult {
+                item: Some(self.root_snapshot()),
+                warnings: Vec::new(),
+            }),
             ProviderItemId::NamespaceRoot { namespace_id } => {
                 if !self.config.exposed_namespaces.contains(namespace_id) {
-                    return Ok(None);
+                    return Ok(ProviderLookupResult {
+                        item: None,
+                        warnings: Vec::new(),
+                    });
                 }
-                Ok(Some(self.namespace_root_snapshot(namespace_id)))
+                Ok(ProviderLookupResult {
+                    item: Some(self.namespace_root_snapshot(namespace_id)),
+                    warnings: Vec::new(),
+                })
             }
             ProviderItemId::BoundInode { namespace_id, .. }
             | ProviderItemId::LocalOnly { namespace_id, .. } => {
                 self.ensure_namespace_exposed(namespace_id)?;
                 let projection = self.build_namespace_projection(namespace_id)?;
-                Ok(projection.items.get(item_id).cloned())
+                Ok(ProviderLookupResult {
+                    item: projection.items.get(item_id).cloned(),
+                    warnings: projection.warnings,
+                })
             }
         }
     }
@@ -319,6 +445,418 @@ impl FileProviderBridge {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InteropEnvelope<T> {
+    ok: bool,
+    result: Option<T>,
+    error: Option<InteropErrorPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropErrorPayload {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropOpenRequest {
+    ops_config_path: String,
+    exposed_namespaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropBridgeHandleRequest {
+    bridge_handle: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropLookupRequest {
+    bridge_handle: u64,
+    item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropListChildrenRequest {
+    bridge_handle: u64,
+    parent_item_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropMaterializeRequest {
+    bridge_handle: u64,
+    item_id: String,
+    now_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropOpenResult {
+    bridge_handle: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropCloseResult {
+    closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropLookupResult {
+    item: Option<InteropProviderItemSnapshot>,
+    warnings: Vec<InteropProviderProjectionWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropProviderListing {
+    items: Vec<InteropProviderItemSnapshot>,
+    warnings: Vec<InteropProviderProjectionWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropProviderProjectionWarning {
+    namespace_id: String,
+    relative_path: String,
+    inode_kind: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropProviderItemSnapshot {
+    item_id: String,
+    parent_item_id: Option<String>,
+    display_name: String,
+    inode_kind: String,
+    materialization_state: ProviderMaterializationState,
+    current_relative_path: Option<String>,
+    size_bytes: Option<u64>,
+    revision_no: Option<u64>,
+    content_digest: Option<String>,
+    content_manifest_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InteropMaterializedPath {
+    absolute_path: String,
+    relative_path: String,
+}
+
+#[derive(Default)]
+struct BridgeRegistry {
+    next_handle: u64,
+    bridges: BTreeMap<u64, FileProviderBridge>,
+}
+
+impl InteropProviderProjectionWarning {
+    fn from_warning(warning: ProviderProjectionWarning) -> Self {
+        Self {
+            namespace_id: warning.namespace_id.as_str().to_owned(),
+            relative_path: warning.relative_path,
+            inode_kind: inode_kind_text(&warning.inode_kind).to_owned(),
+            reason: warning.reason,
+        }
+    }
+}
+
+impl InteropProviderItemSnapshot {
+    fn from_snapshot(snapshot: ProviderItemSnapshot) -> Self {
+        Self {
+            item_id: snapshot.item_id.to_opaque_string(),
+            parent_item_id: snapshot
+                .parent_item_id
+                .map(|item_id| item_id.to_opaque_string()),
+            display_name: snapshot.display_name,
+            inode_kind: inode_kind_text(&snapshot.inode_kind).to_owned(),
+            materialization_state: snapshot.materialization_state,
+            current_relative_path: snapshot.current_relative_path,
+            size_bytes: snapshot.size_bytes,
+            revision_no: snapshot.revision_no.map(|revision_no| revision_no.0),
+            content_digest: snapshot.content_digest,
+            content_manifest_digest: snapshot.content_manifest_digest,
+        }
+    }
+}
+
+impl InteropProviderListing {
+    fn from_listing(listing: ProviderListing) -> Self {
+        Self {
+            items: listing
+                .items
+                .into_iter()
+                .map(InteropProviderItemSnapshot::from_snapshot)
+                .collect(),
+            warnings: listing
+                .warnings
+                .into_iter()
+                .map(InteropProviderProjectionWarning::from_warning)
+                .collect(),
+        }
+    }
+}
+
+impl InteropLookupResult {
+    fn from_lookup(lookup: ProviderLookupResult) -> Self {
+        Self {
+            item: lookup.item.map(InteropProviderItemSnapshot::from_snapshot),
+            warnings: lookup
+                .warnings
+                .into_iter()
+                .map(InteropProviderProjectionWarning::from_warning)
+                .collect(),
+        }
+    }
+}
+
+impl InteropMaterializedPath {
+    fn from_path(path: ProviderMaterializedPath) -> Self {
+        Self {
+            absolute_path: path.absolute_path.to_string_lossy().into_owned(),
+            relative_path: path.relative_path,
+        }
+    }
+}
+
+fn bridge_registry() -> &'static Mutex<BridgeRegistry> {
+    static BRIDGE_REGISTRY: OnceLock<Mutex<BridgeRegistry>> = OnceLock::new();
+    BRIDGE_REGISTRY.get_or_init(|| {
+        Mutex::new(BridgeRegistry {
+            next_handle: 1,
+            bridges: BTreeMap::new(),
+        })
+    })
+}
+
+fn interop_open(request: InteropOpenRequest) -> Result<InteropOpenResult, InteropErrorPayload> {
+    let ops_config = OpsConfig::load(Path::new(&request.ops_config_path))
+        .map_err(|error| interop_error("ops_config_load_failed", error.to_string()))?;
+    let bridge = FileProviderBridge::new(FileProviderSpikeConfig {
+        ops_config,
+        exposed_namespaces: request
+            .exposed_namespaces
+            .into_iter()
+            .map(NamespaceId::from)
+            .collect(),
+    })
+    .map_err(map_bridge_error)?;
+
+    let mut registry = lock_bridge_registry()?;
+    let bridge_handle = registry.next_handle;
+    registry.next_handle = registry.next_handle.saturating_add(1);
+    registry.bridges.insert(bridge_handle, bridge);
+    Ok(InteropOpenResult { bridge_handle })
+}
+
+fn interop_close(
+    request: InteropBridgeHandleRequest,
+) -> Result<InteropCloseResult, InteropErrorPayload> {
+    let mut registry = lock_bridge_registry()?;
+    if registry.bridges.remove(&request.bridge_handle).is_none() {
+        return Err(interop_error(
+            "unknown_bridge_handle",
+            format!("unknown bridge handle {}", request.bridge_handle),
+        ));
+    }
+    Ok(InteropCloseResult { closed: true })
+}
+
+fn interop_list_root(
+    request: InteropBridgeHandleRequest,
+) -> Result<InteropProviderListing, InteropErrorPayload> {
+    with_bridge(request.bridge_handle, |bridge| {
+        bridge.list_root().map(InteropProviderListing::from_listing)
+    })
+}
+
+fn interop_lookup_item(
+    request: InteropLookupRequest,
+) -> Result<InteropLookupResult, InteropErrorPayload> {
+    let item_id = ProviderItemId::from_opaque_str(&request.item_id)
+        .map_err(|error| interop_error("invalid_item_id", error.to_string()))?;
+    with_bridge(request.bridge_handle, |bridge| {
+        bridge
+            .lookup_item_with_warnings(&item_id)
+            .map(InteropLookupResult::from_lookup)
+    })
+}
+
+fn interop_list_children(
+    request: InteropListChildrenRequest,
+) -> Result<InteropProviderListing, InteropErrorPayload> {
+    let parent_item_id = ProviderItemId::from_opaque_str(&request.parent_item_id)
+        .map_err(|error| interop_error("invalid_item_id", error.to_string()))?;
+    with_bridge(request.bridge_handle, |bridge| {
+        bridge
+            .list_children(&parent_item_id)
+            .map(InteropProviderListing::from_listing)
+    })
+}
+
+fn interop_materialize_item(
+    request: InteropMaterializeRequest,
+) -> Result<InteropMaterializedPath, InteropErrorPayload> {
+    let item_id = ProviderItemId::from_opaque_str(&request.item_id)
+        .map_err(|error| interop_error("invalid_item_id", error.to_string()))?;
+    with_bridge(request.bridge_handle, |bridge| {
+        bridge
+            .materialize_item(&item_id, request.now_ms)
+            .map(InteropMaterializedPath::from_path)
+    })
+}
+
+fn with_bridge<T, F>(bridge_handle: u64, f: F) -> Result<T, InteropErrorPayload>
+where
+    F: FnOnce(&FileProviderBridge) -> Result<T, FileProviderBridgeError>,
+{
+    let registry = lock_bridge_registry()?;
+    let bridge = registry.bridges.get(&bridge_handle).ok_or_else(|| {
+        interop_error(
+            "unknown_bridge_handle",
+            format!("unknown bridge handle {}", bridge_handle),
+        )
+    })?;
+    f(bridge).map_err(map_bridge_error)
+}
+
+fn lock_bridge_registry(
+) -> Result<std::sync::MutexGuard<'static, BridgeRegistry>, InteropErrorPayload> {
+    bridge_registry().lock().map_err(|error| {
+        interop_error(
+            "bridge_registry_unavailable",
+            format!("bridge registry unavailable: {}", error),
+        )
+    })
+}
+
+fn map_bridge_error(error: FileProviderBridgeError) -> InteropErrorPayload {
+    match error {
+        FileProviderBridgeError::StateDb(error) => {
+            interop_error("state_db_error", error.to_string())
+        }
+        FileProviderBridgeError::TargetedMaterialize(error) => {
+            interop_error("targeted_materialize_failed", error.to_string())
+        }
+        FileProviderBridgeError::OpsConfig(error) => {
+            interop_error("ops_config_failed", error.to_string())
+        }
+        FileProviderBridgeError::Io(error) => interop_error("io_error", error.to_string()),
+        FileProviderBridgeError::StateDbMissing(path) => interop_error("state_db_missing", path),
+        FileProviderBridgeError::NamespaceNotExposed(namespace_id) => {
+            interop_error("namespace_not_exposed", namespace_id)
+        }
+    }
+}
+
+fn interop_error(code: impl Into<String>, message: impl Into<String>) -> InteropErrorPayload {
+    InteropErrorPayload {
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+fn encode_success_envelope<T: Serialize>(result: T) -> *mut c_char {
+    encode_envelope(InteropEnvelope {
+        ok: true,
+        result: Some(result),
+        error: None,
+    })
+}
+
+fn encode_error_envelope(error: InteropErrorPayload) -> *mut c_char {
+    encode_envelope::<()>(InteropEnvelope {
+        ok: false,
+        result: None,
+        error: Some(error),
+    })
+}
+
+fn encode_envelope<T: Serialize>(envelope: InteropEnvelope<T>) -> *mut c_char {
+    let json = match serde_json::to_string(&envelope) {
+        Ok(json) => json,
+        Err(error) => format!(
+            "{{\"ok\":false,\"result\":null,\"error\":{{\"code\":\"serialization_failed\",\"message\":{}}}}}",
+            serde_json::to_string(&error.to_string()).unwrap_or_else(|_| "\"serialization_failed\"".to_owned())
+        ),
+    };
+    CString::new(json)
+        .expect("JSON envelopes should not contain interior NUL bytes")
+        .into_raw()
+}
+
+fn parse_request<T: DeserializeOwned>(
+    request_json: *const c_char,
+) -> Result<T, InteropErrorPayload> {
+    if request_json.is_null() {
+        return Err(interop_error("null_request", "request pointer was null"));
+    }
+    let request_json = {
+        // SAFETY: the caller promises a valid NUL-terminated C string pointer for the lifetime of
+        // this call, and we reject null pointers above.
+        let c_str = unsafe { CStr::from_ptr(request_json) };
+        c_str
+            .to_str()
+            .map_err(|error| interop_error("invalid_utf8_request", error.to_string()))?
+    };
+    serde_json::from_str(request_json)
+        .map_err(|error| interop_error("invalid_json_request", error.to_string()))
+}
+
+fn ffi_call<TRequest, TResult, F>(request_json: *const c_char, handler: F) -> *mut c_char
+where
+    TRequest: DeserializeOwned,
+    TResult: Serialize,
+    F: FnOnce(TRequest) -> Result<TResult, InteropErrorPayload>,
+{
+    match parse_request(request_json).and_then(handler) {
+        Ok(result) => encode_success_envelope(result),
+        Err(error) => encode_error_envelope(error),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn loon_file_provider_bridge_open(request_json: *const c_char) -> *mut c_char {
+    ffi_call(request_json, interop_open)
+}
+
+#[no_mangle]
+pub extern "C" fn loon_file_provider_bridge_close(request_json: *const c_char) -> *mut c_char {
+    ffi_call(request_json, interop_close)
+}
+
+#[no_mangle]
+pub extern "C" fn loon_file_provider_bridge_list_root(request_json: *const c_char) -> *mut c_char {
+    ffi_call(request_json, interop_list_root)
+}
+
+#[no_mangle]
+pub extern "C" fn loon_file_provider_bridge_lookup_item(
+    request_json: *const c_char,
+) -> *mut c_char {
+    ffi_call(request_json, interop_lookup_item)
+}
+
+#[no_mangle]
+pub extern "C" fn loon_file_provider_bridge_list_children(
+    request_json: *const c_char,
+) -> *mut c_char {
+    ffi_call(request_json, interop_list_children)
+}
+
+#[no_mangle]
+pub extern "C" fn loon_file_provider_bridge_materialize_item(
+    request_json: *const c_char,
+) -> *mut c_char {
+    ffi_call(request_json, interop_materialize_item)
+}
+
+#[no_mangle]
+pub extern "C" fn loon_file_provider_string_free(value: *mut c_char) {
+    if value.is_null() {
+        return;
+    }
+    // SAFETY: `value` must come from `CString::into_raw` in this library. Converting it back frees
+    // the allocation exactly once.
+    unsafe {
+        let _ = CString::from_raw(value);
+    }
+}
+
 struct NamespaceProjection {
     items: BTreeMap<ProviderItemId, ProviderItemSnapshot>,
     children: BTreeMap<ProviderItemId, Vec<ProviderItemSnapshot>>,
@@ -328,7 +866,7 @@ struct NamespaceProjection {
 impl NamespaceProjection {
     fn build(
         namespace_id: &NamespaceId,
-        namespace_root: &std::path::Path,
+        namespace_root: &Path,
         summary: &ClientNamespaceStateSummary,
         parent_links: &[LocalOnlyParentLinkRow],
     ) -> Self {
@@ -508,12 +1046,16 @@ impl NamespaceProjection {
 
 impl ProviderProjectionWarning {
     fn inode_kind_text(&self) -> &'static str {
-        match self.inode_kind {
-            InodeKind::File => "file",
-            InodeKind::Dir => "dir",
-            InodeKind::Symlink => "symlink",
-            InodeKind::Mount => "mount",
-        }
+        inode_kind_text(&self.inode_kind)
+    }
+}
+
+fn inode_kind_text(inode_kind: &InodeKind) -> &'static str {
+    match inode_kind {
+        InodeKind::File => "file",
+        InodeKind::Dir => "dir",
+        InodeKind::Symlink => "symlink",
+        InodeKind::Mount => "mount",
     }
 }
 
@@ -678,7 +1220,7 @@ fn bound_is_remote_placeholder(views: &FileSyncViews) -> bool {
         && local.display_name == remote.display_name
 }
 
-fn materialized_size_bytes(namespace_root: &std::path::Path, relative_path: &str) -> Option<u64> {
+fn materialized_size_bytes(namespace_root: &Path, relative_path: &str) -> Option<u64> {
     let absolute_path = join_under_mirror_root(namespace_root, relative_path);
     fs::metadata(absolute_path)
         .ok()
@@ -723,4 +1265,48 @@ fn bound_content_manifest_digest(views: &FileSyncViews) -> Option<String> {
                 .as_ref()
                 .and_then(|row| row.content_manifest_digest.clone())
         })
+}
+
+fn encode_hex(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(nibble_to_hex(byte >> 4));
+        encoded.push(nibble_to_hex(byte & 0x0f));
+    }
+    encoded
+}
+
+fn decode_hex(value: &str) -> Result<String, ProviderItemIdDecodeError> {
+    if value.len() % 2 != 0 {
+        return Err(ProviderItemIdDecodeError::InvalidHex(value.to_owned()));
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 2);
+    let value_bytes = value.as_bytes();
+    let mut index = 0;
+    while index < value_bytes.len() {
+        let high = hex_to_nibble(value_bytes[index])
+            .ok_or_else(|| ProviderItemIdDecodeError::InvalidHex(value.to_owned()))?;
+        let low = hex_to_nibble(value_bytes[index + 1])
+            .ok_or_else(|| ProviderItemIdDecodeError::InvalidHex(value.to_owned()))?;
+        bytes.push((high << 4) | low);
+        index += 2;
+    }
+    String::from_utf8(bytes).map_err(|_| ProviderItemIdDecodeError::InvalidUtf8)
+}
+
+fn nibble_to_hex(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        10..=15 => (b'a' + (nibble - 10)) as char,
+        _ => unreachable!("nibble must be in 0..=15"),
+    }
+}
+
+fn hex_to_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }

@@ -4,14 +4,20 @@ use loon_client::state_db::{
 };
 use loon_client::upload::upload_small_file_from_path;
 use loon_macos::{
-    FileProviderBridge, FileProviderSpikeConfig, ProviderItemId, ProviderMaterializationState,
+    loon_file_provider_bridge_close, loon_file_provider_bridge_list_children,
+    loon_file_provider_bridge_list_root, loon_file_provider_bridge_lookup_item,
+    loon_file_provider_bridge_materialize_item, loon_file_provider_bridge_open,
+    loon_file_provider_string_free, FileProviderBridge, FileProviderSpikeConfig, ProviderItemId,
+    ProviderMaterializationState,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_ops::{OpsClientConfig, OpsConfig, OpsObjectStoreSpec, OpsSection, OpsServerConfig};
 use loon_testkit::tempdir::TestDir;
 use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 use std::collections::BTreeSet;
+use std::ffi::{CStr, CString};
 use std::fs;
+use std::os::raw::c_char;
 
 #[test]
 fn file_provider_bridge_lists_root_namespaces_deterministically() {
@@ -161,6 +167,278 @@ fn file_provider_bridge_materializes_placeholder_file() {
     );
 }
 
+#[test]
+fn provider_item_id_opaque_encoding_is_stable() {
+    assert_eq!(ProviderItemId::Root.to_opaque_string(), "root");
+    assert_eq!(
+        ProviderItemId::NamespaceRoot {
+            namespace_id: NamespaceId::from("ns-a"),
+        }
+        .to_opaque_string(),
+        "ns:6e732d61"
+    );
+    assert_eq!(
+        ProviderItemId::BoundInode {
+            namespace_id: NamespaceId::from("ns-a"),
+            inode_id: InodeId(7),
+        }
+        .to_opaque_string(),
+        "inode:6e732d61:0000000000000007"
+    );
+    let local_only = ProviderItemId::LocalOnly {
+        namespace_id: NamespaceId::from("ns-a"),
+        client_file_id: ClientFileId::from("tmp:42"),
+    };
+    let opaque = local_only.to_opaque_string();
+    assert_eq!(opaque, "local:6e732d61:746d703a3432");
+    assert_eq!(
+        ProviderItemId::from_opaque_str(&opaque).expect("decode opaque item id"),
+        local_only
+    );
+}
+
+#[test]
+fn file_provider_ffi_round_trips_open_list_lookup_and_close() {
+    let temp_dir = TestDir::new("macos-provider-ffi-listing");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    let object_store_root = temp_dir.path().join("objectstore");
+    let config_path = temp_dir.path().join("loondb-provider.toml");
+    let namespace_id = NamespaceId::from("provider-ns");
+    let namespace_root = mirror_root.join(namespace_id.as_str());
+    fs::create_dir_all(&namespace_root).expect("create namespace root");
+    fs::write(namespace_root.join("bound.txt"), "bound\n").expect("write bound file");
+    fs::write(namespace_root.join("draft.txt"), "draft\n").expect("write local-only file");
+    seed_projection_state(&db_path, &namespace_id);
+    write_ops_config_file(&config_path, &db_path, &mirror_root, &object_store_root);
+
+    let open_response = call_ffi(
+        loon_file_provider_bridge_open,
+        &serde_json::json!({
+            "ops_config_path": config_path.to_string_lossy(),
+            "exposed_namespaces": [namespace_id.as_str()],
+        })
+        .to_string(),
+    );
+    assert_eq!(open_response["ok"], serde_json::Value::Bool(true));
+    let bridge_handle = open_response["result"]["bridge_handle"]
+        .as_u64()
+        .expect("bridge handle should be present");
+
+    let root_response = call_ffi(
+        loon_file_provider_bridge_list_root,
+        &serde_json::json!({
+            "bridge_handle": bridge_handle,
+        })
+        .to_string(),
+    );
+    assert_eq!(root_response["ok"], serde_json::Value::Bool(true));
+    assert_eq!(
+        root_response["result"]["items"][0]["display_name"],
+        serde_json::Value::String(namespace_id.as_str().to_owned())
+    );
+    assert_eq!(
+        root_response["result"]["items"][0]["parent_item_id"],
+        serde_json::Value::String("root".to_owned())
+    );
+
+    let namespace_root_id = ProviderItemId::NamespaceRoot {
+        namespace_id: namespace_id.clone(),
+    }
+    .to_opaque_string();
+    let children_response = call_ffi(
+        loon_file_provider_bridge_list_children,
+        &serde_json::json!({
+            "bridge_handle": bridge_handle,
+            "parent_item_id": namespace_root_id,
+        })
+        .to_string(),
+    );
+    assert_eq!(children_response["ok"], serde_json::Value::Bool(true));
+    let child_names = children_response["result"]["items"]
+        .as_array()
+        .expect("children array")
+        .iter()
+        .map(|item| {
+            item["display_name"]
+                .as_str()
+                .expect("display name")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(child_names, vec!["bound.txt", "draft.txt", "remote.txt"]);
+    assert_eq!(
+        children_response["result"]["warnings"][0]["relative_path"],
+        serde_json::Value::String("alias".to_owned())
+    );
+    assert_eq!(
+        children_response["result"]["warnings"][0]["inode_kind"],
+        serde_json::Value::String("symlink".to_owned())
+    );
+
+    let lookup_response = call_ffi(
+        loon_file_provider_bridge_lookup_item,
+        &serde_json::json!({
+            "bridge_handle": bridge_handle,
+            "item_id": ProviderItemId::BoundInode {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(8),
+            }
+            .to_opaque_string(),
+        })
+        .to_string(),
+    );
+    assert_eq!(lookup_response["ok"], serde_json::Value::Bool(true));
+    assert_eq!(
+        lookup_response["result"]["item"]["materialization_state"],
+        serde_json::Value::String("placeholder".to_owned())
+    );
+    assert_eq!(
+        lookup_response["result"]["warnings"][0]["reason"],
+        serde_json::Value::String("unsupported_inode_kind".to_owned())
+    );
+
+    let close_response = call_ffi(
+        loon_file_provider_bridge_close,
+        &serde_json::json!({
+            "bridge_handle": bridge_handle,
+        })
+        .to_string(),
+    );
+    assert_eq!(close_response["ok"], serde_json::Value::Bool(true));
+    assert_eq!(
+        close_response["result"]["closed"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+#[test]
+fn file_provider_ffi_materializes_placeholder_file() {
+    let temp_dir = TestDir::new("macos-provider-ffi-materialize");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    let object_store_root = temp_dir.path().join("objectstore");
+    let config_path = temp_dir.path().join("loondb-provider.toml");
+    let source_root = temp_dir.path().join("source");
+    fs::create_dir_all(&source_root).expect("create source root");
+    let namespace_id = NamespaceId::from("provider-ns");
+    let source_path = source_root.join("remote.txt");
+    fs::write(&source_path, "finder hydration bytes\n").expect("write source file");
+    let store = LocalFsStore::new(&object_store_root).expect("open local fs store");
+    let uploaded = upload_small_file_from_path(&store, &namespace_id, &source_path)
+        .expect("upload source content");
+    seed_remote_only_placeholder(
+        &db_path,
+        &namespace_id,
+        InodeId(7),
+        "remote.txt",
+        &uploaded.file_digest_sha256,
+        &uploaded.content_manifest_digest,
+    );
+    write_ops_config_file(&config_path, &db_path, &mirror_root, &object_store_root);
+
+    let open_response = call_ffi(
+        loon_file_provider_bridge_open,
+        &serde_json::json!({
+            "ops_config_path": config_path.to_string_lossy(),
+            "exposed_namespaces": [namespace_id.as_str()],
+        })
+        .to_string(),
+    );
+    let bridge_handle = open_response["result"]["bridge_handle"]
+        .as_u64()
+        .expect("bridge handle should be present");
+
+    let materialize_response = call_ffi(
+        loon_file_provider_bridge_materialize_item,
+        &serde_json::json!({
+            "bridge_handle": bridge_handle,
+            "item_id": ProviderItemId::BoundInode {
+                namespace_id: namespace_id.clone(),
+                inode_id: InodeId(7),
+            }
+            .to_opaque_string(),
+            "now_ms": 1_700_000_000_000u64,
+        })
+        .to_string(),
+    );
+    assert_eq!(materialize_response["ok"], serde_json::Value::Bool(true));
+    assert_eq!(
+        materialize_response["result"]["relative_path"],
+        serde_json::Value::String("remote.txt".to_owned())
+    );
+    let absolute_path = materialize_response["result"]["absolute_path"]
+        .as_str()
+        .expect("absolute path");
+    assert_eq!(
+        fs::read_to_string(absolute_path).expect("read hydrated file"),
+        "finder hydration bytes\n"
+    );
+
+    let close_response = call_ffi(
+        loon_file_provider_bridge_close,
+        &serde_json::json!({
+            "bridge_handle": bridge_handle,
+        })
+        .to_string(),
+    );
+    assert_eq!(close_response["ok"], serde_json::Value::Bool(true));
+}
+
+#[test]
+fn file_provider_ffi_reports_invalid_json_and_unknown_item_id() {
+    let temp_dir = TestDir::new("macos-provider-ffi-errors");
+    let db_path = temp_dir.path().join("client.sqlite3");
+    let mirror_root = temp_dir.path().join("mirror");
+    let object_store_root = temp_dir.path().join("objectstore");
+    let config_path = temp_dir.path().join("loondb-provider.toml");
+    let namespace_id = NamespaceId::from("provider-ns");
+    seed_projection_state(&db_path, &namespace_id);
+    write_ops_config_file(&config_path, &db_path, &mirror_root, &object_store_root);
+
+    let invalid_json_response = call_ffi(loon_file_provider_bridge_open, "{");
+    assert_eq!(invalid_json_response["ok"], serde_json::Value::Bool(false));
+    assert_eq!(
+        invalid_json_response["error"]["code"],
+        serde_json::Value::String("invalid_json_request".to_owned())
+    );
+
+    let open_response = call_ffi(
+        loon_file_provider_bridge_open,
+        &serde_json::json!({
+            "ops_config_path": config_path.to_string_lossy(),
+            "exposed_namespaces": [namespace_id.as_str()],
+        })
+        .to_string(),
+    );
+    let bridge_handle = open_response["result"]["bridge_handle"]
+        .as_u64()
+        .expect("bridge handle should be present");
+
+    let unknown_item_response = call_ffi(
+        loon_file_provider_bridge_lookup_item,
+        &serde_json::json!({
+            "bridge_handle": bridge_handle,
+            "item_id": "bogus-item-id",
+        })
+        .to_string(),
+    );
+    assert_eq!(unknown_item_response["ok"], serde_json::Value::Bool(false));
+    assert_eq!(
+        unknown_item_response["error"]["code"],
+        serde_json::Value::String("invalid_item_id".to_owned())
+    );
+
+    let close_response = call_ffi(
+        loon_file_provider_bridge_close,
+        &serde_json::json!({
+            "bridge_handle": bridge_handle,
+        })
+        .to_string(),
+    );
+    assert_eq!(close_response["ok"], serde_json::Value::Bool(true));
+}
+
 fn spike_config(
     state_db_path: std::path::PathBuf,
     mirror_root: std::path::PathBuf,
@@ -182,6 +460,61 @@ fn spike_config(
         },
         ops: OpsSection::default(),
     }
+}
+
+fn write_ops_config_file(
+    config_path: &std::path::Path,
+    state_db_path: &std::path::Path,
+    mirror_root: &std::path::Path,
+    object_store_root: &std::path::Path,
+) {
+    fs::write(
+        config_path,
+        format!(
+            "\
+[object_store]
+kind = \"local-fs\"
+root = \"{}\"
+
+[client]
+state_db_path = \"{}\"
+mirror_root = \"{}\"
+
+[server]
+writer_id = \"writer-a\"
+writer_version = \"test\"
+lease_duration_ms = 60000
+",
+            object_store_root.display(),
+            state_db_path.display(),
+            mirror_root.display(),
+        ),
+    )
+    .expect("write ops config");
+}
+
+fn call_ffi(
+    function: extern "C" fn(*const c_char) -> *mut c_char,
+    request_json: &str,
+) -> serde_json::Value {
+    let request_json = CString::new(request_json).expect("request JSON should not contain NUL");
+    let response_ptr = function(request_json.as_ptr());
+    ffi_response_json(response_ptr)
+}
+
+fn ffi_response_json(response_ptr: *mut c_char) -> serde_json::Value {
+    assert!(
+        !response_ptr.is_null(),
+        "ffi response pointer should not be null"
+    );
+    // SAFETY: the response pointer comes from `loon_file_provider_*` and remains valid until it is
+    // released through `loon_file_provider_string_free`.
+    let response_json = unsafe { CStr::from_ptr(response_ptr) }
+        .to_str()
+        .expect("response should be valid UTF-8")
+        .to_owned();
+    loon_file_provider_string_free(response_ptr);
+    serde_json::from_str(&response_json).expect("response should be valid JSON")
 }
 
 fn seed_projection_state(db_path: &std::path::Path, namespace_id: &NamespaceId) {

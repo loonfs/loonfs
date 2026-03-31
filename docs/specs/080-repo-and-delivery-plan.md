@@ -39,7 +39,7 @@ Current real delivery surfaces:
 - `loon-server::mutation`
 - `loon-server::ops`
 - `loon-client`
-- `loon-macos` Rust bridge surface
+- `loon-macos` Rust bridge and native interop surface
 - `loon-testkit`
 - `xtask`
 
@@ -224,6 +224,10 @@ Rules:
 - it is read-only
 - it projects from existing client SQLite state plus local-only parent links
 - it uses one account/root domain with namespaces as top-level directories
+- it exposes a static-library C ABI with UTF-8 JSON payloads for the out-of-tree native sample
+- the containing app owns domain registration; the extension owns enumeration, lookup, and targeted
+  hydration
+- File Provider item ids exposed to native code are opaque encoded bridge ids
 - it does not add in-repo app/extension packaging, plist files, entitlements, or Swift code
 - the runnable native shell remains out of tree and must call the Rust bridge rather than
   re-implementing projection or hydration logic

@@ -10,6 +10,7 @@ Current scope:
 - one account/root projection with namespaces as top-level directories
 - DB-backed enumeration only
 - targeted hydration into the existing client mirror root
+- static-library C ABI with UTF-8 JSON payloads for a native macOS sample
 - out-of-tree native app and extension shell
 
 Current non-goals:

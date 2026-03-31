@@ -1145,6 +1145,7 @@ dependencies = [
  "loon-testkit",
  "loon-types",
  "serde",
+ "serde_json",
  "serde_yaml",
  "thiserror",
 ]
