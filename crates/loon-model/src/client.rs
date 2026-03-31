@@ -989,3 +989,45 @@ pub fn advance_transfer_one_block(next_block_index: u64, block_count: u64) -> (u
     let completed = next >= block_count;
     (next, completed)
 }
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn provider_root_listing_is_deterministic(listed_namespace_ids: &[&str]) -> bool {
+    listed_namespace_ids
+        .windows(2)
+        .all(|window| window[0] < window[1])
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn provider_namespace_listing_merges_visible_items(
+    bound_item_count: usize,
+    local_only_item_count: usize,
+    placeholder_item_count: usize,
+    warning_count: usize,
+) -> bool {
+    bound_item_count > 0
+        && local_only_item_count > 0
+        && placeholder_item_count > 0
+        && warning_count > 0
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn provider_targeted_file_hydration_materializes_ancestors_first(
+    first_decision: &str,
+    final_decision: &str,
+) -> bool {
+    first_decision == "materialize_remote_dir" && final_decision == "download_remote_edit"
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn provider_targeted_materialization_fails_closed(reason: &str) -> bool {
+    matches!(
+        reason,
+        "apply_remote_rename"
+            | "apply_remote_delete"
+            | "apply_remote_subtree_delete"
+            | "apply_remote_subtree_rename"
+            | "has_recorded_issue"
+            | "has_pending_inode_mutation"
+            | "wait_for_exact_path_vacate"
+    )
+}

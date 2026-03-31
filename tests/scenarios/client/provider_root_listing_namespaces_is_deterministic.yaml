@@ -1,0 +1,17 @@
+name: provider_root_listing_namespaces_is_deterministic
+summary: >
+  The synthetic File Provider root lists only the configured namespaces and
+  does so in deterministic namespace-id order.
+initial:
+  exposed_namespaces:
+    - alpha-namespace
+    - beta-namespace
+    - gamma-namespace
+actions:
+  - list_root
+expect:
+  items:
+    - display_name: alpha-namespace
+    - display_name: beta-namespace
+    - display_name: gamma-namespace
+  warnings: []

@@ -17,6 +17,9 @@ use crate::client::{
     fs_event_rename_reduces_to_observe_move, fs_event_repeated_edits_reduce_to_one_subtree,
     local_only_delete_clears_temp_state, local_only_move_preserves_identity,
     local_only_observation_under_bound_parent_plans_upload_local_create,
+    provider_namespace_listing_merges_visible_items, provider_root_listing_is_deterministic,
+    provider_targeted_file_hydration_materializes_ancestors_first,
+    provider_targeted_materialization_fails_closed,
     recursive_subtree_ambiguous_directory_pairing_fails_closed,
     recursive_subtree_ambiguous_file_pairing_fails_closed,
     recursive_subtree_changed_digest_file_does_not_pair,
@@ -255,6 +258,54 @@ fn model_local_only_observation_under_bound_parent_plans_upload_local_create() {
             true
         )
     );
+}
+
+#[test]
+fn model_provider_root_listing_is_deterministic() {
+    assert!(provider_root_listing_is_deterministic(&[
+        "alpha-namespace",
+        "beta-namespace",
+        "gamma-namespace",
+    ]));
+    assert!(!provider_root_listing_is_deterministic(&[
+        "beta-namespace",
+        "alpha-namespace",
+    ]));
+}
+
+#[test]
+fn model_provider_listing_merges_visible_items_and_warnings() {
+    assert!(provider_namespace_listing_merges_visible_items(1, 1, 1, 1));
+    assert!(!provider_namespace_listing_merges_visible_items(1, 1, 0, 1));
+}
+
+#[test]
+fn model_provider_targeted_file_hydration_materializes_ancestors_first() {
+    assert!(
+        provider_targeted_file_hydration_materializes_ancestors_first(
+            "materialize_remote_dir",
+            "download_remote_edit",
+        )
+    );
+    assert!(
+        !provider_targeted_file_hydration_materializes_ancestors_first(
+            "download_remote_edit",
+            "materialize_remote_dir",
+        )
+    );
+}
+
+#[test]
+fn model_provider_targeted_materialization_fails_closed() {
+    assert!(provider_targeted_materialization_fails_closed(
+        "apply_remote_rename"
+    ));
+    assert!(provider_targeted_materialization_fails_closed(
+        "wait_for_exact_path_vacate"
+    ));
+    assert!(!provider_targeted_materialization_fails_closed(
+        "download_remote_edit"
+    ));
 }
 
 #[test]

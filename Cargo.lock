@@ -1137,6 +1137,17 @@ dependencies = [
 [[package]]
 name = "loon-macos"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "loon-client",
+ "loon-objectstore",
+ "loon-ops",
+ "loon-testkit",
+ "loon-types",
+ "serde",
+ "serde_yaml",
+ "thiserror",
+]
 
 [[package]]
 name = "loon-model"

@@ -13,6 +13,7 @@ the mirror client exercises the core sync semantics with fewer platform-specific
 - CLI
 - later macOS File Provider bridge
 - local SQLite state is acceptable
+- the first File Provider spike is a read-only Rust bridge over the same SQLite truth model
 
 ## Local durable truth
 
@@ -2951,6 +2952,24 @@ conflict reasoning and convergence are much easier when directionality is explic
 
 Online-only placeholders must use the same canonical inode and revision semantics as full mirror mode.
 The platform integration layer must not invent a different sync model.
+
+## File Provider spike rule
+
+The first File Provider spike is intentionally narrower than full mirror mode.
+
+Rules:
+
+- it is read-only
+- it is DB-backed only for enumeration
+- it uses one account/root domain with namespaces as top-level directories
+- it reuses the current `OpsConfig` and current client `mirror_root`
+- it uses targeted hydration helpers instead of the global next-action scheduler
+- it does not add implicit authoritative import, implicit sync, a watcher, or a daemon loop
+- the native app and extension shell stay out of tree in this slice
+
+Why this rule exists:
+the first Finder integration slice should prove that the existing client truth model is sufficient
+before more platform surface is added.
 
 ## Crash/restart checkpoint rule
 

@@ -18,6 +18,11 @@ This roadmap keeps the existing path for link stability, but the goal is a **loc
   adapters without adding one yet
 - supported single-step client execution through the real scheduler and real server mutation path
 - supported thin repeat-until-idle execution through the same real scheduler step
+- supported read-only Rust File Provider bridge spike over the same client truth model:
+  - one account/root listing configured namespaces
+  - DB-backed enumeration only
+  - targeted hydration without using the global scheduler
+  - out-of-tree native app/extension shell
 - supported `loon-cli` discovery/diagnostic affordances:
   - built-in help and generated manpages
   - checked-in CLI manual
@@ -138,6 +143,11 @@ Required rules:
   - any reacquire after expiry rotates the head fence token before lease publish, even for the same
     writer
   - an expired foreign writer lease may be taken over by the next real write
+- the first File Provider spike remains read-only and DB-backed only:
+  - no implicit import
+  - no implicit sync
+  - no watcher or daemon loop
+  - native shell packaging stays out of tree
 - the shell output stays stable and human-readable
 
 Command contract:

@@ -1,0 +1,19 @@
+name: provider_materialize_nested_remote_only_file_materializes_ancestors_first
+summary: >
+  Targeted provider hydration for a nested remote-only file first materializes
+  any missing ancestor directories under the namespace mirror root, then
+  downloads the requested file bytes.
+initial:
+  namespace_id: provider-ns
+  target_relative_path: docs/report.txt
+  missing_ancestors:
+    - docs
+actions:
+  - decision: materialize_remote_dir
+    relative_path: docs
+  - decision: download_remote_edit
+    relative_path: docs/report.txt
+expect:
+  final_relative_path: docs/report.txt
+  ancestor_relative_paths:
+    - docs

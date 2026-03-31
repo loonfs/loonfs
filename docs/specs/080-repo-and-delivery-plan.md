@@ -39,6 +39,7 @@ Current real delivery surfaces:
 - `loon-server::mutation`
 - `loon-server::ops`
 - `loon-client`
+- `loon-macos` Rust bridge surface
 - `loon-testkit`
 - `xtask`
 
@@ -194,7 +195,6 @@ Current quarantined delivery surfaces:
 
 - the `loond` binary shell
 - `loon-server` HTTP/app placeholders
-- `loon-macos`
 
 These quarantined surfaces stay in the repository to preserve delivery intent and crate names, but
 they should not advertise themselves as active product entrypoints until they wrap real behavior.
@@ -214,3 +214,16 @@ The repo should accumulate:
 - better rendered traces
 
 before it accumulates a large amount of production code.
+
+## Current macOS File Provider spike boundary
+
+The first macOS File Provider slice is now an active Rust bridge surface in `loon-macos`.
+
+Rules:
+
+- it is read-only
+- it projects from existing client SQLite state plus local-only parent links
+- it uses one account/root domain with namespaces as top-level directories
+- it does not add in-repo app/extension packaging, plist files, entitlements, or Swift code
+- the runnable native shell remains out of tree and must call the Rust bridge rather than
+  re-implementing projection or hydration logic
