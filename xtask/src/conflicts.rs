@@ -5,7 +5,7 @@ use loon_client::{
     discover_conflict_artifacts_for_namespace, load_or_discover_conflict_artifact,
     restore_conflict_artifact_to_path, unarchive_conflict_artifact, RestoredConflictArtifact,
 };
-use loon_objectstore::fs::LocalFsStore;
+use loon_server::objectstore::fs::LocalFsStore;
 use loon_testkit::render::render_yaml;
 use loon_types::{ConflictArtifactArchiveEnvelope, ConflictArtifactLifecycleState, NamespaceId};
 use std::collections::BTreeMap;
@@ -571,9 +571,9 @@ mod tests {
         prepare_conflict_artifact, prepare_subtree_conflict_artifact,
         write_conflict_artifact_if_absent, write_subtree_conflict_artifact_if_absent,
     };
-    use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{blob, conflict_artifact_archive, content_manifest};
-    use loon_objectstore::ObjectStore;
+    use loon_server::objectstore::fs::LocalFsStore;
+    use loon_server::objectstore::keys::{blob, conflict_artifact_archive, content_manifest};
+    use loon_server::objectstore::ObjectStore;
     use loon_testkit::tempdir::TestDir;
     use loon_types::{
         ChangeSeq, ConflictArtifactArchiveEnvelope, ConflictArtifactLoserSummary,

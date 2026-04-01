@@ -1,7 +1,7 @@
-use loon_core::checkpoint::prepare_checkpoint;
-use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
-use loon_objectstore::keys::namespace_head;
-use loon_objectstore::ObjectStore;
+use loon_server::core::checkpoint::prepare_checkpoint;
+use loon_server::core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
+use loon_server::objectstore::keys::namespace_head;
+use loon_server::objectstore::ObjectStore;
 use loon_types::{
     ChangeSeq, ClientMutationOp, ClientMutationRequest, ControlObjectKind, HeadStateEnvelope,
     InodeId, InodeKind,

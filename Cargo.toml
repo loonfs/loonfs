@@ -2,17 +2,12 @@
 resolver = "2"
 members = [
   "crates/loon-types",
-  "crates/loon-objectstore",
   "crates/loon-ops",
-  "crates/loon-core",
-  "crates/loon-model",
-  "crates/loon-queue",
   "crates/loon-testkit",
   "crates/loon-sim",
   "crates/loon-server",
   "crates/loon-cli",
   "crates/loon-client",
-  "crates/loon-macos",
   "xtask",
 ]
 

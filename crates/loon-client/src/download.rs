@@ -1,6 +1,6 @@
-use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::keys::{blob, content_manifest};
-use loon_objectstore::ObjectStore;
+use loon_server::objectstore::error::ObjectStoreError;
+use loon_server::objectstore::keys::{blob, content_manifest};
+use loon_server::objectstore::ObjectStore;
 use loon_types::{
     content_manifest_digest_sha256, decode_content_manifest_json, sha256_digest,
     ContentBlockDescriptor, ContentManifestCodecError, ContentManifestEnvelope, NamespaceId,

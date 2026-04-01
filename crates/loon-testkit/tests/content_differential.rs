@@ -1,15 +1,15 @@
 use loon_client::upload::{upload_small_file_from_path, UploadedContent};
-use loon_core::checkpoint::prepare_checkpoint;
-use loon_core::content::{validate_durable_content_reference, DurableContentValidationError};
-use loon_core::invariants::CONTENT_OBJECT_FILE_INVARIANTS;
-use loon_core::metadata::MetadataState;
-use loon_model::{
+use loon_server::core::checkpoint::prepare_checkpoint;
+use loon_server::core::content::{validate_durable_content_reference, DurableContentValidationError};
+use loon_server::core::invariants::CONTENT_OBJECT_FILE_INVARIANTS;
+use loon_server::core::metadata::MetadataState;
+use loon_testkit::model::{
     build_uploaded_content, validate_uploaded_content_reference, ModelContentValidationError,
     ModelUploadedContent,
 };
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
-use loon_objectstore::ObjectStore;
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
+use loon_server::objectstore::ObjectStore;
 use loon_server::mutation::{
     execute_client_mutation, ClientMutationExecutionError, ClientMutationExecutionParams,
 };

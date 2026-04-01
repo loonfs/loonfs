@@ -1,18 +1,18 @@
 use crate::genesis::bootstrap_basis_metadata_state;
 use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
-use loon_core::checkpoint::{
+use crate::core::checkpoint::{
     load_checkpoint, load_checkpoint_manifest, prepare_checkpoint, prepare_checkpoint_head_publish,
     publish_checkpoint_head, CheckpointBuildError, CheckpointHeadPublishRequest,
     CheckpointPublishError, CheckpointReplayError, StoredCheckpointManifest,
     StoredCheckpointSegment,
 };
-use loon_core::content::{read_durable_content_bytes, DurableContentValidationError};
-use loon_core::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
-use loon_objectstore::keys::{
+use crate::core::content::{read_durable_content_bytes, DurableContentValidationError};
+use crate::core::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use crate::objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
 };
-use loon_objectstore::ObjectStore;
+use crate::objectstore::ObjectStore;
 use loon_types::{
     decode_content_manifest_json, ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope,
     InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId, ObservedRemoteInode,
@@ -838,11 +838,11 @@ mod tests {
     };
     use crate::genesis::bootstrap_basis_metadata_state;
     use crate::mutation::{execute_client_mutation, ClientMutationExecutionParams};
-    use loon_core::checkpoint::prepare_checkpoint;
-    use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
-    use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
-    use loon_objectstore::ObjectStore;
+    use crate::core::checkpoint::prepare_checkpoint;
+    use crate::core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
+    use crate::objectstore::fs::LocalFsStore;
+    use crate::objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
+    use crate::objectstore::ObjectStore;
     use loon_types::{
         sha256_digest, ChangeSeq, ClientMutationOp, ClientMutationRequest, ContentBlockDescriptor,
         ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, FenceToken, HeadState,

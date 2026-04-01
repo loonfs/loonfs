@@ -12,9 +12,9 @@ use loon_client::state_db::{
     SqliteStateDb, StateDbError, SyncAnchorRow, TransferDirection, TransferState,
 };
 use loon_client::upload::{upload_small_file_from_path, UploadError, UploadedContent};
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::{namespace_head, namespace_lease};
-use loon_objectstore::ObjectStore;
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::keys::{namespace_head, namespace_lease};
+use loon_server::objectstore::ObjectStore;
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
 use loon_testkit::invariants::{
     evaluate_local_only_upload_transfer_invariants, LocalOnlyUploadTransferInvariantInputs,

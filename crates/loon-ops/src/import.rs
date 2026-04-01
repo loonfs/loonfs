@@ -1,5 +1,5 @@
 use loon_client::state_db::{AppliedRemoteObservation, SqliteStateDb, StateDbError};
-use loon_objectstore::ObjectStore;
+use loon_server::objectstore::ObjectStore;
 use loon_server::ops::{
     load_namespace_state_summary, translate_authoritative_state_to_remote_observations,
     NamespaceStateSummaryError, RemoteObservationTranslationError,
@@ -116,13 +116,13 @@ mod tests {
     use loon_client::state_db::{
         LocalFileStateRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
     };
-    use loon_core::checkpoint::prepare_checkpoint;
-    use loon_core::metadata::{
+    use loon_server::core::checkpoint::prepare_checkpoint;
+    use loon_server::core::metadata::{
         DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
     };
-    use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
-    use loon_objectstore::ObjectStore;
+    use loon_server::objectstore::fs::LocalFsStore;
+    use loon_server::objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
+    use loon_server::objectstore::ObjectStore;
     use loon_types::{
         sha256_digest, ChangeSeq, ContentBlockDescriptor, ContentManifestEnvelope,
         ContentManifestPayload, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope,

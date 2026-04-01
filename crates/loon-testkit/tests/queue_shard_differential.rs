@@ -1,19 +1,19 @@
-use loon_model::{
+use loon_testkit::model::{
     ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobClaimParams,
     ModelJobCompleteOutcome, ModelMetadataState, ModelNamespace, ModelProgressObject,
     ModelQueueBroker, ModelQueueClaim, ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome,
     ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass,
 };
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::ObjectStore;
-use loon_queue::durable::{
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::ObjectStore;
+use loon_server::queue::durable::{
     claim_job_in_store, complete_job_in_store, read_queue_shard, renew_broker_lease_in_store,
     repair_lost_snapshot_enqueue_in_store, DurableBrokerLeaseOutcome, DurableJobClaimOutcome,
     DurableJobCompleteOutcome, DurableSnapshotRepairOutcome, DurableWorkerMutationError,
 };
-use loon_queue::repair::build_snapshot_dedupe_key;
-use loon_queue::types::{JobState, QueueJob, QueueShardEnvelope, QueueShardState, WorkClass};
-use loon_queue::worker::{JobClaimRequest, JobCompleteRequest};
+use loon_server::queue::repair::build_snapshot_dedupe_key;
+use loon_server::queue::types::{JobState, QueueJob, QueueShardEnvelope, QueueShardState, WorkClass};
+use loon_server::queue::worker::{JobClaimRequest, JobCompleteRequest};
 use loon_testkit::invariants::{
     evaluate_queue_broker_lease_invariants, evaluate_queue_claim_invariants,
     evaluate_queue_complete_invariants, evaluate_queue_repair_invariants,
@@ -345,7 +345,7 @@ struct FixtureQueueShardPayload {
     work_class: WorkClass,
     shard_id: u32,
     #[serde(default)]
-    broker: Option<loon_queue::types::QueueBroker>,
+    broker: Option<loon_server::queue::types::QueueBroker>,
     #[serde(default)]
     jobs: Vec<FixtureQueueShardJob>,
 }
@@ -356,11 +356,11 @@ struct FixtureQueueShardJob {
     job_id: Option<String>,
     dedupe_key: String,
     state: JobState,
-    payload: loon_queue::types::SeqScopedPayload,
+    payload: loon_server::queue::types::SeqScopedPayload,
     #[serde(default)]
-    follow_up: Option<loon_queue::types::SeqScopedPayload>,
+    follow_up: Option<loon_server::queue::types::SeqScopedPayload>,
     #[serde(default)]
-    claim: Option<loon_queue::types::QueueClaim>,
+    claim: Option<loon_server::queue::types::QueueClaim>,
     #[serde(default)]
     attempts: u32,
 }
@@ -1025,7 +1025,7 @@ fn normalize_model_error(err: ModelError) -> QueueMutationError {
 fn normalize_durable_complete_error(err: DurableWorkerMutationError) -> QueueMutationError {
     match err {
         DurableWorkerMutationError::Mutation(
-            loon_queue::worker::WorkerMutationError::ClaimTokenMismatch { expected, actual },
+            loon_server::queue::worker::WorkerMutationError::ClaimTokenMismatch { expected, actual },
         ) => QueueMutationError::ClaimTokenMismatch { expected, actual },
         other => QueueMutationError::Other(format!("{other:?}")),
     }
@@ -1054,16 +1054,16 @@ impl From<DurableSnapshotRepairOutcome> for NativeQueueOutcome {
             DurableSnapshotRepairOutcome::NoChange => Self::Repair(RepairSnapshot::NoRepairNeeded),
             DurableSnapshotRepairOutcome::Created(repair)
             | DurableSnapshotRepairOutcome::Updated(repair) => Self::Repair(match repair.repair {
-                loon_queue::repair::SnapshotRepairOutcome::NoRepairNeeded => {
+                loon_server::queue::repair::SnapshotRepairOutcome::NoRepairNeeded => {
                     RepairSnapshot::NoRepairNeeded
                 }
-                loon_queue::repair::SnapshotRepairOutcome::Enqueued { through_seq } => {
+                loon_server::queue::repair::SnapshotRepairOutcome::Enqueued { through_seq } => {
                     RepairSnapshot::Enqueued { through_seq }
                 }
-                loon_queue::repair::SnapshotRepairOutcome::RaisedReadyJob { through_seq } => {
+                loon_server::queue::repair::SnapshotRepairOutcome::RaisedReadyJob { through_seq } => {
                     RepairSnapshot::RaisedReadyJob { through_seq }
                 }
-                loon_queue::repair::SnapshotRepairOutcome::AttachedFollowUp { through_seq } => {
+                loon_server::queue::repair::SnapshotRepairOutcome::AttachedFollowUp { through_seq } => {
                     RepairSnapshot::AttachedFollowUp { through_seq }
                 }
             }),
@@ -1089,13 +1089,13 @@ impl From<DurableBrokerLeaseOutcome> for NativeQueueOutcome {
             DurableBrokerLeaseOutcome::Created(mutation)
             | DurableBrokerLeaseOutcome::Updated(mutation) => {
                 Self::BrokerLease(match mutation.mutation {
-                    loon_queue::broker::BrokerLeaseOutcome::Acquired { epoch } => {
+                    loon_server::queue::broker::BrokerLeaseOutcome::Acquired { epoch } => {
                         BrokerLeaseSnapshot::Acquired { epoch }
                     }
-                    loon_queue::broker::BrokerLeaseOutcome::Renewed { epoch } => {
+                    loon_server::queue::broker::BrokerLeaseOutcome::Renewed { epoch } => {
                         BrokerLeaseSnapshot::Renewed { epoch }
                     }
-                    loon_queue::broker::BrokerLeaseOutcome::TakenOver { epoch } => {
+                    loon_server::queue::broker::BrokerLeaseOutcome::TakenOver { epoch } => {
                         BrokerLeaseSnapshot::TakenOver { epoch }
                     }
                 })
@@ -1118,10 +1118,10 @@ impl From<DurableJobClaimOutcome> for NativeQueueOutcome {
         match value {
             DurableJobClaimOutcome::Created(mutation)
             | DurableJobClaimOutcome::Updated(mutation) => Self::Claim(match mutation.mutation {
-                loon_queue::worker::JobClaimOutcome::Claimed { claim_token } => {
+                loon_server::queue::worker::JobClaimOutcome::Claimed { claim_token } => {
                     ClaimSnapshot::Claimed { claim_token }
                 }
-                loon_queue::worker::JobClaimOutcome::Stolen { claim_token } => {
+                loon_server::queue::worker::JobClaimOutcome::Stolen { claim_token } => {
                     ClaimSnapshot::Stolen { claim_token }
                 }
             }),
@@ -1146,8 +1146,8 @@ impl From<DurableJobCompleteOutcome> for NativeQueueOutcome {
             DurableJobCompleteOutcome::Created(mutation)
             | DurableJobCompleteOutcome::Updated(mutation) => {
                 Self::Complete(match mutation.mutation {
-                    loon_queue::worker::JobCompleteOutcome::Removed => CompleteSnapshot::Removed,
-                    loon_queue::worker::JobCompleteOutcome::PromotedFollowUp { through_seq } => {
+                    loon_server::queue::worker::JobCompleteOutcome::Removed => CompleteSnapshot::Removed,
+                    loon_server::queue::worker::JobCompleteOutcome::PromotedFollowUp { through_seq } => {
                         CompleteSnapshot::PromotedFollowUp { through_seq }
                     }
                 })

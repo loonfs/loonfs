@@ -1,30 +1,30 @@
-use loon_core::checkpoint::{
+use loon_server::core::checkpoint::{
     load_checkpoint, prepare_checkpoint, prepare_checkpoint_head_publish, publish_checkpoint_head,
     CheckpointHeadPublishRequest, CheckpointPublishError, PreparedCheckpoint,
     StoredCheckpointManifest, StoredCheckpointSegment,
 };
-use loon_core::commit::{
+use loon_server::core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
     Precondition,
 };
-use loon_core::metadata::MetadataState;
-use loon_core::namespace::head_and_lease_fence_tokens_agree;
-use loon_core::progress::{
+use loon_server::core::metadata::MetadataState;
+use loon_server::core::namespace::head_and_lease_fence_tokens_agree;
+use loon_server::core::progress::{
     load_retention_authorizers, publish_progress, read_progress_object, ProgressPublishOutcome,
 };
-use loon_model::{
+use loon_testkit::model::{
     ModelAction, ModelCheckpoint, ModelCheckpointPublishAuthorizers, ModelCommitValidationError,
     ModelCommitValidationRequest, ModelError, ModelMetadataState, ModelNamespace,
     ModelProgressObject, ModelQueueBroker, ModelQueueClaim, ModelQueueJob, ModelQueueJobState,
     ModelQueueRepairOutcome, ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass,
 };
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::{derived_progress, namespace_head, namespace_lease, queue_shard};
-use loon_objectstore::ObjectStore;
-use loon_queue::durable::{
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::keys::{derived_progress, namespace_head, namespace_lease, queue_shard};
+use loon_server::objectstore::ObjectStore;
+use loon_server::queue::durable::{
     read_queue_shard, repair_lost_snapshot_enqueue_in_store, DurableSnapshotRepairOutcome,
 };
-use loon_queue::types::{
+use loon_server::queue::types::{
     JobState, QueueBroker, QueueClaim, QueueJob, QueueShardEnvelope, QueueShardState,
     SeqScopedPayload, WorkClass,
 };
@@ -1347,7 +1347,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         inodes: metadata_state
             .inodes
             .iter()
-            .map(|inode| loon_model::ModelInodeRecord {
+            .map(|inode| loon_testkit::model::ModelInodeRecord {
                 inode_id: inode.inode_id,
                 inode_kind: inode.inode_kind.clone(),
                 created_seq: inode.created_seq,
@@ -1356,7 +1356,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         direntries: metadata_state
             .direntries
             .iter()
-            .map(|direntry| loon_model::ModelDirentryRecord {
+            .map(|direntry| loon_testkit::model::ModelDirentryRecord {
                 parent_inode_id: direntry.parent_inode_id,
                 name_key: direntry.name_key.clone(),
                 display_name: direntry.display_name.clone(),
@@ -1368,7 +1368,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         revisions: metadata_state
             .revisions
             .iter()
-            .map(|revision| loon_model::ModelRevisionRecord {
+            .map(|revision| loon_testkit::model::ModelRevisionRecord {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
@@ -1379,7 +1379,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|tombstone| loon_model::ModelSubtreeTombstoneRecord {
+            .map(|tombstone| loon_testkit::model::ModelSubtreeTombstoneRecord {
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
                 tombstone_op_index: tombstone.tombstone_op_index,
@@ -1481,7 +1481,7 @@ fn normalize_core_error(error: CommitValidationError) -> CommitAttemptError {
 
 fn checkpoint_build_snapshot_from_model(checkpoint: &ModelCheckpoint) -> CheckpointBuildSnapshot {
     CheckpointBuildSnapshot {
-        manifest_key: loon_objectstore::keys::snapshot_manifest(
+        manifest_key: loon_server::objectstore::keys::snapshot_manifest(
             checkpoint.namespace_id.as_str(),
             checkpoint.checkpoint_seq.0,
         ),
@@ -1607,7 +1607,7 @@ fn checkpoint_model_authorizers(
 }
 
 fn core_authorizer(
-    progress: &loon_core::progress::LoadedProgressObject,
+    progress: &loon_server::core::progress::LoadedProgressObject,
 ) -> CheckpointProgressAuthorizer<'_> {
     CheckpointProgressAuthorizer {
         namespace_id: &progress.envelope.state.namespace_id,
@@ -1716,14 +1716,14 @@ impl From<DurableSnapshotRepairOutcome> for NormalizedRepairOutcome {
             DurableSnapshotRepairOutcome::NoChange => Self::NoRepairNeeded,
             DurableSnapshotRepairOutcome::Created(repair)
             | DurableSnapshotRepairOutcome::Updated(repair) => match repair.repair {
-                loon_queue::repair::SnapshotRepairOutcome::NoRepairNeeded => Self::NoRepairNeeded,
-                loon_queue::repair::SnapshotRepairOutcome::Enqueued { through_seq } => {
+                loon_server::queue::repair::SnapshotRepairOutcome::NoRepairNeeded => Self::NoRepairNeeded,
+                loon_server::queue::repair::SnapshotRepairOutcome::Enqueued { through_seq } => {
                     Self::Enqueued { through_seq }
                 }
-                loon_queue::repair::SnapshotRepairOutcome::RaisedReadyJob { through_seq } => {
+                loon_server::queue::repair::SnapshotRepairOutcome::RaisedReadyJob { through_seq } => {
                     Self::RaisedReadyJob { through_seq }
                 }
-                loon_queue::repair::SnapshotRepairOutcome::AttachedFollowUp { through_seq } => {
+                loon_server::queue::repair::SnapshotRepairOutcome::AttachedFollowUp { through_seq } => {
                     Self::AttachedFollowUp { through_seq }
                 }
             },

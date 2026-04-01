@@ -1,4 +1,4 @@
-use loon_core::metadata::{InodeRecord, MetadataState};
+use crate::core::metadata::{InodeRecord, MetadataState};
 use loon_types::{ChangeSeq, InodeId, InodeKind};
 
 pub(crate) fn bootstrap_basis_metadata_state() -> MetadataState {

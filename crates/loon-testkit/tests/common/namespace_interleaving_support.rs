@@ -5,31 +5,31 @@ use loon_client::state_db::{
     ObservedRemoteInode, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
 };
 use loon_client::testing::{ClientExecutionHooks, FaultController};
-use loon_core::checkpoint::{
+use loon_server::core::checkpoint::{
     load_checkpoint, prepare_checkpoint, prepare_checkpoint_head_publish, publish_checkpoint_head,
     CheckpointHeadPublishRequest, CheckpointPublishError, PreparedCheckpoint,
     StoredCheckpointManifest, StoredCheckpointSegment,
 };
-use loon_core::commit::{
+use loon_server::core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
     Precondition,
 };
-use loon_core::metadata::MetadataState;
-use loon_core::namespace::head_and_lease_fence_tokens_agree;
-use loon_core::progress::{
+use loon_server::core::metadata::MetadataState;
+use loon_server::core::namespace::head_and_lease_fence_tokens_agree;
+use loon_server::core::progress::{
     load_retention_authorizers, publish_progress, read_progress_object, ProgressPublishOutcome,
 };
-use loon_model::{
+use loon_testkit::model::{
     ModelAction, ModelCheckpoint, ModelCheckpointPublishAuthorizers, ModelCommitValidationError,
     ModelCommitValidationRequest, ModelError, ModelNamespace, ModelProgressObject,
     ModelQueueBroker, ModelQueueClaim, ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome,
     ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass,
 };
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::{derived_progress, namespace_head, namespace_lease, queue_shard};
-use loon_objectstore::ObjectStore;
-use loon_queue::durable::{read_queue_shard, repair_lost_snapshot_enqueue_in_store};
-use loon_queue::types::{
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::keys::{derived_progress, namespace_head, namespace_lease, queue_shard};
+use loon_server::objectstore::ObjectStore;
+use loon_server::queue::durable::{read_queue_shard, repair_lost_snapshot_enqueue_in_store};
+use loon_server::queue::types::{
     JobState, QueueBroker, QueueClaim, QueueJob, QueueShardEnvelope, QueueShardState,
     SeqScopedPayload, WorkClass,
 };
@@ -1972,11 +1972,11 @@ fn model_namespace_from_head(head: &HeadState, metadata_state: &MetadataState) -
     namespace.next_inode_id = head.next_inode_id;
     namespace.snapshot_hint_seq = head.snapshot_hint_seq;
     namespace.retention_floor_seq = head.retention_floor_seq;
-    namespace.metadata_state = loon_model::ModelMetadataState {
+    namespace.metadata_state = loon_testkit::model::ModelMetadataState {
         inodes: metadata_state
             .inodes
             .iter()
-            .map(|row| loon_model::ModelInodeRecord {
+            .map(|row| loon_testkit::model::ModelInodeRecord {
                 inode_id: row.inode_id,
                 inode_kind: row.inode_kind.clone(),
                 created_seq: row.created_seq,
@@ -1985,7 +1985,7 @@ fn model_namespace_from_head(head: &HeadState, metadata_state: &MetadataState) -
         direntries: metadata_state
             .direntries
             .iter()
-            .map(|row| loon_model::ModelDirentryRecord {
+            .map(|row| loon_testkit::model::ModelDirentryRecord {
                 parent_inode_id: row.parent_inode_id,
                 name_key: row.name_key.clone(),
                 display_name: row.display_name.clone(),
@@ -1997,7 +1997,7 @@ fn model_namespace_from_head(head: &HeadState, metadata_state: &MetadataState) -
         revisions: metadata_state
             .revisions
             .iter()
-            .map(|row| loon_model::ModelRevisionRecord {
+            .map(|row| loon_testkit::model::ModelRevisionRecord {
                 inode_id: row.inode_id,
                 revision_no: row.revision_no,
                 committed_seq: row.committed_seq,
@@ -2008,7 +2008,7 @@ fn model_namespace_from_head(head: &HeadState, metadata_state: &MetadataState) -
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|row| loon_model::ModelSubtreeTombstoneRecord {
+            .map(|row| loon_testkit::model::ModelSubtreeTombstoneRecord {
                 root_inode_id: row.root_inode_id,
                 tombstone_seq: row.tombstone_seq,
                 tombstone_op_index: row.tombstone_op_index,
@@ -2111,7 +2111,7 @@ fn normalize_core_error(error: CommitValidationError) -> CommitAttemptError {
 
 fn checkpoint_build_snapshot_from_model(checkpoint: &ModelCheckpoint) -> CheckpointBuildSnapshot {
     CheckpointBuildSnapshot {
-        manifest_key: loon_objectstore::keys::snapshot_manifest(
+        manifest_key: loon_server::objectstore::keys::snapshot_manifest(
             checkpoint.namespace_id.as_str(),
             checkpoint.checkpoint_seq.0,
         ),
@@ -2237,7 +2237,7 @@ fn checkpoint_model_authorizers(
 }
 
 fn core_authorizer(
-    progress: &loon_core::progress::LoadedProgressObject,
+    progress: &loon_server::core::progress::LoadedProgressObject,
 ) -> CheckpointProgressAuthorizer<'_> {
     CheckpointProgressAuthorizer {
         namespace_id: &progress.envelope.state.namespace_id,
@@ -2320,23 +2320,23 @@ impl From<ModelQueueRepairOutcome> for NormalizedRepairOutcome {
     }
 }
 
-impl From<loon_queue::durable::DurableSnapshotRepairOutcome> for NormalizedRepairOutcome {
-    fn from(value: loon_queue::durable::DurableSnapshotRepairOutcome) -> Self {
+impl From<loon_server::queue::durable::DurableSnapshotRepairOutcome> for NormalizedRepairOutcome {
+    fn from(value: loon_server::queue::durable::DurableSnapshotRepairOutcome) -> Self {
         match value {
-            loon_queue::durable::DurableSnapshotRepairOutcome::NoChange => Self::NoRepairNeeded,
-            loon_queue::durable::DurableSnapshotRepairOutcome::Created(repair)
-            | loon_queue::durable::DurableSnapshotRepairOutcome::Updated(repair) => {
+            loon_server::queue::durable::DurableSnapshotRepairOutcome::NoChange => Self::NoRepairNeeded,
+            loon_server::queue::durable::DurableSnapshotRepairOutcome::Created(repair)
+            | loon_server::queue::durable::DurableSnapshotRepairOutcome::Updated(repair) => {
                 match repair.repair {
-                    loon_queue::repair::SnapshotRepairOutcome::NoRepairNeeded => {
+                    loon_server::queue::repair::SnapshotRepairOutcome::NoRepairNeeded => {
                         Self::NoRepairNeeded
                     }
-                    loon_queue::repair::SnapshotRepairOutcome::Enqueued { through_seq } => {
+                    loon_server::queue::repair::SnapshotRepairOutcome::Enqueued { through_seq } => {
                         Self::Enqueued { through_seq }
                     }
-                    loon_queue::repair::SnapshotRepairOutcome::RaisedReadyJob { through_seq } => {
+                    loon_server::queue::repair::SnapshotRepairOutcome::RaisedReadyJob { through_seq } => {
                         Self::RaisedReadyJob { through_seq }
                     }
-                    loon_queue::repair::SnapshotRepairOutcome::AttachedFollowUp { through_seq } => {
+                    loon_server::queue::repair::SnapshotRepairOutcome::AttachedFollowUp { through_seq } => {
                         Self::AttachedFollowUp { through_seq }
                     }
                 }

@@ -1,18 +1,18 @@
-use loon_model::{
+use loon_testkit::model::{
     ModelBrokerLeaseOutcome, ModelError, ModelJobClaimOutcome, ModelJobClaimParams,
     ModelJobCompleteOutcome, ModelMetadataState, ModelNamespace, ModelProgressObject,
     ModelQueueBroker, ModelQueueClaim, ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome,
     ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass,
 };
-use loon_queue::broker::{renew_broker_lease, BrokerLeaseError, BrokerLeaseOutcome};
-use loon_queue::repair::{
+use loon_server::queue::broker::{renew_broker_lease, BrokerLeaseError, BrokerLeaseOutcome};
+use loon_server::queue::repair::{
     build_snapshot_dedupe_key, repair_lost_snapshot_enqueue, SnapshotRepairError,
     SnapshotRepairOutcome,
 };
-use loon_queue::types::{
+use loon_server::queue::types::{
     JobState, QueueBroker, QueueClaim, QueueJob, QueueShardState, SeqScopedPayload, WorkClass,
 };
-use loon_queue::worker::{
+use loon_server::queue::worker::{
     claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobClaimRequest, JobCompleteOutcome,
     JobCompleteRequest, JobHeartbeatRequest, WorkerMutationError,
 };
@@ -806,7 +806,7 @@ fn model_namespace_from_head(head: &HeadState) -> ModelNamespace {
 }
 
 fn model_progress_from_fixture(progress: &FixtureProgressObject) -> ModelProgressObject {
-    let expected_key = loon_objectstore::keys::derived_progress(
+    let expected_key = loon_server::objectstore::keys::derived_progress(
         progress.payload.namespace_id.as_str(),
         &progress.payload.work_class,
     );
@@ -993,10 +993,10 @@ fn normalize_broker_error(error: BrokerLeaseError) -> QueueMutationError {
 fn normalize_worker_error(error: WorkerMutationError) -> QueueMutationError {
     match error {
         WorkerMutationError::Broker(error) => match error {
-            loon_queue::broker::BrokerLeaseGuardError::MissingBrokerLease => {
+            loon_server::queue::broker::BrokerLeaseGuardError::MissingBrokerLease => {
                 QueueMutationError::MissingBrokerLease
             }
-            loon_queue::broker::BrokerLeaseGuardError::BrokerLeaseMismatch {
+            loon_server::queue::broker::BrokerLeaseGuardError::BrokerLeaseMismatch {
                 expected_broker_id,
                 expected_epoch,
                 actual_broker_id,
@@ -1007,7 +1007,7 @@ fn normalize_worker_error(error: WorkerMutationError) -> QueueMutationError {
                 actual_broker_id,
                 actual_epoch,
             },
-            loon_queue::broker::BrokerLeaseGuardError::BrokerLeaseExpired {
+            loon_server::queue::broker::BrokerLeaseGuardError::BrokerLeaseExpired {
                 broker_id,
                 epoch,
                 lease_expires_at_ms,

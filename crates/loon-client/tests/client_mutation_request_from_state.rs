@@ -3,7 +3,7 @@ use loon_client::state_db::{
     LocalOnlyFileStateRow, LocalOnlyPlannedActionRow, LocalOnlyUploadRow, SqliteStateDb,
 };
 use loon_client::upload::upload_small_file_from_path;
-use loon_objectstore::fs::LocalFsStore;
+use loon_server::objectstore::fs::LocalFsStore;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ClientMutationOp, ClientMutationRequest, InodeId, NamespaceId};
 use serde::Deserialize;

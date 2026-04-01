@@ -1,11 +1,11 @@
-use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
-use loon_core::commit::CommitRequest;
-use loon_core::metadata::{
+use loon_server::core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
+use loon_server::core::commit::CommitRequest;
+use loon_server::core::metadata::{
     DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
 };
-use loon_core::wal::PreparedWalCommit;
-use loon_core::wal::StoredWalObject;
-use loon_objectstore::keys::{
+use loon_server::core::wal::PreparedWalCommit;
+use loon_server::core::wal::StoredWalObject;
+use loon_server::objectstore::keys::{
     blob, conflict_artifact, derived_progress, queue_shard, snapshot_manifest, snapshot_table,
     wal_commit, SnapshotTableFamily,
 };
@@ -2816,7 +2816,7 @@ pub fn evaluate_client_retry_reuse_invariants(
         checks: vec![InvariantCheck {
             name: "client_retry_reuses_pending_request_after_delayed_response".to_owned(),
             passed: inputs.converged_once
-                && loon_model::retry_reuses_pending_request_id(
+                && crate::model::retry_reuses_pending_request_id(
                     inputs.pending_request_id_before_restart,
                     inputs.pending_request_id_after_retry,
                     inputs.retried_request_id,
@@ -2838,7 +2838,7 @@ pub fn evaluate_duplicate_response_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "duplicate_response_is_idempotent".to_owned(),
-            passed: loon_model::duplicate_response_delivery_is_idempotent(
+            passed: crate::model::duplicate_response_delivery_is_idempotent(
                 inputs.winner_already_durable,
                 inputs.second_delivery_applied_cleanly,
                 inputs.duplicate_winner_apply_count,
@@ -2859,7 +2859,7 @@ pub fn evaluate_late_remote_observation_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "late_remote_observation_does_not_duplicate_winner_apply".to_owned(),
-            passed: loon_model::late_remote_observation_converges_once(
+            passed: crate::model::late_remote_observation_converges_once(
                 inputs.response_apply_succeeded,
                 inputs.observation_apply_succeeded,
                 inputs.winner_apply_count,
@@ -2880,7 +2880,7 @@ pub fn evaluate_response_after_newer_observation_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "response_after_newer_observation_is_idempotent".to_owned(),
-            passed: loon_model::response_after_newer_observation_is_idempotent(
+            passed: crate::model::response_after_newer_observation_is_idempotent(
                 inputs.observation_apply_succeeded,
                 inputs.delayed_response_applied_cleanly,
                 inputs.delayed_response_changed_state,
@@ -2903,7 +2903,7 @@ pub fn evaluate_sim_trace_determinism_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "sim_trace_order_is_seed_stable".to_owned(),
-            passed: loon_model::delivery_order_is_seed_stable(
+            passed: crate::model::delivery_order_is_seed_stable(
                 &[inputs.first_rendered_trace],
                 &[inputs.second_rendered_trace],
             ),
@@ -2922,7 +2922,7 @@ pub fn evaluate_background_stale_writer_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "stale_writer_publish_remains_fenced_after_handover".to_owned(),
-            passed: loon_model::stale_writer_stays_fenced_after_handover(
+            passed: crate::model::stale_writer_stays_fenced_after_handover(
                 inputs.stale_publish_rejected,
                 inputs.head_fence_matches_lease,
                 inputs.stale_writer_fence_token,
@@ -2947,7 +2947,7 @@ pub fn evaluate_background_checkpoint_publish_invariants(
             InvariantCheck {
                 name: "checkpoint_publish_waits_for_required_progress_under_interleaving"
                     .to_owned(),
-                passed: loon_model::checkpoint_publish_waits_for_required_progress(
+                passed: crate::model::checkpoint_publish_waits_for_required_progress(
                     inputs.first_publish_blocked,
                     inputs.second_publish_succeeded,
                 ),
@@ -2959,7 +2959,7 @@ pub fn evaluate_background_checkpoint_publish_invariants(
             InvariantCheck {
                 name: "checkpoint_publish_preserves_monotonic_head_summary_under_interleaving"
                     .to_owned(),
-                passed: loon_model::checkpoint_publish_head_summary_is_monotonic(
+                passed: crate::model::checkpoint_publish_head_summary_is_monotonic(
                     inputs.snapshot_hint_before,
                     inputs.snapshot_hint_after_blocked,
                     inputs.snapshot_hint_after_success,
@@ -2987,7 +2987,7 @@ pub fn evaluate_background_repair_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "repair_lost_enqueue_tracks_latest_visible_head_seq".to_owned(),
-            passed: loon_model::snapshot_repair_tracks_latest_visible_head_seq(
+            passed: crate::model::snapshot_repair_tracks_latest_visible_head_seq(
                 inputs.repaired_through_seq,
                 inputs.latest_visible_head_seq,
             ),
@@ -3005,7 +3005,7 @@ pub fn evaluate_background_sim_trace_determinism_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "background_sim_trace_order_is_seed_stable".to_owned(),
-            passed: loon_model::delivery_order_is_seed_stable(
+            passed: crate::model::delivery_order_is_seed_stable(
                 &[inputs.first_rendered_trace],
                 &[inputs.second_rendered_trace],
             ),
@@ -3024,7 +3024,7 @@ pub fn evaluate_queue_sim_trace_determinism_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "queue_sim_trace_order_is_seed_stable".to_owned(),
-            passed: loon_model::delivery_order_is_seed_stable(
+            passed: crate::model::delivery_order_is_seed_stable(
                 &[inputs.first_rendered_trace],
                 &[inputs.second_rendered_trace],
             ),
@@ -3044,7 +3044,7 @@ pub fn evaluate_namespace_checkpoint_latest_head_invariants(
         checks: vec![InvariantCheck {
             name: "checkpoint_publish_uses_latest_visible_head_after_client_server_advance"
                 .to_owned(),
-            passed: loon_model::checkpoint_publish_uses_latest_visible_head(
+            passed: crate::model::checkpoint_publish_uses_latest_visible_head(
                 inputs.published_snapshot_hint_seq,
                 inputs.latest_visible_head_seq,
             ),
@@ -3063,7 +3063,7 @@ pub fn evaluate_namespace_repair_latest_head_invariants(
         checks: vec![InvariantCheck {
             name: "repair_lost_enqueue_tracks_latest_visible_head_after_client_server_advance"
                 .to_owned(),
-            passed: loon_model::snapshot_repair_tracks_latest_visible_head_seq(
+            passed: crate::model::snapshot_repair_tracks_latest_visible_head_seq(
                 inputs.repaired_through_seq,
                 inputs.latest_visible_head_seq,
             ),
@@ -3081,7 +3081,7 @@ pub fn evaluate_namespace_stale_writer_inflight_request_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "stale_writer_fence_survives_inflight_client_request".to_owned(),
-            passed: loon_model::stale_writer_fence_survives_inflight_client_request(
+            passed: crate::model::stale_writer_fence_survives_inflight_client_request(
                 inputs.stale_publish_rejected,
                 inputs.inflight_client_request_present,
                 inputs.delayed_client_response_converged,
@@ -3102,7 +3102,7 @@ pub fn evaluate_unified_namespace_sim_trace_determinism_invariants(
     SimInvariantReport {
         checks: vec![InvariantCheck {
             name: "unified_namespace_sim_trace_order_is_seed_stable".to_owned(),
-            passed: loon_model::delivery_order_is_seed_stable(
+            passed: crate::model::delivery_order_is_seed_stable(
                 &[inputs.first_rendered_trace],
                 &[inputs.second_rendered_trace],
             ),
@@ -4754,14 +4754,14 @@ mod tests {
         StoredContentBlockSnapshot, SubtreeConflictArtifactRestoreInvariantInputs,
         UnifiedNamespaceSimTraceDeterminismInvariantInputs, WalReplayInvariantInputs,
     };
-    use loon_core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
-    use loon_core::commit::{
+    use loon_server::core::checkpoint::{StoredCheckpointManifest, StoredCheckpointSegment};
+    use loon_server::core::commit::{
         build_commit_plan, prepare_commit_head_publish, CommitOp, CommitRequest,
         CommitValidationContext, Precondition,
     };
-    use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
-    use loon_core::wal::{prepare_wal_commit, StoredWalObject};
-    use loon_objectstore::keys::{
+    use loon_server::core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
+    use loon_server::core::wal::{prepare_wal_commit, StoredWalObject};
+    use loon_server::objectstore::keys::{
         blob, conflict_artifact, content_manifest, derived_progress, snapshot_manifest,
         snapshot_table, SnapshotTableFamily,
     };

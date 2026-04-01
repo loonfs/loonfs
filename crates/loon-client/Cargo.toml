@@ -8,7 +8,7 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 loon-types = { path = "../loon-types" }
-loon-objectstore = { path = "../loon-objectstore" }
+loon-server = { path = "../loon-server" }
 loon-sim = { path = "../loon-sim" }
 rusqlite.workspace = true
 thiserror.workspace = true
@@ -16,8 +16,5 @@ serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-loon-model = { path = "../loon-model" }
 loon-testkit = { path = "../loon-testkit" }
-loon-server = { path = "../loon-server" }
-loon-core = { path = "../loon-core" }
 serde_yaml.workspace = true

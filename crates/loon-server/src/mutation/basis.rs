@@ -2,14 +2,14 @@ use crate::genesis::bootstrap_basis_metadata_state;
 use crate::mutation::loading::{
     read_head_object, read_lease_object, ControlObjectLoadError, LoadedHeadObject,
 };
-use loon_core::checkpoint::{
+use crate::core::checkpoint::{
     replay_from_checkpoint_and_wal_tail_with_metadata, CheckpointReplayError,
     StoredCheckpointManifest, StoredCheckpointSegment,
 };
-use loon_core::metadata::MetadataState;
-use loon_core::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
-use loon_objectstore::keys::snapshot_manifest;
-use loon_objectstore::ObjectStore;
+use crate::core::metadata::MetadataState;
+use crate::core::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
+use crate::objectstore::keys::snapshot_manifest;
+use crate::objectstore::ObjectStore;
 use loon_types::{HeadState, HeadStateEnvelope, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

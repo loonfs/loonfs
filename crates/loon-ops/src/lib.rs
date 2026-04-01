@@ -13,9 +13,9 @@ mod sync;
 
 use anyhow::{anyhow, bail, Context, Result};
 use loon_client::state_db::{ClientNamespaceStateSummary, SqliteStateDb};
-use loon_objectstore::r2::R2StoreConfig;
-use loon_objectstore::s3::AwsS3StoreConfig;
-use loon_objectstore::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
+use loon_server::objectstore::r2::R2StoreConfig;
+use loon_server::objectstore::s3::AwsS3StoreConfig;
+use loon_server::objectstore::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 use loon_server::ops::{
     bootstrap_namespace, load_namespace_state_summary, NamespaceBootstrapParams,
     NamespaceStateSummary,
@@ -711,10 +711,10 @@ mod tests {
         SqliteStateDb, SyncAnchorRow,
     };
     use loon_client::upload::upload_small_file_from_path;
-    use loon_core::checkpoint::prepare_checkpoint;
-    use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
-    use loon_objectstore::keys::{namespace_head, namespace_lease};
-    use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
+    use loon_server::core::checkpoint::prepare_checkpoint;
+    use loon_server::core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
+    use loon_server::objectstore::keys::{namespace_head, namespace_lease};
+    use loon_server::objectstore::{ConfiguredObjectStore, ObjectStore};
     use loon_types::{
         sha256_digest, ChangeSeq, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope,
         InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,

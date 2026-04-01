@@ -12,8 +12,8 @@ use crate::local_apply::LocalApplyError;
 use crate::state_db::{
     ClientFileId, ConflictArtifactArchiveRow, ConflictArtifactRow, SqliteStateDb,
 };
-use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use loon_server::objectstore::error::ObjectStoreError;
+use loon_server::objectstore::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
 use loon_sim::faults::{
     FaultPlan, InjectedClientFault, InjectedStoreErrorKind, InjectedStoreOperation,
 };

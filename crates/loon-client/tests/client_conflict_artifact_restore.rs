@@ -6,9 +6,9 @@ use loon_client::{
     restore_subtree_conflict_artifact_to_path, write_conflict_artifact_if_absent,
     write_subtree_conflict_artifact_if_absent, ConflictArtifactError,
 };
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::{blob, conflict_artifact, content_manifest};
-use loon_objectstore::ObjectStore;
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::keys::{blob, conflict_artifact, content_manifest};
+use loon_server::objectstore::ObjectStore;
 use loon_testkit::invariants::{
     evaluate_conflict_artifact_discovery_invariants,
     evaluate_file_conflict_artifact_restore_invariants,
