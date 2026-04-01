@@ -1,19 +1,24 @@
 # loon-macos
 
-Read-only macOS File Provider bridge spike.
+**Status: Experimental spike**
+
+Read-only macOS File Provider bridge.
 
 This crate projects Finder-style provider items from the existing client SQLite state and reuses
 the same client truth model rather than inventing a second sync model.
 
-Current scope:
+`#![deny(unsafe_op_in_unsafe_fn)]` — this is the only crate in the workspace with unsafe code,
+confined to the C FFI boundary.
 
-- one account/root projection with namespaces as top-level directories
+## Current scope
+
+- One account/root projection with namespaces as top-level directories
 - DB-backed enumeration only
-- targeted hydration into the existing client mirror root
-- static-library C ABI with UTF-8 JSON payloads for a native macOS sample
-- checked-in developer sample app and extension shell under `native/macos/LoonFileProviderSample/`
+- Targeted hydration into the existing client mirror root
+- Static-library C ABI with UTF-8 JSON payloads for a native macOS sample
+- Checked-in developer sample app and extension shell under `native/macos/LoonFileProviderSample/`
 
-Current non-goals:
+## Current non-goals
 
-- no create/modify/delete/rename support
-- no implicit import, sync, watcher, or daemon loop
+- No create/modify/delete/rename support
+- No implicit import, sync, watcher, or daemon loop
