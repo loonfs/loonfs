@@ -9,7 +9,7 @@ use crate::state_db::{
 };
 use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use crate::upload::{upload_small_file_from_path, UploadError, UploadedContent};
-use loon_server::objectstore::error::ObjectStoreError;
+use loon_server::objectstore::ObjectStoreError;
 use loon_server::objectstore::keys::{
     conflict_artifact, conflict_artifact_archive, conflict_artifact_archive_prefix,
     conflict_artifact_prefix,

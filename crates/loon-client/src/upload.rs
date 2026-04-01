@@ -1,4 +1,4 @@
-use loon_server::objectstore::error::ObjectStoreError;
+use loon_server::objectstore::ObjectStoreError;
 use loon_server::objectstore::keys::{blob, content_manifest};
 use loon_server::objectstore::ObjectStore;
 use loon_types::{

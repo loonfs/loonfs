@@ -1,4 +1,4 @@
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
@@ -481,10 +481,10 @@ mod tests {
         .expect("construct store");
 
         let first = store
-            .run_async(async { Ok::<_, crate::objectstore::error::ObjectStoreError>(1usize) })
+            .run_async(async { Ok::<_, crate::objectstore::ObjectStoreError>(1usize) })
             .expect("first block_on");
         let second = store
-            .run_async(async { Ok::<_, crate::objectstore::error::ObjectStoreError>(2usize) })
+            .run_async(async { Ok::<_, crate::objectstore::ObjectStoreError>(2usize) })
             .expect("second block_on");
 
         assert_eq!((first, second), (1, 2));

@@ -1,4 +1,4 @@
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::keyspace::validate_segments;
 use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
 use std::fs::{self, File, OpenOptions};

@@ -1,6 +1,6 @@
 mod provider_env;
 
-use loon_server::objectstore::error::ObjectStoreError;
+use loon_server::objectstore::ObjectStoreError;
 use loon_server::objectstore::fs::LocalFsStore;
 use loon_server::objectstore::keys::{
     derived_progress, namespace_head, namespace_lease, queue_shard, snapshot_manifest,

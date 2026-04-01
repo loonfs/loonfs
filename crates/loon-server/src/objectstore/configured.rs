@@ -1,4 +1,4 @@
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::fs::LocalFsStore;
 use crate::objectstore::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
@@ -136,7 +136,7 @@ impl ObjectStore for ConfiguredObjectStore {
 #[cfg(test)]
 mod tests {
     use super::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
-    use crate::objectstore::error::ObjectStoreError;
+    use crate::objectstore::ObjectStoreError;
     use crate::objectstore::fs::LocalFsStore;
     use crate::objectstore::r2::R2StoreConfig;
     use crate::objectstore::s3::AwsS3StoreConfig;

@@ -3,7 +3,7 @@ use crate::core::metadata::{
 };
 use crate::core::progress::LoadedRetentionAuthorizers;
 use crate::core::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::keys::{
     namespace_head, snapshot_manifest, snapshot_table, SnapshotTableFamily,
 };

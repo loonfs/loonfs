@@ -5,7 +5,7 @@ use crate::queue::worker::{
     claim_job, complete_job, heartbeat_job, JobClaimOutcome, JobClaimRequest, JobCompleteOutcome,
     JobCompleteRequest, JobHeartbeatOutcome, JobHeartbeatRequest, WorkerMutationError,
 };
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::keys::queue_shard;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{

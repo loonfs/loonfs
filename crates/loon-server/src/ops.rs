@@ -21,56 +21,11 @@ use loon_types::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceBootstrapParams {
-    pub holder_id: String,
-    pub writer_version: String,
-    pub now_ms: u64,
-    pub lease_duration_ms: u64,
-    pub allow_existing: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BootstrappedNamespace {
-    pub namespace_id: NamespaceId,
-    pub created: bool,
-    pub head: HeadState,
-    pub lease: LeaseState,
-    pub checkpoint_seq: ChangeSeq,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceCheckpointBasisSummary {
-    pub checkpoint_seq: ChangeSeq,
-    pub manifest_object_key: String,
-    pub table_object_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceWalTailSummary {
-    pub object_count: usize,
-    pub first_seq: Option<ChangeSeq>,
-    pub last_seq: Option<ChangeSeq>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceMetadataSummary {
-    pub inode_count: usize,
-    pub visible_inode_count: usize,
-    pub direntry_count: usize,
-    pub revision_count: usize,
-    pub subtree_tombstone_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceStateSummary {
-    pub namespace_id: NamespaceId,
-    pub head: HeadState,
-    pub lease: LeaseState,
-    pub checkpoint_basis: Option<NamespaceCheckpointBasisSummary>,
-    pub wal_tail: NamespaceWalTailSummary,
-    pub metadata: NamespaceMetadataSummary,
-}
+// Re-export wire types from loon-types so existing `loon_server::ops::*` paths work.
+pub use loon_types::{
+    BootstrappedNamespace, NamespaceBootstrapParams, NamespaceCheckpointBasisSummary,
+    NamespaceMetadataSummary, NamespaceStateSummary, NamespaceWalTailSummary,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum NamespaceBootstrapError {

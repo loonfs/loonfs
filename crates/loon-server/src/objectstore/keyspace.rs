@@ -1,4 +1,4 @@
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 
 pub(crate) fn validate_segments(
     key: &str,
@@ -89,7 +89,7 @@ mod tests {
         normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
         validate_segments,
     };
-    use crate::objectstore::error::ObjectStoreError;
+    use crate::objectstore::ObjectStoreError;
 
     #[test]
     fn normalize_key_prefix_rejects_traversal_and_empty_segments() {

@@ -1,4 +1,4 @@
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::keys::{namespace_head, namespace_lease};
 use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{

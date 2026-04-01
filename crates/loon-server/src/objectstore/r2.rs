@@ -1,4 +1,4 @@
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
 use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
 

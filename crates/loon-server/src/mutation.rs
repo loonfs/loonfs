@@ -16,7 +16,7 @@ use crate::core::commit::{
 };
 use crate::core::metadata::{MetadataApplyError, MetadataState};
 use crate::core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
-use crate::objectstore::error::ObjectStoreError;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{ClientMutationRequest, ClientMutationResponse};
 use serde::{Deserialize, Serialize};
