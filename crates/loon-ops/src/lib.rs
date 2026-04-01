@@ -1,3 +1,9 @@
+//! Shared operability command, config, and rendering contract for LoonDB.
+//!
+//! Implements the core operations (import, observe, sync) consumed by both `loon-cli` and
+//! `xtask`. This is the integration point that composes `loon-client`, `loon-server`, and
+//! `loon-objectstore` into user-facing workflows.
+
 #![forbid(unsafe_code)]
 
 mod file;

@@ -1,3 +1,9 @@
+//! Read-only macOS File Provider bridge (experimental spike).
+//!
+//! Projects Finder-style provider items from the existing client SQLite state, reusing the
+//! same client truth model rather than inventing a second sync model. Exports a static-library
+//! C ABI with UTF-8 JSON payloads for a native macOS host app.
+
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use loon_client::local_fs::{join_under_mirror_root, NamespacePathIndex};

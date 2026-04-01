@@ -1,3 +1,9 @@
+//! Pure reference model for namespace and queue semantics.
+//!
+//! This crate defines the expected outcomes for every mutation, precondition check, conflict
+//! scenario, and queue operation — without performing any I/O or side effects. It serves as
+//! the specification-in-code that production implementations are tested against.
+
 #![forbid(unsafe_code)]
 
 use loon_types::{

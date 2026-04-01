@@ -1,3 +1,8 @@
+//! Thin CLI frontend for LoonDB, built over `loon-ops`.
+//!
+//! Provides the `loon` binary with subcommands for operability (`ops`), configuration
+//! validation (`config`), diagnostics (`doctor`), shell completions, and manpage generation.
+
 mod app;
 mod cmd;
 mod error;

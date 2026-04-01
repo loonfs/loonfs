@@ -1,3 +1,10 @@
+//! Object-store abstraction layer for LoonDB.
+//!
+//! This crate defines the [`ObjectStore`] trait and provides implementations for local
+//! filesystem, AWS S3, and Cloudflare R2. It is the only layer that should know provider
+//! quirks — higher layers depend only on the trait, its error types, and opaque compare
+//! tokens.
+
 #![forbid(unsafe_code)]
 
 mod configured;
@@ -14,6 +21,7 @@ use crate::error::ObjectStoreError;
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 use serde::{Deserialize, Serialize};
 
+/// Metadata returned by a successful `head` or `put` call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMetadata {
     /// Opaque compare token for one object version.
@@ -24,16 +32,23 @@ pub struct ObjectMetadata {
     pub size_bytes: u64,
 }
 
+/// Controls the write semantics of a `put` call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PutMode {
+    /// Unconditionally overwrite any existing object.
     Overwrite,
+    /// Write only if the key does not already exist. Returns `PreconditionFailed` if it does.
     CreateIfAbsent,
+    /// Write only if the current etag matches. Returns `PreconditionFailed` on mismatch.
     CompareAndSwap { expected_etag: String },
 }
 
+/// A byte range for partial object reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteRange {
+    /// First byte to read (inclusive, zero-based).
     pub start_inclusive: u64,
+    /// First byte to exclude (exclusive, zero-based).
     pub end_exclusive: u64,
 }
 
