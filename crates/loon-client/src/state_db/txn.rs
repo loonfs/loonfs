@@ -453,6 +453,7 @@ impl SqliteStateDb {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn observe_local_only_move_and_plan(
         &mut self,
         client_file_id: &ClientFileId,

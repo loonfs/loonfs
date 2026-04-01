@@ -875,6 +875,7 @@ fn run_execute_next_client_action(
     .expect("execute next client action")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_execute_next_until_idle(
     db_path: &Path,
     store: &LocalFsStore,
