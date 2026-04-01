@@ -1,3 +1,9 @@
+//! Readable scenario fixture types, rendering helpers, and test infrastructure.
+//!
+//! Scenario fixtures are YAML files under `tests/scenarios/` that describe expected protocol
+//! behavior in human-readable form. They are treated as product artifacts and reviewed alongside
+//! specs and ADRs.
+
 #![forbid(unsafe_code)]
 
 pub mod client;

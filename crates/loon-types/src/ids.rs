@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
+/// Unique identifier for a namespace (a logical sync boundary).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NamespaceId(pub String);
 
@@ -44,18 +45,23 @@ impl<'de> Deserialize<'de> for NamespaceId {
     }
 }
 
+/// Numeric identity of a file, directory, symlink, or mount within a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InodeId(pub u64);
 
+/// Monotonically increasing file revision counter within an inode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RevisionNo(pub u64);
 
+/// Monotonically increasing namespace commit sequence number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChangeSeq(pub u64);
 
+/// Fencing token for write-lease concurrency control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FenceToken(pub u64);
 
+/// Case-normalized directory entry name used as a lookup key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NameKey(pub String);
 

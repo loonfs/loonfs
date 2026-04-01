@@ -1,3 +1,9 @@
+//! Client-side daemon scaffolding for mirror sync, hydration, and local durability.
+//!
+//! Implements the client half of the LoonDB sync protocol: observing remote namespace changes,
+//! planning uploads and downloads, executing content transfers, and managing conflicts. Local
+//! durable state is maintained in a SQLite database.
+
 #![forbid(unsafe_code)]
 
 mod conflict;
