@@ -689,6 +689,7 @@ fn write_demo_local_fs_config_with_paths(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_demo_local_fs_config_with_spec(
     base_dir: &Path,
     object_store_root: PathBuf,

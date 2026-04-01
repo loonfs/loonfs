@@ -113,8 +113,7 @@ pub fn run_queue_scenario_report(
         let mut observed_invariants = Vec::new();
         let mut saw_stolen_claim = false;
 
-        if initial.progress.is_some() {
-            let progress = initial.progress.as_ref().expect("progress should exist");
+        if let Some(progress) = initial.progress.as_ref() {
             let progress_report =
                 evaluate_progress_publish_invariants(ProgressPublishInvariantInputs {
                     expected_namespace: &progress.payload.namespace_id,

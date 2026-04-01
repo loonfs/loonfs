@@ -345,7 +345,7 @@ fn reduce_explicit_renames(
         if targets.len() > 1 {
             return Err(FsEventReductionError::AmbiguousRenameSource {
                 affected_relative_paths: vec![source.clone()],
-                suggested_subtree_roots: suggested_subtree_roots(&[source.clone()]),
+                suggested_subtree_roots: suggested_subtree_roots(std::slice::from_ref(source)),
             });
         }
     }
@@ -353,7 +353,7 @@ fn reduce_explicit_renames(
         if sources.len() > 1 {
             return Err(FsEventReductionError::AmbiguousRenameTarget {
                 affected_relative_paths: vec![target.clone()],
-                suggested_subtree_roots: suggested_subtree_roots(&[target.clone()]),
+                suggested_subtree_roots: suggested_subtree_roots(std::slice::from_ref(target)),
             });
         }
     }

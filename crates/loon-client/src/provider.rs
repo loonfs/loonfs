@@ -189,20 +189,17 @@ pub fn materialize_inode_to_mirror_root<S: ObjectStore>(
         }
         PlannerDecision::DownloadRemoteEdit => {
             let mut applied_at_ms = now_ms;
-            loop {
-                match execute_download_remote_edit_to_path(
+            while let DownloadRemoteEditExecution::Progressed(_) =
+                execute_download_remote_edit_to_path(
                     db,
                     store,
                     namespace_id,
                     inode_id,
                     &absolute_path,
                     applied_at_ms,
-                )? {
-                    DownloadRemoteEditExecution::Progressed(_) => {
-                        applied_at_ms = applied_at_ms.saturating_add(1);
-                    }
-                    DownloadRemoteEditExecution::Completed(_) => break,
-                }
+                )?
+            {
+                applied_at_ms = applied_at_ms.saturating_add(1);
             }
         }
         _ => {}
