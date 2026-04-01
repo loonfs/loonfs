@@ -21,6 +21,11 @@ edition = "2021"
 version = "0.1.0"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.83"
+description = "File sync engine with object-storage-only backend"
+repository = "https://github.com/prequel-co/loonfs"
+homepage = "https://github.com/prequel-co/loonfs"
+keywords = ["sync", "object-storage", "s3"]
+categories = ["filesystem"]
 
 [workspace.dependencies]
 anyhow = "1"
