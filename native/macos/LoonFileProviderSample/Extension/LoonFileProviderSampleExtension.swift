@@ -2,6 +2,10 @@ import FileProvider
 import Foundation
 import OSLog
 
+private struct SendableBox<T>: @unchecked Sendable {
+    let value: T
+}
+
 final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedExtension {
     private let domain: NSFileProviderDomain
     private let bridgeSession: SampleBridgeSession
@@ -17,6 +21,7 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
     }
 
     func invalidate() {
+        let bridgeSession = self.bridgeSession
         Task { await bridgeSession.invalidate() }
     }
 
@@ -38,10 +43,14 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
         completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
+        let bridgeSession = self.bridgeSession
+        let logger = self.logger
+        let domainDisplayName = domain.displayName
+        let completion = SendableBox(value: completionHandler)
         Task {
             do {
                 if identifier == .rootContainer {
-                    completionHandler(SampleFileProviderItem(rootDisplayName: domain.displayName), nil)
+                    completion.value(SampleFileProviderItem(rootDisplayName: domainDisplayName), nil)
                     return
                 }
 
@@ -54,12 +63,12 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
                         domain: NSFileProviderErrorDomain,
                         code: NSFileProviderError.noSuchItem.rawValue
                     )
-                    completionHandler(nil, error)
+                    completion.value(nil, error)
                     return
                 }
-                completionHandler(SampleFileProviderItem(snapshot: item), nil)
+                completion.value(SampleFileProviderItem(snapshot: item), nil)
             } catch {
-                completionHandler(nil, sampleNSError(from: error))
+                completion.value(nil, sampleNSError(from: error))
             }
         }
         return progress
@@ -72,6 +81,8 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
+        let bridgeSession = self.bridgeSession
+        let completion = SendableBox(value: completionHandler)
         Task {
             do {
                 let bridgeItemId = itemIdentifier.rawValue
@@ -81,7 +92,7 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
                 )
                 let refreshed = try await bridgeSession.lookupItem(itemId: bridgeItemId)
                 guard let item = refreshed.item else {
-                    completionHandler(
+                    completion.value(
                         URL(fileURLWithPath: materialized.absolutePath),
                         nil,
                         NSError(
@@ -91,17 +102,68 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
                     )
                     return
                 }
-                completionHandler(
+                completion.value(
                     URL(fileURLWithPath: materialized.absolutePath),
                     SampleFileProviderItem(snapshot: item),
                     nil
                 )
             } catch let error as BridgeInteropError {
-                completionHandler(nil, nil, sampleNSError(from: ExtensionAdapter.mapBridgeError(error)))
+                completion.value(nil, nil, sampleNSError(from: ExtensionAdapter.mapBridgeError(error)))
             } catch {
-                completionHandler(nil, nil, sampleNSError(from: error))
+                completion.value(nil, nil, sampleNSError(from: error))
             }
         }
+        return progress
+    }
+
+    func createItem(
+        basedOn itemTemplate: NSFileProviderItem,
+        fields: NSFileProviderItemFields,
+        contents url: URL?,
+        options: NSFileProviderCreateItemOptions = [],
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        completionHandler(
+            nil,
+            [],
+            false,
+            sampleNSError(from: SampleProviderError.readOnly("The sample File Provider is read-only."))
+        )
+        return progress
+    }
+
+    func modifyItem(
+        _ item: NSFileProviderItem,
+        baseVersion version: NSFileProviderItemVersion,
+        changedFields: NSFileProviderItemFields,
+        contents newContents: URL?,
+        options: NSFileProviderModifyItemOptions = [],
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        completionHandler(
+            nil,
+            [],
+            false,
+            sampleNSError(from: SampleProviderError.readOnly("The sample File Provider is read-only."))
+        )
+        return progress
+    }
+
+    func deleteItem(
+        identifier: NSFileProviderItemIdentifier,
+        baseVersion version: NSFileProviderItemVersion,
+        options: NSFileProviderDeleteItemOptions = [],
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        completionHandler(
+            sampleNSError(from: SampleProviderError.readOnly("The sample File Provider is read-only."))
+        )
         return progress
     }
 }

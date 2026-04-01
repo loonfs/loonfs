@@ -2,6 +2,10 @@ import FileProvider
 import Foundation
 import OSLog
 
+private struct SendableObserverBox<T>: @unchecked Sendable {
+    let value: T
+}
+
 final class SampleFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     private let parentIdentifier: NSFileProviderItemIdentifier
     private let bridgeSession: SampleBridgeSession
@@ -26,6 +30,11 @@ final class SampleFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderEnumerationObserver,
         startingAt page: NSFileProviderPage
     ) {
+        let parentIdentifier = self.parentIdentifier
+        let bridgeSession = self.bridgeSession
+        let logger = self.logger
+        let domainDisplayName = self.domainDisplayName
+        let observer = SendableObserverBox(value: observer)
         Task {
             do {
                 let listing: BridgeListing
@@ -51,10 +60,10 @@ final class SampleFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                     }
                     return SampleFileProviderItem(snapshot: snapshot)
                 }
-                observer.didEnumerateItems(items)
-                observer.finishEnumerating(upTo: nil)
+                observer.value.didEnumerate(items)
+                observer.value.finishEnumerating(upTo: nil)
             } catch {
-                observer.finishEnumeratingWithError(sampleNSError(from: error))
+                observer.value.finishEnumeratingWithError(sampleNSError(from: error))
             }
         }
     }
@@ -63,10 +72,13 @@ final class SampleFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderChangeObserver,
         from syncAnchor: NSFileProviderSyncAnchor
     ) {
-        observer.finishEnumeratingChanges(upTo: Data(), moreComing: false)
+        observer.finishEnumeratingChanges(
+            upTo: NSFileProviderSyncAnchor(Data()),
+            moreComing: false
+        )
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        completionHandler(Data())
+        completionHandler(NSFileProviderSyncAnchor(Data()))
     }
 }

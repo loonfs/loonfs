@@ -1,6 +1,6 @@
 import Foundation
 
-public struct SampleDomainDescriptor: Equatable {
+public struct SampleDomainDescriptor: Equatable, Sendable {
     public let identifier: String
     public let displayName: String
 
@@ -10,7 +10,7 @@ public struct SampleDomainDescriptor: Equatable {
     }
 }
 
-public struct SampleDomainRegistrationStatus: Equatable {
+public struct SampleDomainRegistrationStatus: Equatable, Sendable {
     public let descriptor: SampleDomainDescriptor
     public let isRegistered: Bool
 
@@ -20,17 +20,17 @@ public struct SampleDomainRegistrationStatus: Equatable {
     }
 }
 
-public protocol SampleDomainRegistryManaging {
+public protocol SampleDomainRegistryManaging: Sendable {
     func existingDomains() async throws -> [SampleDomainDescriptor]
     func addDomain(_ descriptor: SampleDomainDescriptor) async throws
     func removeDomain(identifier: String) async throws
 }
 
-public enum SampleDomainRegistrationError: Error, Equatable {
+public enum SampleDomainRegistrationError: Error, Equatable, Sendable {
     case invalidConfig([String])
 }
 
-public struct SampleDomainRegistrationLogic {
+public struct SampleDomainRegistrationLogic: Sendable {
     public init() {}
 
     public func descriptor(for config: SampleConfig) -> SampleDomainDescriptor {

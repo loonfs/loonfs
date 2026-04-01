@@ -3,12 +3,7 @@ import Foundation
 
 struct FileProviderDomainRegistryClient: SampleDomainRegistryManaging {
     func existingDomains() async throws -> [SampleDomainDescriptor] {
-        try await loadDomains().map {
-            SampleDomainDescriptor(
-                identifier: $0.identifier.rawValue,
-                displayName: $0.displayName
-            )
-        }
+        try await loadDomainDescriptors()
     }
 
     func addDomain(_ descriptor: SampleDomainDescriptor) async throws {
@@ -16,7 +11,7 @@ struct FileProviderDomainRegistryClient: SampleDomainRegistryManaging {
             identifier: NSFileProviderDomainIdentifier(rawValue: descriptor.identifier),
             displayName: descriptor.displayName
         )
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             NSFileProviderManager.add(domain) { error in
                 if let error {
                     continuation.resume(throwing: error)
@@ -28,27 +23,43 @@ struct FileProviderDomainRegistryClient: SampleDomainRegistryManaging {
     }
 
     func removeDomain(identifier: String) async throws {
-        guard let domain = try await loadDomains().first(where: { $0.identifier.rawValue == identifier }) else {
-            return
-        }
-        try await withCheckedThrowingContinuation { continuation in
-            NSFileProviderManager.remove(domain) { error in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
                 if let error {
                     continuation.resume(throwing: error)
-                } else {
+                    return
+                }
+
+                guard let domain = domains.first(where: { $0.identifier.rawValue == identifier }) else {
                     continuation.resume()
+                    return
+                }
+
+                NSFileProviderManager.remove(domain) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
                 }
             }
         }
     }
 
-    private func loadDomains() async throws -> [NSFileProviderDomain] {
-        try await withCheckedThrowingContinuation { continuation in
+    private func loadDomainDescriptors() async throws -> [SampleDomainDescriptor] {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[SampleDomainDescriptor], Error>) in
             NSFileProviderManager.getDomainsWithCompletionHandler { domains, error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
-                    continuation.resume(returning: domains ?? [])
+                    continuation.resume(
+                        returning: domains.map {
+                            SampleDomainDescriptor(
+                                identifier: $0.identifier.rawValue,
+                                displayName: $0.displayName
+                            )
+                        }
+                    )
                 }
             }
         }

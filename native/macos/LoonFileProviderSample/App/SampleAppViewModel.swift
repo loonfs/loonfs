@@ -1,19 +1,18 @@
 import AppKit
+import Combine
 import Foundation
-import Observation
 
 @MainActor
-@Observable
-final class SampleAppViewModel {
+final class SampleAppViewModel: ObservableObject {
     private let configLocator: AppGroupConfigLocator
     private let registry: any SampleDomainRegistryManaging
     private let domainLogic = SampleDomainRegistrationLogic()
 
-    var configFilePath: String = ""
-    var configStatusText: String = "Loading sample config..."
-    var domainStatusText: String = "Checking domain registration..."
-    var errorText: String?
-    var isBusy = false
+    @Published var configFilePath: String = ""
+    @Published var configStatusText: String = "Loading sample config..."
+    @Published var domainStatusText: String = "Checking domain registration..."
+    @Published var errorText: String?
+    @Published var isBusy = false
 
     init(
         configLocator: AppGroupConfigLocator = AppGroupConfigLocator(),

@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Bindable var viewModel: SampleAppViewModel
+    @ObservedObject var viewModel: SampleAppViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

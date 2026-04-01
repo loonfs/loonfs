@@ -7,30 +7,30 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AA0000010000000000000001 /* LoonFileProviderSampleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000001 /* LoonFileProviderSampleApp.swift */; };
-		AA0000020000000000000001 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000020000000000000001 /* ContentView.swift */; };
-		AA0000030000000000000001 /* SampleAppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000030000000000000001 /* SampleAppViewModel.swift */; };
-		AA0000040000000000000001 /* FileProviderDomainRegistryClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000040000000000000001 /* FileProviderDomainRegistryClient.swift */; };
-		AA0000050000000000000001 /* AppGroupConfigLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000050000000000000001 /* AppGroupConfigLocator.swift */; };
-		AA0000060000000000000001 /* SampleNSError.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000060000000000000001 /* SampleNSError.swift */; };
-		AA0000070000000000000001 /* SampleDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000070000000000000001 /* SampleDefaults.swift */; };
-		AA0000080000000000000001 /* SampleConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000080000000000000001 /* SampleConfig.swift */; };
-		AA0000090000000000000001 /* BridgeInterop.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000090000000000000001 /* BridgeInterop.swift */; };
-		AA00000A0000000000000001 /* DomainRegistrationLogic.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10000A0000000000000001 /* DomainRegistrationLogic.swift */; };
-		AA00000B0000000000000001 /* ExtensionAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10000B0000000000000001 /* ExtensionAdapter.swift */; };
+		AA0000010000000000000001 /* App/LoonFileProviderSampleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000010000000000000001 /* App/LoonFileProviderSampleApp.swift */; };
+		AA0000020000000000000001 /* App/ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000020000000000000001 /* App/ContentView.swift */; };
+		AA0000030000000000000001 /* App/SampleAppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000030000000000000001 /* App/SampleAppViewModel.swift */; };
+		AA0000040000000000000001 /* App/FileProviderDomainRegistryClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000040000000000000001 /* App/FileProviderDomainRegistryClient.swift */; };
+		AA0000050000000000000001 /* Support/AppGroupConfigLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000050000000000000001 /* Support/AppGroupConfigLocator.swift */; };
+		AA0000060000000000000001 /* Support/SampleNSError.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000060000000000000001 /* Support/SampleNSError.swift */; };
+		AA0000070000000000000001 /* Sources/LoonFileProviderSampleCore/SampleDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000070000000000000001 /* Sources/LoonFileProviderSampleCore/SampleDefaults.swift */; };
+		AA0000080000000000000001 /* Sources/LoonFileProviderSampleCore/SampleConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000080000000000000001 /* Sources/LoonFileProviderSampleCore/SampleConfig.swift */; };
+		AA0000090000000000000001 /* Sources/LoonFileProviderSampleCore/BridgeInterop.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000090000000000000001 /* Sources/LoonFileProviderSampleCore/BridgeInterop.swift */; };
+		AA00000A0000000000000001 /* Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10000A0000000000000001 /* Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift */; };
+		AA00000B0000000000000001 /* Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10000B0000000000000001 /* Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift */; };
 		AA00000C0000000000000001 /* LoonFileProviderSampleExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = AA2000020000000000000001 /* LoonFileProviderSampleExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		AA0001010000000000000001 /* LoonMacosFFIFunctionCaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001010000000000000001 /* LoonMacosFFIFunctionCaller.swift */; };
-		AA0001020000000000000001 /* SampleBridgeSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001020000000000000001 /* SampleBridgeSession.swift */; };
-		AA0001030000000000000001 /* SampleFileProviderItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001030000000000000001 /* SampleFileProviderItem.swift */; };
-		AA0001040000000000000001 /* SampleFileProviderEnumerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001040000000000000001 /* SampleFileProviderEnumerator.swift */; };
-		AA0001050000000000000001 /* LoonFileProviderSampleExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001050000000000000001 /* LoonFileProviderSampleExtension.swift */; };
-		AA0001060000000000000001 /* AppGroupConfigLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000050000000000000001 /* AppGroupConfigLocator.swift */; };
-		AA0001070000000000000001 /* SampleNSError.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000060000000000000001 /* SampleNSError.swift */; };
-		AA0001080000000000000001 /* SampleDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000070000000000000001 /* SampleDefaults.swift */; };
-		AA0001090000000000000001 /* SampleConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000080000000000000001 /* SampleConfig.swift */; };
-		AA00010A0000000000000001 /* BridgeInterop.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000090000000000000001 /* BridgeInterop.swift */; };
-		AA00010B0000000000000001 /* DomainRegistrationLogic.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10000A0000000000000001 /* DomainRegistrationLogic.swift */; };
-		AA00010C0000000000000001 /* ExtensionAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10000B0000000000000001 /* ExtensionAdapter.swift */; };
+		AA0001010000000000000001 /* Extension/LoonMacosFFIFunctionCaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001010000000000000001 /* Extension/LoonMacosFFIFunctionCaller.swift */; };
+		AA0001020000000000000001 /* Extension/SampleBridgeSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001020000000000000001 /* Extension/SampleBridgeSession.swift */; };
+		AA0001030000000000000001 /* Extension/SampleFileProviderItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001030000000000000001 /* Extension/SampleFileProviderItem.swift */; };
+		AA0001040000000000000001 /* Extension/SampleFileProviderEnumerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001040000000000000001 /* Extension/SampleFileProviderEnumerator.swift */; };
+		AA0001050000000000000001 /* Extension/LoonFileProviderSampleExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1001050000000000000001 /* Extension/LoonFileProviderSampleExtension.swift */; };
+		AA0001060000000000000001 /* Support/AppGroupConfigLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000050000000000000001 /* Support/AppGroupConfigLocator.swift */; };
+		AA0001070000000000000001 /* Support/SampleNSError.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000060000000000000001 /* Support/SampleNSError.swift */; };
+		AA0001080000000000000001 /* Sources/LoonFileProviderSampleCore/SampleDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000070000000000000001 /* Sources/LoonFileProviderSampleCore/SampleDefaults.swift */; };
+		AA0001090000000000000001 /* Sources/LoonFileProviderSampleCore/SampleConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000080000000000000001 /* Sources/LoonFileProviderSampleCore/SampleConfig.swift */; };
+		AA00010A0000000000000001 /* Sources/LoonFileProviderSampleCore/BridgeInterop.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1000090000000000000001 /* Sources/LoonFileProviderSampleCore/BridgeInterop.swift */; };
+		AA00010B0000000000000001 /* Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10000A0000000000000001 /* Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift */; };
+		AA00010C0000000000000001 /* Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10000B0000000000000001 /* Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -58,31 +58,31 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		AA1000010000000000000001 /* LoonFileProviderSampleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/LoonFileProviderSampleApp.swift; sourceTree = "<group>"; };
-		AA1000020000000000000001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/ContentView.swift; sourceTree = "<group>"; };
-		AA1000030000000000000001 /* SampleAppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/SampleAppViewModel.swift; sourceTree = "<group>"; };
-		AA1000040000000000000001 /* FileProviderDomainRegistryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/FileProviderDomainRegistryClient.swift; sourceTree = "<group>"; };
-		AA1000050000000000000001 /* AppGroupConfigLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Support/AppGroupConfigLocator.swift; sourceTree = "<group>"; };
-		AA1000060000000000000001 /* SampleNSError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Support/SampleNSError.swift; sourceTree = "<group>"; };
-		AA1000070000000000000001 /* SampleDefaults.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LoonFileProviderSampleCore/SampleDefaults.swift; sourceTree = "<group>"; };
-		AA1000080000000000000001 /* SampleConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LoonFileProviderSampleCore/SampleConfig.swift; sourceTree = "<group>"; };
-		AA1000090000000000000001 /* BridgeInterop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LoonFileProviderSampleCore/BridgeInterop.swift; sourceTree = "<group>"; };
-		AA10000A0000000000000001 /* DomainRegistrationLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift; sourceTree = "<group>"; };
-		AA10000B0000000000000001 /* ExtensionAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift; sourceTree = "<group>"; };
-		AA10000C0000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = App/Info.plist; sourceTree = "<group>"; };
-		AA10000D0000000000000001 /* LoonFileProviderSample.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = App/LoonFileProviderSample.entitlements; sourceTree = "<group>"; };
-		AA1001010000000000000001 /* LoonMacosFFIFunctionCaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extension/LoonMacosFFIFunctionCaller.swift; sourceTree = "<group>"; };
-		AA1001020000000000000001 /* SampleBridgeSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extension/SampleBridgeSession.swift; sourceTree = "<group>"; };
-		AA1001030000000000000001 /* SampleFileProviderItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extension/SampleFileProviderItem.swift; sourceTree = "<group>"; };
-		AA1001040000000000000001 /* SampleFileProviderEnumerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extension/SampleFileProviderEnumerator.swift; sourceTree = "<group>"; };
-		AA1001050000000000000001 /* LoonFileProviderSampleExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extension/LoonFileProviderSampleExtension.swift; sourceTree = "<group>"; };
-		AA1001060000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Extension/Info.plist; sourceTree = "<group>"; };
-		AA1001070000000000000001 /* LoonFileProviderSampleExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Extension/LoonFileProviderSampleExtension.entitlements; sourceTree = "<group>"; };
-		AA1001080000000000000001 /* LoonFileProviderSampleExtension-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Support/LoonFileProviderSampleExtension-Bridging-Header.h; sourceTree = "<group>"; };
+		AA1000010000000000000001 /* App/LoonFileProviderSampleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoonFileProviderSampleApp.swift; sourceTree = "<group>"; };
+		AA1000020000000000000001 /* App/ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		AA1000030000000000000001 /* App/SampleAppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleAppViewModel.swift; sourceTree = "<group>"; };
+		AA1000040000000000000001 /* App/FileProviderDomainRegistryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileProviderDomainRegistryClient.swift; sourceTree = "<group>"; };
+		AA1000050000000000000001 /* Support/AppGroupConfigLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupConfigLocator.swift; sourceTree = "<group>"; };
+		AA1000060000000000000001 /* Support/SampleNSError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleNSError.swift; sourceTree = "<group>"; };
+		AA1000070000000000000001 /* Sources/LoonFileProviderSampleCore/SampleDefaults.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleDefaults.swift; sourceTree = "<group>"; };
+		AA1000080000000000000001 /* Sources/LoonFileProviderSampleCore/SampleConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleConfig.swift; sourceTree = "<group>"; };
+		AA1000090000000000000001 /* Sources/LoonFileProviderSampleCore/BridgeInterop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeInterop.swift; sourceTree = "<group>"; };
+		AA10000A0000000000000001 /* Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DomainRegistrationLogic.swift; sourceTree = "<group>"; };
+		AA10000B0000000000000001 /* Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionAdapter.swift; sourceTree = "<group>"; };
+		AA10000C0000000000000001 /* App/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA10000D0000000000000001 /* App/LoonFileProviderSample.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LoonFileProviderSample.entitlements; sourceTree = "<group>"; };
+		AA1001010000000000000001 /* Extension/LoonMacosFFIFunctionCaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoonMacosFFIFunctionCaller.swift; sourceTree = "<group>"; };
+		AA1001020000000000000001 /* Extension/SampleBridgeSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleBridgeSession.swift; sourceTree = "<group>"; };
+		AA1001030000000000000001 /* Extension/SampleFileProviderItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleFileProviderItem.swift; sourceTree = "<group>"; };
+		AA1001040000000000000001 /* Extension/SampleFileProviderEnumerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleFileProviderEnumerator.swift; sourceTree = "<group>"; };
+		AA1001050000000000000001 /* Extension/LoonFileProviderSampleExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoonFileProviderSampleExtension.swift; sourceTree = "<group>"; };
+		AA1001060000000000000001 /* Extension/Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA1001070000000000000001 /* Extension/LoonFileProviderSampleExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LoonFileProviderSampleExtension.entitlements; sourceTree = "<group>"; };
+		AA1001080000000000000001 /* Support/LoonFileProviderSampleExtension-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = LoonFileProviderSampleExtension-Bridging-Header.h; sourceTree = "<group>"; };
 		AA1001090000000000000001 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		AA10010A0000000000000001 /* Package.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Package.swift; sourceTree = "<group>"; };
-		AA10010B0000000000000001 /* loon-file-provider-sample.template.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Config/loon-file-provider-sample.template.json; sourceTree = "<group>"; };
-		AA10010C0000000000000001 /* build_loon_macos_staticlib.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = scripts/build_loon_macos_staticlib.sh; sourceTree = "<group>"; };
+		AA10010B0000000000000001 /* Config/loon-file-provider-sample.template.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Config/loon-file-provider-sample.template.json"; sourceTree = "<group>"; };
+		AA10010C0000000000000001 /* scripts/build_loon_macos_staticlib.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = scripts/build_loon_macos_staticlib.sh; sourceTree = "<group>"; };
 		AA2000010000000000000001 /* LoonFileProviderSampleApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LoonFileProviderSampleApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA2000020000000000000001 /* LoonFileProviderSampleExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LoonFileProviderSampleExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -110,7 +110,7 @@
 			children = (
 				AA8000010000000000000001 /* App */,
 				AA8000020000000000000001 /* Extension */,
-				AA8000030000000000000001 /* Sources */,
+				AA8000030000000000000001 /* Sources/LoonFileProviderSampleCore */,
 				AA8000040000000000000001 /* Support */,
 				AA8000050000000000000001 /* Config */,
 				AA8000060000000000000001 /* scripts */,
@@ -123,12 +123,12 @@
 		AA8000010000000000000001 /* App */ = {
 			isa = PBXGroup;
 			children = (
-				AA1000010000000000000001 /* LoonFileProviderSampleApp.swift */,
-				AA1000020000000000000001 /* ContentView.swift */,
-				AA1000030000000000000001 /* SampleAppViewModel.swift */,
-				AA1000040000000000000001 /* FileProviderDomainRegistryClient.swift */,
-				AA10000C0000000000000001 /* Info.plist */,
-				AA10000D0000000000000001 /* LoonFileProviderSample.entitlements */,
+				AA1000010000000000000001 /* App/LoonFileProviderSampleApp.swift */,
+				AA1000020000000000000001 /* App/ContentView.swift */,
+				AA1000030000000000000001 /* App/SampleAppViewModel.swift */,
+				AA1000040000000000000001 /* App/FileProviderDomainRegistryClient.swift */,
+				AA10000C0000000000000001 /* App/Info.plist */,
+				AA10000D0000000000000001 /* App/LoonFileProviderSample.entitlements */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -136,25 +136,25 @@
 		AA8000020000000000000001 /* Extension */ = {
 			isa = PBXGroup;
 			children = (
-				AA1001010000000000000001 /* LoonMacosFFIFunctionCaller.swift */,
-				AA1001020000000000000001 /* SampleBridgeSession.swift */,
-				AA1001030000000000000001 /* SampleFileProviderItem.swift */,
-				AA1001040000000000000001 /* SampleFileProviderEnumerator.swift */,
-				AA1001050000000000000001 /* LoonFileProviderSampleExtension.swift */,
-				AA1001060000000000000001 /* Info.plist */,
-				AA1001070000000000000001 /* LoonFileProviderSampleExtension.entitlements */,
+				AA1001010000000000000001 /* Extension/LoonMacosFFIFunctionCaller.swift */,
+				AA1001020000000000000001 /* Extension/SampleBridgeSession.swift */,
+				AA1001030000000000000001 /* Extension/SampleFileProviderItem.swift */,
+				AA1001040000000000000001 /* Extension/SampleFileProviderEnumerator.swift */,
+				AA1001050000000000000001 /* Extension/LoonFileProviderSampleExtension.swift */,
+				AA1001060000000000000001 /* Extension/Info.plist */,
+				AA1001070000000000000001 /* Extension/LoonFileProviderSampleExtension.entitlements */,
 			);
 			path = Extension;
 			sourceTree = "<group>";
 		};
-		AA8000030000000000000001 /* Sources */ = {
+		AA8000030000000000000001 /* Sources/LoonFileProviderSampleCore */ = {
 			isa = PBXGroup;
 			children = (
-				AA1000070000000000000001 /* SampleDefaults.swift */,
-				AA1000080000000000000001 /* SampleConfig.swift */,
-				AA1000090000000000000001 /* BridgeInterop.swift */,
-				AA10000A0000000000000001 /* DomainRegistrationLogic.swift */,
-				AA10000B0000000000000001 /* ExtensionAdapter.swift */,
+				AA1000070000000000000001 /* Sources/LoonFileProviderSampleCore/SampleDefaults.swift */,
+				AA1000080000000000000001 /* Sources/LoonFileProviderSampleCore/SampleConfig.swift */,
+				AA1000090000000000000001 /* Sources/LoonFileProviderSampleCore/BridgeInterop.swift */,
+				AA10000A0000000000000001 /* Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift */,
+				AA10000B0000000000000001 /* Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift */,
 			);
 			path = Sources/LoonFileProviderSampleCore;
 			sourceTree = "<group>";
@@ -162,9 +162,9 @@
 		AA8000040000000000000001 /* Support */ = {
 			isa = PBXGroup;
 			children = (
-				AA1000050000000000000001 /* AppGroupConfigLocator.swift */,
-				AA1000060000000000000001 /* SampleNSError.swift */,
-				AA1001080000000000000001 /* LoonFileProviderSampleExtension-Bridging-Header.h */,
+				AA1000050000000000000001 /* Support/AppGroupConfigLocator.swift */,
+				AA1000060000000000000001 /* Support/SampleNSError.swift */,
+				AA1001080000000000000001 /* Support/LoonFileProviderSampleExtension-Bridging-Header.h */,
 			);
 			path = Support;
 			sourceTree = "<group>";
@@ -172,7 +172,7 @@
 		AA8000050000000000000001 /* Config */ = {
 			isa = PBXGroup;
 			children = (
-				AA10010B0000000000000001 /* loon-file-provider-sample.template.json */,
+				AA10010B0000000000000001 /* Config/loon-file-provider-sample.template.json */,
 			);
 			path = Config;
 			sourceTree = "<group>";
@@ -180,7 +180,7 @@
 		AA8000060000000000000001 /* scripts */ = {
 			isa = PBXGroup;
 			children = (
-				AA10010C0000000000000001 /* build_loon_macos_staticlib.sh */,
+				AA10010C0000000000000001 /* scripts/build_loon_macos_staticlib.sh */,
 			);
 			path = scripts;
 			sourceTree = "<group>";
@@ -296,17 +296,17 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AA0000010000000000000001 /* LoonFileProviderSampleApp.swift in Sources */,
-				AA0000020000000000000001 /* ContentView.swift in Sources */,
-				AA0000030000000000000001 /* SampleAppViewModel.swift in Sources */,
-				AA0000040000000000000001 /* FileProviderDomainRegistryClient.swift in Sources */,
-				AA0000050000000000000001 /* AppGroupConfigLocator.swift in Sources */,
-				AA0000060000000000000001 /* SampleNSError.swift in Sources */,
-				AA0000070000000000000001 /* SampleDefaults.swift in Sources */,
-				AA0000080000000000000001 /* SampleConfig.swift in Sources */,
-				AA0000090000000000000001 /* BridgeInterop.swift in Sources */,
-				AA00000A0000000000000001 /* DomainRegistrationLogic.swift in Sources */,
-				AA00000B0000000000000001 /* ExtensionAdapter.swift in Sources */,
+				AA0000010000000000000001 /* App/LoonFileProviderSampleApp.swift in Sources */,
+				AA0000020000000000000001 /* App/ContentView.swift in Sources */,
+				AA0000030000000000000001 /* App/SampleAppViewModel.swift in Sources */,
+				AA0000040000000000000001 /* App/FileProviderDomainRegistryClient.swift in Sources */,
+				AA0000050000000000000001 /* Support/AppGroupConfigLocator.swift in Sources */,
+				AA0000060000000000000001 /* Support/SampleNSError.swift in Sources */,
+				AA0000070000000000000001 /* Sources/LoonFileProviderSampleCore/SampleDefaults.swift in Sources */,
+				AA0000080000000000000001 /* Sources/LoonFileProviderSampleCore/SampleConfig.swift in Sources */,
+				AA0000090000000000000001 /* Sources/LoonFileProviderSampleCore/BridgeInterop.swift in Sources */,
+				AA00000A0000000000000001 /* Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift in Sources */,
+				AA00000B0000000000000001 /* Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -314,18 +314,18 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AA0001010000000000000001 /* LoonMacosFFIFunctionCaller.swift in Sources */,
-				AA0001020000000000000001 /* SampleBridgeSession.swift in Sources */,
-				AA0001030000000000000001 /* SampleFileProviderItem.swift in Sources */,
-				AA0001040000000000000001 /* SampleFileProviderEnumerator.swift in Sources */,
-				AA0001050000000000000001 /* LoonFileProviderSampleExtension.swift in Sources */,
-				AA0001060000000000000001 /* AppGroupConfigLocator.swift in Sources */,
-				AA0001070000000000000001 /* SampleNSError.swift in Sources */,
-				AA0001080000000000000001 /* SampleDefaults.swift in Sources */,
-				AA0001090000000000000001 /* SampleConfig.swift in Sources */,
-				AA00010A0000000000000001 /* BridgeInterop.swift in Sources */,
-				AA00010B0000000000000001 /* DomainRegistrationLogic.swift in Sources */,
-				AA00010C0000000000000001 /* ExtensionAdapter.swift in Sources */,
+				AA0001010000000000000001 /* Extension/LoonMacosFFIFunctionCaller.swift in Sources */,
+				AA0001020000000000000001 /* Extension/SampleBridgeSession.swift in Sources */,
+				AA0001030000000000000001 /* Extension/SampleFileProviderItem.swift in Sources */,
+				AA0001040000000000000001 /* Extension/SampleFileProviderEnumerator.swift in Sources */,
+				AA0001050000000000000001 /* Extension/LoonFileProviderSampleExtension.swift in Sources */,
+				AA0001060000000000000001 /* Support/AppGroupConfigLocator.swift in Sources */,
+				AA0001070000000000000001 /* Support/SampleNSError.swift in Sources */,
+				AA0001080000000000000001 /* Sources/LoonFileProviderSampleCore/SampleDefaults.swift in Sources */,
+				AA0001090000000000000001 /* Sources/LoonFileProviderSampleCore/SampleConfig.swift in Sources */,
+				AA00010A0000000000000001 /* Sources/LoonFileProviderSampleCore/BridgeInterop.swift in Sources */,
+				AA00010B0000000000000001 /* Sources/LoonFileProviderSampleCore/DomainRegistrationLogic.swift in Sources */,
+				AA00010C0000000000000001 /* Sources/LoonFileProviderSampleCore/ExtensionAdapter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -335,6 +335,7 @@
 		AAC000010000000000000001 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = LoonFileProviderSampleExtension;
+			target = AA5000020000000000000001 /* LoonFileProviderSampleExtension */;
 			targetProxy = AA3000010000000000000001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -363,6 +364,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = App/LoonFileProviderSample.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 82P8YW76Z9;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -383,6 +385,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = App/LoonFileProviderSample.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 82P8YW76Z9;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -404,6 +407,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Extension/LoonFileProviderSampleExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 82P8YW76Z9;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
@@ -423,7 +427,7 @@
 				PRODUCT_NAME = LoonFileProviderSampleExtension;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = Support/LoonFileProviderSampleExtension-Bridging-Header.h;
+				SWIFT_OBJC_BRIDGING_HEADER = "Support/LoonFileProviderSampleExtension-Bridging-Header.h";
 				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
@@ -434,6 +438,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_ENTITLEMENTS = Extension/LoonFileProviderSampleExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 82P8YW76Z9;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
@@ -453,7 +458,7 @@
 				PRODUCT_NAME = LoonFileProviderSampleExtension;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = Support/LoonFileProviderSampleExtension-Bridging-Header.h;
+				SWIFT_OBJC_BRIDGING_HEADER = "Support/LoonFileProviderSampleExtension-Bridging-Header.h";
 				SWIFT_VERSION = 6.0;
 			};
 			name = Release;

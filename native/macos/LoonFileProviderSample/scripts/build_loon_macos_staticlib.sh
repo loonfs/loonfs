@@ -5,7 +5,22 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 SAMPLE_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SAMPLE_DIR/../../.." && pwd)"
 
-ARCH="${CURRENT_ARCH:-${NATIVE_ARCH_ACTUAL:-$(uname -m)}}"
+ARCH="${CURRENT_ARCH:-}"
+if [ -z "$ARCH" ] || [ "$ARCH" = "undefined_arch" ]; then
+    ARCH="${NATIVE_ARCH_ACTUAL:-}"
+fi
+if [ -z "$ARCH" ] || [ "$ARCH" = "undefined_arch" ]; then
+    ARCH="${ARCHS:-}"
+fi
+if [ -z "$ARCH" ] || [ "$ARCH" = "undefined_arch" ]; then
+    ARCH="$(uname -m)"
+fi
+case "$ARCH" in
+    *" "*)
+        set -- $ARCH
+        ARCH="$1"
+        ;;
+esac
 case "$ARCH" in
     arm64)
         RUST_TARGET="aarch64-apple-darwin"

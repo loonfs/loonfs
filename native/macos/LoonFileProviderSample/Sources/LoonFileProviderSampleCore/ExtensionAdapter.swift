@@ -1,17 +1,18 @@
 import Foundation
 
-public enum SampleProviderIdentifier: Equatable {
+public enum SampleProviderIdentifier: Equatable, Sendable {
     case rootContainer
     case opaque(String)
 }
 
-public enum BridgeEnumerationTarget: Equatable {
+public enum BridgeEnumerationTarget: Equatable, Sendable {
     case root
     case children(parentItemId: String)
 }
 
-public enum SampleProviderError: Error, Equatable {
+public enum SampleProviderError: Error, Equatable, Sendable {
     case unavailable(String)
+    case readOnly(String)
     case bridgeFailure(code: String, message: String)
 }
 

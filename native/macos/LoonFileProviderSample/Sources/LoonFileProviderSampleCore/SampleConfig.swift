@@ -1,6 +1,6 @@
 import Foundation
 
-public struct SampleConfig: Codable, Equatable {
+public struct SampleConfig: Codable, Equatable, Sendable {
     public var opsConfigPath: String
     public var exposedNamespaces: [String]
     public var domainIdentifier: String
@@ -59,7 +59,7 @@ public struct SampleConfig: Codable, Equatable {
     }
 }
 
-public struct SampleConfigStatus: Equatable {
+public struct SampleConfigStatus: Equatable, Sendable {
     public let configFileURL: URL
     public let fileExists: Bool
     public let parsedConfig: SampleConfig?

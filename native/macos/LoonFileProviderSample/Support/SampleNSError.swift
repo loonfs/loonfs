@@ -4,6 +4,7 @@ enum SampleErrorCode {
     static let unavailable = 1
     static let bridgeFailure = 2
     static let invalidConfig = 3
+    static let readOnly = 4
 }
 
 func sampleNSError(from error: Error) -> NSError {
@@ -13,6 +14,12 @@ func sampleNSError(from error: Error) -> NSError {
             return NSError(
                 domain: "dev.loondb.LoonFileProviderSample",
                 code: SampleErrorCode.unavailable,
+                userInfo: [NSLocalizedDescriptionKey: message]
+            )
+        case let .readOnly(message):
+            return NSError(
+                domain: "dev.loondb.LoonFileProviderSample",
+                code: SampleErrorCode.readOnly,
                 userInfo: [NSLocalizedDescriptionKey: message]
             )
         case let .bridgeFailure(code, message):

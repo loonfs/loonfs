@@ -1,20 +1,20 @@
 import Foundation
 
-public enum BridgeMaterializationState: String, Codable, Equatable {
+public enum BridgeMaterializationState: String, Codable, Equatable, Sendable {
     case syntheticDir = "synthetic_dir"
     case materialized
     case placeholder
     case unavailable
 }
 
-public struct BridgeProjectionWarning: Codable, Equatable {
+public struct BridgeProjectionWarning: Codable, Equatable, Sendable {
     public let namespaceId: String
     public let relativePath: String
     public let inodeKind: String
     public let reason: String
 }
 
-public struct BridgeItemSnapshot: Codable, Equatable {
+public struct BridgeItemSnapshot: Codable, Equatable, Sendable {
     public let itemId: String
     public let parentItemId: String?
     public let displayName: String
@@ -27,22 +27,22 @@ public struct BridgeItemSnapshot: Codable, Equatable {
     public let contentManifestDigest: String?
 }
 
-public struct BridgeListing: Codable, Equatable {
+public struct BridgeListing: Codable, Equatable, Sendable {
     public let items: [BridgeItemSnapshot]
     public let warnings: [BridgeProjectionWarning]
 }
 
-public struct BridgeLookupResult: Codable, Equatable {
+public struct BridgeLookupResult: Codable, Equatable, Sendable {
     public let item: BridgeItemSnapshot?
     public let warnings: [BridgeProjectionWarning]
 }
 
-public struct BridgeMaterializedPath: Codable, Equatable {
+public struct BridgeMaterializedPath: Codable, Equatable, Sendable {
     public let absolutePath: String
     public let relativePath: String
 }
 
-public enum BridgeInteropError: Error, Equatable, CustomStringConvertible {
+public enum BridgeInteropError: Error, Equatable, CustomStringConvertible, Sendable {
     case missingBridgeHandle
     case transportFailure(String)
     case invalidResponse(String)
