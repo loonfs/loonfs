@@ -1051,10 +1051,7 @@ fn build_subtree_operations(
         &unmatched_present_dir_paths,
         &missing_tracked_dirs,
     )?;
-    let paired_directory_source_roots = directory_pairings
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let paired_directory_source_roots = directory_pairings.keys().cloned().collect::<BTreeSet<_>>();
     let paired_directory_target_roots = directory_pairings
         .values()
         .cloned()
