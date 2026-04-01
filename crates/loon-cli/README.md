@@ -28,4 +28,4 @@ Broader CLI work should continue to reuse those existing layers rather than re-i
 
 The checked-in manual for the active surface is:
 
-- [docs/runbooks/loon-cli.md](/Users/conormccarter/Code/loondb/docs/runbooks/loon-cli.md)
+- [docs/runbooks/loon-cli.md](../../docs/runbooks/loon-cli.md)
