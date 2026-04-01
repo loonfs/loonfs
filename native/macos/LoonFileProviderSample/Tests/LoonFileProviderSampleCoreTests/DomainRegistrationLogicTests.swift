@@ -60,7 +60,7 @@ struct DomainRegistrationLogicTests {
     }
 }
 
-private final class FakeDomainRegistry: SampleDomainRegistryManaging {
+private final class FakeDomainRegistry: @unchecked Sendable, SampleDomainRegistryManaging {
     private(set) var addedDomains: [SampleDomainDescriptor] = []
     private(set) var removedDomainIdentifiers: [String] = []
     private var storedDomains: [SampleDomainDescriptor]

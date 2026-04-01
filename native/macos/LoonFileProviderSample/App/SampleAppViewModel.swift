@@ -44,7 +44,7 @@ final class SampleAppViewModel: ObservableObject {
                 ? "Registered domain: \(registration.descriptor.displayName) (\(registration.descriptor.identifier))"
                 : "Domain not registered: \(registration.descriptor.displayName) (\(registration.descriptor.identifier))"
         } catch {
-            errorText = error.localizedDescription
+            errorText = describeSampleError(error)
             domainStatusText = "Domain registration unavailable."
         }
     }
@@ -69,7 +69,7 @@ final class SampleAppViewModel: ObservableObject {
             errorText = nil
             await refresh()
         } catch {
-            errorText = error.localizedDescription
+            errorText = describeSampleError(error)
         }
     }
 
@@ -90,7 +90,7 @@ final class SampleAppViewModel: ObservableObject {
             errorText = nil
             await refresh()
         } catch {
-            errorText = error.localizedDescription
+            errorText = describeSampleError(error)
         }
     }
 

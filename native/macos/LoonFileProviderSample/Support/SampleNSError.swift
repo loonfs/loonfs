@@ -55,3 +55,22 @@ func sampleNSError(from error: Error) -> NSError {
         )
     )
 }
+
+func describeSampleError(_ error: Error) -> String {
+    let nsError = error as NSError
+    var lines = [nsError.localizedDescription]
+    lines.append("domain=\(nsError.domain) code=\(nsError.code)")
+
+    if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError {
+        lines.append("underlying=\(underlying.domain) code=\(underlying.code)")
+        if !underlying.localizedDescription.isEmpty, underlying.localizedDescription != nsError.localizedDescription {
+            lines.append("underlying_description=\(underlying.localizedDescription)")
+        }
+    }
+
+    if let bridgeCode = nsError.userInfo["bridge_code"] {
+        lines.append("bridge_code=\(bridgeCode)")
+    }
+
+    return lines.joined(separator: "\n")
+}
