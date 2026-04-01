@@ -1,136 +1,116 @@
 # LoonDB
 
-LoonDB is a Dropbox/GDrive-like sync engine with an object-storage-only durable backend.
-For now, this repository is a **development bootstrap**, not a finished product. It is structured so we can start implementing in small, testable steps without losing the design intent we already established.
+[![CI](https://github.com/prequel-co/loonfs/actions/workflows/ci.yml/badge.svg)](https://github.com/prequel-co/loonfs/actions/workflows/ci.yml)
 
-## What this repo is trying to optimize for
+LoonDB is a file sync engine whose only durable backend is object storage (S3, R2, local
+filesystem). There is no traditional database server — all authoritative state lives as immutable
+objects and a small set of mutable control objects in the object store. The project is under active
+development and not yet production-ready.
 
-- correctness before feature count
-- deterministic behavior before raw throughput
-- small changes with high reviewability
-- object-storage portability earned through conformance tests
-- a test suite that is understandable by both engineers and product-minded reviewers
+## Design principles
 
-## Intended product shape
+- Correctness before feature count
+- Deterministic behavior before raw throughput
+- Small changes with high reviewability
+- Object-storage portability earned through conformance tests
+- A test suite understandable by both engineers and product-minded reviewers
 
-- Rust server
-- macOS client
-- local-server mode and remote-server mode
-- object storage as the only durable system of record
-- inode-keyed metadata
-- multiple namespaces per account
-- deterministic background work built on rebuildable state
+## Product shape
 
-## Current implemented surfaces
+- Rust server and macOS client
+- Local-server mode and remote-server mode
+- Object storage as the only durable system of record
+- Inode-keyed metadata (paths are derived views, never canonical identity)
+- Multiple namespaces per account
+- Deterministic background work built on rebuildable state
 
-- `loon-core`, `loon-model`, and `loon-objectstore` hold the active protocol and storage logic
-- `loon-server::mutation` is the current authoritative server-side execution surface
-- `loon-client` contains the active SQLite/planner/executor work
-- `loon-ops` owns the shared operability command/config/rendering contract
-- `xtask ops ...` and `loon ops ...` are the active local operability frontends
-- `loon-cli` also owns built-in help, manpage generation, config inspection, and `doctor`
-- `xtask rc-local` remains the canonical repo release-candidate path
-- `loon-testkit` remains the active review and debugging toolkit
-- the `loond` binary shell and `loon-macos` are still reserved later-phase delivery surfaces
-
-## Start here
-
-1. Read `AGENTS.md`.
-2. Read `docs/specs/000-overview.md`.
-3. Read `docs/specs/060-testing-strategy.md`.
-4. Read `docs/specs/090-major-implementation-decisions.md`.
-5. Read `docs/adr/` in numerical order.
-6. Read `docs/roadmap/020-semantic-core-reset.md` for the current execution order.
-7. Read `docs/roadmap/000-bootstrap.md` and `docs/roadmap/010-foundation-workstreams.md` only for historical context.
-
-## Repository map
+## Crate map
 
 ```text
-docs/
-  adr/              locked architectural decisions
-  context/          source context and original prompt
-  references/       public research links and notes
-  roadmap/          implementation phases
-  runbooks/         operational/debugging checklists
-  specs/            readable design specs
-
-spec/tla/           protocol-level model-checking seeds
-
 crates/
   loon-types/       shared IDs and wire/domain types
   loon-objectstore/ object-store trait, provider profiles, conformance surface
   loon-core/        canonical metadata rules and commit planning
   loon-model/       pure reference model for state-machine testing
   loon-queue/       durable background-work coordination
+  loon-client/      client-side sync: SQLite state, planner, executor
+  loon-server/      authoritative mutation surface (binary/HTTP shell quarantined)
+  loon-ops/         shared operability command/config/rendering contract
+  loon-cli/         thin CLI frontend over loon-ops
   loon-testkit/     scenario fixtures, rendering, helpers
   loon-sim/         deterministic simulator scaffolding
-  loon-server/      authoritative mutation surface; binary/http shell quarantined for now
-  loon-cli/         active thin CLI frontend over loon-ops
-  loon-client/      active client state, planner, and executor implementation
-  loon-macos/       reserved macOS integration placeholder for later File Provider work
+  loon-macos/       macOS File Provider bridge (experimental spike)
 
 tests/
-  scenarios/        readable test cases
+  scenarios/        readable test cases (YAML fixtures)
   conformance/      storage-provider contract tests
   snapshots/        expected rendered outputs
 
 xtask/              repository automation entrypoints
 ```
 
-## Recommended first implementation order
-
-1. `loon-objectstore`: local adapter + conformance harness
-2. `loon-core`: head/lease/commit rules
-3. `loon-model`: pure namespace model + state-machine tests
-4. `loon-queue`: one sharded queue class, probably `BuildSnapshot`
-5. `loon-sim`: deterministic clock, scheduler, mock object store
-6. `loon-server`: authoritative mutation surface before widening binary or HTTP shells
-7. `loon-client`: durable local truth, planner, and executor paths
-8. `loon-macos`: File Provider bridge after mirror semantics are stable
-
-## Commands to wire up first
+## Getting started
 
 ```bash
-# Format all Rust code in the workspace (rustfmt)
-cargo fmt --all
+# Build all crates
+cargo build --workspace
 
-# Lint every crate and target; all warnings are errors
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Run the built-in test runner across all crates
+# Run the full test suite
 cargo test --workspace
 
-# Run the canonical local release-candidate path
-cargo run -p xtask -- rc-local --config ./loondb-demo.toml --namespace demo
+# Lint
+cargo clippy --workspace --all-targets -- -D warnings
 
-# Run the active thin CLI frontend over the same loon-ops contract
-cargo run -p loon-cli -- ops smoke --config ./loondb-demo.toml --namespace demo
+# Explore the CLI
+cargo run -p loon-cli -- help
 
-# Discover the active CLI surface and validate a local config
-cargo run -p loon-cli -- help ops bootstrap-namespace
+# Validate a local config
 cargo run -p loon-cli -- config validate --config ./loondb-demo.toml
 cargo run -p loon-cli -- doctor --config ./loondb-demo.toml
 
-# Run the same tests with nextest (optional, if installed)
-cargo nextest run
+# Run the canonical local release-candidate path
+cargo run -p xtask -- rc-local --config ./loondb-demo.toml --namespace demo
 
 # Render a YAML scenario fixture into human-readable form
 cargo run -p xtask -- render-case tests/scenarios/model/delete_then_stale_local_edit.yaml
 ```
 
-## Definition of “done” for an early feature
+## Configuration
 
-A feature is not done when the code compiles. A feature is done when all of the following are true:
+Example configuration templates are in [`configs/`](configs/):
 
-- the relevant spec section exists or was updated
-- an ADR exists if the decision is architectural
-- the reference model has the behavior
-- at least one readable scenario fixture covers the behavior
-- invariants are named explicitly
-- the implementation and tests agree on the same vocabulary
+- [`loondb-demo.local-fs.example.toml`](configs/loondb-demo.local-fs.example.toml) — local filesystem backend
+- [`loondb-demo.aws-s3.example.toml`](configs/loondb-demo.aws-s3.example.toml) — AWS S3 backend
+- [`loondb-demo.cloudflare-r2.example.toml`](configs/loondb-demo.cloudflare-r2.example.toml) — Cloudflare R2 backend
+
+Copy one of these to `./loondb-demo.toml` and edit to match your setup.
+
+## Architecture
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for a comprehensive system overview covering the data
+model, mutation flow, object-store layer, commit protocol, client architecture, and testing
+strategy.
+
+## Documentation
+
+| Path | Content |
+|------|---------|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | System overview and orientation |
+| [`AGENTS.md`](AGENTS.md) | Non-negotiable rules and development workflow |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Branch/PR guidance, formatting, documentation style |
+| [`docs/specs/`](docs/specs/) | Readable design specifications |
+| [`docs/adr/`](docs/adr/) | Architectural decision records |
+| [`docs/roadmap/`](docs/roadmap/) | Implementation phases |
+| [`docs/runbooks/`](docs/runbooks/) | Operational and debugging guides |
+
+### Recommended reading order
+
+1. [`AGENTS.md`](AGENTS.md)
+2. [`docs/specs/000-overview.md`](docs/specs/000-overview.md)
+3. [`docs/specs/060-testing-strategy.md`](docs/specs/060-testing-strategy.md)
+4. [`docs/specs/090-major-implementation-decisions.md`](docs/specs/090-major-implementation-decisions.md)
+5. [`docs/adr/`](docs/adr/) in numerical order
 
 ## CLI manual
 
-The current operator-facing CLI manual is:
-
-- [docs/runbooks/loon-cli.md](/Users/conormccarter/Code/loondb/docs/runbooks/loon-cli.md)
+The operator-facing CLI manual is at [`docs/runbooks/loon-cli.md`](docs/runbooks/loon-cli.md).
