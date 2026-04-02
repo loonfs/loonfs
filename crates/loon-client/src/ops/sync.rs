@@ -1,14 +1,14 @@
-use crate::{require_existing_file, OpsConfig};
+use crate::ops::{require_existing_file, OpsConfig};
 use anyhow::Result;
-use loon_client::executor::{
+use crate::executor::{
     execute_next_client_action, DownloadRemoteEditExecution, ExecuteNextClientActionError,
     ExecutedLocalOnlyCreate, NextClientAction, UploadLocalCreateExecution,
     UploadLocalEditExecution,
 };
-use loon_client::local_fs::{join_under_mirror_root, NamespacePathIndex};
-use loon_client::state_db::{ClientFileId, SqliteStateDb, TransferDirection, TransferState};
-use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
-use loon_types::{ChangeSeq, InodeId, NamespaceId};
+use crate::local_fs::{join_under_mirror_root, NamespacePathIndex};
+use crate::state_db::{ClientFileId, SqliteStateDb, TransferDirection, TransferState};
+use loon_types::server::ServerTransport;
+use loon_types::{ChangeSeq, InodeId, NamespaceId, ObjectStore};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -68,7 +68,7 @@ pub struct SyncUntilIdleReport {
 #[derive(Debug, Error)]
 pub enum SyncOnceError {
     #[error(transparent)]
-    StateDb(#[from] loon_client::state_db::StateDbError),
+    StateDb(#[from] crate::state_db::StateDbError),
     #[error(transparent)]
     Execute(Box<ExecuteNextClientActionError>),
     #[error(transparent)]
@@ -93,25 +93,24 @@ pub enum SyncUntilIdleError {
     MaxStepsExceeded { max_steps: u64, steps_run: usize },
 }
 
-pub fn sync_once(
+pub fn sync_once<T: ServerTransport, S: ObjectStore>(
     config: &OpsConfig,
     namespace_id: &NamespaceId,
+    transport: &T,
+    store: &S,
 ) -> Result<SyncOnceReport, SyncOnceError> {
     require_existing_file(&config.client.state_db_path, "client state db")?;
 
-    let store = config.open_store()?;
     let mut db = SqliteStateDb::open(&config.client.state_db_path)?;
     let summary = db.load_namespace_state_summary(namespace_id)?;
     let parent_links = db.load_local_only_parent_links_for_namespace(namespace_id)?;
     let path_index = NamespacePathIndex::build(&summary, &parent_links);
     let mirror_root = config.client.mirror_root.clone();
     let now_ms = config.now_ms();
-    let writer_id = config.server.writer_id.clone();
-    let writer_version = config.server.writer_version.clone();
 
     let next_action = execute_next_client_action(
         &mut db,
-        &store,
+        store,
         |client_file_id| {
             path_index
                 .resolve_local_only_source_relative_path(client_file_id)
@@ -130,18 +129,9 @@ pub fn sync_once(
         now_ms,
         now_ms,
         |request| {
-            execute_client_mutation(
-                &store,
-                request,
-                &ClientMutationExecutionParams {
-                    writer_id: writer_id.clone(),
-                    writer_version: writer_version.clone(),
-                    now_ms,
-                    lease_duration_ms: config.server.lease_duration_ms,
-                },
-            )
-            .map(|executed| executed.response)
-            .map_err(|err| err.to_string())
+            transport
+                .execute_mutation(request)
+                .map_err(|err| err.to_string())
         },
     )?;
 
@@ -166,16 +156,18 @@ pub fn sync_once(
     }
 }
 
-pub fn sync_until_idle(
+pub fn sync_until_idle<T: ServerTransport, S: ObjectStore>(
     config: &OpsConfig,
     namespace_id: &NamespaceId,
     max_steps_override: Option<u64>,
+    transport: &T,
+    store: &S,
 ) -> Result<SyncUntilIdleReport, SyncUntilIdleError> {
     let max_steps = max_steps_override.or(config.ops.max_steps).unwrap_or(50);
     let mut steps = Vec::new();
 
     for _ in 0..max_steps {
-        let step = sync_once(config, namespace_id)?;
+        let step = sync_once(config, namespace_id, transport, store)?;
         let reached_idle = step.outcome == SyncOnceOutcome::NoWork;
         steps.push(step);
         if reached_idle {

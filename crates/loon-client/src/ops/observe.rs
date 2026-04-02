@@ -1,6 +1,6 @@
-use crate::OpsConfig;
+use crate::ops::OpsConfig;
 use anyhow::Result;
-use loon_client::local_fs::{
+use crate::local_fs::{
     observe_delete_path as client_observe_delete_path,
     observe_local_path as client_observe_local_path, observe_move_path as client_observe_move_path,
     observe_subtree_path as client_observe_subtree_path,
@@ -8,7 +8,7 @@ use loon_client::local_fs::{
 use loon_types::NamespaceId;
 use std::path::Path;
 
-pub use loon_client::local_fs::{
+pub use crate::local_fs::{
     ObserveDeleteError, ObserveDeleteReport, ObserveLocalError, ObserveLocalReport,
     ObserveMoveError, ObserveMoveReport, ObserveSubtreeError, ObserveSubtreeReport,
     ObservedPathKind,

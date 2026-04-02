@@ -9,8 +9,8 @@ description = "Build automation for the LoonDB workspace"
 [dependencies]
 anyhow.workspace = true
 loon-client = { path = "../crates/loon-client" }
-loon-ops = { path = "../crates/loon-ops" }
 loon-server = { path = "../crates/loon-server" }
 loon-testkit = { path = "../crates/loon-testkit" }
 loon-types = { path = "../crates/loon-types" }
 serde_json.workspace = true
+thiserror.workspace = true

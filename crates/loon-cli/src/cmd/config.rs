@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Subcommand};
-use loon_ops::OpsConfig;
+use loon_client::ops::OpsConfig;
 use std::env;
 use std::path::PathBuf;
 

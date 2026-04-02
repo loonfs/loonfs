@@ -1,7 +1,7 @@
 use crate::cmd::config::resolve_config_path;
 use anyhow::{anyhow, Result};
 use clap::Args;
-use loon_ops::OpsConfig;
+use loon_client::ops::OpsConfig;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub(crate) fn render_doctor(command: DoctorCommand) -> Result<String> {
         "object_store_kind={}",
         object_store_kind_as_str(&config)
     ));
-    match config.open_store() {
+    match crate::transport::open_store(&config) {
         Ok(_) => lines.push("object_store=ok".to_string()),
         Err(error) => {
             failed = true;
@@ -150,9 +150,9 @@ fn describe_parent_path(path: &Path) -> ParentPathStatus {
 
 fn object_store_kind_as_str(config: &OpsConfig) -> &'static str {
     match config.object_store {
-        loon_ops::OpsObjectStoreSpec::LocalFs { .. } => "local-fs",
-        loon_ops::OpsObjectStoreSpec::AwsS3 { .. } => "aws-s3",
-        loon_ops::OpsObjectStoreSpec::CloudflareR2 { .. } => "cloudflare-r2",
+        loon_client::ops::OpsObjectStoreSpec::LocalFs { .. } => "local-fs",
+        loon_client::ops::OpsObjectStoreSpec::AwsS3 { .. } => "aws-s3",
+        loon_client::ops::OpsObjectStoreSpec::CloudflareR2 { .. } => "cloudflare-r2",
     }
 }
 

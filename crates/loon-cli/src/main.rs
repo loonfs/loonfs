@@ -6,6 +6,7 @@
 mod app;
 mod cmd;
 mod error;
+pub(crate) mod transport;
 
 fn main() -> std::process::ExitCode {
     match app::run(std::env::args_os()) {

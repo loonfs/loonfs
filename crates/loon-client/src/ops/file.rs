@@ -1,10 +1,10 @@
-use crate::OpsConfig;
+use super::OpsConfig;
 use anyhow::{bail, Context, Result};
 use loon_server::ops::{
     list_authoritative_path, read_authoritative_file_bytes, resolve_authoritative_path,
     AuthoritativeFileBytes, AuthoritativePathEntry,
 };
-use loon_types::NamespaceId;
+use loon_types::{NamespaceId, ObjectStore};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -103,14 +103,17 @@ pub(crate) fn parse_authoritative_path_selector(
     })
 }
 
-pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
+pub fn run_file_command<S: ObjectStore>(
+    command: FileCommand,
+    store_factory: &impl Fn(&OpsConfig) -> Result<S>,
+) -> Result<FileCommandOutput> {
     match command {
         FileCommand::Ls {
             config_path,
             selector,
         } => {
             let config = OpsConfig::load(&config_path)?;
-            let store = config.open_store()?;
+            let store = store_factory(&config)?;
             let selector = parse_authoritative_path_selector(&selector)?;
             let entries =
                 list_authoritative_path(&store, &selector.namespace_id, &selector.absolute_path)?;
@@ -130,7 +133,7 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             selector,
         } => {
             let config = OpsConfig::load(&config_path)?;
-            let store = config.open_store()?;
+            let store = store_factory(&config)?;
             let selector = parse_authoritative_path_selector(&selector)?;
             let entry = resolve_authoritative_path(
                 &store,
@@ -147,7 +150,7 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             local_path,
         } => {
             let config = OpsConfig::load(&config_path)?;
-            let store = config.open_store()?;
+            let store = store_factory(&config)?;
             let selector_str = selector.clone();
             let selector = parse_authoritative_path_selector(&selector)?;
             let read = read_authoritative_file_bytes(
@@ -181,7 +184,7 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             selector,
         } => {
             let config = OpsConfig::load(&config_path)?;
-            let store = config.open_store()?;
+            let store = store_factory(&config)?;
             let selector = parse_authoritative_path_selector(&selector)?;
             let read = read_authoritative_file_bytes(
                 &store,
@@ -274,9 +277,9 @@ mod tests {
     use super::{
         parse_authoritative_path_selector, run_file_command, FileCommand, FileCommandOutput,
     };
-    use crate::OpsConfig;
-    use loon_objectstore::keys::{blob, content_manifest};
-    use loon_objectstore::ObjectStore;
+    use super::OpsConfig;
+    use loon_server::objectstore::keys::{blob, content_manifest};
+    use loon_server::objectstore::ConfiguredObjectStore;
     use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
     use loon_server::ops::{bootstrap_namespace, NamespaceBootstrapParams};
     use loon_testkit::tempdir::TestDir;
@@ -315,14 +318,14 @@ mod tests {
         let ls = run_file_command(FileCommand::Ls {
             config_path: config_path.clone(),
             selector: "demo:/".to_owned(),
-        })
+        }, &test_open_store)
         .expect("run ls");
         assert_eq!(ls, FileCommandOutput::Text("hello.txt\n".to_owned()));
 
         let stat = run_file_command(FileCommand::Stat {
             config_path: config_path.clone(),
             selector: "demo:/hello.txt".to_owned(),
-        })
+        }, &test_open_store)
         .expect("run stat");
         let stat_text = match stat {
             FileCommandOutput::Text(text) => text,
@@ -337,7 +340,7 @@ mod tests {
             config_path: config_path.clone(),
             selector: "demo:/hello.txt".to_owned(),
             local_path: download_dir.clone(),
-        })
+        }, &test_open_store)
         .expect("run get");
         let get_text = match get {
             FileCommandOutput::Text(text) => text,
@@ -352,7 +355,7 @@ mod tests {
         let cat = run_file_command(FileCommand::Cat {
             config_path,
             selector: "demo:/hello.txt".to_owned(),
-        })
+        }, &test_open_store)
         .expect("run cat");
         assert_eq!(cat, FileCommandOutput::Bytes(b"hello from loon\n".to_vec()));
     }
@@ -370,7 +373,7 @@ mod tests {
             config_path: config_path.clone(),
             selector: "demo:/hello.txt".to_owned(),
             local_path: existing_target,
-        })
+        }, &test_open_store)
         .expect_err("existing target should fail");
         assert!(existing_error.to_string().contains("already exists"));
 
@@ -379,7 +382,7 @@ mod tests {
             config_path,
             selector: "demo:/hello.txt".to_owned(),
             local_path: missing_parent,
-        })
+        }, &test_open_store)
         .expect_err("missing parent should fail");
         assert!(missing_parent_error
             .to_string()
@@ -393,20 +396,20 @@ mod tests {
         fs::create_dir_all(&object_store_root).expect("create object store root");
         fs::create_dir_all(&mirror_root).expect("create mirror root");
         let config = OpsConfig {
-            object_store: crate::OpsObjectStoreSpec::LocalFs {
+            object_store: super::OpsObjectStoreSpec::LocalFs {
                 root: object_store_root,
                 key_prefix: None,
             },
-            client: crate::OpsClientConfig {
+            client: super::OpsClientConfig {
                 state_db_path,
                 mirror_root,
             },
-            server: crate::OpsServerConfig {
+            server: super::OpsServerConfig {
                 writer_id: "writer-a".to_owned(),
                 writer_version: "loon-ops-test".to_owned(),
                 lease_duration_ms: 60_000,
             },
-            ops: crate::OpsSection {
+            ops: super::OpsSection {
                 now_ms: Some(1_000),
                 max_steps: None,
             },
@@ -426,7 +429,7 @@ mod tests {
         bytes: &[u8],
     ) {
         let config = OpsConfig::load(config_path).expect("load config");
-        let store = config.open_store().expect("open store");
+        let store = test_open_store(&config).expect("open store");
         bootstrap_namespace(
             &store,
             namespace_id,
@@ -484,5 +487,14 @@ mod tests {
             },
         )
         .expect("create authoritative file");
+    }
+
+    fn test_open_store(config: &OpsConfig) -> anyhow::Result<ConfiguredObjectStore> {
+        match &config.object_store {
+            super::OpsObjectStoreSpec::LocalFs { root, key_prefix } => {
+                ConfiguredObjectStore::local_fs(root, key_prefix.as_deref()).map_err(Into::into)
+            }
+            _ => anyhow::bail!("test only supports local-fs stores"),
+        }
     }
 }

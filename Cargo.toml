@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "crates/loon-types",
-  "crates/loon-ops",
   "crates/loon-testkit",
   "crates/loon-sim",
   "crates/loon-server",

@@ -1097,12 +1097,12 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
- "loon-objectstore",
- "loon-ops",
+ "loon-client",
  "loon-server",
  "loon-testkit",
  "loon-types",
  "serde_json",
+ "thiserror",
  "toml",
 ]
 
@@ -1110,6 +1110,7 @@ dependencies = [
 name = "loon-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "loon-server",
  "loon-sim",
  "loon-testkit",
@@ -1119,21 +1120,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "loon-ops"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "loon-client",
- "loon-server",
- "loon-testkit",
- "loon-types",
- "serde",
- "serde_json",
- "serde_yaml",
  "thiserror",
  "toml",
 ]
@@ -2206,11 +2192,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "loon-client",
- "loon-ops",
  "loon-server",
  "loon-testkit",
  "loon-types",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

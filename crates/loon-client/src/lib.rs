@@ -28,6 +28,7 @@ pub use local_apply::LocalApplyError;
 
 pub mod download;
 pub mod executor;
+pub mod ops;
 pub mod planner;
 pub mod state_db;
 pub mod upload;
