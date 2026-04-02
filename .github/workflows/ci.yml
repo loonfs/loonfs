@@ -7,7 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
 
 jobs:
   fmt:
@@ -37,6 +37,8 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -47,4 +49,6 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
+      - name: Free disk space
+        run: df -h / && rm -rf target/debug/incremental && echo "--- after cleanup ---" && df -h /
       - run: cargo test --all
