@@ -1,268 +1,200 @@
-# 070 — Namespace API
+# 070 — Namespace CLI
 
 ## Overview
 
-This spec defines the HTTP API for operating on loon namespaces and their contents. The API is stateless and request-response: every call is a self-contained round-trip with no client-side sync state or persistent connections.
-
----
-
-## Conventions
-
-### Paths
+This spec defines the `loon namespace` CLI commands for managing namespaces and their contents.
 
 All file paths within a namespace are absolute, rooted at `/`. The root directory `/` always exists and cannot be deleted.
-
-### Errors
-
-Every error response is JSON:
-
-```json
-{
-  "error": "not_found",
-  "message": "No file or directory at /logs/missing.txt"
-}
-```
-
-Standard error codes:
-
-| Code | HTTP Status | Meaning |
-|------|-------------|---------|
-| `not_found` | 404 | Namespace or path does not exist |
-| `already_exists` | 409 | Namespace or file already exists |
-| `not_empty` | 409 | Directory is not empty (non-recursive delete) |
-| `invalid_path` | 400 | Malformed or relative path |
-| `invalid_name` | 400 | Namespace name is invalid |
-| `precondition_failed` | 412 | Concurrent modification detected |
 
 ---
 
 ## Namespace management
 
-### Create namespace
+### create
+
+Create a named, persistent namespace.
 
 ```
-POST /v1/namespaces
+loon namespace create [OPTIONS] NAME
 ```
 
-```json
-{
-  "name": "my-namespace"
-}
-```
+| Argument | Description |
+|----------|-------------|
+| `NAME` | Name for the new namespace (required) |
 
-**Response** — `201 Created`
+| Option | Description |
+|--------|-------------|
+| `-e, --env TEXT` | Environment to target |
 
-```json
-{
-  "name": "my-namespace",
-  "created_at": "2026-04-02T12:00:00Z"
-}
-```
-
-**Errors**: `already_exists` if the name is taken, `invalid_name` if the name is empty or contains invalid characters.
+Errors if a namespace with the same name already exists.
 
 ---
 
-### List namespaces
+### list
+
+List all namespaces in an environment.
 
 ```
-GET /v1/namespaces
+loon namespace list [OPTIONS]
 ```
 
-**Response** — `200 OK`
-
-```json
-{
-  "namespaces": [
-    { "name": "analytics", "created_at": "2026-03-01T08:00:00Z" },
-    { "name": "logs", "created_at": "2026-03-15T14:30:00Z" }
-  ]
-}
-```
+| Option | Description |
+|--------|-------------|
+| `--json / --no-json` | Machine-readable JSON output (default: no-json) |
+| `-e, --env TEXT` | Environment to target |
 
 ---
 
-### Delete namespace
+### delete
 
 Delete a namespace and all of its data. This is irreversible.
 
 ```
-DELETE /v1/namespaces/{name}
+loon namespace delete [OPTIONS] NAME
 ```
 
-**Response** — `204 No Content`
+| Argument | Description |
+|----------|-------------|
+| `NAME` | Name of the namespace to delete (required, case sensitive) |
 
-**Errors**: `not_found` if the namespace doesn't exist. Pass `?allow_missing=true` to suppress.
+| Option | Description |
+|--------|-------------|
+| `--allow-missing` | Don't error if the namespace doesn't exist |
+| `-y, --yes` | Skip confirmation prompt |
+| `-e, --env TEXT` | Environment to target |
 
 ---
 
-### Rename namespace
+### rename
+
+Rename a namespace.
 
 ```
-PATCH /v1/namespaces/{name}
+loon namespace rename [OPTIONS] OLD_NAME NEW_NAME
 ```
 
-```json
-{
-  "name": "new-name"
-}
-```
+| Argument | Description |
+|----------|-------------|
+| `OLD_NAME` | Current namespace name (required) |
+| `NEW_NAME` | New namespace name (required) |
 
-**Response** — `200 OK`
+| Option | Description |
+|--------|-------------|
+| `-y, --yes` | Skip confirmation prompt |
+| `-e, --env TEXT` | Environment to target |
 
-```json
-{
-  "name": "new-name"
-}
-```
-
-**Errors**: `not_found` if the old name doesn't exist, `already_exists` if the new name is taken, `invalid_name` if the new name is invalid.
+Errors if `OLD_NAME` doesn't exist or `NEW_NAME` is already taken.
 
 ---
 
 ## File operations
 
-### List path
+### ls
 
-List files and directories at a path within a namespace.
+List files and directories in a namespace.
 
 ```
-GET /v1/namespaces/{name}/ls?path=/some/dir
+loon namespace ls [OPTIONS] NAMESPACE_NAME [PATH]
 ```
 
-**Response** — `200 OK`
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `NAMESPACE_NAME` | required | Namespace to browse |
+| `PATH` | `/` | Directory or file to list |
 
-```json
-{
-  "path": "/some/dir",
-  "entries": [
-    {
-      "name": "report.csv",
-      "path": "/some/dir/report.csv",
-      "kind": "file",
-      "size_bytes": 4096,
-      "content_digest": "sha256:abc123..."
-    },
-    {
-      "name": "subdir",
-      "path": "/some/dir/subdir",
-      "kind": "dir"
-    }
-  ]
-}
-```
+| Option | Description |
+|--------|-------------|
+| `--json / --no-json` | Machine-readable JSON output (default: no-json) |
+| `-e, --env TEXT` | Environment to target |
 
-If `path` points to a file, the response contains that single file as the only entry. If `path` is omitted, it defaults to `/`.
-
-**Errors**: `not_found` if the path doesn't exist.
+If `PATH` is a file, displays that file's metadata. If `PATH` is a directory, lists its contents.
 
 ---
 
-### Download file
+### get
 
-Download file contents from a namespace.
-
-```
-GET /v1/namespaces/{name}/files/{path}
-```
-
-For files, the response body is the raw file bytes:
+Download files from a namespace.
 
 ```
-Content-Type: application/octet-stream
-Content-Length: 4096
-X-Loon-Content-Digest: sha256:abc123...
+loon namespace get [OPTIONS] NAMESPACE_NAME REMOTE_PATH [LOCAL_DESTINATION]
 ```
 
-For directories, the response is a tar stream containing the directory tree:
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `NAMESPACE_NAME` | required | Namespace to download from |
+| `REMOTE_PATH` | required | File or directory to download |
+| `LOCAL_DESTINATION` | `.` | Local path to write to |
 
-```
-Content-Type: application/x-tar
-```
+| Option | Description |
+|--------|-------------|
+| `--force / --no-force` | Overwrite existing local files (default: no-force) |
+| `-e, --env TEXT` | Environment to target |
 
-**Errors**: `not_found` if the path doesn't exist.
+If `REMOTE_PATH` is a directory, its contents are downloaded recursively including all subdirectories. Use `-` as `LOCAL_DESTINATION` to write file contents to stdout.
 
 ---
 
-### Upload file
+### put
 
-Upload a file to a namespace. Parent directories are created as needed.
+Upload a file or directory to a namespace.
 
 ```
-PUT /v1/namespaces/{name}/files/{path}
+loon namespace put [OPTIONS] NAMESPACE_NAME LOCAL_PATH [REMOTE_PATH]
 ```
 
-Request body is the raw file bytes with `Content-Type: application/octet-stream`.
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `NAMESPACE_NAME` | required | Namespace to upload to |
+| `LOCAL_PATH` | required | Local file or directory to upload |
+| `REMOTE_PATH` | `/` | Destination path in namespace |
 
-For directory uploads, the request body is a tar stream with `Content-Type: application/x-tar`.
+| Option | Description |
+|--------|-------------|
+| `-f, --force` | Overwrite existing remote files |
+| `-e, --env TEXT` | Environment to target |
 
-**Response** — `201 Created` (new file) or `200 OK` (overwrite)
-
-```json
-{
-  "path": "/data/report.csv",
-  "kind": "file",
-  "size_bytes": 4096,
-  "content_digest": "sha256:abc123..."
-}
-```
-
-By default, uploading to an existing path fails with `already_exists`. Pass `?overwrite=true` to replace.
-
-**Errors**: `already_exists` if the path exists and `overwrite` is not set. `not_found` if the namespace doesn't exist.
+Remote parent directories are created as needed. If `REMOTE_PATH` ends with `/`, it is treated as a directory and the file is uploaded under it using its local filename.
 
 ---
 
-### Delete file
+### rm
 
-Delete a file or directory from a namespace. Deleting the root `/` is not allowed.
+Delete a file or directory from a namespace.
 
 ```
-DELETE /v1/namespaces/{name}/files/{path}
+loon namespace rm [OPTIONS] NAMESPACE_NAME REMOTE_PATH
 ```
 
-Pass `?recursive=true` to delete a non-empty directory.
+| Argument | Description |
+|----------|-------------|
+| `NAMESPACE_NAME` | Namespace to delete from (required) |
+| `REMOTE_PATH` | File or directory to delete (required) |
 
-**Response** — `204 No Content`
+| Option | Description |
+|--------|-------------|
+| `-r, --recursive` | Delete directory recursively |
+| `-e, --env TEXT` | Environment to target |
 
-**Errors**: `not_found` if the path doesn't exist. `not_empty` if the path is a non-empty directory and `recursive` is not set.
+Deleting a non-empty directory without `--recursive` is an error. Deleting the root `/` is not allowed.
 
 ---
 
-### Copy
+### cp
 
-Copy a file or directory within a namespace. Parent directories of the destination are created as needed.
+Copy files within a namespace.
 
 ```
-POST /v1/namespaces/{name}/cp
+loon namespace cp [OPTIONS] NAMESPACE_NAME PATHS...
 ```
 
-Single-source copy:
+| Argument | Description |
+|----------|-------------|
+| `NAMESPACE_NAME` | Namespace to copy within (required) |
+| `PATHS...` | Source path(s) followed by destination path (required) |
 
-```json
-{
-  "source": "/data/report.csv",
-  "destination": "/archive/report.csv"
-}
-```
+| Option | Description |
+|--------|-------------|
+| `-r, --recursive` | Copy directories recursively |
+| `-e, --env TEXT` | Environment to target |
 
-Multi-source copy (destination must be a directory):
-
-```json
-{
-  "sources": ["/data/a.csv", "/data/b.csv"],
-  "destination_dir": "/archive/"
-}
-```
-
-**Response** — `201 Created`
-
-```json
-{
-  "copied": [
-    { "source": "/data/report.csv", "destination": "/archive/report.csv" }
-  ]
-}
-```
-
-**Errors**: `not_found` if a source path doesn't exist. `already_exists` if the destination already exists. `invalid_path` if the destination is invalid.
+Copies source to destination. If multiple source paths are given, the last path is treated as the destination directory. Parent directories of the destination are created as needed.
