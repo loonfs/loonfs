@@ -7,17 +7,53 @@ The first client milestone is a full live mirror, not File Provider hydration.
 Why:
 the mirror client exercises the core sync semantics with fewer platform-specific variables.
 
+## Scope boundary
+
+This spec describes the **replica client architecture**, not every user-facing shell in the repo.
+
+The current product surfaces split into two families:
+
+- replica-facing client surfaces:
+  - `loon ops ...`
+  - the mirror-root client
+  - the later File Provider bridge over client SQLite truth
+- authoritative product surface:
+  - `loon file ...`, defined in Spec 100 and ADR 0021
+
+Rules:
+
+- this spec governs the client replica, local observation, planner, and sync architecture
+- this spec does not define direct authoritative path-addressed reads or writes
+- direct authoritative `loon file ...` mutations may make the client replica stale until the next
+  explicit authoritative import or refresh path runs
+- once imported, those direct authoritative mutations become ordinary remote observations for the
+  client planner
+
+Why this boundary exists:
+
+- the repo now has both an authoritative product shell and a replica client shell
+- SQLite remains the replica client's durable truth without becoming the only product-facing read
+  or write path
+
+Failure modes prevented:
+
+- reading this spec as if client SQLite were the only user-facing truth model in the repository
+- assuming File Provider freshness is immediate after a direct authoritative `loon file ...`
+  mutation
+
 ## Client shape
 
 - Rust daemon
-- CLI
+- mirror/admin CLI surface such as `loon ops ...`
 - later macOS File Provider bridge
 - local SQLite state is acceptable
-- the first File Provider spike is a read-only Rust bridge over the same SQLite truth model
+- the first File Provider spike is a read-only Rust bridge over the same replica SQLite truth
+  model
+- the separate authoritative `loon file ...` surface is outside this spec
 
 ## Local durable truth
 
-The client uses SQLite as its only durable local truth.
+The client uses SQLite as its only durable local truth for replica state.
 
 The first client-state slice models three durable views explicitly:
 
@@ -29,7 +65,7 @@ Why this shape exists:
 
 - conflict decisions should compare explicit durable views, not reconstructed guesses
 - restart behavior should be deterministic
-- later File Provider mode should reuse the same truth model
+- later replica File Provider mode should reuse the same truth model
 
 Failure modes prevented:
 
@@ -316,7 +352,8 @@ Rules:
 
 Why this rule exists:
 
-- future `xtask` and future `loon-cli` should call one supported client observation surface
+- future `xtask` and future mirror-facing `loon-cli` surfaces should call one supported client
+  observation surface
 - local observation and planner replacement should not become a best-effort multi-step shell flow
 
 Failure modes prevented:
@@ -351,7 +388,8 @@ Rules:
 Why this rule exists:
 
 - delete and move are high-impact mutations and should not depend on lossy shell-side inference
-- future `xtask` and future `loon-cli` should call one explicit supported observation surface
+- future `xtask` and future mirror-facing `loon-cli` surfaces should call one explicit supported
+  observation surface
 
 Failure modes prevented:
 
@@ -476,8 +514,8 @@ Why this rule exists:
 - the hard problem is deterministic local-change meaning, not OS callback subscription
 - future watcher adapters should share one semantic reduction path instead of embedding shell or
   platform-specific heuristics
-- `xtask ops ...` and future `loon-cli` should call the same client-owned path routing layer that
-  watcher adapters will eventually use
+- `xtask ops ...` and future mirror-facing `loon-cli` surfaces should call the same client-owned
+  path routing layer that watcher adapters will eventually use
 
 Failure modes prevented:
 
@@ -797,7 +835,8 @@ Dispatch policy for the first shell slice:
 
 Why this rule exists:
 
-- local operability should reuse the same scheduler and mutation contracts as tests and later CLI
+- local operability should reuse the same scheduler and mutation contracts as tests and later
+  mirror/admin CLI surfaces
 - a thin shell should not become a second sync engine
 
 Failure modes prevented:
