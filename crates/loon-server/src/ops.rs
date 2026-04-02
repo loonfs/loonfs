@@ -611,15 +611,15 @@ fn load_file_content_summary_from_manifest<S: ObjectStore>(
     let object_key = content_manifest(namespace_id.as_str(), manifest_digest);
     let manifest_bytes = store
         .get(&object_key, None)
-        .map_err(|err| ManifestSummaryLoadError::ReadManifest {
+        .map_err(|err| ManifestSummaryLoadError::Read {
             object_key: object_key.clone(),
             message: err.to_string(),
         })?
-        .ok_or_else(|| ManifestSummaryLoadError::MissingManifest {
+        .ok_or_else(|| ManifestSummaryLoadError::Missing {
             object_key: object_key.clone(),
         })?;
     let manifest = decode_content_manifest_json(&manifest_bytes).map_err(|err| {
-        ManifestSummaryLoadError::DecodeManifest {
+        ManifestSummaryLoadError::Decode {
             object_key: object_key.clone(),
             message: err.to_string(),
         }
@@ -678,27 +678,27 @@ struct AuthoritativeFileContentSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 enum ManifestSummaryLoadError {
     #[error("failed to read content manifest `{object_key}`: {message}")]
-    ReadManifest { object_key: String, message: String },
+    Read { object_key: String, message: String },
     #[error("missing content manifest `{object_key}`")]
-    MissingManifest { object_key: String },
+    Missing { object_key: String },
     #[error("failed to decode content manifest `{object_key}`: {message}")]
-    DecodeManifest { object_key: String, message: String },
+    Decode { object_key: String, message: String },
 }
 
 impl From<ManifestSummaryLoadError> for RemoteObservationTranslationError {
     fn from(value: ManifestSummaryLoadError) -> Self {
         match value {
-            ManifestSummaryLoadError::ReadManifest {
+            ManifestSummaryLoadError::Read {
                 object_key,
                 message,
             } => Self::ReadManifest {
                 object_key,
                 message,
             },
-            ManifestSummaryLoadError::MissingManifest { object_key } => {
+            ManifestSummaryLoadError::Missing { object_key } => {
                 Self::MissingManifest { object_key }
             }
-            ManifestSummaryLoadError::DecodeManifest {
+            ManifestSummaryLoadError::Decode {
                 object_key,
                 message,
             } => Self::DecodeManifest {
@@ -712,17 +712,17 @@ impl From<ManifestSummaryLoadError> for RemoteObservationTranslationError {
 impl From<ManifestSummaryLoadError> for AuthoritativePathReadError {
     fn from(value: ManifestSummaryLoadError) -> Self {
         match value {
-            ManifestSummaryLoadError::ReadManifest {
+            ManifestSummaryLoadError::Read {
                 object_key,
                 message,
             } => Self::ReadManifest {
                 object_key,
                 message,
             },
-            ManifestSummaryLoadError::MissingManifest { object_key } => {
+            ManifestSummaryLoadError::Missing { object_key } => {
                 Self::MissingManifest { object_key }
             }
-            ManifestSummaryLoadError::DecodeManifest {
+            ManifestSummaryLoadError::Decode {
                 object_key,
                 message,
             } => Self::DecodeManifest {
