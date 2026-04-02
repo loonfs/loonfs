@@ -21,7 +21,7 @@ The durable source of truth is object storage. Everything else is either compute
 
 ## 2a. Required reading before changing core behavior
 
-Before touching `loon-objectstore`, `loon-core`, `loon-queue`, or `loon-client`, read:
+Before touching `loon-server` (including its `objectstore`, `core`, or `queue` modules) or `loon-client`, read:
 
 - `docs/specs/020-objectstore-contract.md`
 - `docs/specs/040-namespace-commit.md`
@@ -66,8 +66,8 @@ Every randomized failure must print:
 - `docs/specs/`: readable contracts and examples
 - `docs/adr/`: decisions that are hard to reverse
 - `docs/runbooks/`: “how to debug X” guides
-- `crates/loon-model/`: pure semantics
-- `crates/loon-core/`: canonical implementation of metadata rules
+- `crates/loon-testkit/src/model/`: pure reference model for state-machine testing
+- `crates/loon-server/src/core/`: canonical implementation of metadata rules
 - `crates/loon-sim/`: deterministic scheduler and failure injection
 - `tests/scenarios/`: human-readable input cases
 
@@ -79,9 +79,9 @@ You must do all of the following:
 
 1. Describe the mutation in `docs/specs/040-namespace-commit.md`.
 2. Document preconditions and failure modes.
-3. Add a model transition in `crates/loon-model/`.
+3. Add a model transition in `crates/loon-testkit/src/model/`.
 4. Add at least one scenario fixture.
-5. Add or update invariants in `crates/loon-core/src/invariants.rs`.
+5. Add or update invariants in `crates/loon-server/src/core/invariants.rs`.
 6. Only then add the production implementation.
 
 ## 7. How to add a new object-store assumption
@@ -90,16 +90,16 @@ Example: “we need compare-and-swap update on small mutable control objects.”
 
 Required steps:
 
-1. Add the capability to `loon-objectstore` provider profiles.
+1. Add the capability to `loon-server/src/objectstore` provider profiles.
 2. Add a conformance test case.
 3. Mark the provider expectation for S3 and R2.
 4. Update the object-store contract spec.
 
-Do not smuggle provider-specific behavior into `loon-core`.
+Do not smuggle provider-specific behavior into `loon-server/src/core`.
 
-## 8. Commit style
+## 8. Commit and PR style
 
-Always use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages (e.g. `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`). Scope is optional but encouraged when the change is confined to a single crate (e.g. `fix(loon-client):`, `refactor(loon-macos):`).
+Always use [Conventional Commits](https://www.conventionalcommits.org/) for both commit messages and PR titles (e.g. `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`). Scope is optional but encouraged when the change is confined to a single crate (e.g. `fix(loon-client):`, `refactor(loon-server):`).
 
 Prefer small commits. Good commit shapes:
 
