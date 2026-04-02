@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  loon file ls demo:/\n  loon file stat demo:/docs/report.txt\n  loon file get demo:/hello.txt ./downloads\n  loon file get --recursive demo:/docs ./downloaded-docs\n  loon file cat demo:/hello.txt\n  loon file put ./hello.txt demo:/docs/hello.txt\n  loon file put --replace ./hello-v2.txt demo:/docs/hello.txt\n  loon file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file cp --replace demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file mkdir demo:/docs\n  loon file rm --recursive demo:/docs/archive\n  loon file mv demo:/docs/hello.txt demo:/docs/archive.txt"
+    after_help = "Examples:\n  loon file ls demo:/\n  loon file stat demo:/docs/report.txt\n  loon file get demo:/hello.txt ./downloads\n  loon file get --recursive demo:/docs ./downloaded-docs\n  loon file cat demo:/hello.txt\n  loon file put ./hello.txt demo:/docs/hello.txt\n  loon file put --replace ./hello-v2.txt demo:/docs/hello.txt\n  loon file put --recursive ./docs demo:/uploaded-docs\n  loon file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file cp --replace demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file mkdir demo:/docs\n  loon file rm --recursive demo:/docs/archive\n  loon file mv demo:/docs/hello.txt demo:/docs/archive.txt"
 )]
 pub struct FileArgs {
     #[command(subcommand)]
@@ -22,7 +22,7 @@ enum FileSubcommand {
     Get(FileGetArgs),
     /// Print one authoritative file's raw bytes to stdout.
     Cat(FileSelectorArgs),
-    /// Upload one local file to an exact authoritative destination path.
+    /// Upload one local file or directory to an exact authoritative destination path.
     Put(FilePutArgs),
     /// Copy one authoritative file to a new exact path within the same namespace.
     Cp(FileCpArgs),
@@ -71,8 +71,8 @@ struct FilePutArgs {
     )]
     config: Option<PathBuf>,
     #[arg(
-        value_name = "LOCAL_FILE",
-        help = "Existing regular local file to upload."
+        value_name = "LOCAL_PATH",
+        help = "Existing regular local file, or local directory with --recursive."
     )]
     local_path: PathBuf,
     #[arg(
@@ -80,6 +80,12 @@ struct FilePutArgs {
         help = "Replace an existing visible authoritative file instead of creating a new one."
     )]
     replace: bool,
+    #[arg(
+        long,
+        conflicts_with = "replace",
+        help = "Recursively upload one local directory as an exact absent authoritative destination root."
+    )]
+    recursive: bool,
     #[arg(
         value_name = "SELECTOR",
         help = "Exact authoritative destination selector in the form <namespace>:/absolute/path."
@@ -152,6 +158,7 @@ impl FileArgs {
                 local_path: args.local_path,
                 selector: args.selector,
                 replace: args.replace,
+                recursive: args.recursive,
             }),
             FileSubcommand::Cp(args) => Ok(FileCommand::Cp {
                 config_path: resolve_config_path(args.pair.config)?.path,

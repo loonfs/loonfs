@@ -6,9 +6,10 @@ use loon_server::ops::{
     collect_authoritative_subtree_download, cp_authoritative_file_within_namespace,
     cp_replace_authoritative_file_within_namespace, list_authoritative_path,
     mkdir_authoritative_path, mv_authoritative_path, put_authoritative_file_from_path,
-    read_authoritative_file_bytes, replace_authoritative_file_from_path,
-    resolve_authoritative_path, rm_authoritative_path, AuthoritativeFileBytes,
-    AuthoritativePathEntry, AuthoritativeSubtreeDownload,
+    put_authoritative_subtree_from_path, read_authoritative_file_bytes,
+    replace_authoritative_file_from_path, resolve_authoritative_path, rm_authoritative_path,
+    AuthoritativeFileBytes, AuthoritativePathEntry, AuthoritativeRecursivePutResult,
+    AuthoritativeSubtreeDownload,
 };
 use loon_types::NamespaceId;
 use serde::{Deserialize, Serialize};
@@ -43,6 +44,7 @@ pub enum FileCommand {
         local_path: PathBuf,
         selector: String,
         replace: bool,
+        recursive: bool,
     },
     Mkdir {
         config_path: PathBuf,
@@ -101,6 +103,18 @@ struct FilePutReport {
     destination: String,
     replace: bool,
     entry: AuthoritativePathEntry,
+    committed_seq: ChangeSeqReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FilePutRecursiveReport {
+    source_local_path: String,
+    destination: String,
+    recursive: bool,
+    directory_count: u64,
+    file_count: u64,
+    total_size_bytes: u64,
+    root_entry: AuthoritativePathEntry,
     committed_seq: ChangeSeqReport,
 }
 
@@ -176,11 +190,19 @@ enum FilePutLocalSourceError {
     Missing { path: String },
     #[error("upload source must be a regular file: `{path}`")]
     NotRegularFile { path: String },
+    #[error("recursive upload source must be a directory: `{path}`")]
+    NotDirectory { path: String },
     #[error("failed to inspect upload source `{path}`: {source}")]
     ReadMetadata {
         path: String,
         source: std::io::Error,
     },
+}
+
+#[derive(Debug, Error)]
+enum FilePutCommandError {
+    #[error("file put flags `--recursive` and `--replace` are mutually exclusive")]
+    RecursiveReplaceConflict,
 }
 
 #[derive(Debug, Error)]
@@ -345,40 +367,60 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             local_path,
             selector,
             replace,
+            recursive,
         } => {
-            ensure_put_source_is_regular_file(&local_path)?;
+            if recursive && replace {
+                return Err(FilePutCommandError::RecursiveReplaceConflict.into());
+            }
             let config = OpsConfig::load(&config_path)?;
             let store = config.open_store()?;
             let selector = parse_authoritative_path_selector(&selector)?;
-            let result = if replace {
-                replace_authoritative_file_from_path(
+            if recursive {
+                ensure_put_source_is_directory(&local_path)?;
+                let result = put_authoritative_subtree_from_path(
                     &store,
                     &selector.namespace_id,
                     &local_path,
                     &selector.absolute_path,
                     &mutation_params(&config),
-                )?
+                )?;
+                Ok(FileCommandOutput::Text(render_recursive_put_report(
+                    &local_path,
+                    &selector,
+                    result,
+                )?))
             } else {
-                put_authoritative_file_from_path(
-                    &store,
-                    &selector.namespace_id,
-                    &local_path,
-                    &selector.absolute_path,
-                    &mutation_params(&config),
-                )?
-            };
-            let report = FilePutReport {
-                source_local_path: local_path.display().to_string(),
-                destination: format_selector(&selector),
-                replace,
-                entry: result.entry,
-                committed_seq: ChangeSeqReport {
-                    seq: result.committed_seq.0,
-                },
-            };
-            Ok(FileCommandOutput::Text(
-                serde_yaml::to_string(&report).context("render file put report")?,
-            ))
+                ensure_put_source_is_regular_file(&local_path)?;
+                let result = if replace {
+                    replace_authoritative_file_from_path(
+                        &store,
+                        &selector.namespace_id,
+                        &local_path,
+                        &selector.absolute_path,
+                        &mutation_params(&config),
+                    )?
+                } else {
+                    put_authoritative_file_from_path(
+                        &store,
+                        &selector.namespace_id,
+                        &local_path,
+                        &selector.absolute_path,
+                        &mutation_params(&config),
+                    )?
+                };
+                let report = FilePutReport {
+                    source_local_path: local_path.display().to_string(),
+                    destination: format_selector(&selector),
+                    replace,
+                    entry: result.entry,
+                    committed_seq: ChangeSeqReport {
+                        seq: result.committed_seq.0,
+                    },
+                };
+                Ok(FileCommandOutput::Text(
+                    serde_yaml::to_string(&report).context("render file put report")?,
+                ))
+            }
         }
         FileCommand::Mkdir {
             config_path,
@@ -537,6 +579,27 @@ fn ensure_put_source_is_regular_file(local_path: &Path) -> Result<(), FilePutLoc
     Ok(())
 }
 
+fn ensure_put_source_is_directory(local_path: &Path) -> Result<(), FilePutLocalSourceError> {
+    let metadata = fs::metadata(local_path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            FilePutLocalSourceError::Missing {
+                path: local_path.display().to_string(),
+            }
+        } else {
+            FilePutLocalSourceError::ReadMetadata {
+                path: local_path.display().to_string(),
+                source,
+            }
+        }
+    })?;
+    if !metadata.is_dir() {
+        return Err(FilePutLocalSourceError::NotDirectory {
+            path: local_path.display().to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn ensure_same_namespace(
     from: &AuthoritativePathSelector,
     to: &AuthoritativePathSelector,
@@ -558,6 +621,26 @@ fn format_selector(selector: &AuthoritativePathSelector) -> String {
         selector.namespace_id.as_str(),
         selector.absolute_path
     )
+}
+
+fn render_recursive_put_report(
+    local_path: &Path,
+    selector: &AuthoritativePathSelector,
+    result: AuthoritativeRecursivePutResult,
+) -> Result<String> {
+    let report = FilePutRecursiveReport {
+        source_local_path: local_path.display().to_string(),
+        destination: format_selector(selector),
+        recursive: true,
+        directory_count: result.directory_count,
+        file_count: result.file_count,
+        total_size_bytes: result.total_size_bytes,
+        root_entry: result.root_entry,
+        committed_seq: ChangeSeqReport {
+            seq: result.committed_seq.0,
+        },
+    };
+    serde_yaml::to_string(&report).context("render recursive file put report")
 }
 
 fn render_ls_entry(entry: AuthoritativePathEntry) -> String {
@@ -897,6 +980,7 @@ mod tests {
             local_path: local_file,
             selector: "demo:/docs/hello.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect("run put");
         let put_text = match put {
@@ -915,6 +999,7 @@ mod tests {
             local_path: replacement_local_file,
             selector: "demo:/docs/hello.txt".to_owned(),
             replace: true,
+            recursive: false,
         })
         .expect("run put --replace");
         let replace_text = match replace {
@@ -992,6 +1077,7 @@ mod tests {
             local_path: local_dir,
             selector: "demo:/copied.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect_err("local directory source should fail");
         assert!(put_dir_error.to_string().contains("regular file"));
@@ -1003,6 +1089,7 @@ mod tests {
             local_path: put_missing_parent,
             selector: "demo:/missing/copied.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect_err("missing remote parent should fail");
         assert!(put_parent_error
@@ -1016,6 +1103,7 @@ mod tests {
             local_path: replace_missing,
             selector: "demo:/missing.txt".to_owned(),
             replace: true,
+            recursive: false,
         })
         .expect_err("missing replace target should fail");
         assert!(replace_missing_error
@@ -1034,6 +1122,7 @@ mod tests {
             local_path: replace_directory,
             selector: "demo:/docs".to_owned(),
             replace: true,
+            recursive: false,
         })
         .expect_err("directory replace target should fail");
         assert!(replace_directory_error
@@ -1060,6 +1149,144 @@ mod tests {
     }
 
     #[test]
+    fn recursive_put_uploads_nested_directory_tree_atomically() {
+        let temp_dir = TestDir::new("loon-ops-file-put-recursive");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_empty_namespace(&config_path, &namespace_id);
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/imports".to_owned(),
+        })
+        .expect("mkdir imports");
+
+        let docs_root = temp_dir.path().join("docs");
+        let drafts_root = docs_root.join("drafts");
+        fs::create_dir_all(&drafts_root).expect("create local drafts dir");
+        fs::write(docs_root.join("report.txt"), b"report bytes\n").expect("write report");
+        fs::write(drafts_root.join("note.txt"), b"note bytes\n").expect("write note");
+
+        let put = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: docs_root,
+            selector: "demo:/imports/docs".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect("run recursive put");
+        let put_text = match put {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text recursive put output, got {other:?}"),
+        };
+        assert!(put_text.contains("recursive: true"));
+        assert!(put_text.contains("directory_count: 2"));
+        assert!(put_text.contains("file_count: 2"));
+        assert!(put_text.contains("destination: demo:/imports/docs"));
+
+        let listing = run_file_command(FileCommand::Ls {
+            config_path: config_path.clone(),
+            selector: "demo:/imports/docs".to_owned(),
+        })
+        .expect("list uploaded docs");
+        assert_eq!(
+            listing,
+            FileCommandOutput::Text("drafts/\nreport.txt\n".to_owned())
+        );
+
+        let report_bytes = run_file_command(FileCommand::Cat {
+            config_path: config_path.clone(),
+            selector: "demo:/imports/docs/report.txt".to_owned(),
+        })
+        .expect("cat uploaded report");
+        assert_eq!(
+            report_bytes,
+            FileCommandOutput::Bytes(b"report bytes\n".to_vec())
+        );
+        let note_bytes = run_file_command(FileCommand::Cat {
+            config_path,
+            selector: "demo:/imports/docs/drafts/note.txt".to_owned(),
+        })
+        .expect("cat uploaded note");
+        assert_eq!(
+            note_bytes,
+            FileCommandOutput::Bytes(b"note bytes\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn recursive_put_fails_closed_for_invalid_sources_and_targets() {
+        let temp_dir = TestDir::new("loon-ops-file-put-recursive-errors");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_empty_namespace(&config_path, &namespace_id);
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/imports".to_owned(),
+        })
+        .expect("mkdir imports");
+
+        let local_file = temp_dir.path().join("not-a-dir.txt");
+        fs::write(&local_file, b"hello").expect("write local file");
+        let not_directory = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: local_file,
+            selector: "demo:/imports/docs".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect_err("recursive put file source should fail");
+        assert!(not_directory.to_string().contains("must be a directory"));
+
+        let docs_root = temp_dir.path().join("docs");
+        fs::create_dir_all(&docs_root).expect("create docs root");
+        let conflict = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: docs_root.clone(),
+            selector: "demo:/imports/docs".to_owned(),
+            replace: true,
+            recursive: true,
+        })
+        .expect_err("recursive put replace conflict should fail");
+        assert!(conflict.to_string().contains("mutually exclusive"));
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/imports/docs".to_owned(),
+        })
+        .expect("mkdir occupied destination");
+        let occupied = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: docs_root.clone(),
+            selector: "demo:/imports/docs".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect_err("occupied recursive destination should fail");
+        assert!(occupied.to_string().contains("already occupied"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let symlink_root = temp_dir.path().join("symlink-root");
+            fs::create_dir_all(&symlink_root).expect("create symlink root");
+            symlink("missing-target", symlink_root.join("link"))
+                .expect("create unsupported symlink child");
+            let symlink_error = run_file_command(FileCommand::Put {
+                config_path,
+                local_path: symlink_root,
+                selector: "demo:/imports/with-link".to_owned(),
+                replace: false,
+                recursive: true,
+            })
+            .expect_err("symlink child should fail");
+            assert!(symlink_error.to_string().contains("symlink"));
+        }
+    }
+
+    #[test]
     fn copy_rejects_occupied_directory_and_cross_namespace_targets() {
         let temp_dir = TestDir::new("loon-ops-file-copy-errors");
         let config_path = write_local_fs_config(temp_dir.path());
@@ -1078,6 +1305,7 @@ mod tests {
             local_path: local_file,
             selector: "demo:/docs/hello.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect("seed source file");
         run_file_command(FileCommand::Mkdir {
@@ -1172,6 +1400,7 @@ mod tests {
             local_path: source_file,
             selector: "demo:/docs/source.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect("put source");
 
@@ -1182,6 +1411,7 @@ mod tests {
             local_path: target_file,
             selector: "demo:/docs/target.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect("put target");
 
@@ -1192,6 +1422,7 @@ mod tests {
             local_path: note_file,
             selector: "demo:/docs/drafts/note.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect("put note");
 
@@ -1258,6 +1489,7 @@ mod tests {
             local_path: source_file,
             selector: "demo:/docs/source.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect("put source");
 

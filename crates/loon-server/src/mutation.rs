@@ -48,6 +48,18 @@ pub struct ExecutedClientMutation {
     pub checked_invariants: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExecutedCommitRequest {
+    pub commit_request: CommitRequest,
+    pub plan: CommitPlan,
+    pub wal: PreparedWalCommit,
+    pub resulting_metadata_state: MetadataState,
+    pub wal_metadata: ObjectMetadata,
+    pub head_publish: PreparedCommitHeadPublish,
+    pub head_metadata: ObjectMetadata,
+    pub checked_invariants: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ClientMutationExecutionError {
     #[error(transparent)]
@@ -105,14 +117,53 @@ pub(crate) fn execute_client_mutation_against_basis<S: ObjectStore>(
     validated_content: Option<ValidatedDurableContent>,
 ) -> Result<ExecutedClientMutation, ClientMutationExecutionError> {
     let commit_request = translate_client_mutation_request(request, params, &basis.head)?;
+    let additional_checked_invariants = validated_content
+        .as_ref()
+        .map(|content| content.checked_invariants.as_slice())
+        .unwrap_or(&[]);
+    let executed = execute_commit_request_against_basis(
+        store,
+        &commit_request,
+        params,
+        basis,
+        additional_checked_invariants,
+    )?;
+    let response = build_client_mutation_response(
+        request,
+        validated_content.as_ref(),
+        &executed.plan,
+        &executed.resulting_metadata_state,
+        &executed.head_publish,
+    )?;
+
+    Ok(ExecutedClientMutation {
+        commit_request: executed.commit_request,
+        plan: executed.plan,
+        wal: executed.wal,
+        resulting_metadata_state: executed.resulting_metadata_state,
+        wal_metadata: executed.wal_metadata,
+        head_publish: executed.head_publish,
+        head_metadata: executed.head_metadata,
+        response,
+        checked_invariants: executed.checked_invariants,
+    })
+}
+
+pub(crate) fn execute_commit_request_against_basis<S: ObjectStore>(
+    store: &S,
+    commit_request: &CommitRequest,
+    params: &ClientMutationExecutionParams,
+    basis: VerifiedNamespaceBasis,
+    additional_checked_invariants: &[String],
+) -> Result<ExecutedCommitRequest, ClientMutationExecutionError> {
     let context = CommitValidationContext {
         head: basis.head.clone(),
         lease: basis.lease.clone(),
         now_ms: params.now_ms,
         metadata_state: basis.metadata_state.clone(),
     };
-    let plan = build_commit_plan(&commit_request, &context)?;
-    let wal = prepare_wal_commit(&commit_request, &plan, &params.writer_version)?;
+    let plan = build_commit_plan(commit_request, &context)?;
+    let wal = prepare_wal_commit(commit_request, &plan, &params.writer_version)?;
     let applied_metadata = basis
         .metadata_state
         .apply_committed_wal_ops(plan.next_seq, &wal.envelope.payload.ops)
@@ -123,21 +174,8 @@ pub(crate) fn execute_client_mutation_against_basis<S: ObjectStore>(
         .map_err(map_store_write_error)?;
     let head_metadata = publish_commit_head(store, &basis.head_etag, &head_publish)
         .map_err(|err| ClientMutationExecutionError::HeadWrite(format!("{err:?}")))?;
-    let response = build_client_mutation_response(
-        request,
-        validated_content.as_ref(),
-        &plan,
-        &applied_metadata.metadata_state,
-        &head_publish,
-    )?;
-
     let mut checked_invariants = Vec::new();
-    if let Some(validated_content) = &validated_content {
-        extend_invariants(
-            &mut checked_invariants,
-            &validated_content.checked_invariants,
-        );
-    }
+    extend_invariants(&mut checked_invariants, additional_checked_invariants);
     extend_invariants(&mut checked_invariants, &plan.checked_invariants);
     extend_invariants(&mut checked_invariants, &wal.checked_invariants);
     extend_invariants(
@@ -146,15 +184,14 @@ pub(crate) fn execute_client_mutation_against_basis<S: ObjectStore>(
     );
     extend_invariants(&mut checked_invariants, &head_publish.checked_invariants);
 
-    Ok(ExecutedClientMutation {
-        commit_request,
+    Ok(ExecutedCommitRequest {
+        commit_request: commit_request.clone(),
         plan,
         wal,
         resulting_metadata_state: applied_metadata.metadata_state,
         wal_metadata,
         head_publish,
         head_metadata,
-        response,
         checked_invariants,
     })
 }

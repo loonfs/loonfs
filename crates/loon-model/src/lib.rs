@@ -358,6 +358,69 @@ pub enum ModelVisibleSubtreeError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRecursivePutLocalEntry {
+    pub relative_path: String,
+    pub inode_kind: InodeKind,
+    pub content_manifest_digest: Option<String>,
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRecursivePutDirectory {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub parent_relative_path: Option<String>,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRecursivePutFile {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub parent_relative_path: String,
+    pub display_name: String,
+    pub content_manifest_digest: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRecursivePutPlan {
+    pub target: ModelResolvedVisibleCreateTarget,
+    #[serde(default)]
+    pub directories: Vec<ModelRecursivePutDirectory>,
+    #[serde(default)]
+    pub files: Vec<ModelRecursivePutFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelRecursivePutPlanError {
+    VisiblePathMutation(ModelVisiblePathMutationError),
+    RootEntryMissing,
+    RootEntryMustBeDirectory,
+    InvalidRelativePath {
+        relative_path: String,
+    },
+    UnsupportedLocalKind {
+        relative_path: String,
+        inode_kind: InodeKind,
+    },
+    DuplicateRelativePath {
+        relative_path: String,
+    },
+    ParentEntryMissing {
+        relative_path: String,
+        parent_relative_path: String,
+    },
+    ParentEntryNotDirectory {
+        relative_path: String,
+        parent_relative_path: String,
+    },
+    FileEntryMissingContent {
+        relative_path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelLocalOnlyObservationCandidate {
     pub client_file_id: String,
     pub namespace_id: NamespaceId,

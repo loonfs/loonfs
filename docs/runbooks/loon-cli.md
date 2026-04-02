@@ -98,6 +98,7 @@ cargo run -p loon-cli -- file get --recursive demo:/docs ./docs-download
 cargo run -p loon-cli -- file cat demo:/hello.txt
 cargo run -p loon-cli -- file put ./hello.txt demo:/docs/hello.txt
 cargo run -p loon-cli -- file put --replace ./hello-v2.txt demo:/docs/hello.txt
+cargo run -p loon-cli -- file put --recursive ./docs demo:/uploaded-docs
 cargo run -p loon-cli -- file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt
 cargo run -p loon-cli -- file cp --replace demo:/docs/hello.txt demo:/docs/existing.txt
 cargo run -p loon-cli -- file mkdir demo:/docs/archive
@@ -112,6 +113,8 @@ Strict v1 rules:
 - `put` is local-file only
 - plain `put` is create-only
 - `put --replace` is update-only and requires an existing visible file destination
+- `put --recursive` is local-directory only, create-only, and exact-root
+- `put --recursive` rejects symlinks and other unsupported non-file/non-directory descendants
 - plain `get` is file-only
 - `get --recursive` is directory-only and downloads to one absent exact local root path
 - plain `cp` is same-namespace, file-only, and create-only

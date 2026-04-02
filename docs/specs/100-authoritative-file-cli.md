@@ -13,6 +13,7 @@ The first user-facing product shell is a separate authoritative file surface:
 - `loon file cat <namespace:/path>`
 - `loon file put <local-file> <namespace:/absolute/path>`
 - `loon file put --replace <local-file> <namespace:/absolute/path>`
+- `loon file put --recursive <local-dir> <namespace:/absolute/path>`
 - `loon file cp <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
 - `loon file mkdir <namespace:/absolute/path>`
 - `loon file rm [--recursive] <namespace:/absolute/path>`
@@ -180,6 +181,7 @@ observation, client SQLite state, or sync execution.
 Rules:
 
 - source must be one existing regular local file
+- `put --recursive` is directory-only
 - destination selector must not be root
 - destination selector names the exact final remote path
 - destination must be absent unless `--replace` is present
@@ -189,7 +191,16 @@ Rules:
   - destination must resolve to one visible file
   - absent destination is rejected
   - directory destination is rejected
-- no directory upload, overwrite, or parent auto-create
+- `put --recursive` is create-only:
+  - source must be one existing local directory
+  - `--recursive` and `--replace` are mutually exclusive
+  - destination must resolve as one exact absent directory root create target
+  - destination parent must already exist as a visible directory
+  - empty local directories are valid
+  - unsupported local descendants are rejected before any metadata commit:
+    - symlink
+    - device / fifo / socket / unknown non-file non-dir kinds
+- no overwrite or parent auto-create
 
 ### `loon file cp`
 
@@ -271,6 +282,14 @@ Additional rules:
 
 - `put --replace` resolves the destination to one visible file and commits `ReplaceFile` against
   that file's current revision under the same leased basis
+- `put --recursive` walks one normalized local subtree, uploads all file content first, then
+  commits one ordered multi-op `CommitRequest` that creates:
+  - the exact destination root directory
+  - descendant directories in lexicographic relative-path order
+  - descendant files in lexicographic relative-path order
+- `put --recursive` publishes metadata atomically:
+  - no subtree entries become visible until the one commit succeeds
+  - the command does not widen the shared single-op client mutation protocol
 - plain `cp` resolves source and destination under one leased basis and commits `CreateFile` at
   the destination with the source file's current manifest digest
 - `cp --replace` resolves source and destination under one leased basis and commits `ReplaceFile`
@@ -293,6 +312,7 @@ Failure modes prevented:
   later authoritative rename
 - widening `loon file ...` into a bespoke path mutation implementation that diverges from the
   namespace commit protocol
+- publishing a partially visible remote subtree before all uploaded content is durable
 
 ## Content read validation
 

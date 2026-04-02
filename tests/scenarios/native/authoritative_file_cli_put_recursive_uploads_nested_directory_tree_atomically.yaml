@@ -1,0 +1,28 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_put_recursive_uploads_nested_directory_tree_atomically
+initial:
+  head:
+    namespace_id: demo
+    seq: 7
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /imports
+        inode_id: 2
+        inode_kind: dir
+actions:
+  - put_recursive:
+      local_path: ./docs
+      selector: demo:/imports/docs
+expect:
+  created:
+    selector: demo:/imports/docs
+    inode_kind: dir
+  preserved_relative_entries:
+    - drafts
+    - drafts/note.txt
+    - report.txt
+

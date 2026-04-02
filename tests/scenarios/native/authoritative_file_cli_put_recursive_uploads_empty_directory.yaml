@@ -1,0 +1,25 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_put_recursive_uploads_empty_directory
+initial:
+  head:
+    namespace_id: demo
+    seq: 3
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /imports
+        inode_id: 2
+        inode_kind: dir
+actions:
+  - put_recursive:
+      local_path: ./empty-dir
+      selector: demo:/imports/empty-dir
+expect:
+  created:
+    selector: demo:/imports/empty-dir
+    inode_kind: dir
+  file_count: 0
+

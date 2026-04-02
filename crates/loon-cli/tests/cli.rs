@@ -195,6 +195,65 @@ fn file_get_recursive_writes_exact_output_root() {
 }
 
 #[test]
+fn file_put_recursive_uploads_nested_directory_tree() {
+    let temp_dir = TestDir::new("loon-cli-file-put-recursive");
+    let config_path = write_demo_local_fs_config(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    bootstrap_empty_namespace(&config_path, &namespace_id);
+
+    let mkdir_imports = run_loon([
+        "file",
+        "mkdir",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/imports",
+    ]);
+    assert!(mkdir_imports.status.success());
+
+    let docs_root = temp_dir.path().join("docs");
+    let drafts_root = docs_root.join("drafts");
+    fs::create_dir_all(&drafts_root).expect("create local drafts dir");
+    fs::write(docs_root.join("report.txt"), b"report bytes\n").expect("write report");
+    fs::write(drafts_root.join("note.txt"), b"note bytes\n").expect("write note");
+
+    let put = run_loon([
+        "file",
+        "put",
+        "--recursive",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        docs_root.to_str().expect("utf-8 path"),
+        "demo:/imports/docs",
+    ]);
+    assert!(put.status.success());
+    let put_stdout = String::from_utf8(put.stdout).expect("utf-8 stdout");
+    assert!(put_stdout.contains("recursive: true"));
+    assert!(put_stdout.contains("directory_count: 2"));
+    assert!(put_stdout.contains("file_count: 2"));
+    assert!(put_stdout.contains("destination: demo:/imports/docs"));
+
+    let report = run_loon([
+        "file",
+        "cat",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/imports/docs/report.txt",
+    ]);
+    assert!(report.status.success());
+    assert_eq!(report.stdout, b"report bytes\n");
+
+    let note = run_loon([
+        "file",
+        "cat",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/imports/docs/drafts/note.txt",
+    ]);
+    assert!(note.status.success());
+    assert_eq!(note.stdout, b"note bytes\n");
+}
+
+#[test]
 fn file_put_replace_cp_mkdir_rm_and_mv_run_as_authoritative_commands() {
     let temp_dir = TestDir::new("loon-cli-file-write");
     let config_path = write_demo_local_fs_config(temp_dir.path());

@@ -1,6 +1,7 @@
+use crate::commit::CommitOp;
 use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -172,6 +173,78 @@ pub enum VisibleSubtreeError {
         absolute_path: String,
         inode_id: InodeId,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecursivePutLocalEntry {
+    pub relative_path: String,
+    pub inode_kind: InodeKind,
+    pub content_manifest_digest: Option<String>,
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecursivePutDirectory {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub parent_relative_path: Option<String>,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecursivePutFile {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub parent_relative_path: String,
+    pub display_name: String,
+    pub content_manifest_digest: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecursivePutPlan {
+    pub target: ResolvedVisibleCreateTarget,
+    #[serde(default)]
+    pub directories: Vec<RecursivePutDirectory>,
+    #[serde(default)]
+    pub files: Vec<RecursivePutFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub enum RecursivePutPlanError {
+    #[error(transparent)]
+    VisiblePathMutation(VisiblePathMutationError),
+    #[error("recursive put local subtree is missing its root directory entry")]
+    RootEntryMissing,
+    #[error("recursive put root local entry must be a directory")]
+    RootEntryMustBeDirectory,
+    #[error("recursive put entry has invalid relative path `{relative_path}`")]
+    InvalidRelativePath { relative_path: String },
+    #[error(
+        "recursive put does not support local kind `{inode_kind:?}` at relative path `{relative_path}`"
+    )]
+    UnsupportedLocalKind {
+        relative_path: String,
+        inode_kind: InodeKind,
+    },
+    #[error("recursive put local subtree contains duplicate relative path `{relative_path}`")]
+    DuplicateRelativePath { relative_path: String },
+    #[error(
+        "recursive put local subtree entry `{relative_path}` is missing parent `{parent_relative_path}`"
+    )]
+    ParentEntryMissing {
+        relative_path: String,
+        parent_relative_path: String,
+    },
+    #[error(
+        "recursive put local subtree entry `{relative_path}` has non-directory parent `{parent_relative_path}`"
+    )]
+    ParentEntryNotDirectory {
+        relative_path: String,
+        parent_relative_path: String,
+    },
+    #[error("recursive put file entry `{relative_path}` is missing content metadata")]
+    FileEntryMissingContent { relative_path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -724,6 +797,150 @@ impl MetadataState {
         })
     }
 
+    pub fn plan_recursive_put_subtree(
+        &self,
+        absolute_path: &str,
+        base_seq: ChangeSeq,
+        local_entries: &[RecursivePutLocalEntry],
+    ) -> Result<RecursivePutPlan, RecursivePutPlanError> {
+        let target = self
+            .resolve_visible_create_target(absolute_path, base_seq)
+            .map_err(RecursivePutPlanError::VisiblePathMutation)?;
+        let normalized = normalize_recursive_put_entries(local_entries)?;
+        let root = normalized
+            .get("")
+            .ok_or(RecursivePutPlanError::RootEntryMissing)?;
+        if root.inode_kind != InodeKind::Dir {
+            return Err(RecursivePutPlanError::RootEntryMustBeDirectory);
+        }
+
+        let mut directories = Vec::new();
+        let mut files = Vec::new();
+        for (relative_path, entry) in &normalized {
+            if relative_path.is_empty() {
+                directories.push(RecursivePutDirectory {
+                    relative_path: String::new(),
+                    absolute_path: target.absolute_path.clone(),
+                    parent_relative_path: None,
+                    display_name: target.display_name.clone(),
+                });
+                continue;
+            }
+
+            let parent_relative_path = parent_relative_path(relative_path).ok_or_else(|| {
+                RecursivePutPlanError::ParentEntryMissing {
+                    relative_path: relative_path.clone(),
+                    parent_relative_path: String::new(),
+                }
+            })?;
+            let parent_entry = normalized.get(&parent_relative_path).ok_or_else(|| {
+                RecursivePutPlanError::ParentEntryMissing {
+                    relative_path: relative_path.clone(),
+                    parent_relative_path: parent_relative_path.clone(),
+                }
+            })?;
+            if parent_entry.inode_kind != InodeKind::Dir {
+                return Err(RecursivePutPlanError::ParentEntryNotDirectory {
+                    relative_path: relative_path.clone(),
+                    parent_relative_path,
+                });
+            }
+
+            let absolute_path = join_absolute_path(&target.absolute_path, relative_path);
+            let display_name = leaf_display_name(relative_path).expect("non-root relative path");
+            match entry.inode_kind {
+                InodeKind::Dir => directories.push(RecursivePutDirectory {
+                    relative_path: relative_path.clone(),
+                    absolute_path,
+                    parent_relative_path: Some(parent_relative_path),
+                    display_name,
+                }),
+                InodeKind::File => {
+                    let content_manifest_digest = entry
+                        .content_manifest_digest
+                        .clone()
+                        .ok_or_else(|| RecursivePutPlanError::FileEntryMissingContent {
+                            relative_path: relative_path.clone(),
+                        })?;
+                    let size_bytes = entry.size_bytes.ok_or_else(|| {
+                        RecursivePutPlanError::FileEntryMissingContent {
+                            relative_path: relative_path.clone(),
+                        }
+                    })?;
+                    files.push(RecursivePutFile {
+                        relative_path: relative_path.clone(),
+                        absolute_path,
+                        parent_relative_path,
+                        display_name,
+                        content_manifest_digest,
+                        size_bytes,
+                    });
+                }
+                InodeKind::Symlink | InodeKind::Mount => {
+                    return Err(RecursivePutPlanError::UnsupportedLocalKind {
+                        relative_path: relative_path.clone(),
+                        inode_kind: entry.inode_kind.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(RecursivePutPlan {
+            target,
+            directories,
+            files,
+        })
+    }
+
+    pub fn build_recursive_put_commit_ops(
+        &self,
+        plan: &RecursivePutPlan,
+        next_inode_id: InodeId,
+    ) -> Vec<CommitOp> {
+        let mut ops = Vec::new();
+        let mut current_inode = next_inode_id;
+        let mut directory_inode_ids = BTreeMap::new();
+
+        for directory in &plan.directories {
+            let parent_inode = match &directory.parent_relative_path {
+                None => plan.target.parent_inode_id,
+                Some(parent_relative_path) => *directory_inode_ids
+                    .get(parent_relative_path)
+                    .expect("directory parent should be allocated earlier"),
+            };
+            ops.push(CommitOp::CreateDir {
+                parent_inode,
+                display_name: directory.display_name.clone(),
+            });
+            directory_inode_ids.insert(directory.relative_path.clone(), current_inode);
+            current_inode = InodeId(
+                current_inode
+                    .0
+                    .checked_add(1)
+                    .expect("recursive put inode allocation should not overflow"),
+            );
+        }
+
+        for file in &plan.files {
+            let parent_inode = *directory_inode_ids
+                .get(&file.parent_relative_path)
+                .expect("file parent directory should be allocated earlier");
+            ops.push(CommitOp::CreateFile {
+                parent_inode,
+                display_name: file.display_name.clone(),
+                content_manifest_digest: file.content_manifest_digest.clone(),
+            });
+            current_inode = InodeId(
+                current_inode
+                    .0
+                    .checked_add(1)
+                    .expect("recursive put inode allocation should not overflow"),
+            );
+        }
+
+        ops
+    }
+
     fn active_child_binding_at_seq(
         &self,
         parent_inode_id: InodeId,
@@ -898,6 +1115,68 @@ fn relative_path_from_root(root_absolute_path: &str, absolute_path: &str) -> Str
     }
 }
 
+fn normalize_recursive_put_entries(
+    local_entries: &[RecursivePutLocalEntry],
+) -> Result<BTreeMap<String, RecursivePutLocalEntry>, RecursivePutPlanError> {
+    let mut normalized = BTreeMap::new();
+    for entry in local_entries {
+        let relative_path = normalize_relative_path(&entry.relative_path)?;
+        if matches!(entry.inode_kind, InodeKind::Symlink | InodeKind::Mount) {
+            return Err(RecursivePutPlanError::UnsupportedLocalKind {
+                relative_path,
+                inode_kind: entry.inode_kind.clone(),
+            });
+        }
+        let normalized_entry = RecursivePutLocalEntry {
+            relative_path: relative_path.clone(),
+            inode_kind: entry.inode_kind.clone(),
+            content_manifest_digest: entry.content_manifest_digest.clone(),
+            size_bytes: entry.size_bytes,
+        };
+        if normalized
+            .insert(relative_path.clone(), normalized_entry)
+            .is_some()
+        {
+            return Err(RecursivePutPlanError::DuplicateRelativePath { relative_path });
+        }
+    }
+    Ok(normalized)
+}
+
+fn normalize_relative_path(relative_path: &str) -> Result<String, RecursivePutPlanError> {
+    if relative_path.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut components = Vec::new();
+    for component in relative_path.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(RecursivePutPlanError::InvalidRelativePath {
+                relative_path: relative_path.to_owned(),
+            });
+        }
+        components.push(component);
+    }
+    Ok(components.join("/"))
+}
+
+fn parent_relative_path(relative_path: &str) -> Option<String> {
+    if relative_path.is_empty() {
+        return None;
+    }
+    match relative_path.rsplit_once('/') {
+        Some((parent, _)) => Some(parent.to_owned()),
+        None => Some(String::new()),
+    }
+}
+
+fn leaf_display_name(relative_path: &str) -> Option<String> {
+    relative_path
+        .rsplit('/')
+        .next()
+        .map(std::borrow::ToOwned::to_owned)
+}
+
 fn normalize_absolute_path(absolute_path: &str) -> Result<String, VisiblePathError> {
     let components = parse_absolute_path_components(absolute_path)?;
     if components.is_empty() {
@@ -945,8 +1224,8 @@ fn split_parent_and_display_name(absolute_path: &str) -> Result<(String, String)
 #[cfg(test)]
 mod tests {
     use super::{
-        DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
-        VisiblePathError, VisiblePathMutationError, VisibleSubtreeError,
+        DirentryRecord, InodeRecord, MetadataState, RecursivePutLocalEntry, RevisionRecord,
+        SubtreeTombstoneRecord, VisiblePathError, VisiblePathMutationError, VisibleSubtreeError,
     };
     use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
 
@@ -1582,6 +1861,141 @@ mod tests {
             error,
             VisibleSubtreeError::FileRevisionMissing { absolute_path, inode_id }
                 if absolute_path == "/docs/drafts/note.txt" && inode_id == InodeId(6)
+        ));
+    }
+
+    #[test]
+    fn plan_recursive_put_subtree_builds_deterministic_entries_and_commit_ops() {
+        let metadata_state = sample_path_metadata();
+        let plan = metadata_state
+            .plan_recursive_put_subtree(
+                "/archive/imported",
+                ChangeSeq(3),
+                &[
+                    RecursivePutLocalEntry {
+                        relative_path: String::new(),
+                        inode_kind: InodeKind::Dir,
+                        content_manifest_digest: None,
+                        size_bytes: None,
+                    },
+                    RecursivePutLocalEntry {
+                        relative_path: "b-dir".to_owned(),
+                        inode_kind: InodeKind::Dir,
+                        content_manifest_digest: None,
+                        size_bytes: None,
+                    },
+                    RecursivePutLocalEntry {
+                        relative_path: "a-dir".to_owned(),
+                        inode_kind: InodeKind::Dir,
+                        content_manifest_digest: None,
+                        size_bytes: None,
+                    },
+                    RecursivePutLocalEntry {
+                        relative_path: "a-dir/alpha.txt".to_owned(),
+                        inode_kind: InodeKind::File,
+                        content_manifest_digest: Some("sha256:alpha".to_owned()),
+                        size_bytes: Some(11),
+                    },
+                    RecursivePutLocalEntry {
+                        relative_path: "b-dir/bravo.txt".to_owned(),
+                        inode_kind: InodeKind::File,
+                        content_manifest_digest: Some("sha256:bravo".to_owned()),
+                        size_bytes: Some(12),
+                    },
+                ],
+            )
+            .expect("plan recursive put");
+
+        assert_eq!(
+            plan.directories
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["", "a-dir", "b-dir"]
+        );
+        assert_eq!(
+            plan.files
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-dir/alpha.txt", "b-dir/bravo.txt"]
+        );
+
+        let ops = metadata_state.build_recursive_put_commit_ops(&plan, InodeId(501));
+        assert_eq!(
+            ops,
+            vec![
+                crate::commit::CommitOp::CreateDir {
+                    parent_inode: InodeId(4),
+                    display_name: "imported".to_owned(),
+                },
+                crate::commit::CommitOp::CreateDir {
+                    parent_inode: InodeId(501),
+                    display_name: "a-dir".to_owned(),
+                },
+                crate::commit::CommitOp::CreateDir {
+                    parent_inode: InodeId(501),
+                    display_name: "b-dir".to_owned(),
+                },
+                crate::commit::CommitOp::CreateFile {
+                    parent_inode: InodeId(502),
+                    display_name: "alpha.txt".to_owned(),
+                    content_manifest_digest: "sha256:alpha".to_owned(),
+                },
+                crate::commit::CommitOp::CreateFile {
+                    parent_inode: InodeId(503),
+                    display_name: "bravo.txt".to_owned(),
+                    content_manifest_digest: "sha256:bravo".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_recursive_put_subtree_rejects_invalid_local_shapes() {
+        let metadata_state = sample_path_metadata();
+
+        let missing_root = metadata_state
+            .plan_recursive_put_subtree(
+                "/archive/imported",
+                ChangeSeq(3),
+                &[RecursivePutLocalEntry {
+                    relative_path: "docs".to_owned(),
+                    inode_kind: InodeKind::Dir,
+                    content_manifest_digest: None,
+                    size_bytes: None,
+                }],
+            )
+            .expect_err("missing root should fail");
+        assert!(matches!(
+            missing_root,
+            super::RecursivePutPlanError::RootEntryMissing
+        ));
+
+        let unsupported = metadata_state
+            .plan_recursive_put_subtree(
+                "/archive/imported",
+                ChangeSeq(3),
+                &[
+                    RecursivePutLocalEntry {
+                        relative_path: String::new(),
+                        inode_kind: InodeKind::Dir,
+                        content_manifest_digest: None,
+                        size_bytes: None,
+                    },
+                    RecursivePutLocalEntry {
+                        relative_path: "link".to_owned(),
+                        inode_kind: InodeKind::Symlink,
+                        content_manifest_digest: None,
+                        size_bytes: None,
+                    },
+                ],
+            )
+            .expect_err("unsupported local kind should fail");
+        assert!(matches!(
+            unsupported,
+            super::RecursivePutPlanError::UnsupportedLocalKind { relative_path, inode_kind }
+                if relative_path == "link" && inode_kind == InodeKind::Symlink
         ));
     }
 

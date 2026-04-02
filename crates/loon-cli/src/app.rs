@@ -181,6 +181,7 @@ mod tests {
                 local_path: PathBuf::from("./hello.txt"),
                 selector: "demo:/docs/hello.txt".to_owned(),
                 replace: false,
+                recursive: false,
             })
         );
     }
@@ -205,6 +206,29 @@ mod tests {
                 local_path: PathBuf::from("./hello-v2.txt"),
                 selector: "demo:/docs/hello.txt".to_owned(),
                 replace: true,
+                recursive: false,
+            })
+        );
+
+        let recursive_put = parse_args([
+            "loon",
+            "file",
+            "put",
+            "--recursive",
+            "--config",
+            "demo.toml",
+            "./docs",
+            "demo:/uploaded-docs",
+        ])
+        .expect("parse file put --recursive");
+        assert_eq!(
+            recursive_put,
+            ParsedCommand::File(FileCommand::Put {
+                config_path: PathBuf::from("demo.toml"),
+                local_path: PathBuf::from("./docs"),
+                selector: "demo:/uploaded-docs".to_owned(),
+                replace: false,
+                recursive: true,
             })
         );
 
