@@ -513,7 +513,9 @@ fn ffi_response_json(response_ptr: *mut c_char) -> serde_json::Value {
         .to_str()
         .expect("response should be valid UTF-8")
         .to_owned();
-    loon_file_provider_string_free(response_ptr);
+    // SAFETY: `response_ptr` was returned by a `loon_file_provider_*` FFI call and has not been
+    // freed yet.
+    unsafe { loon_file_provider_string_free(response_ptr) };
     serde_json::from_str(&response_json).expect("response should be valid JSON")
 }
 

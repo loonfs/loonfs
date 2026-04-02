@@ -215,7 +215,6 @@ impl FileProviderBridge {
                 .config
                 .exposed_namespaces
                 .iter()
-                .cloned()
                 .map(|namespace_id| ProviderItemSnapshot {
                     item_id: ProviderItemId::NamespaceRoot {
                         namespace_id: namespace_id.clone(),
@@ -845,8 +844,14 @@ pub extern "C" fn loon_file_provider_bridge_materialize_item(
     ffi_call(request_json, interop_materialize_item)
 }
 
+/// Frees a string previously returned by a `loon_file_provider_*` FFI function.
+///
+/// # Safety
+///
+/// `value` must be a pointer returned by a `loon_file_provider_*` function in this library
+/// (i.e. produced via `CString::into_raw`), and it must not have been freed before.
 #[no_mangle]
-pub extern "C" fn loon_file_provider_string_free(value: *mut c_char) {
+pub unsafe extern "C" fn loon_file_provider_string_free(value: *mut c_char) {
     if value.is_null() {
         return;
     }

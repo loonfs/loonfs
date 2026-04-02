@@ -3799,8 +3799,7 @@ fn check_create_mutation_consumes_next_inode_id(
     });
     let expected_next = initial_next_inode_id
         .0
-        .checked_add(create_ids.len() as u64)
-        .unwrap_or(u64::MAX);
+        .saturating_add(create_ids.len() as u64);
 
     InvariantCheck {
         name: "create_mutation_consumes_next_inode_id".to_owned(),

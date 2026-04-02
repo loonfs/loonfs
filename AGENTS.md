@@ -99,6 +99,8 @@ Do not smuggle provider-specific behavior into `loon-core`.
 
 ## 8. Commit style
 
+Always use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages (e.g. `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`). Scope is optional but encouraged when the change is confined to a single crate (e.g. `fix(loon-client):`, `refactor(loon-macos):`).
+
 Prefer small commits. Good commit shapes:
 
 - one spec + one fixture + one model change

@@ -39,6 +39,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 #[test]
+#[allow(clippy::result_large_err)]
 fn dispatch_retry_reuses_pending_request_after_crash_after_response() {
     let namespace_id = NamespaceId::new("ns-1");
     let client_file_id = ClientFileId::new("temp-dir-1");
@@ -239,6 +240,7 @@ fn apply_remote_rename_retry_accepts_already_applied_winner() {
 }
 
 #[test]
+#[allow(clippy::result_large_err)]
 fn download_remote_edit_retry_accepts_already_applied_winner() {
     let namespace_id = NamespaceId::new("ns-1");
     let fixture = ClientCrashFixture::new("crash-download-remote-edit");
@@ -377,6 +379,7 @@ fn download_remote_edit_retry_accepts_already_applied_winner() {
 }
 
 #[test]
+#[allow(clippy::result_large_err)]
 fn same_inode_conflict_retry_reuses_existing_artifact_after_store_write_crash() {
     let namespace_id = NamespaceId::new("ns-1");
     let fixture = ClientCrashFixture::new("crash-conflict-artifact-after-store-write");
@@ -517,6 +520,7 @@ fn same_inode_conflict_retry_reuses_existing_artifact_after_store_write_crash() 
 }
 
 #[test]
+#[allow(clippy::result_large_err)]
 fn archive_retry_reconciles_sidecar_after_store_write_crash() {
     let namespace_id = NamespaceId::new("ns-1");
     let fixture = ClientCrashFixture::new("crash-archive-after-store-write");
@@ -581,6 +585,7 @@ fn archive_retry_reconciles_sidecar_after_store_write_crash() {
 }
 
 #[test]
+#[allow(clippy::result_large_err)]
 fn subtree_restore_retry_is_absent_or_complete_after_stage_ready_crash() {
     let namespace_id = NamespaceId::new("ns-1");
     let fixture = ClientCrashFixture::new("crash-subtree-restore-stage");
