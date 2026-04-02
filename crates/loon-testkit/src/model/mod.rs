@@ -1,8 +1,8 @@
-//! Pure reference model for namespace and queue semantics.
+//! Pure reference model for namespace semantics.
 //!
-//! This crate defines the expected outcomes for every mutation, precondition check, conflict
-//! scenario, and queue operation — without performing any I/O or side effects. It serves as
-//! the specification-in-code that production implementations are tested against.
+//! This crate defines the expected outcomes for every mutation, precondition check, and conflict
+//! scenario — without performing any I/O or side effects. It serves as the specification-in-code
+//! that production implementations are tested against.
 
 use loon_types::{
     ChangeSeq, ContentManifestEnvelope, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
@@ -582,96 +582,6 @@ pub enum ModelCommitValidationError {
     SeqOverflow,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelQueueWorkClass {
-    BuildSnapshot,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelQueueJobState {
-    Ready,
-    Claimed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelQueueBroker {
-    pub broker_id: String,
-    pub epoch: u64,
-    pub lease_expires_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelQueueClaim {
-    pub worker_id: String,
-    pub claim_token: String,
-    pub heartbeat_at_ms: u64,
-    pub timeout_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelJobClaimParams {
-    pub broker_id: String,
-    pub broker_epoch: u64,
-    pub worker_id: String,
-    pub claim_token: String,
-    pub now_ms: u64,
-    pub claim_timeout_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelQueueSeqPayload {
-    pub namespace_id: NamespaceId,
-    pub through_seq: ChangeSeq,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelQueueJob {
-    pub job_id: String,
-    pub dedupe_key: String,
-    pub state: ModelQueueJobState,
-    pub payload: ModelQueueSeqPayload,
-    pub follow_up: Option<ModelQueueSeqPayload>,
-    pub claim: Option<ModelQueueClaim>,
-    pub attempts: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelQueueShard {
-    pub work_class: ModelQueueWorkClass,
-    pub shard_id: u32,
-    pub broker: Option<ModelQueueBroker>,
-    pub jobs: Vec<ModelQueueJob>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ModelQueueRepairOutcome {
-    NoRepairNeeded,
-    Enqueued { through_seq: ChangeSeq },
-    RaisedReadyJob { through_seq: ChangeSeq },
-    AttachedFollowUp { through_seq: ChangeSeq },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ModelBrokerLeaseOutcome {
-    Acquired { epoch: u64 },
-    Renewed { epoch: u64 },
-    TakenOver { epoch: u64 },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ModelJobClaimOutcome {
-    Claimed { claim_token: String },
-    Stolen { claim_token: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ModelJobCompleteOutcome {
-    Removed,
-    PromotedFollowUp { through_seq: ChangeSeq },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelAction {
     CreateDir {
@@ -752,45 +662,6 @@ pub enum ModelError {
         requested: ChangeSeq,
         available: ChangeSeq,
     },
-    QueueWorkClassMismatch {
-        expected: ModelQueueWorkClass,
-        actual: ModelQueueWorkClass,
-    },
-    MissingBrokerLease,
-    BrokerLeaseHeldByOther {
-        active_broker_id: String,
-        active_epoch: u64,
-        lease_expires_at_ms: u64,
-        now_ms: u64,
-    },
-    BrokerLeaseMismatch {
-        expected_broker_id: String,
-        expected_epoch: u64,
-        actual_broker_id: String,
-        actual_epoch: u64,
-    },
-    BrokerLeaseExpired {
-        broker_id: String,
-        epoch: u64,
-        lease_expires_at_ms: u64,
-        now_ms: u64,
-    },
-    JobNotFound {
-        job_id: String,
-    },
-    JobBusy {
-        job_id: String,
-        worker_id: String,
-        timeout_at_ms: u64,
-        now_ms: u64,
-    },
-    JobNotClaimed {
-        job_id: String,
-    },
-    ClaimTokenMismatch {
-        expected: String,
-        actual: String,
-    },
     MetadataRevisionOverflow {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
@@ -806,8 +677,6 @@ mod client;
 mod content;
 mod metadata;
 mod namespace;
-mod queue;
-
 pub use client::{
     allocate_client_request_id, bound_local_matches_remote_observation,
     checkpoint_publish_head_summary_is_monotonic, checkpoint_publish_uses_latest_visible_head,
@@ -834,9 +703,6 @@ pub use content::{
     materialize_uploaded_content_reference, validate_inode_upload_record,
     validate_local_only_upload_record, validate_uploaded_content_reference,
 };
-
-#[cfg(test)]
-pub(crate) use queue::ensure_active_broker_lease;
 
 #[cfg(test)]
 mod tests;

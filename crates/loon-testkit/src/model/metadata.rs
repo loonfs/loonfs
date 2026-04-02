@@ -681,7 +681,7 @@ fn join_absolute_path(base: &str, component: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ModelDirentryRecord, ModelInodeRecord, ModelMetadataState, ModelRevisionRecord};
+    use super::{ModelDirentryRecord, ModelInodeRecord, ModelMetadataState, ModelRevisionRecord};
 
     #[test]
     fn resolve_visible_path_accepts_root_and_nested_file() {

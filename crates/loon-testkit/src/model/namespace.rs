@@ -2,16 +2,12 @@ use super::checkpoint::{
     build_model_checkpoint_page, checkpoint_segment_object_key, ensure_checkpoint_is_restorable,
     metadata_state_from_checkpoint,
 };
-use super::queue::{
-    build_snapshot_dedupe_key, build_snapshot_repair_job_id, build_snapshot_work_class,
-};
 use super::{
     ModelAction, ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPublishAuthorizers,
     ModelCheckpointSegment, ModelCheckpointTable, ModelCommitValidationError,
     ModelCommitValidationOutcome, ModelCommitValidationRequest, ModelError, ModelInodeRecord,
     ModelMetadataApplyError, ModelMetadataMutation, ModelMetadataState, ModelNamespace,
-    ModelProgressObject, ModelQueueJob, ModelQueueJobState, ModelQueueRepairOutcome,
-    ModelQueueSeqPayload, ModelQueueShard, ModelQueueWorkClass, ModelWalCommit,
+    ModelProgressObject, ModelWalCommit,
 };
 use loon_types::{ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId};
 #[cfg(test)]
@@ -424,99 +420,6 @@ impl ModelNamespace {
             namespace_id: self.namespace_id.clone(),
             work_class: work_class.to_owned(),
             through_seq: requested_through_seq,
-        })
-    }
-
-    pub fn repair_lost_snapshot_enqueue(
-        &self,
-        queue: &mut ModelQueueShard,
-        progress: Option<&ModelProgressObject>,
-    ) -> Result<ModelQueueRepairOutcome, ModelError> {
-        if queue.work_class != ModelQueueWorkClass::BuildSnapshot {
-            return Err(ModelError::QueueWorkClassMismatch {
-                expected: ModelQueueWorkClass::BuildSnapshot,
-                actual: queue.work_class,
-            });
-        }
-
-        if self.head_seq == ChangeSeq(0) {
-            return Ok(ModelQueueRepairOutcome::NoRepairNeeded);
-        }
-
-        if let Some(progress) = progress {
-            if progress.namespace_id != self.namespace_id {
-                return Err(ModelError::ProgressNamespaceMismatch {
-                    work_class: progress.work_class.clone(),
-                    expected: self.namespace_id.clone(),
-                    actual: progress.namespace_id.clone(),
-                });
-            }
-
-            if progress.work_class != build_snapshot_work_class() {
-                return Err(ModelError::ProgressWorkClassMismatch {
-                    expected: build_snapshot_work_class().to_owned(),
-                    actual: progress.work_class.clone(),
-                });
-            }
-
-            if progress.through_seq >= self.head_seq {
-                return Ok(ModelQueueRepairOutcome::NoRepairNeeded);
-            }
-        }
-
-        let desired_payload = ModelQueueSeqPayload {
-            namespace_id: self.namespace_id.clone(),
-            through_seq: self.head_seq,
-        };
-        let dedupe_key = build_snapshot_dedupe_key(&self.namespace_id);
-
-        if let Some(job) = queue
-            .jobs
-            .iter_mut()
-            .find(|job| job.dedupe_key == dedupe_key)
-        {
-            match job.state {
-                ModelQueueJobState::Ready => {
-                    if desired_payload.through_seq > job.payload.through_seq {
-                        job.payload.through_seq = desired_payload.through_seq;
-                        return Ok(ModelQueueRepairOutcome::RaisedReadyJob {
-                            through_seq: job.payload.through_seq,
-                        });
-                    }
-                }
-                ModelQueueJobState::Claimed => match &mut job.follow_up {
-                    Some(existing) => {
-                        if desired_payload.through_seq > existing.through_seq {
-                            existing.through_seq = desired_payload.through_seq;
-                            return Ok(ModelQueueRepairOutcome::AttachedFollowUp {
-                                through_seq: existing.through_seq,
-                            });
-                        }
-                    }
-                    None => {
-                        job.follow_up = Some(desired_payload.clone());
-                        return Ok(ModelQueueRepairOutcome::AttachedFollowUp {
-                            through_seq: desired_payload.through_seq,
-                        });
-                    }
-                },
-            }
-
-            return Ok(ModelQueueRepairOutcome::NoRepairNeeded);
-        }
-
-        queue.jobs.push(ModelQueueJob {
-            job_id: build_snapshot_repair_job_id(&self.namespace_id),
-            dedupe_key,
-            state: ModelQueueJobState::Ready,
-            payload: desired_payload.clone(),
-            follow_up: None,
-            claim: None,
-            attempts: 0,
-        });
-
-        Ok(ModelQueueRepairOutcome::Enqueued {
-            through_seq: desired_payload.through_seq,
         })
     }
 

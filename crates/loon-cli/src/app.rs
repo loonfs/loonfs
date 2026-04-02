@@ -69,7 +69,7 @@ pub fn run(
                 .map_err(CliError::from)
         }
         ParsedCommand::File(command) => {
-            loon_client::ops::run_file_command(command, &open_store)
+            loon_client::ops::run_file_command(command, &make_transport)
                 .map(|output| match output {
                     loon_client::ops::FileCommandOutput::Text(text) => CliOutput::Text(text),
                     loon_client::ops::FileCommandOutput::Bytes(bytes) => CliOutput::Bytes(bytes),

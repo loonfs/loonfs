@@ -11,4 +11,3 @@ pub(crate) mod genesis;
 pub mod mutation;
 pub mod objectstore;
 pub mod ops;
-pub mod queue;

@@ -1,10 +1,7 @@
 use super::OpsConfig;
 use anyhow::{bail, Context, Result};
-use loon_server::ops::{
-    list_authoritative_path, read_authoritative_file_bytes, resolve_authoritative_path,
-    AuthoritativeFileBytes, AuthoritativePathEntry,
-};
-use loon_types::{NamespaceId, ObjectStore};
+use loon_types::server::{AuthoritativeFileBytes, AuthoritativePathEntry, ServerTransport};
+use loon_types::NamespaceId;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -103,9 +100,9 @@ pub(crate) fn parse_authoritative_path_selector(
     })
 }
 
-pub fn run_file_command<S: ObjectStore>(
+pub fn run_file_command<T: ServerTransport>(
     command: FileCommand,
-    store_factory: &impl Fn(&OpsConfig) -> Result<S>,
+    transport_factory: &impl Fn(&OpsConfig) -> Result<T>,
 ) -> Result<FileCommandOutput> {
     match command {
         FileCommand::Ls {
@@ -113,10 +110,11 @@ pub fn run_file_command<S: ObjectStore>(
             selector,
         } => {
             let config = OpsConfig::load(&config_path)?;
-            let store = store_factory(&config)?;
+            let transport = transport_factory(&config)?;
             let selector = parse_authoritative_path_selector(&selector)?;
-            let entries =
-                list_authoritative_path(&store, &selector.namespace_id, &selector.absolute_path)?;
+            let entries = transport
+                .list_path(&selector.namespace_id, &selector.absolute_path)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             let rendered = entries
                 .into_iter()
                 .map(render_ls_entry)
@@ -133,13 +131,11 @@ pub fn run_file_command<S: ObjectStore>(
             selector,
         } => {
             let config = OpsConfig::load(&config_path)?;
-            let store = store_factory(&config)?;
+            let transport = transport_factory(&config)?;
             let selector = parse_authoritative_path_selector(&selector)?;
-            let entry = resolve_authoritative_path(
-                &store,
-                &selector.namespace_id,
-                &selector.absolute_path,
-            )?;
+            let entry = transport
+                .resolve_path(&selector.namespace_id, &selector.absolute_path)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(FileCommandOutput::Text(
                 serde_yaml::to_string(&entry).context("render authoritative file stat")?,
             ))
@@ -150,14 +146,12 @@ pub fn run_file_command<S: ObjectStore>(
             local_path,
         } => {
             let config = OpsConfig::load(&config_path)?;
-            let store = store_factory(&config)?;
+            let transport = transport_factory(&config)?;
             let selector_str = selector.clone();
             let selector = parse_authoritative_path_selector(&selector)?;
-            let read = read_authoritative_file_bytes(
-                &store,
-                &selector.namespace_id,
-                &selector.absolute_path,
-            )?;
+            let read = transport
+                .read_file_bytes(&selector.namespace_id, &selector.absolute_path)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             if read.entry.inode_kind != loon_types::InodeKind::File {
                 return Err(FileGetError::SourceNotFile {
                     selector: selector_str,
@@ -184,13 +178,11 @@ pub fn run_file_command<S: ObjectStore>(
             selector,
         } => {
             let config = OpsConfig::load(&config_path)?;
-            let store = store_factory(&config)?;
+            let transport = transport_factory(&config)?;
             let selector = parse_authoritative_path_selector(&selector)?;
-            let read = read_authoritative_file_bytes(
-                &store,
-                &selector.namespace_id,
-                &selector.absolute_path,
-            )?;
+            let read = transport
+                .read_file_bytes(&selector.namespace_id, &selector.absolute_path)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(FileCommandOutput::Bytes(read.bytes))
         }
     }
@@ -277,18 +269,102 @@ mod tests {
     use super::{
         parse_authoritative_path_selector, run_file_command, FileCommand, FileCommandOutput,
     };
-    use super::OpsConfig;
+    use crate::ops::{
+        OpsClientConfig, OpsConfig, OpsObjectStoreSpec, OpsSection, OpsServerConfig,
+    };
     use loon_server::objectstore::keys::{blob, content_manifest};
     use loon_server::objectstore::ConfiguredObjectStore;
     use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
-    use loon_server::ops::{bootstrap_namespace, NamespaceBootstrapParams};
+    use loon_server::ops::{
+        bootstrap_namespace,
+        list_authoritative_path, read_authoritative_file_bytes, resolve_authoritative_path,
+    };
     use loon_testkit::tempdir::TestDir;
+    use loon_types::server::{
+        AuthoritativeFileBytes, AuthoritativePathEntry, BootstrappedNamespace,
+        NamespaceBootstrapParams, NamespaceStateSummary, ServerTransport,
+    };
     use loon_types::{
-        sha256_digest, ClientMutationOp, ClientMutationRequest, ContentBlockDescriptor,
-        ContentManifestEnvelope, ContentManifestPayload, NamespaceId,
+        sha256_digest, ChangeSeq, ClientMutationOp, ClientMutationRequest,
+        ClientMutationResponse, ContentBlockDescriptor, ContentManifestEnvelope,
+        ContentManifestPayload, NamespaceId, ObjectStore, ObservedRemoteInode,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    /// Minimal `ServerTransport` backed by a `ConfiguredObjectStore`, used only in tests.
+    struct TestTransport {
+        store: ConfiguredObjectStore,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("{0}")]
+    struct TestTransportError(String);
+
+    impl ServerTransport for TestTransport {
+        type Error = TestTransportError;
+
+        fn execute_mutation(
+            &self,
+            _request: &ClientMutationRequest,
+        ) -> Result<ClientMutationResponse, Self::Error> {
+            Err(TestTransportError("execute_mutation not used in file tests".into()))
+        }
+
+        fn load_namespace_state_summary(
+            &self,
+            _namespace_id: &NamespaceId,
+        ) -> Result<NamespaceStateSummary, Self::Error> {
+            Err(TestTransportError("load_namespace_state_summary not used in file tests".into()))
+        }
+
+        fn load_remote_observations(
+            &self,
+            _namespace_id: &NamespaceId,
+        ) -> Result<(ChangeSeq, Vec<ObservedRemoteInode>), Self::Error> {
+            Err(TestTransportError("load_remote_observations not used in file tests".into()))
+        }
+
+        fn bootstrap_namespace(
+            &self,
+            _namespace_id: &NamespaceId,
+            _params: &NamespaceBootstrapParams,
+        ) -> Result<BootstrappedNamespace, Self::Error> {
+            Err(TestTransportError("bootstrap_namespace not used in file tests".into()))
+        }
+
+        fn list_path(
+            &self,
+            namespace_id: &NamespaceId,
+            absolute_path: &str,
+        ) -> Result<Vec<AuthoritativePathEntry>, Self::Error> {
+            list_authoritative_path(&self.store, namespace_id, absolute_path)
+                .map_err(|e| TestTransportError(e.to_string()))
+        }
+
+        fn resolve_path(
+            &self,
+            namespace_id: &NamespaceId,
+            absolute_path: &str,
+        ) -> Result<AuthoritativePathEntry, Self::Error> {
+            resolve_authoritative_path(&self.store, namespace_id, absolute_path)
+                .map_err(|e| TestTransportError(e.to_string()))
+        }
+
+        fn read_file_bytes(
+            &self,
+            namespace_id: &NamespaceId,
+            absolute_path: &str,
+        ) -> Result<AuthoritativeFileBytes, Self::Error> {
+            read_authoritative_file_bytes(&self.store, namespace_id, absolute_path)
+                .map_err(|e| TestTransportError(e.to_string()))
+        }
+    }
+
+    fn test_make_transport(config: &OpsConfig) -> anyhow::Result<TestTransport> {
+        let store = test_open_store(config)?;
+        Ok(TestTransport { store })
+    }
 
     #[test]
     fn parse_selector_normalizes_root_and_nested_paths() {
@@ -318,14 +394,14 @@ mod tests {
         let ls = run_file_command(FileCommand::Ls {
             config_path: config_path.clone(),
             selector: "demo:/".to_owned(),
-        }, &test_open_store)
+        }, &test_make_transport)
         .expect("run ls");
         assert_eq!(ls, FileCommandOutput::Text("hello.txt\n".to_owned()));
 
         let stat = run_file_command(FileCommand::Stat {
             config_path: config_path.clone(),
             selector: "demo:/hello.txt".to_owned(),
-        }, &test_open_store)
+        }, &test_make_transport)
         .expect("run stat");
         let stat_text = match stat {
             FileCommandOutput::Text(text) => text,
@@ -340,7 +416,7 @@ mod tests {
             config_path: config_path.clone(),
             selector: "demo:/hello.txt".to_owned(),
             local_path: download_dir.clone(),
-        }, &test_open_store)
+        }, &test_make_transport)
         .expect("run get");
         let get_text = match get {
             FileCommandOutput::Text(text) => text,
@@ -355,7 +431,7 @@ mod tests {
         let cat = run_file_command(FileCommand::Cat {
             config_path,
             selector: "demo:/hello.txt".to_owned(),
-        }, &test_open_store)
+        }, &test_make_transport)
         .expect("run cat");
         assert_eq!(cat, FileCommandOutput::Bytes(b"hello from loon\n".to_vec()));
     }
@@ -373,7 +449,7 @@ mod tests {
             config_path: config_path.clone(),
             selector: "demo:/hello.txt".to_owned(),
             local_path: existing_target,
-        }, &test_open_store)
+        }, &test_make_transport)
         .expect_err("existing target should fail");
         assert!(existing_error.to_string().contains("already exists"));
 
@@ -382,7 +458,7 @@ mod tests {
             config_path,
             selector: "demo:/hello.txt".to_owned(),
             local_path: missing_parent,
-        }, &test_open_store)
+        }, &test_make_transport)
         .expect_err("missing parent should fail");
         assert!(missing_parent_error
             .to_string()
@@ -396,20 +472,20 @@ mod tests {
         fs::create_dir_all(&object_store_root).expect("create object store root");
         fs::create_dir_all(&mirror_root).expect("create mirror root");
         let config = OpsConfig {
-            object_store: super::OpsObjectStoreSpec::LocalFs {
+            object_store: OpsObjectStoreSpec::LocalFs {
                 root: object_store_root,
                 key_prefix: None,
             },
-            client: super::OpsClientConfig {
+            client: OpsClientConfig {
                 state_db_path,
                 mirror_root,
             },
-            server: super::OpsServerConfig {
+            server: OpsServerConfig {
                 writer_id: "writer-a".to_owned(),
                 writer_version: "loon-ops-test".to_owned(),
                 lease_duration_ms: 60_000,
             },
-            ops: super::OpsSection {
+            ops: OpsSection {
                 now_ms: Some(1_000),
                 max_steps: None,
             },
@@ -491,7 +567,7 @@ mod tests {
 
     fn test_open_store(config: &OpsConfig) -> anyhow::Result<ConfiguredObjectStore> {
         match &config.object_store {
-            super::OpsObjectStoreSpec::LocalFs { root, key_prefix } => {
+            OpsObjectStoreSpec::LocalFs { root, key_prefix } => {
                 ConfiguredObjectStore::local_fs(root, key_prefix.as_deref()).map_err(Into::into)
             }
             _ => anyhow::bail!("test only supports local-fs stores"),

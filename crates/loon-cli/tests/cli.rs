@@ -6,14 +6,17 @@ use loon_server::objectstore::s3::AwsS3StoreConfig;
 use loon_server::objectstore::ConfiguredObjectStore;
 use loon_server::ops::{
     bootstrap_namespace as server_bootstrap_namespace,
+    list_authoritative_path as server_list_path,
     load_namespace_state_summary as server_load_namespace_state_summary,
+    read_authoritative_file_bytes as server_read_file_bytes,
+    resolve_authoritative_path as server_resolve_path,
     translate_authoritative_state_to_remote_observations as server_translate,
     NamespaceBootstrapError, NamespaceStateSummaryError, RemoteObservationTranslationError,
 };
 use loon_testkit::tempdir::TestDir;
 use loon_types::{
     sha256_digest, ClientMutationOp, ClientMutationRequest, ContentBlockDescriptor,
-    ContentManifestEnvelope, ContentManifestPayload, NamespaceId,
+    ContentManifestEnvelope, ContentManifestPayload, NamespaceId, ObjectStore,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -920,6 +923,8 @@ enum TestTransportError {
     RemoteObservations(#[from] RemoteObservationTranslationError),
     #[error("mutation execution failed: {0}")]
     Mutation(String),
+    #[error("file read failed: {0}")]
+    FileRead(String),
 }
 
 impl loon_types::server::ServerTransport for TestLocalTransport {
@@ -965,6 +970,33 @@ impl loon_types::server::ServerTransport for TestLocalTransport {
         params: &loon_types::server::NamespaceBootstrapParams,
     ) -> Result<loon_types::server::BootstrappedNamespace, Self::Error> {
         Ok(server_bootstrap_namespace(&self.store, namespace_id, params)?)
+    }
+
+    fn list_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<Vec<loon_types::server::AuthoritativePathEntry>, Self::Error> {
+        server_list_path(&self.store, namespace_id, absolute_path)
+            .map_err(|e| TestTransportError::FileRead(e.to_string()))
+    }
+
+    fn resolve_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<loon_types::server::AuthoritativePathEntry, Self::Error> {
+        server_resolve_path(&self.store, namespace_id, absolute_path)
+            .map_err(|e| TestTransportError::FileRead(e.to_string()))
+    }
+
+    fn read_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<loon_types::server::AuthoritativeFileBytes, Self::Error> {
+        server_read_file_bytes(&self.store, namespace_id, absolute_path)
+            .map_err(|e| TestTransportError::FileRead(e.to_string()))
     }
 }
 
