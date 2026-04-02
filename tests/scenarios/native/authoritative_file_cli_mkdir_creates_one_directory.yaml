@@ -1,0 +1,23 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_mkdir_creates_one_directory
+initial:
+  head:
+    namespace_id: demo
+    seq: 2
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+actions:
+  - mkdir:
+      selector: demo:/docs/archive
+expect:
+  created:
+    selector: demo:/docs/archive
+    inode_kind: dir
+

@@ -281,6 +281,30 @@ pub enum ModelVisiblePathError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelResolvedVisibleCreateTarget {
+    pub absolute_path: String,
+    pub parent_absolute_path: String,
+    pub parent_inode_id: InodeId,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelVisiblePathMutationError {
+    VisiblePath(ModelVisiblePathError),
+    RootPathRejected {
+        absolute_path: String,
+    },
+    DestinationOccupied {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    IdenticalSourceAndDestination {
+        absolute_path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelLocalOnlyObservationCandidate {
     pub client_file_id: String,
     pub namespace_id: NamespaceId,

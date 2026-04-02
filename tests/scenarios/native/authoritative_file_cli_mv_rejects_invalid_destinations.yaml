@@ -1,0 +1,40 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_mv_rejects_invalid_destinations
+initial:
+  head:
+    namespace_id: demo
+    seq: 8
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/report.txt
+        inode_id: 3
+        inode_kind: file
+      - absolute_path: /docs/final.txt
+        inode_id: 4
+        inode_kind: file
+actions:
+  - move:
+      from: demo:/docs/report.txt
+      to: demo:/docs/final.txt
+  - move:
+      from: demo:/docs/report.txt
+      to: other:/docs/report.txt
+  - move:
+      from: demo:/docs/report.txt
+      to: demo:/docs/report.txt
+  - move:
+      from: demo:/
+      to: demo:/docs/root-copy
+expect:
+  errors:
+    - destination_occupied
+    - cross_namespace_move_rejected
+    - identical_source_and_destination
+    - root_target_rejected

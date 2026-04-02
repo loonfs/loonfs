@@ -1,0 +1,38 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_put_rejects_invalid_targets
+initial:
+  head:
+    namespace_id: demo
+    seq: 6
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/report.txt
+        inode_id: 3
+        inode_kind: file
+actions:
+  - put_file:
+      local_path: ./report.txt
+      selector: demo:/docs/report.txt
+  - put_file:
+      local_path: ./report.txt
+      selector: demo:/missing/report.txt
+  - put_file:
+      local_path: ./report.txt
+      selector: demo:/
+  - put_file:
+      local_path: ./docs
+      selector: demo:/docs/new.txt
+expect:
+  errors:
+    - destination_occupied
+    - parent_path_not_found
+    - root_target_rejected
+    - local_source_not_regular_file
+

@@ -1,24 +1,33 @@
 use crate::genesis::bootstrap_basis_metadata_state;
 use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::mutation::execute_client_mutation_against_basis;
+use crate::mutation::lease::LeaseAcquireError;
 use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
+use crate::mutation::{ClientMutationExecutionError, ClientMutationExecutionParams};
 use loon_core::checkpoint::{
     load_checkpoint, load_checkpoint_manifest, prepare_checkpoint, prepare_checkpoint_head_publish,
     publish_checkpoint_head, CheckpointBuildError, CheckpointHeadPublishRequest,
     CheckpointPublishError, CheckpointReplayError, StoredCheckpointManifest,
     StoredCheckpointSegment,
 };
-use loon_core::content::{read_durable_content_bytes, DurableContentValidationError};
-use loon_core::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use loon_core::content::{
+    read_durable_content_bytes, upload_small_file_from_path, validate_durable_content_reference,
+    DurableContentValidationError, UploadError,
+};
+use loon_core::metadata::{
+    MetadataState, ResolvedVisiblePath, VisiblePathError, VisiblePathMutationError,
+};
 use loon_objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
 };
 use loon_objectstore::ObjectStore;
 use loon_types::{
-    decode_content_manifest_json, ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope,
-    InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId, ObservedRemoteInode,
-    RevisionNo,
+    decode_content_manifest_json, ChangeSeq, ClientMutationOp, ClientMutationRequest,
+    ControlObjectKind, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState,
+    LeaseStateEnvelope, NamespaceId, ObservedRemoteInode, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +194,37 @@ pub struct AuthoritativeFileBytes {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativePutResult {
+    pub entry: AuthoritativePathEntry,
+    pub committed_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeMkdirResult {
+    pub entry: AuthoritativePathEntry,
+    pub committed_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeRmResult {
+    pub namespace_id: NamespaceId,
+    pub absolute_path: String,
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub committed_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeMvResult {
+    pub namespace_id: NamespaceId,
+    pub from_absolute_path: String,
+    pub to_absolute_path: String,
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub committed_seq: ChangeSeq,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum AuthoritativePathReadError {
     #[error(transparent)]
@@ -235,6 +275,79 @@ impl From<VisiblePathError> for AuthoritativePathReadError {
 impl From<DurableContentValidationError> for AuthoritativePathReadError {
     fn from(value: DurableContentValidationError) -> Self {
         Self::DurableContent(Box::new(value))
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum AuthoritativePathWriteError {
+    #[error(transparent)]
+    Basis(Box<BasisLoadError>),
+    #[error(transparent)]
+    LeaseAcquire(Box<LeaseAcquireError>),
+    #[error(transparent)]
+    VisiblePath(VisiblePathError),
+    #[error(transparent)]
+    VisiblePathMutation(VisiblePathMutationError),
+    #[error("authoritative remove requires `--recursive` for directory `{absolute_path}`")]
+    DirectoryRequiresRecursive {
+        absolute_path: String,
+        inode_id: InodeId,
+    },
+    #[error(transparent)]
+    Upload(Box<UploadError>),
+    #[error(transparent)]
+    DurableContent(Box<DurableContentValidationError>),
+    #[error(transparent)]
+    PathRead(Box<AuthoritativePathReadError>),
+    #[error(transparent)]
+    Mutation(Box<ClientMutationExecutionError>),
+}
+
+impl From<BasisLoadError> for AuthoritativePathWriteError {
+    fn from(value: BasisLoadError) -> Self {
+        Self::Basis(Box::new(value))
+    }
+}
+
+impl From<LeaseAcquireError> for AuthoritativePathWriteError {
+    fn from(value: LeaseAcquireError) -> Self {
+        Self::LeaseAcquire(Box::new(value))
+    }
+}
+
+impl From<VisiblePathError> for AuthoritativePathWriteError {
+    fn from(value: VisiblePathError) -> Self {
+        Self::VisiblePath(value)
+    }
+}
+
+impl From<VisiblePathMutationError> for AuthoritativePathWriteError {
+    fn from(value: VisiblePathMutationError) -> Self {
+        Self::VisiblePathMutation(value)
+    }
+}
+
+impl From<UploadError> for AuthoritativePathWriteError {
+    fn from(value: UploadError) -> Self {
+        Self::Upload(Box::new(value))
+    }
+}
+
+impl From<DurableContentValidationError> for AuthoritativePathWriteError {
+    fn from(value: DurableContentValidationError) -> Self {
+        Self::DurableContent(Box::new(value))
+    }
+}
+
+impl From<AuthoritativePathReadError> for AuthoritativePathWriteError {
+    fn from(value: AuthoritativePathReadError) -> Self {
+        Self::PathRead(Box::new(value))
+    }
+}
+
+impl From<ClientMutationExecutionError> for AuthoritativePathWriteError {
+    fn from(value: ClientMutationExecutionError) -> Self {
+        Self::Mutation(Box::new(value))
     }
 }
 
@@ -638,6 +751,225 @@ pub fn read_authoritative_file_bytes<S: ObjectStore>(
     })
 }
 
+pub fn put_authoritative_file_from_path<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    source_path: &Path,
+    absolute_path: &str,
+    params: &ClientMutationExecutionParams,
+) -> Result<AuthoritativePutResult, AuthoritativePathWriteError> {
+    let uploaded = upload_small_file_from_path(store, namespace_id, source_path)?;
+    let validated =
+        validate_durable_content_reference(store, namespace_id, &uploaded.content_manifest_digest)?;
+    crate::mutation::lease::acquire_or_renew_namespace_lease(store, namespace_id, params)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let target = basis
+        .metadata_state
+        .resolve_visible_create_target(absolute_path, basis.head.seq)?;
+    let request = ClientMutationRequest {
+        namespace_id: namespace_id.clone(),
+        client_request_id: build_authoritative_request_id("put", &target.absolute_path, params),
+        op: ClientMutationOp::CreateFile {
+            parent_inode_id: target.parent_inode_id,
+            display_name: target.display_name.clone(),
+            content_manifest_digest: uploaded.content_manifest_digest.clone(),
+        },
+    };
+    let executed =
+        execute_client_mutation_against_basis(store, &request, params, basis, Some(validated))?;
+    let entry = resolve_entry_from_metadata_state(
+        store,
+        namespace_id,
+        executed.head_publish.resulting_head.seq,
+        &executed.resulting_metadata_state,
+        &target.absolute_path,
+    )?;
+    Ok(AuthoritativePutResult {
+        entry,
+        committed_seq: executed.head_publish.resulting_head.seq,
+    })
+}
+
+pub fn mkdir_authoritative_path<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    params: &ClientMutationExecutionParams,
+) -> Result<AuthoritativeMkdirResult, AuthoritativePathWriteError> {
+    crate::mutation::lease::acquire_or_renew_namespace_lease(store, namespace_id, params)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let target = basis
+        .metadata_state
+        .resolve_visible_create_target(absolute_path, basis.head.seq)?;
+    let request = ClientMutationRequest {
+        namespace_id: namespace_id.clone(),
+        client_request_id: build_authoritative_request_id("mkdir", &target.absolute_path, params),
+        op: ClientMutationOp::CreateDir {
+            parent_inode_id: target.parent_inode_id,
+            display_name: target.display_name.clone(),
+        },
+    };
+    let executed = execute_client_mutation_against_basis(store, &request, params, basis, None)?;
+    let entry = resolve_entry_from_metadata_state(
+        store,
+        namespace_id,
+        executed.head_publish.resulting_head.seq,
+        &executed.resulting_metadata_state,
+        &target.absolute_path,
+    )?;
+    Ok(AuthoritativeMkdirResult {
+        entry,
+        committed_seq: executed.head_publish.resulting_head.seq,
+    })
+}
+
+pub fn rm_authoritative_path<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    recursive: bool,
+    params: &ClientMutationExecutionParams,
+) -> Result<AuthoritativeRmResult, AuthoritativePathWriteError> {
+    crate::mutation::lease::acquire_or_renew_namespace_lease(store, namespace_id, params)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let resolved = basis
+        .metadata_state
+        .resolve_visible_path(absolute_path, basis.head.seq)?;
+    reject_root_path(&resolved.absolute_path)?;
+    let request = match resolved.inode_kind {
+        InodeKind::File => ClientMutationRequest {
+            namespace_id: namespace_id.clone(),
+            client_request_id: build_authoritative_request_id(
+                "rm-file",
+                &resolved.absolute_path,
+                params,
+            ),
+            op: ClientMutationOp::DeleteFile {
+                inode_id: resolved.inode_id,
+            },
+        },
+        InodeKind::Dir => {
+            if !recursive {
+                return Err(AuthoritativePathWriteError::DirectoryRequiresRecursive {
+                    absolute_path: resolved.absolute_path,
+                    inode_id: resolved.inode_id,
+                });
+            }
+            ClientMutationRequest {
+                namespace_id: namespace_id.clone(),
+                client_request_id: build_authoritative_request_id(
+                    "rm-subtree",
+                    &resolved.absolute_path,
+                    params,
+                ),
+                op: ClientMutationOp::DeleteSubtree {
+                    root_inode_id: resolved.inode_id,
+                },
+            }
+        }
+        _ => ClientMutationRequest {
+            namespace_id: namespace_id.clone(),
+            client_request_id: build_authoritative_request_id(
+                "rm-file",
+                &resolved.absolute_path,
+                params,
+            ),
+            op: ClientMutationOp::DeleteFile {
+                inode_id: resolved.inode_id,
+            },
+        },
+    };
+    let executed = execute_client_mutation_against_basis(store, &request, params, basis, None)?;
+    Ok(AuthoritativeRmResult {
+        namespace_id: namespace_id.clone(),
+        absolute_path: resolved.absolute_path,
+        inode_id: resolved.inode_id,
+        inode_kind: resolved.inode_kind,
+        committed_seq: executed.head_publish.resulting_head.seq,
+    })
+}
+
+pub fn mv_authoritative_path<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    from_absolute_path: &str,
+    to_absolute_path: &str,
+    params: &ClientMutationExecutionParams,
+) -> Result<AuthoritativeMvResult, AuthoritativePathWriteError> {
+    crate::mutation::lease::acquire_or_renew_namespace_lease(store, namespace_id, params)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    basis
+        .metadata_state
+        .ensure_distinct_visible_paths(from_absolute_path, to_absolute_path)?;
+    let source = basis
+        .metadata_state
+        .resolve_visible_path(from_absolute_path, basis.head.seq)?;
+    reject_root_path(&source.absolute_path)?;
+    let target = basis
+        .metadata_state
+        .resolve_visible_create_target(to_absolute_path, basis.head.seq)?;
+    let request = ClientMutationRequest {
+        namespace_id: namespace_id.clone(),
+        client_request_id: build_authoritative_request_id("mv", &source.absolute_path, params),
+        op: ClientMutationOp::Rename {
+            inode_id: source.inode_id,
+            new_parent_inode_id: target.parent_inode_id,
+            new_display_name: target.display_name.clone(),
+        },
+    };
+    let executed = execute_client_mutation_against_basis(store, &request, params, basis, None)?;
+    let moved_entry = resolve_entry_from_metadata_state(
+        store,
+        namespace_id,
+        executed.head_publish.resulting_head.seq,
+        &executed.resulting_metadata_state,
+        &target.absolute_path,
+    )?;
+    Ok(AuthoritativeMvResult {
+        namespace_id: namespace_id.clone(),
+        from_absolute_path: source.absolute_path,
+        to_absolute_path: moved_entry.absolute_path,
+        inode_id: moved_entry.inode_id,
+        inode_kind: moved_entry.inode_kind,
+        committed_seq: executed.head_publish.resulting_head.seq,
+    })
+}
+
+fn resolve_entry_from_metadata_state<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head_seq: ChangeSeq,
+    metadata_state: &MetadataState,
+    absolute_path: &str,
+) -> Result<AuthoritativePathEntry, AuthoritativePathWriteError> {
+    let resolved = metadata_state.resolve_visible_path(absolute_path, head_seq)?;
+    build_authoritative_path_entry(store, namespace_id, head_seq, metadata_state, &resolved)
+        .map_err(AuthoritativePathWriteError::from)
+}
+
+fn reject_root_path(absolute_path: &str) -> Result<(), AuthoritativePathWriteError> {
+    if absolute_path == "/" {
+        return Err(AuthoritativePathWriteError::VisiblePathMutation(
+            VisiblePathMutationError::RootPathRejected {
+                absolute_path: absolute_path.to_owned(),
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn build_authoritative_request_id(
+    operation: &str,
+    absolute_path: &str,
+    params: &ClientMutationExecutionParams,
+) -> String {
+    format!(
+        "authoritative-{operation}-{}-{}",
+        params.now_ms,
+        absolute_path.trim_start_matches('/').replace('/', "_")
+    )
+}
+
 fn load_namespace_checkpoint_manifest<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -832,9 +1164,10 @@ fn wal_seq_from_key(
 mod tests {
     use super::{
         bootstrap_namespace, list_authoritative_path, load_namespace_state_summary,
-        read_authoritative_file_bytes, resolve_authoritative_path,
+        mkdir_authoritative_path, mv_authoritative_path, put_authoritative_file_from_path,
+        read_authoritative_file_bytes, resolve_authoritative_path, rm_authoritative_path,
         translate_authoritative_state_to_remote_observations, AuthoritativePathReadError,
-        NamespaceBootstrapError, NamespaceBootstrapParams,
+        AuthoritativePathWriteError, NamespaceBootstrapError, NamespaceBootstrapParams,
     };
     use crate::genesis::bootstrap_basis_metadata_state;
     use crate::mutation::{execute_client_mutation, ClientMutationExecutionParams};
@@ -1332,6 +1665,141 @@ mod tests {
         assert!(matches!(
             broken_error,
             AuthoritativePathReadError::DurableContent(_)
+        ));
+    }
+
+    #[test]
+    fn authoritative_write_ops_create_move_and_delete_visible_entries() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-write");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+
+        let mkdir = mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir authoritative path");
+        assert_eq!(mkdir.entry.absolute_path, "/docs");
+
+        let source_path = temp_dir.join("hello.txt");
+        fs::write(&source_path, b"hello from write path\n").expect("write local source");
+        let put = put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &source_path,
+            "/docs/hello.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put authoritative file");
+        assert_eq!(put.entry.absolute_path, "/docs/hello.txt");
+        assert_eq!(put.entry.size_bytes, Some(22));
+
+        let mv = mv_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            "/docs/archive.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_300,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("move authoritative file");
+        assert_eq!(mv.to_absolute_path, "/docs/archive.txt");
+
+        let rm = rm_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs/archive.txt",
+            false,
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_400,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("remove authoritative file");
+        assert_eq!(rm.absolute_path, "/docs/archive.txt");
+
+        let listing = list_authoritative_path(&store, &namespace_id, "/docs").expect("list docs");
+        assert!(listing.is_empty());
+    }
+
+    #[test]
+    fn authoritative_rm_rejects_directory_without_recursive() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-rm-dir");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir authoritative path");
+
+        let error = rm_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            false,
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect_err("directory remove without recursive should fail");
+        assert!(matches!(
+            error,
+            AuthoritativePathWriteError::DirectoryRequiresRecursive { .. }
         ));
     }
 

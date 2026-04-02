@@ -1,0 +1,28 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_mv_renames_within_namespace
+initial:
+  head:
+    namespace_id: demo
+    seq: 6
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/report.txt
+        inode_id: 3
+        inode_kind: file
+actions:
+  - move:
+      from: demo:/docs/report.txt
+      to: demo:/docs/final.txt
+expect:
+  moved:
+    from: demo:/docs/report.txt
+    to: demo:/docs/final.txt
+    inode_kind: file
+

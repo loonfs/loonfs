@@ -1,4 +1,4 @@
-# Spec 100: authoritative read-only file CLI
+# Spec 100: authoritative file CLI
 
 ## Purpose
 
@@ -10,6 +10,10 @@ The first user-facing product shell is a separate authoritative file surface:
 - `loon file stat <namespace:/path>`
 - `loon file get <namespace:/path> <local-path>`
 - `loon file cat <namespace:/path>`
+- `loon file put <local-file> <namespace:/absolute/path>`
+- `loon file mkdir <namespace:/absolute/path>`
+- `loon file rm [--recursive] <namespace:/absolute/path>`
+- `loon file mv <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
 
 This surface is path-oriented for user intent, but it still reads canonical inode-keyed namespace
 state directly from durable object storage.
@@ -155,6 +159,98 @@ Failure modes prevented:
 
 - using `get` as a hidden sync/materialization path
 - mixing human-readable wrapper text into binary stdout
+
+## Write commands
+
+Write commands are direct authoritative mutations. They do not route through mirror-root
+observation, client SQLite state, or sync execution.
+
+### `loon file put`
+
+Rules:
+
+- source must be one existing regular local file
+- destination selector must not be root
+- destination selector names the exact final remote path
+- destination must be absent
+- destination parent must already exist and be a visible directory
+- v1 `put` is create-only
+- no directory upload, overwrite, or parent auto-create
+
+### `loon file mkdir`
+
+Rules:
+
+- target selector must not be root
+- target selector names one exact final directory path
+- destination must be absent
+- destination parent must already exist and be a visible directory
+- no `-p` behavior
+
+### `loon file rm`
+
+Rules:
+
+- file targets delete directly
+- directory targets require `--recursive`
+- root is always rejected
+- there is no `--force` in this slice
+
+### `loon file mv`
+
+Rules:
+
+- source and destination selectors must be in the same namespace
+- both selectors name exact final paths
+- source must exist and must not be root
+- destination must be absent
+- destination parent must already exist and be a visible directory
+- identical source and destination paths are explicit errors
+- there is no overwrite behavior in this slice
+
+Why these rules exist:
+
+- the first product write surface should be immediately useful without inventing shell-like path
+  heuristics
+- fail-closed path rules keep the authoritative mutation contract easy to reason about
+
+Failure modes prevented:
+
+- interpreting a remote directory selector as an implicit basename-placement container
+- accidental overwrite semantics that do not exist in the underlying authoritative protocol
+
+## Path-addressed authoritative mutation flow
+
+Product writes must resolve paths and commit inside one authoritative server-side mutation flow.
+
+Rules:
+
+1. `put` uploads durable content first
+2. acquire or renew the namespace lease
+3. load one verified authoritative basis
+4. resolve selectors against that basis
+5. translate the resolved paths to the existing inode-keyed mutation ops
+6. validate, write WAL, and CAS-publish the head through the existing commit machinery
+
+Additional rules:
+
+- `loon-ops` and `loon-cli` must not resolve a path to an inode and then call the current
+  inode-addressed mutation path as two separate authoritative steps
+- selector resolution and authoritative commit validation must therefore observe one coherent basis
+- `put` reuses the same immutable block/manifest upload contract as client sync uploads
+
+Why these rules exist:
+
+- authoritative path writes must not be vulnerable to path drift between selection and commit
+- the product shell should remain a second frontend to the same semantics engine, not a second
+  mutation protocol
+
+Failure modes prevented:
+
+- resolving `/docs/report.txt` to inode `42` in one step and committing a stale mutation after a
+  later authoritative rename
+- widening `loon file ...` into a bespoke path mutation implementation that diverges from the
+  namespace commit protocol
 
 ## Content read validation
 

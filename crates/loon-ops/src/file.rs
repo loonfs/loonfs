@@ -1,8 +1,10 @@
 use crate::OpsConfig;
 use anyhow::{bail, Context, Result};
+use loon_server::mutation::ClientMutationExecutionParams;
 use loon_server::ops::{
-    list_authoritative_path, read_authoritative_file_bytes, resolve_authoritative_path,
-    AuthoritativeFileBytes, AuthoritativePathEntry,
+    list_authoritative_path, mkdir_authoritative_path, mv_authoritative_path,
+    put_authoritative_file_from_path, read_authoritative_file_bytes, resolve_authoritative_path,
+    rm_authoritative_path, AuthoritativeFileBytes, AuthoritativePathEntry,
 };
 use loon_types::NamespaceId;
 use serde::{Deserialize, Serialize};
@@ -31,6 +33,25 @@ pub enum FileCommand {
         config_path: PathBuf,
         selector: String,
     },
+    Put {
+        config_path: PathBuf,
+        local_path: PathBuf,
+        selector: String,
+    },
+    Mkdir {
+        config_path: PathBuf,
+        selector: String,
+    },
+    Rm {
+        config_path: PathBuf,
+        selector: String,
+        recursive: bool,
+    },
+    Mv {
+        config_path: PathBuf,
+        from_selector: String,
+        to_selector: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +60,7 @@ pub enum FileCommandOutput {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AuthoritativePathSelector {
     pub namespace_id: NamespaceId,
     pub absolute_path: String,
@@ -50,6 +71,45 @@ struct FileGetReport {
     source: String,
     written_to: String,
     size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FilePutReport {
+    source_local_path: String,
+    destination: String,
+    entry: AuthoritativePathEntry,
+    committed_seq: ChangeSeqReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FileMkdirReport {
+    selector: String,
+    entry: AuthoritativePathEntry,
+    committed_seq: ChangeSeqReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FileRmReport {
+    selector: String,
+    recursive: bool,
+    deleted_path: String,
+    inode_id: String,
+    inode_kind: loon_types::InodeKind,
+    committed_seq: ChangeSeqReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FileMvReport {
+    from: String,
+    to: String,
+    inode_id: String,
+    inode_kind: loon_types::InodeKind,
+    committed_seq: ChangeSeqReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ChangeSeqReport {
+    seq: u64,
 }
 
 #[derive(Debug, Error)]
@@ -68,6 +128,30 @@ enum FileGetError {
     },
     #[error("download source is not a file selector: `{selector}`")]
     SourceNotFile { selector: String },
+}
+
+#[derive(Debug, Error)]
+enum FilePutLocalSourceError {
+    #[error("upload source path does not exist: `{path}`")]
+    Missing { path: String },
+    #[error("upload source must be a regular file: `{path}`")]
+    NotRegularFile { path: String },
+    #[error("failed to inspect upload source `{path}`: {source}")]
+    ReadMetadata {
+        path: String,
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, Error)]
+enum FileMvSelectorError {
+    #[error(
+        "authoritative move requires both selectors in one namespace: from `{from_selector}` to `{to_selector}`"
+    )]
+    CrossNamespace {
+        from_selector: String,
+        to_selector: String,
+    },
 }
 
 pub(crate) fn parse_authoritative_path_selector(
@@ -190,7 +274,171 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             )?;
             Ok(FileCommandOutput::Bytes(read.bytes))
         }
+        FileCommand::Put {
+            config_path,
+            local_path,
+            selector,
+        } => {
+            ensure_put_source_is_regular_file(&local_path)?;
+            let config = OpsConfig::load(&config_path)?;
+            let store = config.open_store()?;
+            let selector = parse_authoritative_path_selector(&selector)?;
+            let result = put_authoritative_file_from_path(
+                &store,
+                &selector.namespace_id,
+                &local_path,
+                &selector.absolute_path,
+                &mutation_params(&config),
+            )?;
+            let report = FilePutReport {
+                source_local_path: local_path.display().to_string(),
+                destination: format_selector(&selector),
+                entry: result.entry,
+                committed_seq: ChangeSeqReport {
+                    seq: result.committed_seq.0,
+                },
+            };
+            Ok(FileCommandOutput::Text(
+                serde_yaml::to_string(&report).context("render file put report")?,
+            ))
+        }
+        FileCommand::Mkdir {
+            config_path,
+            selector,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let store = config.open_store()?;
+            let selector = parse_authoritative_path_selector(&selector)?;
+            let result = mkdir_authoritative_path(
+                &store,
+                &selector.namespace_id,
+                &selector.absolute_path,
+                &mutation_params(&config),
+            )?;
+            let report = FileMkdirReport {
+                selector: format_selector(&selector),
+                entry: result.entry,
+                committed_seq: ChangeSeqReport {
+                    seq: result.committed_seq.0,
+                },
+            };
+            Ok(FileCommandOutput::Text(
+                serde_yaml::to_string(&report).context("render file mkdir report")?,
+            ))
+        }
+        FileCommand::Rm {
+            config_path,
+            selector,
+            recursive,
+        } => {
+            let config = OpsConfig::load(&config_path)?;
+            let store = config.open_store()?;
+            let selector = parse_authoritative_path_selector(&selector)?;
+            let result = rm_authoritative_path(
+                &store,
+                &selector.namespace_id,
+                &selector.absolute_path,
+                recursive,
+                &mutation_params(&config),
+            )?;
+            let report = FileRmReport {
+                selector: format_selector(&selector),
+                recursive,
+                deleted_path: result.absolute_path,
+                inode_id: result.inode_id.0.to_string(),
+                inode_kind: result.inode_kind,
+                committed_seq: ChangeSeqReport {
+                    seq: result.committed_seq.0,
+                },
+            };
+            Ok(FileCommandOutput::Text(
+                serde_yaml::to_string(&report).context("render file rm report")?,
+            ))
+        }
+        FileCommand::Mv {
+            config_path,
+            from_selector,
+            to_selector,
+        } => {
+            let from = parse_authoritative_path_selector(&from_selector)?;
+            let to = parse_authoritative_path_selector(&to_selector)?;
+            ensure_same_namespace(&from, &to, &from_selector, &to_selector)?;
+            let config = OpsConfig::load(&config_path)?;
+            let store = config.open_store()?;
+            let result = mv_authoritative_path(
+                &store,
+                &from.namespace_id,
+                &from.absolute_path,
+                &to.absolute_path,
+                &mutation_params(&config),
+            )?;
+            let report = FileMvReport {
+                from: from_selector,
+                to: to_selector,
+                inode_id: result.inode_id.0.to_string(),
+                inode_kind: result.inode_kind,
+                committed_seq: ChangeSeqReport {
+                    seq: result.committed_seq.0,
+                },
+            };
+            Ok(FileCommandOutput::Text(
+                serde_yaml::to_string(&report).context("render file mv report")?,
+            ))
+        }
     }
+}
+
+fn mutation_params(config: &OpsConfig) -> ClientMutationExecutionParams {
+    ClientMutationExecutionParams {
+        writer_id: config.server.writer_id.clone(),
+        writer_version: config.server.writer_version.clone(),
+        now_ms: config.now_ms(),
+        lease_duration_ms: config.server.lease_duration_ms,
+    }
+}
+
+fn ensure_put_source_is_regular_file(local_path: &Path) -> Result<(), FilePutLocalSourceError> {
+    let metadata = fs::metadata(local_path).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            FilePutLocalSourceError::Missing {
+                path: local_path.display().to_string(),
+            }
+        } else {
+            FilePutLocalSourceError::ReadMetadata {
+                path: local_path.display().to_string(),
+                source,
+            }
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(FilePutLocalSourceError::NotRegularFile {
+            path: local_path.display().to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_same_namespace(
+    from: &AuthoritativePathSelector,
+    to: &AuthoritativePathSelector,
+    from_selector: &str,
+    to_selector: &str,
+) -> Result<(), FileMvSelectorError> {
+    if from.namespace_id != to.namespace_id {
+        return Err(FileMvSelectorError::CrossNamespace {
+            from_selector: from_selector.to_owned(),
+            to_selector: to_selector.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn format_selector(selector: &AuthoritativePathSelector) -> String {
+    format!(
+        "{}:{}",
+        selector.namespace_id.as_str(),
+        selector.absolute_path
+    )
 }
 
 fn render_ls_entry(entry: AuthoritativePathEntry) -> String {
@@ -358,6 +606,122 @@ mod tests {
     }
 
     #[test]
+    fn put_mkdir_rm_and_mv_mutate_authoritative_store_directly() {
+        let temp_dir = TestDir::new("loon-ops-file-write");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_empty_namespace(&config_path, &namespace_id);
+
+        let mkdir = run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/docs".to_owned(),
+        })
+        .expect("run mkdir");
+        let mkdir_text = match mkdir {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text mkdir output, got {other:?}"),
+        };
+        assert!(mkdir_text.contains("selector: demo:/docs"));
+        assert!(mkdir_text.contains("absolute_path: /docs"));
+
+        let local_file = temp_dir.path().join("hello.txt");
+        fs::write(&local_file, b"hello write path\n").expect("write local source");
+        let put = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: local_file,
+            selector: "demo:/docs/hello.txt".to_owned(),
+        })
+        .expect("run put");
+        let put_text = match put {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text put output, got {other:?}"),
+        };
+        assert!(put_text.contains("destination: demo:/docs/hello.txt"));
+        assert!(put_text.contains("absolute_path: /docs/hello.txt"));
+
+        let mv = run_file_command(FileCommand::Mv {
+            config_path: config_path.clone(),
+            from_selector: "demo:/docs/hello.txt".to_owned(),
+            to_selector: "demo:/docs/archive.txt".to_owned(),
+        })
+        .expect("run mv");
+        let mv_text = match mv {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text mv output, got {other:?}"),
+        };
+        assert!(mv_text.contains("from: demo:/docs/hello.txt"));
+        assert!(mv_text.contains("to: demo:/docs/archive.txt"));
+
+        let ls = run_file_command(FileCommand::Ls {
+            config_path: config_path.clone(),
+            selector: "demo:/docs".to_owned(),
+        })
+        .expect("list docs after mv");
+        assert_eq!(ls, FileCommandOutput::Text("archive.txt\n".to_owned()));
+
+        let rm = run_file_command(FileCommand::Rm {
+            config_path,
+            selector: "demo:/docs/archive.txt".to_owned(),
+            recursive: false,
+        })
+        .expect("run rm");
+        let rm_text = match rm {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text rm output, got {other:?}"),
+        };
+        assert!(rm_text.contains("deleted_path: /docs/archive.txt"));
+        assert!(rm_text.contains("recursive: false"));
+    }
+
+    #[test]
+    fn write_commands_fail_closed_for_invalid_targets() {
+        let temp_dir = TestDir::new("loon-ops-file-write-errors");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        seed_namespace_with_hello_file(&config_path, &namespace_id, b"hello from loon\n");
+
+        let local_dir = temp_dir.path().join("local-dir");
+        fs::create_dir_all(&local_dir).expect("create local dir");
+        let put_dir_error = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: local_dir,
+            selector: "demo:/copied.txt".to_owned(),
+        })
+        .expect_err("local directory source should fail");
+        assert!(put_dir_error.to_string().contains("regular file"));
+
+        let put_missing_parent = temp_dir.path().join("upload.txt");
+        fs::write(&put_missing_parent, b"hello").expect("write local upload");
+        let put_parent_error = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: put_missing_parent,
+            selector: "demo:/missing/copied.txt".to_owned(),
+        })
+        .expect_err("missing remote parent should fail");
+        assert!(put_parent_error
+            .to_string()
+            .contains("visible path not found"));
+
+        let rm_dir_error = run_file_command(FileCommand::Rm {
+            config_path: config_path.clone(),
+            selector: "demo:/".to_owned(),
+            recursive: true,
+        })
+        .expect_err("root remove should fail");
+        assert!(rm_dir_error.to_string().contains("must not be root"));
+
+        let mv_cross_namespace = run_file_command(FileCommand::Mv {
+            config_path,
+            from_selector: "demo:/hello.txt".to_owned(),
+            to_selector: "other:/hello.txt".to_owned(),
+        })
+        .expect_err("cross namespace move should fail");
+        assert!(mv_cross_namespace
+            .to_string()
+            .contains("requires both selectors in one namespace"));
+    }
+
+    #[test]
     fn get_fails_closed_for_existing_target_and_missing_parent() {
         let temp_dir = TestDir::new("loon-ops-file-get-errors");
         let config_path = write_local_fs_config(temp_dir.path());
@@ -420,11 +784,7 @@ mod tests {
         config_path
     }
 
-    fn seed_namespace_with_hello_file(
-        config_path: &Path,
-        namespace_id: &NamespaceId,
-        bytes: &[u8],
-    ) {
+    fn bootstrap_empty_namespace(config_path: &Path, namespace_id: &NamespaceId) {
         let config = OpsConfig::load(config_path).expect("load config");
         let store = config.open_store().expect("open store");
         bootstrap_namespace(
@@ -439,6 +799,16 @@ mod tests {
             },
         )
         .expect("bootstrap namespace");
+    }
+
+    fn seed_namespace_with_hello_file(
+        config_path: &Path,
+        namespace_id: &NamespaceId,
+        bytes: &[u8],
+    ) {
+        let config = OpsConfig::load(config_path).expect("load config");
+        let store = config.open_store().expect("open store");
+        bootstrap_empty_namespace(config_path, namespace_id);
 
         let file_digest_sha256 = sha256_digest(bytes);
         let block_digest = sha256_digest(bytes);

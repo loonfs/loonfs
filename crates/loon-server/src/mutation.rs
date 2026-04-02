@@ -1,9 +1,11 @@
 pub(crate) mod basis;
-mod lease;
+pub(crate) mod lease;
 pub(crate) mod loading;
 mod translate;
 
-use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::mutation::basis::{
+    load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis,
+};
 use crate::mutation::lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
 use crate::mutation::translate::{
     build_client_mutation_response, translate_client_mutation_request,
@@ -14,6 +16,7 @@ use loon_core::commit::{
     CommitPlan, CommitRequest, CommitValidationContext, CommitValidationError,
     PreparedCommitHeadPublish,
 };
+use loon_core::content::ValidatedDurableContent;
 use loon_core::metadata::{MetadataApplyError, MetadataState};
 use loon_core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
 use loon_objectstore::error::ObjectStoreError;
@@ -91,6 +94,16 @@ pub fn execute_client_mutation<S: ObjectStore>(
     let validated_content = validate_referenced_durable_content(store, request)?;
     acquire_or_renew_namespace_lease(store, &request.namespace_id, params)?;
     let basis = load_verified_namespace_basis(store, &request.namespace_id)?;
+    execute_client_mutation_against_basis(store, request, params, basis, validated_content)
+}
+
+pub(crate) fn execute_client_mutation_against_basis<S: ObjectStore>(
+    store: &S,
+    request: &ClientMutationRequest,
+    params: &ClientMutationExecutionParams,
+    basis: VerifiedNamespaceBasis,
+    validated_content: Option<ValidatedDurableContent>,
+) -> Result<ExecutedClientMutation, ClientMutationExecutionError> {
     let commit_request = translate_client_mutation_request(request, params, &basis.head)?;
     let context = CommitValidationContext {
         head: basis.head.clone(),

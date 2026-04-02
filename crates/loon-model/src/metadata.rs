@@ -1,8 +1,8 @@
 use crate::{
     AppliedModelMetadataState, ModelDirentryRecord, ModelInodeRecord, ModelMetadataApplyError,
     ModelMetadataMutation, ModelMetadataPreconditionError, ModelMetadataState,
-    ModelResolvedVisiblePath, ModelRevisionRecord, ModelSubtreeTombstoneRecord,
-    ModelVisiblePathError,
+    ModelResolvedVisibleCreateTarget, ModelResolvedVisiblePath, ModelRevisionRecord,
+    ModelSubtreeTombstoneRecord, ModelVisiblePathError, ModelVisiblePathMutationError,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo};
 use std::collections::BTreeSet;
@@ -420,6 +420,57 @@ impl ModelMetadataState {
         })
     }
 
+    pub fn resolve_visible_create_target(
+        &self,
+        absolute_path: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<ModelResolvedVisibleCreateTarget, ModelVisiblePathMutationError> {
+        let (parent_absolute_path, display_name) =
+            split_parent_and_display_name(absolute_path).map_err(map_split_path_error)?;
+        let parent = self
+            .resolve_visible_path(&parent_absolute_path, base_seq)
+            .map_err(ModelVisiblePathMutationError::VisiblePath)?;
+        if let Some(existing) = self.visible_child(parent.inode_id, &display_name, base_seq) {
+            let existing_inode = self
+                .visible_inode(existing.child_inode_id, base_seq)
+                .expect("visible child should have visible inode");
+            return Err(ModelVisiblePathMutationError::DestinationOccupied {
+                absolute_path: normalize_absolute_path(absolute_path)
+                    .expect("validated create target should normalize"),
+                inode_id: existing.child_inode_id,
+                inode_kind: existing_inode.inode_kind,
+            });
+        }
+
+        Ok(ModelResolvedVisibleCreateTarget {
+            absolute_path: normalize_absolute_path(absolute_path)
+                .expect("validated create target should normalize"),
+            parent_absolute_path,
+            parent_inode_id: parent.inode_id,
+            display_name,
+        })
+    }
+
+    pub fn ensure_distinct_visible_paths(
+        &self,
+        source_absolute_path: &str,
+        destination_absolute_path: &str,
+    ) -> Result<(), ModelVisiblePathMutationError> {
+        let source = normalize_absolute_path(source_absolute_path)
+            .map_err(ModelVisiblePathMutationError::VisiblePath)?;
+        let destination = normalize_absolute_path(destination_absolute_path)
+            .map_err(ModelVisiblePathMutationError::VisiblePath)?;
+        if source == destination {
+            return Err(
+                ModelVisiblePathMutationError::IdenticalSourceAndDestination {
+                    absolute_path: source,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
     pub fn ensure_child_name_absent(
         &self,
         parent_inode_id: InodeId,
@@ -678,6 +729,50 @@ fn join_absolute_path(base: &str, component: &str) -> String {
     }
 }
 
+fn normalize_absolute_path(absolute_path: &str) -> Result<String, ModelVisiblePathError> {
+    let components = parse_absolute_path_components(absolute_path)?;
+    if components.is_empty() {
+        Ok("/".to_owned())
+    } else {
+        Ok(format!("/{}", components.join("/")))
+    }
+}
+
+enum SplitPathError {
+    RootPathRejected { absolute_path: String },
+    VisiblePath(ModelVisiblePathError),
+}
+
+fn map_split_path_error(error: SplitPathError) -> ModelVisiblePathMutationError {
+    match error {
+        SplitPathError::RootPathRejected { absolute_path } => {
+            ModelVisiblePathMutationError::RootPathRejected { absolute_path }
+        }
+        SplitPathError::VisiblePath(error) => ModelVisiblePathMutationError::VisiblePath(error),
+    }
+}
+
+fn split_parent_and_display_name(absolute_path: &str) -> Result<(String, String), SplitPathError> {
+    let normalized = normalize_absolute_path(absolute_path).map_err(SplitPathError::VisiblePath)?;
+    if normalized == "/" {
+        return Err(SplitPathError::RootPathRejected {
+            absolute_path: normalized,
+        });
+    }
+
+    let mut components =
+        parse_absolute_path_components(&normalized).map_err(SplitPathError::VisiblePath)?;
+    let display_name = components
+        .pop()
+        .expect("non-root normalized absolute path should have leaf");
+    let parent_absolute_path = if components.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("/{}", components.join("/"))
+    };
+    Ok((parent_absolute_path, display_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +827,55 @@ mod tests {
         assert!(matches!(
             non_directory,
             ModelVisiblePathError::PathComponentNotDirectory { inode_id, .. } if inode_id == InodeId(3)
+        ));
+    }
+
+    #[test]
+    fn resolve_visible_create_target_accepts_absent_leaf_under_visible_directory() {
+        let metadata = sample_metadata();
+
+        let target = metadata
+            .resolve_visible_create_target("/docs/draft.txt", ChangeSeq(3))
+            .expect("resolve create target");
+
+        assert_eq!(target.absolute_path, "/docs/draft.txt");
+        assert_eq!(target.parent_absolute_path, "/docs");
+        assert_eq!(target.parent_inode_id, InodeId(2));
+        assert_eq!(target.display_name, "draft.txt");
+    }
+
+    #[test]
+    fn resolve_visible_create_target_rejects_root_and_occupied_destinations() {
+        let metadata = sample_metadata();
+
+        let root = metadata
+            .resolve_visible_create_target("/", ChangeSeq(3))
+            .expect_err("root create target should fail");
+        assert!(matches!(
+            root,
+            ModelVisiblePathMutationError::RootPathRejected { .. }
+        ));
+
+        let occupied = metadata
+            .resolve_visible_create_target("/docs/report.txt", ChangeSeq(3))
+            .expect_err("occupied create target should fail");
+        assert!(matches!(
+            occupied,
+            ModelVisiblePathMutationError::DestinationOccupied { inode_id, .. }
+                if inode_id == InodeId(3)
+        ));
+    }
+
+    #[test]
+    fn ensure_distinct_visible_paths_rejects_identical_normalized_paths() {
+        let metadata = sample_metadata();
+        let error = metadata
+            .ensure_distinct_visible_paths("/docs//report.txt", "/docs/report.txt")
+            .expect_err("identical normalized paths should fail");
+        assert!(matches!(
+            error,
+            ModelVisiblePathMutationError::IdenticalSourceAndDestination { absolute_path }
+                if absolute_path == "/docs/report.txt"
         ));
     }
 

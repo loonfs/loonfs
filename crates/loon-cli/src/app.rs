@@ -163,6 +163,69 @@ mod tests {
     }
 
     #[test]
+    fn parses_file_put_with_local_source_and_selector() {
+        let parsed = parse_args([
+            "loon",
+            "file",
+            "put",
+            "--config",
+            "demo.toml",
+            "./hello.txt",
+            "demo:/docs/hello.txt",
+        ])
+        .expect("parse file put");
+        assert_eq!(
+            parsed,
+            ParsedCommand::File(FileCommand::Put {
+                config_path: PathBuf::from("demo.toml"),
+                local_path: PathBuf::from("./hello.txt"),
+                selector: "demo:/docs/hello.txt".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_file_rm_recursive_and_mv() {
+        let rm = parse_args([
+            "loon",
+            "file",
+            "rm",
+            "--config",
+            "demo.toml",
+            "--recursive",
+            "demo:/docs",
+        ])
+        .expect("parse file rm");
+        assert_eq!(
+            rm,
+            ParsedCommand::File(FileCommand::Rm {
+                config_path: PathBuf::from("demo.toml"),
+                selector: "demo:/docs".to_owned(),
+                recursive: true,
+            })
+        );
+
+        let mv = parse_args([
+            "loon",
+            "file",
+            "mv",
+            "--config",
+            "demo.toml",
+            "demo:/docs/a.txt",
+            "demo:/docs/b.txt",
+        ])
+        .expect("parse file mv");
+        assert_eq!(
+            mv,
+            ParsedCommand::File(FileCommand::Mv {
+                config_path: PathBuf::from("demo.toml"),
+                from_selector: "demo:/docs/a.txt".to_owned(),
+                to_selector: "demo:/docs/b.txt".to_owned(),
+            })
+        );
+    }
+
+    #[test]
     fn parses_ops_show_client_state_common_args() {
         let parsed = parse_args([
             "loon",

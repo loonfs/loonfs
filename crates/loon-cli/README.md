@@ -5,6 +5,8 @@ Active thin CLI frontend over `crates/loon-ops`.
 Current scope:
 
 - `loon ops ...` reuses the shared `loon-ops` subcommand grammar and output semantics unchanged
+- `loon file ...` is the product-facing authoritative file surface for direct read and write
+  operations
 - `loon config ...` and `loon doctor` are CLI-only discovery/diagnostic affordances over the same
   existing ops TOML config shape
 - `loon completion ...`, `loon manpages ...`, and `loon version` are CLI-only affordances
@@ -16,7 +18,9 @@ Deliberate non-goals in the current slice:
 - no profiles or token auth
 - no separate `~/.config/loon/config.toml` model
 - no endpoint or HTTP transport abstraction
-- no public `namespace`, `ls`, `cat`, `put`, or `get` families yet
+- no profile or account management
+- no separate `~/.config/loon/config.toml` model
+- no endpoint or HTTP transport abstraction
 
 The local filesystem semantics underneath the `ops` commands continue to live in `crates/loon-client`:
 

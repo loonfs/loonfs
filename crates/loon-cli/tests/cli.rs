@@ -40,6 +40,10 @@ fn help_file_mentions_authoritative_subcommands() {
     assert!(stdout.contains("stat"));
     assert!(stdout.contains("get"));
     assert!(stdout.contains("cat"));
+    assert!(stdout.contains("put"));
+    assert!(stdout.contains("mkdir"));
+    assert!(stdout.contains("rm"));
+    assert!(stdout.contains("mv"));
 }
 
 #[test]
@@ -109,6 +113,66 @@ fn file_get_writes_download_without_touching_existing_target() {
     assert!(String::from_utf8(second_get.stderr)
         .expect("utf-8 stderr")
         .contains("already exists"));
+}
+
+#[test]
+fn file_put_mkdir_rm_and_mv_run_as_authoritative_commands() {
+    let temp_dir = TestDir::new("loon-cli-file-write");
+    let config_path = write_demo_local_fs_config(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    bootstrap_empty_namespace(&config_path, &namespace_id);
+
+    let mkdir = run_loon([
+        "file",
+        "mkdir",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs",
+    ]);
+    assert!(mkdir.status.success());
+    assert!(String::from_utf8(mkdir.stdout)
+        .expect("utf-8 stdout")
+        .contains("absolute_path: /docs"));
+
+    let local_file = temp_dir.path().join("hello.txt");
+    fs::write(&local_file, b"hello write path\n").expect("write local source");
+    let put = run_loon([
+        "file",
+        "put",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        local_file.to_str().expect("utf-8 path"),
+        "demo:/docs/hello.txt",
+    ]);
+    assert!(put.status.success());
+    assert!(String::from_utf8(put.stdout)
+        .expect("utf-8 stdout")
+        .contains("destination: demo:/docs/hello.txt"));
+
+    let mv = run_loon([
+        "file",
+        "mv",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs/hello.txt",
+        "demo:/docs/archive.txt",
+    ]);
+    assert!(mv.status.success());
+    assert!(String::from_utf8(mv.stdout)
+        .expect("utf-8 stdout")
+        .contains("to: demo:/docs/archive.txt"));
+
+    let rm = run_loon([
+        "file",
+        "rm",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs/archive.txt",
+    ]);
+    assert!(rm.status.success());
+    assert!(String::from_utf8(rm.stdout)
+        .expect("utf-8 stdout")
+        .contains("deleted_path: /docs/archive.txt"));
 }
 
 #[test]
@@ -822,18 +886,7 @@ now_ms = {now_ms}
 fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId, bytes: &[u8]) {
     let config = loon_ops::OpsConfig::load(config_path).expect("load config");
     let store = config.open_store().expect("open store");
-    bootstrap_namespace(
-        &store,
-        namespace_id,
-        &NamespaceBootstrapParams {
-            holder_id: config.server.writer_id.clone(),
-            writer_version: config.server.writer_version.clone(),
-            now_ms: config.ops.now_ms.expect("configured now_ms"),
-            lease_duration_ms: config.server.lease_duration_ms,
-            allow_existing: false,
-        },
-    )
-    .expect("bootstrap namespace");
+    bootstrap_empty_namespace(config_path, namespace_id);
 
     let file_digest_sha256 = sha256_digest(bytes);
     let block_digest = sha256_digest(bytes);
@@ -882,4 +935,21 @@ fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId,
         },
     )
     .expect("create authoritative file");
+}
+
+fn bootstrap_empty_namespace(config_path: &Path, namespace_id: &NamespaceId) {
+    let config = loon_ops::OpsConfig::load(config_path).expect("load config");
+    let store = config.open_store().expect("open store");
+    bootstrap_namespace(
+        &store,
+        namespace_id,
+        &NamespaceBootstrapParams {
+            holder_id: config.server.writer_id.clone(),
+            writer_version: config.server.writer_version.clone(),
+            now_ms: config.ops.now_ms.expect("configured now_ms"),
+            lease_duration_ms: config.server.lease_duration_ms,
+            allow_existing: false,
+        },
+    )
+    .expect("bootstrap namespace");
 }

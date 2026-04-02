@@ -19,7 +19,9 @@ Today that means:
 - auth or token management
 - profile storage
 - HTTP endpoint abstraction
-- product-facing `namespace`, `ls`, `cat`, `put`, or `get` families
+- auth or token management
+- profile storage
+- HTTP endpoint abstraction
 
 ## Start with built-in discovery
 
@@ -49,6 +51,7 @@ cargo run -p loon-cli -- completion zsh
 Current active families:
 
 - `loon ops ...`
+- `loon file ...`
 - `loon config ...`
 - `loon doctor`
 - `loon completion ...`
@@ -79,6 +82,34 @@ cargo run -p loon-cli -- ops sync-once --config ./loondb-demo.local.toml --names
 cargo run -p loon-cli -- ops sync-until-idle --config ./loondb-demo.local.toml --namespace demo --max-steps 50
 cargo run -p loon-cli -- ops smoke --config ./loondb-demo.local.toml --namespace demo
 ```
+
+## Product-facing authoritative file commands
+
+`loon file ...` is the direct authoritative product shell. It does not route through the mirror,
+client SQLite state, or sync execution.
+
+Current commands:
+
+```bash
+cargo run -p loon-cli -- file ls demo:/
+cargo run -p loon-cli -- file stat demo:/docs/report.txt
+cargo run -p loon-cli -- file get demo:/hello.txt ./downloads
+cargo run -p loon-cli -- file cat demo:/hello.txt
+cargo run -p loon-cli -- file put ./hello.txt demo:/docs/hello.txt
+cargo run -p loon-cli -- file mkdir demo:/docs/archive
+cargo run -p loon-cli -- file rm demo:/docs/hello.txt
+cargo run -p loon-cli -- file rm --recursive demo:/docs/archive
+cargo run -p loon-cli -- file mv demo:/docs/hello.txt demo:/docs/hello-final.txt
+```
+
+Strict v1 rules:
+
+- remote selectors are always `namespace:/absolute/path`
+- `put` is local-file only and create-only
+- `put` and `mv` treat the destination selector as the exact final path
+- destination overwrite is never implicit
+- `rm` requires `--recursive` for directories
+- root is rejected for all write commands
 
 ## Config files and templates
 

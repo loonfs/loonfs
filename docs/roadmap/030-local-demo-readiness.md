@@ -261,11 +261,17 @@ Rules:
 
 - keep `loon ops ...` as the explicit operator/debug shell
 - add a separate user-facing authoritative file surface in `loon-cli`
-- the first product slice is read-only:
+- the first product slice now includes direct authoritative reads and the first direct writes:
   - `loon file ls <namespace:/path>`
   - `loon file stat <namespace:/path>`
   - `loon file get <namespace:/path> <local-path>`
   - `loon file cat <namespace:/path>`
-- those commands must read authority directly from verified namespace basis and immutable content
-  objects
+  - `loon file put <local-file> <namespace:/absolute/path>`
+  - `loon file mkdir <namespace:/absolute/path>`
+  - `loon file rm [--recursive] <namespace:/absolute/path>`
+  - `loon file mv <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
+- those commands must read and write authority directly from verified namespace basis and
+  immutable content objects
 - they must not route through client SQLite state, mirror observation, or sync execution
+- product write commands must resolve selectors and commit inside one authoritative server-side
+  mutation flow

@@ -156,13 +156,19 @@ Constraints for that shell:
   `loon-ops` config semantics, command behavior, or stdout rendering
 - the first broader user-facing `loon-cli` surface may widen beyond `loon ops ...` only when the
   behavior still lives in shared library code rather than in the binary shell
-- the first user-facing authoritative file slice is read-only:
+- the first user-facing authoritative file slice is read/write:
   - `loon file ls <namespace:/path>`
   - `loon file stat <namespace:/path>`
   - `loon file get <namespace:/path> <local-path>`
   - `loon file cat <namespace:/path>`
-- those product commands must read authority directly from object storage and verified namespace
-  basis rather than wrapping client import/observe/sync flows
+  - `loon file put <local-file> <namespace:/absolute/path>`
+  - `loon file mkdir <namespace:/absolute/path>`
+  - `loon file rm [--recursive] <namespace:/absolute/path>`
+  - `loon file mv <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
+- those product commands must read and write authority directly from object storage and verified
+  namespace basis rather than wrapping client import/observe/sync flows
+- product write commands must resolve selectors and commit inside one authoritative server-side
+  mutation flow so selector resolution and commit validation use one coherent leased basis
 - `loon ops ...` still requires explicit `--config`
 - config discovery convenience is limited to `loon config ...` and `loon doctor`
 - the shell is intentionally narrow in the current phase; there is still no watcher, and subtree
