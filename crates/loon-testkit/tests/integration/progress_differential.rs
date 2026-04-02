@@ -29,7 +29,7 @@ fn progress_publish_snapshot_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/progress-differential/native/progress_publish_advances_monotonically.txt"
+            "../../../../tests/snapshots/progress-differential/native/progress_publish_advances_monotonically.txt"
         )
     );
 }

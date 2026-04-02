@@ -1057,7 +1057,7 @@ fn remote_observation_late_bind_invariant_trace_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_binds_local_only_create.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_binds_local_only_create.txt"
         )
     );
 }
@@ -1069,7 +1069,7 @@ fn remote_observation_convergence_invariant_trace_matches_checked_in_artifact() 
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_converges_bound_file_edit.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_converges_bound_file_edit.txt"
         )
     );
 }
@@ -1081,7 +1081,7 @@ fn remote_observation_ambiguous_bind_invariant_trace_matches_checked_in_artifact
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_ambiguous_bind_records_issue.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_ambiguous_bind_records_issue.txt"
         )
     );
 }
@@ -1096,7 +1096,7 @@ fn remote_observation_remote_rename_invariant_trace_matches_checked_in_artifact(
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_rename_applies_locally.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_rename_applies_locally.txt"
         )
     );
 }
@@ -1111,7 +1111,7 @@ fn remote_observation_remote_move_invariant_trace_matches_checked_in_artifact() 
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_move_applies_locally.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_move_applies_locally.txt"
         )
     );
 }
@@ -1126,7 +1126,7 @@ fn remote_observation_materialized_target_parent_unblocks_file_rename_trace_matc
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_move_waits_for_target_parent_materialization.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_move_waits_for_target_parent_materialization.txt"
         )
     );
 }
@@ -1141,7 +1141,7 @@ fn remote_observation_remote_rename_failure_invariant_trace_matches_checked_in_a
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_rename_destination_occupied_records_issue.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_rename_destination_occupied_records_issue.txt"
         )
     );
 }
@@ -1155,7 +1155,7 @@ fn remote_observation_remote_delete_invariant_trace_matches_checked_in_artifact(
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_delete_applies_locally.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_delete_applies_locally.txt"
         )
     );
 }
@@ -1169,7 +1169,7 @@ fn remote_observation_remote_delete_failure_invariant_trace_matches_checked_in_a
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_delete_current_path_missing_records_issue.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_file_remote_delete_current_path_missing_records_issue.txt"
         )
     );
 }
@@ -1183,7 +1183,7 @@ fn remote_observation_remote_subtree_delete_invariant_trace_matches_checked_in_a
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_applies_locally.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_applies_locally.txt"
         )
     );
 }
@@ -1198,7 +1198,7 @@ fn remote_observation_remote_subtree_delete_remote_only_descendant_trace_matches
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_clears_remote_only_descendants.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_clears_remote_only_descendants.txt"
         )
     );
 }
@@ -1212,7 +1212,7 @@ fn remote_observation_remote_subtree_delete_failure_invariant_trace_matches_chec
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_current_path_missing_records_issue.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_delete_current_path_missing_records_issue.txt"
         )
     );
 }
@@ -1226,7 +1226,7 @@ fn remote_observation_remote_subtree_delete_deferred_conflict_trace_matches_chec
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_deletes_bound_directory_while_descendant_differs_from_anchor.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_deletes_bound_directory_while_descendant_differs_from_anchor.txt"
         )
     );
 }
@@ -1241,7 +1241,7 @@ fn remote_observation_remote_subtree_rename_invariant_trace_matches_checked_in_a
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_rename_applies_locally.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_rename_applies_locally.txt"
         )
     );
 }
@@ -1256,7 +1256,7 @@ fn remote_observation_remote_subtree_move_invariant_trace_matches_checked_in_art
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_move_applies_locally.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_move_applies_locally.txt"
         )
     );
 }
@@ -1271,7 +1271,7 @@ fn remote_observation_materialized_target_parent_unblocks_subtree_move_trace_mat
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_move_waits_for_target_parent_materialization.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_move_waits_for_target_parent_materialization.txt"
         )
     );
 }
@@ -1286,7 +1286,7 @@ fn remote_observation_remote_subtree_rename_failure_invariant_trace_matches_chec
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_rename_destination_occupied_records_issue.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_bound_directory_remote_subtree_rename_destination_occupied_records_issue.txt"
         )
     );
 }
@@ -1300,7 +1300,7 @@ fn remote_observation_remote_only_parent_wait_invariant_trace_matches_checked_in
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_updates_remote_only_file_while_download_transfer_active.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_updates_remote_only_file_while_download_transfer_active.txt"
         )
     );
 }

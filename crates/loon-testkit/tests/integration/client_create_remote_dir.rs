@@ -1,5 +1,4 @@
-#[path = "common/support.rs"]
-mod support;
+use super::common::support;
 
 use loon_client::executor::{
     execute_create_remote_dir, ExecuteCreateRemoteDirError, ExecutedCreateRemoteDir,

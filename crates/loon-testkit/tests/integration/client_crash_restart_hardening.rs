@@ -1,5 +1,4 @@
-#[path = "common/support.rs"]
-mod support;
+use super::common::support;
 
 use loon_client::executor::{
     execute_next_client_action, DownloadRemoteEditExecution, ExecutedApplyRemoteRename,

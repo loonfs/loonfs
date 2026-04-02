@@ -1,5 +1,4 @@
-#[path = "common/support.rs"]
-mod support;
+use super::common::support;
 
 use loon_client::executor::{
     execute_next_client_action, ExecuteNextClientActionError, ExecuteUploadLocalEditError,
@@ -266,7 +265,7 @@ fn upload_local_edit_multitick_invariant_trace_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-transfer-invariants/client/execute_next_client_action_multitick_upload_local_edit_survives_restart.txt"
+            "../../../../tests/snapshots/client-transfer-invariants/client/execute_next_client_action_multitick_upload_local_edit_survives_restart.txt"
         )
     );
 }

@@ -66,7 +66,7 @@ fn create_file_fixture_snapshot_trace_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/commit-metadata-differential/native/create_file_commit_applies_inode_direntry_and_revision_rows.txt"
+            "../../../../tests/snapshots/commit-metadata-differential/native/create_file_commit_applies_inode_direntry_and_revision_rows.txt"
         )
     );
 }

@@ -39,7 +39,7 @@ fn conflict_artifact_discovery_caches_namespace_artifacts() {
     assert_eq!(
         rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-conflict-artifact-recovery/client/conflict_artifact_discovery_caches_namespace_artifacts.txt"
+            "../../../../tests/snapshots/client-conflict-artifact-recovery/client/conflict_artifact_discovery_caches_namespace_artifacts.txt"
         )
     );
 }
@@ -54,7 +54,7 @@ fn restore_file_conflict_artifact_to_alternate_path() {
     assert_eq!(
         rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-conflict-artifact-recovery/client/restore_file_conflict_artifact_to_alternate_path.txt"
+            "../../../../tests/snapshots/client-conflict-artifact-recovery/client/restore_file_conflict_artifact_to_alternate_path.txt"
         )
     );
 }
@@ -69,7 +69,7 @@ fn restore_subtree_conflict_artifact_to_alternate_root() {
     assert_eq!(
         rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-conflict-artifact-recovery/client/restore_subtree_conflict_artifact_to_alternate_root.txt"
+            "../../../../tests/snapshots/client-conflict-artifact-recovery/client/restore_subtree_conflict_artifact_to_alternate_root.txt"
         )
     );
 }

@@ -40,7 +40,7 @@ fn verified_checkpoint_publish_snapshot_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/checkpoint-publish-differential/native/verified_checkpoint_publish_updates_head_summary.txt"
+            "../../../../tests/snapshots/checkpoint-publish-differential/native/verified_checkpoint_publish_updates_head_summary.txt"
         )
     );
 }
