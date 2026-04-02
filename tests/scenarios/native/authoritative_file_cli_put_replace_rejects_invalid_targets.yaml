@@ -1,0 +1,28 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_put_replace_rejects_invalid_targets
+initial:
+  head:
+    namespace_id: demo
+    seq: 5
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+actions:
+  - put_file:
+      replace: true
+      local_path: ./report-v2.txt
+      selector: demo:/missing.txt
+  - put_file:
+      replace: true
+      local_path: ./report-v2.txt
+      selector: demo:/docs
+expect:
+  errors:
+    - destination_absent
+    - destination_is_directory

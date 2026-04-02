@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  loon file ls demo:/\n  loon file stat demo:/docs/report.txt\n  loon file get demo:/hello.txt ./downloads\n  loon file cat demo:/hello.txt\n  loon file put ./hello.txt demo:/docs/hello.txt\n  loon file mkdir demo:/docs\n  loon file rm --recursive demo:/docs/archive\n  loon file mv demo:/docs/hello.txt demo:/docs/archive.txt"
+    after_help = "Examples:\n  loon file ls demo:/\n  loon file stat demo:/docs/report.txt\n  loon file get demo:/hello.txt ./downloads\n  loon file cat demo:/hello.txt\n  loon file put ./hello.txt demo:/docs/hello.txt\n  loon file put --replace ./hello-v2.txt demo:/docs/hello.txt\n  loon file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file mkdir demo:/docs\n  loon file rm --recursive demo:/docs/archive\n  loon file mv demo:/docs/hello.txt demo:/docs/archive.txt"
 )]
 pub struct FileArgs {
     #[command(subcommand)]
@@ -24,12 +24,14 @@ enum FileSubcommand {
     Cat(FileSelectorArgs),
     /// Upload one local file to an exact authoritative destination path.
     Put(FilePutArgs),
+    /// Copy one authoritative file to a new exact path within the same namespace.
+    Cp(FilePathPairArgs),
     /// Create one authoritative directory at an exact path.
     Mkdir(FileSelectorArgs),
     /// Delete one authoritative file or directory subtree.
     Rm(FileRmArgs),
     /// Rename one authoritative file or directory within a namespace.
-    Mv(FileMvArgs),
+    Mv(FilePathPairArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -72,6 +74,11 @@ struct FilePutArgs {
     )]
     local_path: PathBuf,
     #[arg(
+        long,
+        help = "Replace an existing visible authoritative file instead of creating a new one."
+    )]
+    replace: bool,
+    #[arg(
         value_name = "SELECTOR",
         help = "Exact authoritative destination selector in the form <namespace>:/absolute/path."
     )]
@@ -87,7 +94,7 @@ struct FileRmArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-struct FileMvArgs {
+struct FilePathPairArgs {
     #[arg(
         long,
         value_name = "PATH",
@@ -130,6 +137,12 @@ impl FileArgs {
                 config_path: resolve_config_path(args.config)?.path,
                 local_path: args.local_path,
                 selector: args.selector,
+                replace: args.replace,
+            }),
+            FileSubcommand::Cp(args) => Ok(FileCommand::Cp {
+                config_path: resolve_config_path(args.config)?.path,
+                from_selector: args.from_selector,
+                to_selector: args.to_selector,
             }),
             FileSubcommand::Mkdir(args) => Ok(FileCommand::Mkdir {
                 config_path: resolve_config_path(args.config)?.path,

@@ -2,9 +2,10 @@ use crate::OpsConfig;
 use anyhow::{bail, Context, Result};
 use loon_server::mutation::ClientMutationExecutionParams;
 use loon_server::ops::{
-    list_authoritative_path, mkdir_authoritative_path, mv_authoritative_path,
-    put_authoritative_file_from_path, read_authoritative_file_bytes, resolve_authoritative_path,
-    rm_authoritative_path, AuthoritativeFileBytes, AuthoritativePathEntry,
+    cp_authoritative_file_within_namespace, list_authoritative_path, mkdir_authoritative_path,
+    mv_authoritative_path, put_authoritative_file_from_path, read_authoritative_file_bytes,
+    replace_authoritative_file_from_path, resolve_authoritative_path, rm_authoritative_path,
+    AuthoritativeFileBytes, AuthoritativePathEntry,
 };
 use loon_types::NamespaceId;
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,7 @@ pub enum FileCommand {
         config_path: PathBuf,
         local_path: PathBuf,
         selector: String,
+        replace: bool,
     },
     Mkdir {
         config_path: PathBuf,
@@ -48,6 +50,11 @@ pub enum FileCommand {
         recursive: bool,
     },
     Mv {
+        config_path: PathBuf,
+        from_selector: String,
+        to_selector: String,
+    },
+    Cp {
         config_path: PathBuf,
         from_selector: String,
         to_selector: String,
@@ -77,6 +84,7 @@ struct FileGetReport {
 struct FilePutReport {
     source_local_path: String,
     destination: String,
+    replace: bool,
     entry: AuthoritativePathEntry,
     committed_seq: ChangeSeqReport,
 }
@@ -104,6 +112,14 @@ struct FileMvReport {
     to: String,
     inode_id: String,
     inode_kind: loon_types::InodeKind,
+    committed_seq: ChangeSeqReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FileCpReport {
+    from: String,
+    to: String,
+    entry: AuthoritativePathEntry,
     committed_seq: ChangeSeqReport,
 }
 
@@ -144,9 +160,9 @@ enum FilePutLocalSourceError {
 }
 
 #[derive(Debug, Error)]
-enum FileMvSelectorError {
+enum FilePathPairSelectorError {
     #[error(
-        "authoritative move requires both selectors in one namespace: from `{from_selector}` to `{to_selector}`"
+        "authoritative path command requires both selectors in one namespace: from `{from_selector}` to `{to_selector}`"
     )]
     CrossNamespace {
         from_selector: String,
@@ -278,21 +294,33 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             config_path,
             local_path,
             selector,
+            replace,
         } => {
             ensure_put_source_is_regular_file(&local_path)?;
             let config = OpsConfig::load(&config_path)?;
             let store = config.open_store()?;
             let selector = parse_authoritative_path_selector(&selector)?;
-            let result = put_authoritative_file_from_path(
-                &store,
-                &selector.namespace_id,
-                &local_path,
-                &selector.absolute_path,
-                &mutation_params(&config),
-            )?;
+            let result = if replace {
+                replace_authoritative_file_from_path(
+                    &store,
+                    &selector.namespace_id,
+                    &local_path,
+                    &selector.absolute_path,
+                    &mutation_params(&config),
+                )?
+            } else {
+                put_authoritative_file_from_path(
+                    &store,
+                    &selector.namespace_id,
+                    &local_path,
+                    &selector.absolute_path,
+                    &mutation_params(&config),
+                )?
+            };
             let report = FilePutReport {
                 source_local_path: local_path.display().to_string(),
                 destination: format_selector(&selector),
+                replace,
                 entry: result.entry,
                 committed_seq: ChangeSeqReport {
                     seq: result.committed_seq.0,
@@ -385,6 +413,35 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
                 serde_yaml::to_string(&report).context("render file mv report")?,
             ))
         }
+        FileCommand::Cp {
+            config_path,
+            from_selector,
+            to_selector,
+        } => {
+            let from = parse_authoritative_path_selector(&from_selector)?;
+            let to = parse_authoritative_path_selector(&to_selector)?;
+            ensure_same_namespace(&from, &to, &from_selector, &to_selector)?;
+            let config = OpsConfig::load(&config_path)?;
+            let store = config.open_store()?;
+            let result = cp_authoritative_file_within_namespace(
+                &store,
+                &from.namespace_id,
+                &from.absolute_path,
+                &to.absolute_path,
+                &mutation_params(&config),
+            )?;
+            let report = FileCpReport {
+                from: from_selector,
+                to: to_selector,
+                entry: result.entry,
+                committed_seq: ChangeSeqReport {
+                    seq: result.committed_seq.0,
+                },
+            };
+            Ok(FileCommandOutput::Text(
+                serde_yaml::to_string(&report).context("render file cp report")?,
+            ))
+        }
     }
 }
 
@@ -423,9 +480,9 @@ fn ensure_same_namespace(
     to: &AuthoritativePathSelector,
     from_selector: &str,
     to_selector: &str,
-) -> Result<(), FileMvSelectorError> {
+) -> Result<(), FilePathPairSelectorError> {
     if from.namespace_id != to.namespace_id {
-        return Err(FileMvSelectorError::CrossNamespace {
+        return Err(FilePathPairSelectorError::CrossNamespace {
             from_selector: from_selector.to_owned(),
             to_selector: to_selector.to_owned(),
         });
@@ -630,6 +687,7 @@ mod tests {
             config_path: config_path.clone(),
             local_path: local_file,
             selector: "demo:/docs/hello.txt".to_owned(),
+            replace: false,
         })
         .expect("run put");
         let put_text = match put {
@@ -637,7 +695,40 @@ mod tests {
             other => panic!("expected text put output, got {other:?}"),
         };
         assert!(put_text.contains("destination: demo:/docs/hello.txt"));
+        assert!(put_text.contains("replace: false"));
         assert!(put_text.contains("absolute_path: /docs/hello.txt"));
+
+        let replacement_local_file = temp_dir.path().join("hello-v2.txt");
+        fs::write(&replacement_local_file, b"hello replace path\n")
+            .expect("write replacement local source");
+        let replace = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: replacement_local_file,
+            selector: "demo:/docs/hello.txt".to_owned(),
+            replace: true,
+        })
+        .expect("run put --replace");
+        let replace_text = match replace {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text replace output, got {other:?}"),
+        };
+        assert!(replace_text.contains("replace: true"));
+        assert!(replace_text.contains("destination: demo:/docs/hello.txt"));
+        assert!(replace_text.contains("revision_no: 2"));
+
+        let cp = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/docs/hello.txt".to_owned(),
+            to_selector: "demo:/docs/hello-copy.txt".to_owned(),
+        })
+        .expect("run cp");
+        let cp_text = match cp {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text cp output, got {other:?}"),
+        };
+        assert!(cp_text.contains("from: demo:/docs/hello.txt"));
+        assert!(cp_text.contains("to: demo:/docs/hello-copy.txt"));
+        assert!(cp_text.contains("absolute_path: /docs/hello-copy.txt"));
 
         let mv = run_file_command(FileCommand::Mv {
             config_path: config_path.clone(),
@@ -657,7 +748,10 @@ mod tests {
             selector: "demo:/docs".to_owned(),
         })
         .expect("list docs after mv");
-        assert_eq!(ls, FileCommandOutput::Text("archive.txt\n".to_owned()));
+        assert_eq!(
+            ls,
+            FileCommandOutput::Text("archive.txt\nhello-copy.txt\n".to_owned())
+        );
 
         let rm = run_file_command(FileCommand::Rm {
             config_path,
@@ -686,6 +780,7 @@ mod tests {
             config_path: config_path.clone(),
             local_path: local_dir,
             selector: "demo:/copied.txt".to_owned(),
+            replace: false,
         })
         .expect_err("local directory source should fail");
         assert!(put_dir_error.to_string().contains("regular file"));
@@ -696,11 +791,43 @@ mod tests {
             config_path: config_path.clone(),
             local_path: put_missing_parent,
             selector: "demo:/missing/copied.txt".to_owned(),
+            replace: false,
         })
         .expect_err("missing remote parent should fail");
         assert!(put_parent_error
             .to_string()
             .contains("visible path not found"));
+
+        let replace_missing = temp_dir.path().join("replace-missing.txt");
+        fs::write(&replace_missing, b"replace").expect("write replacement file");
+        let replace_missing_error = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: replace_missing,
+            selector: "demo:/missing.txt".to_owned(),
+            replace: true,
+        })
+        .expect_err("missing replace target should fail");
+        assert!(replace_missing_error
+            .to_string()
+            .contains("visible path not found"));
+
+        let replace_directory = temp_dir.path().join("replace-directory.txt");
+        fs::write(&replace_directory, b"replace").expect("write replacement file");
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/docs".to_owned(),
+        })
+        .expect("mkdir docs for replace-dir rejection");
+        let replace_directory_error = run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: replace_directory,
+            selector: "demo:/docs".to_owned(),
+            replace: true,
+        })
+        .expect_err("directory replace target should fail");
+        assert!(replace_directory_error
+            .to_string()
+            .contains("must resolve to visible file"));
 
         let rm_dir_error = run_file_command(FileCommand::Rm {
             config_path: config_path.clone(),
@@ -717,6 +844,60 @@ mod tests {
         })
         .expect_err("cross namespace move should fail");
         assert!(mv_cross_namespace
+            .to_string()
+            .contains("requires both selectors in one namespace"));
+    }
+
+    #[test]
+    fn copy_rejects_occupied_directory_and_cross_namespace_targets() {
+        let temp_dir = TestDir::new("loon-ops-file-copy-errors");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_empty_namespace(&config_path, &namespace_id);
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/docs".to_owned(),
+        })
+        .expect("mkdir docs");
+        let local_file = temp_dir.path().join("hello.txt");
+        fs::write(&local_file, b"hello").expect("write local file");
+        run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: local_file,
+            selector: "demo:/docs/hello.txt".to_owned(),
+            replace: false,
+        })
+        .expect("seed source file");
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/docs/archive".to_owned(),
+        })
+        .expect("mkdir occupied destination");
+
+        let occupied_error = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/docs/hello.txt".to_owned(),
+            to_selector: "demo:/docs/archive".to_owned(),
+        })
+        .expect_err("occupied destination should fail");
+        assert!(occupied_error.to_string().contains("already occupied"));
+
+        let identical_error = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/docs/hello.txt".to_owned(),
+            to_selector: "demo:/docs//hello.txt".to_owned(),
+        })
+        .expect_err("identical path copy should fail");
+        assert!(identical_error.to_string().contains("identical path"));
+
+        let cross_namespace_error = run_file_command(FileCommand::Cp {
+            config_path,
+            from_selector: "demo:/docs/hello.txt".to_owned(),
+            to_selector: "other:/docs/hello.txt".to_owned(),
+        })
+        .expect_err("cross namespace copy should fail");
+        assert!(cross_namespace_error
             .to_string()
             .contains("requires both selectors in one namespace"));
     }

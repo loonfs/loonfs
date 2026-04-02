@@ -201,6 +201,12 @@ pub struct AuthoritativePutResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeCpResult {
+    pub entry: AuthoritativePathEntry,
+    pub committed_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthoritativeMkdirResult {
     pub entry: AuthoritativePathEntry,
     pub committed_seq: ChangeSeq,
@@ -790,6 +796,110 @@ pub fn put_authoritative_file_from_path<S: ObjectStore>(
     })
 }
 
+pub fn replace_authoritative_file_from_path<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    source_path: &Path,
+    absolute_path: &str,
+    params: &ClientMutationExecutionParams,
+) -> Result<AuthoritativePutResult, AuthoritativePathWriteError> {
+    let uploaded = upload_small_file_from_path(store, namespace_id, source_path)?;
+    let validated =
+        validate_durable_content_reference(store, namespace_id, &uploaded.content_manifest_digest)?;
+    crate::mutation::lease::acquire_or_renew_namespace_lease(store, namespace_id, params)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let target = basis
+        .metadata_state
+        .resolve_visible_file_target(absolute_path, basis.head.seq)?;
+    let current_revision = basis
+        .metadata_state
+        .latest_revision_head_at_seq(target.inode_id, basis.head.seq)
+        .ok_or_else(|| AuthoritativePathReadError::FileRevisionMissing {
+            absolute_path: target.absolute_path.clone(),
+            inode_id: target.inode_id,
+        })?;
+    let request = ClientMutationRequest {
+        namespace_id: namespace_id.clone(),
+        client_request_id: build_authoritative_request_id(
+            "put-replace",
+            &target.absolute_path,
+            params,
+        ),
+        op: ClientMutationOp::ReplaceFile {
+            inode_id: target.inode_id,
+            base_revision_no: current_revision.revision_no,
+            content_manifest_digest: uploaded.content_manifest_digest.clone(),
+        },
+    };
+    let executed =
+        execute_client_mutation_against_basis(store, &request, params, basis, Some(validated))?;
+    let entry = resolve_entry_from_metadata_state(
+        store,
+        namespace_id,
+        executed.head_publish.resulting_head.seq,
+        &executed.resulting_metadata_state,
+        &target.absolute_path,
+    )?;
+    Ok(AuthoritativePutResult {
+        entry,
+        committed_seq: executed.head_publish.resulting_head.seq,
+    })
+}
+
+pub fn cp_authoritative_file_within_namespace<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    from_absolute_path: &str,
+    to_absolute_path: &str,
+    params: &ClientMutationExecutionParams,
+) -> Result<AuthoritativeCpResult, AuthoritativePathWriteError> {
+    crate::mutation::lease::acquire_or_renew_namespace_lease(store, namespace_id, params)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    basis
+        .metadata_state
+        .ensure_distinct_visible_paths(from_absolute_path, to_absolute_path)?;
+    let source = basis
+        .metadata_state
+        .resolve_visible_file_target(from_absolute_path, basis.head.seq)?;
+    let target = basis
+        .metadata_state
+        .resolve_visible_create_target(to_absolute_path, basis.head.seq)?;
+    let current_revision = basis
+        .metadata_state
+        .latest_revision_head_at_seq(source.inode_id, basis.head.seq)
+        .ok_or_else(|| AuthoritativePathReadError::FileRevisionMissing {
+            absolute_path: source.absolute_path.clone(),
+            inode_id: source.inode_id,
+        })?;
+    let validated = validate_durable_content_reference(
+        store,
+        namespace_id,
+        &current_revision.content_manifest_digest,
+    )?;
+    let request = ClientMutationRequest {
+        namespace_id: namespace_id.clone(),
+        client_request_id: build_authoritative_request_id("cp", &target.absolute_path, params),
+        op: ClientMutationOp::CreateFile {
+            parent_inode_id: target.parent_inode_id,
+            display_name: target.display_name.clone(),
+            content_manifest_digest: current_revision.content_manifest_digest,
+        },
+    };
+    let executed =
+        execute_client_mutation_against_basis(store, &request, params, basis, Some(validated))?;
+    let entry = resolve_entry_from_metadata_state(
+        store,
+        namespace_id,
+        executed.head_publish.resulting_head.seq,
+        &executed.resulting_metadata_state,
+        &target.absolute_path,
+    )?;
+    Ok(AuthoritativeCpResult {
+        entry,
+        committed_seq: executed.head_publish.resulting_head.seq,
+    })
+}
+
 pub fn mkdir_authoritative_path<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1163,9 +1273,10 @@ fn wal_seq_from_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_namespace, list_authoritative_path, load_namespace_state_summary,
-        mkdir_authoritative_path, mv_authoritative_path, put_authoritative_file_from_path,
-        read_authoritative_file_bytes, resolve_authoritative_path, rm_authoritative_path,
+        bootstrap_namespace, cp_authoritative_file_within_namespace, list_authoritative_path,
+        load_namespace_state_summary, mkdir_authoritative_path, mv_authoritative_path,
+        put_authoritative_file_from_path, read_authoritative_file_bytes,
+        replace_authoritative_file_from_path, resolve_authoritative_path, rm_authoritative_path,
         translate_authoritative_state_to_remote_observations, AuthoritativePathReadError,
         AuthoritativePathWriteError, NamespaceBootstrapError, NamespaceBootstrapParams,
     };
@@ -1754,6 +1865,104 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_put_replace_and_cp_update_visible_file_without_reuploading_copy() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-replace-copy");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir docs");
+
+        let source_path = temp_dir.join("hello.txt");
+        fs::write(&source_path, b"hello from write path\n").expect("write local source");
+        let created = put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &source_path,
+            "/docs/hello.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put authoritative file");
+        assert_eq!(created.entry.revision_no, Some(RevisionNo(1)));
+
+        let replace_path = temp_dir.join("hello-v2.txt");
+        fs::write(&replace_path, b"hello from replace path\n").expect("write replace source");
+        let replaced = replace_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &replace_path,
+            "/docs/hello.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_300,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("replace authoritative file");
+        assert_eq!(replaced.entry.absolute_path, "/docs/hello.txt");
+        assert_eq!(replaced.entry.revision_no, Some(RevisionNo(2)));
+        assert_eq!(replaced.entry.size_bytes, Some(24));
+
+        let copied = cp_authoritative_file_within_namespace(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            "/docs/hello-copy.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_400,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("copy authoritative file");
+        assert_eq!(copied.entry.absolute_path, "/docs/hello-copy.txt");
+        assert_eq!(copied.entry.revision_no, Some(RevisionNo(1)));
+        assert_ne!(copied.entry.inode_id, replaced.entry.inode_id);
+        assert_eq!(
+            copied.entry.content_manifest_digest,
+            replaced.entry.content_manifest_digest
+        );
+
+        let source_bytes = read_authoritative_file_bytes(&store, &namespace_id, "/docs/hello.txt")
+            .expect("read source bytes after replace");
+        let copied_bytes =
+            read_authoritative_file_bytes(&store, &namespace_id, "/docs/hello-copy.txt")
+                .expect("read copied bytes");
+        assert_eq!(source_bytes.bytes, b"hello from replace path\n");
+        assert_eq!(copied_bytes.bytes, source_bytes.bytes);
+    }
+
+    #[test]
     fn authoritative_rm_rejects_directory_without_recursive() {
         let temp_dir = unique_temp_dir("server-ops-authoritative-rm-dir");
         let store = LocalFsStore::new(&temp_dir).expect("create store");
@@ -1800,6 +2009,95 @@ mod tests {
         assert!(matches!(
             error,
             AuthoritativePathWriteError::DirectoryRequiresRecursive { .. }
+        ));
+    }
+
+    #[test]
+    fn authoritative_copy_rejects_active_foreign_holder() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-copy-foreign-holder");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir docs");
+
+        let source_path = temp_dir.join("hello.txt");
+        fs::write(&source_path, b"hello from write path\n").expect("write local source");
+        put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &source_path,
+            "/docs/hello.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put authoritative file");
+
+        let summary =
+            load_namespace_state_summary(&store, &namespace_id).expect("load namespace summary");
+        let foreign_lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-b".to_owned(),
+            fence_token: summary.head.active_fence_token,
+            lease_expires_at_ms: 2_000,
+        };
+        let lease_envelope = LeaseStateEnvelope::from_state(
+            ControlObjectKind::NamespaceLease,
+            "loon-server-test",
+            foreign_lease,
+        )
+        .expect("encode foreign lease");
+        let lease_bytes = serde_json::to_vec(&lease_envelope).expect("serialize foreign lease");
+        store
+            .put_overwrite(&namespace_lease(namespace_id.as_str()), &lease_bytes)
+            .expect("overwrite lease with foreign holder");
+
+        let error = cp_authoritative_file_within_namespace(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            "/docs/hello-copy.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect_err("active foreign lease holder should fail");
+        assert!(matches!(
+            error,
+            AuthoritativePathWriteError::LeaseAcquire(error)
+                if matches!(
+                    error.as_ref(),
+                    crate::mutation::lease::LeaseAcquireError::HeldByOtherWriter { .. }
+                )
         ));
     }
 

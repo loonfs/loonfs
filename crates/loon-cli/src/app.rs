@@ -180,12 +180,34 @@ mod tests {
                 config_path: PathBuf::from("demo.toml"),
                 local_path: PathBuf::from("./hello.txt"),
                 selector: "demo:/docs/hello.txt".to_owned(),
+                replace: false,
             })
         );
     }
 
     #[test]
-    fn parses_file_rm_recursive_and_mv() {
+    fn parses_file_put_replace_rm_mv_and_cp() {
+        let replace = parse_args([
+            "loon",
+            "file",
+            "put",
+            "--replace",
+            "--config",
+            "demo.toml",
+            "./hello-v2.txt",
+            "demo:/docs/hello.txt",
+        ])
+        .expect("parse file put --replace");
+        assert_eq!(
+            replace,
+            ParsedCommand::File(FileCommand::Put {
+                config_path: PathBuf::from("demo.toml"),
+                local_path: PathBuf::from("./hello-v2.txt"),
+                selector: "demo:/docs/hello.txt".to_owned(),
+                replace: true,
+            })
+        );
+
         let rm = parse_args([
             "loon",
             "file",
@@ -221,6 +243,25 @@ mod tests {
                 config_path: PathBuf::from("demo.toml"),
                 from_selector: "demo:/docs/a.txt".to_owned(),
                 to_selector: "demo:/docs/b.txt".to_owned(),
+            })
+        );
+
+        let cp = parse_args([
+            "loon",
+            "file",
+            "cp",
+            "--config",
+            "demo.toml",
+            "demo:/docs/a.txt",
+            "demo:/docs/c.txt",
+        ])
+        .expect("parse file cp");
+        assert_eq!(
+            cp,
+            ParsedCommand::File(FileCommand::Cp {
+                config_path: PathBuf::from("demo.toml"),
+                from_selector: "demo:/docs/a.txt".to_owned(),
+                to_selector: "demo:/docs/c.txt".to_owned(),
             })
         );
     }

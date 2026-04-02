@@ -294,6 +294,11 @@ pub enum ModelVisiblePathMutationError {
     RootPathRejected {
         absolute_path: String,
     },
+    FileRequired {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
     DestinationOccupied {
         absolute_path: String,
         inode_id: InodeId,

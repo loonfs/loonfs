@@ -41,6 +41,7 @@ fn help_file_mentions_authoritative_subcommands() {
     assert!(stdout.contains("get"));
     assert!(stdout.contains("cat"));
     assert!(stdout.contains("put"));
+    assert!(stdout.contains("cp"));
     assert!(stdout.contains("mkdir"));
     assert!(stdout.contains("rm"));
     assert!(stdout.contains("mv"));
@@ -116,7 +117,7 @@ fn file_get_writes_download_without_touching_existing_target() {
 }
 
 #[test]
-fn file_put_mkdir_rm_and_mv_run_as_authoritative_commands() {
+fn file_put_replace_cp_mkdir_rm_and_mv_run_as_authoritative_commands() {
     let temp_dir = TestDir::new("loon-cli-file-write");
     let config_path = write_demo_local_fs_config(temp_dir.path());
     let namespace_id = NamespaceId::from("demo");
@@ -145,9 +146,40 @@ fn file_put_mkdir_rm_and_mv_run_as_authoritative_commands() {
         "demo:/docs/hello.txt",
     ]);
     assert!(put.status.success());
-    assert!(String::from_utf8(put.stdout)
-        .expect("utf-8 stdout")
-        .contains("destination: demo:/docs/hello.txt"));
+    let put_stdout = String::from_utf8(put.stdout).expect("utf-8 stdout");
+    assert!(put_stdout.contains("destination: demo:/docs/hello.txt"));
+    assert!(put_stdout.contains("replace: false"));
+
+    let replacement_file = temp_dir.path().join("hello-v2.txt");
+    fs::write(&replacement_file, b"hello replaced path\n").expect("write replacement source");
+    let replace = run_loon([
+        "file",
+        "put",
+        "--replace",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        replacement_file.to_str().expect("utf-8 path"),
+        "demo:/docs/hello.txt",
+    ]);
+    assert!(replace.status.success());
+    let replace_stdout = String::from_utf8(replace.stdout).expect("utf-8 stdout");
+    assert!(replace_stdout.contains("replace: true"));
+    assert!(replace_stdout.contains("destination: demo:/docs/hello.txt"));
+    assert!(replace_stdout.contains("revision_no: 2"));
+
+    let cp = run_loon([
+        "file",
+        "cp",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs/hello.txt",
+        "demo:/docs/hello-copy.txt",
+    ]);
+    assert!(cp.status.success());
+    let cp_stdout = String::from_utf8(cp.stdout).expect("utf-8 stdout");
+    assert!(cp_stdout.contains("from: demo:/docs/hello.txt"));
+    assert!(cp_stdout.contains("to: demo:/docs/hello-copy.txt"));
+    assert!(cp_stdout.contains("absolute_path: /docs/hello-copy.txt"));
 
     let mv = run_loon([
         "file",
@@ -161,6 +193,19 @@ fn file_put_mkdir_rm_and_mv_run_as_authoritative_commands() {
     assert!(String::from_utf8(mv.stdout)
         .expect("utf-8 stdout")
         .contains("to: demo:/docs/archive.txt"));
+
+    let ls = run_loon([
+        "file",
+        "ls",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs",
+    ]);
+    assert!(ls.status.success());
+    assert_eq!(
+        String::from_utf8(ls.stdout).expect("utf-8 stdout"),
+        "archive.txt\nhello-copy.txt\n"
+    );
 
     let rm = run_loon([
         "file",

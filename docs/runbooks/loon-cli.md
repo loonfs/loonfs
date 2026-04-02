@@ -96,6 +96,8 @@ cargo run -p loon-cli -- file stat demo:/docs/report.txt
 cargo run -p loon-cli -- file get demo:/hello.txt ./downloads
 cargo run -p loon-cli -- file cat demo:/hello.txt
 cargo run -p loon-cli -- file put ./hello.txt demo:/docs/hello.txt
+cargo run -p loon-cli -- file put --replace ./hello-v2.txt demo:/docs/hello.txt
+cargo run -p loon-cli -- file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt
 cargo run -p loon-cli -- file mkdir demo:/docs/archive
 cargo run -p loon-cli -- file rm demo:/docs/hello.txt
 cargo run -p loon-cli -- file rm --recursive demo:/docs/archive
@@ -105,8 +107,12 @@ cargo run -p loon-cli -- file mv demo:/docs/hello.txt demo:/docs/hello-final.txt
 Strict v1 rules:
 
 - remote selectors are always `namespace:/absolute/path`
-- `put` is local-file only and create-only
+- `put` is local-file only
+- plain `put` is create-only
+- `put --replace` is update-only and requires an existing visible file destination
+- `cp` is same-namespace, file-only, and create-only
 - `put` and `mv` treat the destination selector as the exact final path
+- `cp` treats both selectors as exact final paths too
 - destination overwrite is never implicit
 - `rm` requires `--recursive` for directories
 - root is rejected for all write commands

@@ -1,0 +1,29 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_cp_creates_second_file
+initial:
+  head:
+    namespace_id: demo
+    seq: 8
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/report.txt
+        inode_id: 3
+        inode_kind: file
+actions:
+  - copy_file:
+      from: demo:/docs/report.txt
+      to: demo:/docs/report-copy.txt
+expect:
+  created:
+    selector: demo:/docs/report-copy.txt
+    inode_kind: file
+  preserved:
+    selector: demo:/docs/report.txt
+    inode_kind: file

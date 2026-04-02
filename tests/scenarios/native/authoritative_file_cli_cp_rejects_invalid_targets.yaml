@@ -1,0 +1,36 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_cp_rejects_invalid_targets
+initial:
+  head:
+    namespace_id: demo
+    seq: 8
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/report.txt
+        inode_id: 3
+        inode_kind: file
+      - absolute_path: /docs/archive
+        inode_id: 4
+        inode_kind: dir
+actions:
+  - copy_file:
+      from: demo:/docs/report.txt
+      to: demo:/docs/archive
+  - copy_file:
+      from: demo:/docs/report.txt
+      to: other:/docs/report-copy.txt
+  - copy_file:
+      from: demo:/docs/report.txt
+      to: demo:/docs//report.txt
+expect:
+  errors:
+    - destination_occupied
+    - cross_namespace
+    - identical_paths

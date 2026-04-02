@@ -451,6 +451,30 @@ impl ModelMetadataState {
         })
     }
 
+    pub fn resolve_visible_file_target(
+        &self,
+        absolute_path: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<ModelResolvedVisiblePath, ModelVisiblePathMutationError> {
+        let resolved = self
+            .resolve_visible_path(absolute_path, base_seq)
+            .map_err(ModelVisiblePathMutationError::VisiblePath)?;
+        if resolved.absolute_path == "/" {
+            return Err(ModelVisiblePathMutationError::RootPathRejected {
+                absolute_path: resolved.absolute_path,
+            });
+        }
+        if resolved.inode_kind != InodeKind::File {
+            return Err(ModelVisiblePathMutationError::FileRequired {
+                absolute_path: resolved.absolute_path,
+                inode_id: resolved.inode_id,
+                inode_kind: resolved.inode_kind,
+            });
+        }
+
+        Ok(resolved)
+    }
+
     pub fn ensure_distinct_visible_paths(
         &self,
         source_absolute_path: &str,
@@ -876,6 +900,35 @@ mod tests {
             error,
             ModelVisiblePathMutationError::IdenticalSourceAndDestination { absolute_path }
                 if absolute_path == "/docs/report.txt"
+        ));
+    }
+
+    #[test]
+    fn resolve_visible_file_target_accepts_visible_file_and_rejects_root_or_directory() {
+        let metadata = sample_metadata();
+
+        let file = metadata
+            .resolve_visible_file_target("/docs/report.txt", ChangeSeq(3))
+            .expect("resolve visible file target");
+        assert_eq!(file.inode_id, InodeId(3));
+        assert_eq!(file.absolute_path, "/docs/report.txt");
+
+        let root = metadata
+            .resolve_visible_file_target("/", ChangeSeq(3))
+            .expect_err("root should be rejected");
+        assert!(matches!(
+            root,
+            ModelVisiblePathMutationError::RootPathRejected { absolute_path }
+                if absolute_path == "/"
+        ));
+
+        let directory = metadata
+            .resolve_visible_file_target("/docs", ChangeSeq(3))
+            .expect_err("directory should be rejected");
+        assert!(matches!(
+            directory,
+            ModelVisiblePathMutationError::FileRequired { inode_id, inode_kind, .. }
+                if inode_id == InodeId(2) && inode_kind == InodeKind::Dir
         ));
     }
 

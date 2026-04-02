@@ -11,6 +11,8 @@ The first user-facing product shell is a separate authoritative file surface:
 - `loon file get <namespace:/path> <local-path>`
 - `loon file cat <namespace:/path>`
 - `loon file put <local-file> <namespace:/absolute/path>`
+- `loon file put --replace <local-file> <namespace:/absolute/path>`
+- `loon file cp <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
 - `loon file mkdir <namespace:/absolute/path>`
 - `loon file rm [--recursive] <namespace:/absolute/path>`
 - `loon file mv <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
@@ -23,7 +25,7 @@ state directly from durable object storage.
 Rules:
 
 - `loon ops ...` remains the low-level admin/debug shell
-- `loon file ...` is a product-facing authoritative read surface
+- `loon file ...` is a product-facing authoritative file surface
 - `loon file ...` must not secretly route through:
   - client SQLite state
   - mirror-root observation
@@ -172,10 +174,29 @@ Rules:
 - source must be one existing regular local file
 - destination selector must not be root
 - destination selector names the exact final remote path
-- destination must be absent
+- destination must be absent unless `--replace` is present
 - destination parent must already exist and be a visible directory
-- v1 `put` is create-only
+- plain `put` is create-only
+- `put --replace` is update-only:
+  - destination must resolve to one visible file
+  - absent destination is rejected
+  - directory destination is rejected
 - no directory upload, overwrite, or parent auto-create
+
+### `loon file cp`
+
+Rules:
+
+- source and destination selectors must be in the same namespace
+- `cp` is file-only
+- source must resolve to one visible file
+- source selector must not be root
+- destination selector must not be root
+- destination selector names the exact final remote path
+- destination must be absent
+- identical normalized source and destination paths are explicit errors
+- `cp` creates a new inode and preserves the source binding unchanged
+- `cp` reuses the source file's current manifest digest; it does not re-upload content objects
 
 ### `loon file mkdir`
 
@@ -234,10 +255,15 @@ Rules:
 
 Additional rules:
 
+- `put --replace` resolves the destination to one visible file and commits `ReplaceFile` against
+  that file's current revision under the same leased basis
+- `cp` resolves source and destination under one leased basis and commits `CreateFile` at the
+  destination with the source file's current manifest digest
 - `loon-ops` and `loon-cli` must not resolve a path to an inode and then call the current
   inode-addressed mutation path as two separate authoritative steps
 - selector resolution and authoritative commit validation must therefore observe one coherent basis
-- `put` reuses the same immutable block/manifest upload contract as client sync uploads
+- `put` and `put --replace` reuse the same immutable block/manifest upload contract as client sync
+  uploads
 
 Why these rules exist:
 

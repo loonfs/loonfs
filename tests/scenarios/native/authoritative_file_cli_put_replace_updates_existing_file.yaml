@@ -1,0 +1,27 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_put_replace_updates_existing_file
+initial:
+  head:
+    namespace_id: demo
+    seq: 7
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/report.txt
+        inode_id: 3
+        inode_kind: file
+actions:
+  - put_file:
+      replace: true
+      local_path: ./report-v2.txt
+      selector: demo:/docs/report.txt
+expect:
+  replaced:
+    selector: demo:/docs/report.txt
+    inode_kind: file

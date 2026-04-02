@@ -99,6 +99,14 @@ pub enum VisiblePathMutationError {
     #[error("mutation target must not be root path `{absolute_path}`")]
     RootPathRejected { absolute_path: String },
     #[error(
+        "mutation path `{absolute_path}` must resolve to visible file inode `{inode_id:?}` kind `{inode_kind:?}`"
+    )]
+    FileRequired {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    #[error(
         "destination path `{absolute_path}` is already occupied by inode `{inode_id:?}` kind `{inode_kind:?}`"
     )]
     DestinationOccupied {
@@ -582,6 +590,30 @@ impl MetadataState {
             parent_inode_id: parent.inode_id,
             display_name,
         })
+    }
+
+    pub fn resolve_visible_file_target(
+        &self,
+        absolute_path: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<ResolvedVisiblePath, VisiblePathMutationError> {
+        let resolved = self
+            .resolve_visible_path(absolute_path, base_seq)
+            .map_err(VisiblePathMutationError::VisiblePath)?;
+        if resolved.absolute_path == "/" {
+            return Err(VisiblePathMutationError::RootPathRejected {
+                absolute_path: resolved.absolute_path,
+            });
+        }
+        if resolved.inode_kind != InodeKind::File {
+            return Err(VisiblePathMutationError::FileRequired {
+                absolute_path: resolved.absolute_path,
+                inode_id: resolved.inode_id,
+                inode_kind: resolved.inode_kind,
+            });
+        }
+
+        Ok(resolved)
     }
 
     pub fn ensure_distinct_visible_paths(
@@ -1280,6 +1312,34 @@ mod tests {
             error,
             VisiblePathMutationError::IdenticalSourceAndDestination { absolute_path }
                 if absolute_path == "/docs/report.txt"
+        ));
+    }
+
+    #[test]
+    fn resolve_visible_file_target_accepts_visible_file_and_rejects_root_or_directory() {
+        let metadata_state = sample_path_metadata();
+
+        let file = metadata_state
+            .resolve_visible_file_target("/docs/report.txt", ChangeSeq(3))
+            .expect("resolve visible file target");
+        assert_eq!(file.inode_id, InodeId(3));
+        assert_eq!(file.absolute_path, "/docs/report.txt");
+
+        let root = metadata_state
+            .resolve_visible_file_target("/", ChangeSeq(3))
+            .expect_err("root should be rejected");
+        assert!(matches!(
+            root,
+            VisiblePathMutationError::RootPathRejected { absolute_path } if absolute_path == "/"
+        ));
+
+        let directory = metadata_state
+            .resolve_visible_file_target("/docs", ChangeSeq(3))
+            .expect_err("directory should be rejected");
+        assert!(matches!(
+            directory,
+            VisiblePathMutationError::FileRequired { inode_id, inode_kind, .. }
+                if inode_id == InodeId(2) && inode_kind == InodeKind::Dir
         ));
     }
 
