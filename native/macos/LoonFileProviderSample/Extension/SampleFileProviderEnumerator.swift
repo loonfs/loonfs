@@ -63,6 +63,9 @@ final class SampleFileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 observer.value.didEnumerate(items)
                 observer.value.finishEnumerating(upTo: nil)
             } catch {
+                logger.error(
+                    "enumerateItems failed for \(parentIdentifier.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
                 observer.value.finishEnumeratingWithError(sampleNSError(from: error))
             }
         }

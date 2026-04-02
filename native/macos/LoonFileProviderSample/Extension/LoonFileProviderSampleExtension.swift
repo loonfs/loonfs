@@ -68,6 +68,9 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
                 }
                 completion.value(SampleFileProviderItem(snapshot: item), nil)
             } catch {
+                logger.error(
+                    "item lookup failed for \(identifier.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
                 completion.value(nil, sampleNSError(from: error))
             }
         }
@@ -82,6 +85,7 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
         let bridgeSession = self.bridgeSession
+        let logger = self.logger
         let completion = SendableBox(value: completionHandler)
         Task {
             do {
@@ -108,8 +112,14 @@ final class LoonFileProviderSampleExtension: NSObject, NSFileProviderReplicatedE
                     nil
                 )
             } catch let error as BridgeInteropError {
+                logger.error(
+                    "fetchContents bridge failure for \(itemIdentifier.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
                 completion.value(nil, nil, sampleNSError(from: ExtensionAdapter.mapBridgeError(error)))
             } catch {
+                logger.error(
+                    "fetchContents failed for \(itemIdentifier.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
                 completion.value(nil, nil, sampleNSError(from: error))
             }
         }

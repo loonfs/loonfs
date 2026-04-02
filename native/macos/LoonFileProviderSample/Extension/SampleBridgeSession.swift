@@ -10,17 +10,35 @@ actor SampleBridgeSession {
     }
 
     func loadCurrentConfig() throws -> SampleConfig {
+        var diagnostics: [String] = []
+
+        do {
+            if let sharedConfig = try configLocator.sharedConfigStore().load() {
+                let validationErrors = sharedConfig.validationErrors()
+                if !validationErrors.isEmpty {
+                    throw SampleDomainRegistrationError.invalidConfig(validationErrors)
+                }
+                return sharedConfig
+            }
+            diagnostics.append("shared_defaults=empty")
+        } catch {
+            diagnostics.append("shared_defaults_error=\(error.localizedDescription)")
+        }
+
         let store = try configLocator.configStore()
+        diagnostics.append("config_path=\(store.configFileURL.path)")
         let status = store.loadStatus()
         if let decodeErrorDescription = status.decodeErrorDescription {
-            throw SampleDomainRegistrationError.invalidConfig([decodeErrorDescription])
+            throw SampleDomainRegistrationError.invalidConfig(diagnostics + [decodeErrorDescription])
         }
         guard let config = status.parsedConfig else {
-            throw SampleDomainRegistrationError.invalidConfig(["Sample config is missing."])
+            throw SampleDomainRegistrationError.invalidConfig(
+                diagnostics + ["Sample config is missing."]
+            )
         }
         let validationErrors = config.validationErrors()
         if !validationErrors.isEmpty {
-            throw SampleDomainRegistrationError.invalidConfig(validationErrors)
+            throw SampleDomainRegistrationError.invalidConfig(diagnostics + validationErrors)
         }
         return config
     }

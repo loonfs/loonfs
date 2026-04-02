@@ -36,7 +36,9 @@ Expected sample config fields:
 - `app_group_identifier`
 
 The containing app creates the config file as `loon-file-provider-sample.json` inside the sample
-App Group container if it is missing.
+App Group support directory if it is missing:
+
+- `~/Library/Group Containers/<app-group>/Library/Application Support/LoonFileProviderSample/`
 
 ## Expected Rust bridge calls
 
@@ -58,14 +60,15 @@ The checked-in C header for this surface lives at `crates/loon-macos/include/loo
 
 - the containing app and the File Provider extension share the sample wrapper config through an App
   Group container
-- the containing app reads that config and registers or removes the File Provider domain
-- the extension opens the Rust bridge from the shared config and serves Finder callbacks against the
-  current SQLite snapshot
+- the containing app reads the editable JSON file, mirrors the validated config into shared App
+  Group defaults, and registers or removes the File Provider domain
+- the extension opens the Rust bridge from that shared config snapshot and serves Finder callbacks
+  against the current SQLite snapshot
 - the sample README should instruct developers to set their own signing team and keep the App Group
   identifier in sync with the committed entitlements and the sample config
 - the first in-repo sample does not manage security-scoped bookmarks, so the easiest local setup is
   to point `ops_config_path` at an ops config whose DB, mirror, and object-store paths are also in
-  a location the App Group container can access
+  that same App Group `Library/Application Support/LoonFileProviderSample/` subtree
 
 ## Domain registration and reset flow
 

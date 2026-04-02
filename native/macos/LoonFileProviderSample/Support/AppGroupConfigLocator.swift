@@ -32,7 +32,21 @@ struct AppGroupConfigLocator {
         return url
     }
 
+    func supportDirectoryURL() throws -> URL {
+        try containerDirectoryURL()
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent(
+                SampleDefaults.appGroupSupportDirectoryName,
+                isDirectory: true
+            )
+    }
+
     func configStore() throws -> SampleConfigStore {
-        SampleConfigStore(configDirectoryURL: try containerDirectoryURL())
+        SampleConfigStore(configDirectoryURL: try supportDirectoryURL())
+    }
+
+    func sharedConfigStore() throws -> SampleSharedConfigStore {
+        try SampleSharedConfigStore(appGroupIdentifier: appGroupIdentifier)
     }
 }

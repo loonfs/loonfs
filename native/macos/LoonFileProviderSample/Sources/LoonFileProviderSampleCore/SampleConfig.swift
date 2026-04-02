@@ -137,7 +137,7 @@ public struct SampleConfigStore {
         }
 
         do {
-            let data = try Data(contentsOf: configFileURL)
+            let data = try coordinatedDataRead(from: configFileURL)
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let config = try decoder.decode(SampleConfig.self, from: data)
@@ -159,5 +159,86 @@ public struct SampleConfigStore {
                 decodeErrorDescription: error.localizedDescription
             )
         }
+    }
+
+    private func coordinatedDataRead(from url: URL) throws -> Data {
+        let coordinator = NSFileCoordinator()
+        var coordinatedData: Data?
+        var readError: Error?
+        var coordinationError: NSError?
+
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+            do {
+                coordinatedData = try Data(contentsOf: coordinatedURL)
+            } catch {
+                readError = error
+            }
+        }
+
+        if let coordinationError {
+            throw coordinationError
+        }
+        if let readError {
+            throw readError
+        }
+        guard let coordinatedData else {
+            throw NSError(
+                domain: NSCocoaErrorDomain,
+                code: CocoaError.fileReadUnknown.rawValue,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Coordinated config read returned no data.",
+                ]
+            )
+        }
+        return coordinatedData
+    }
+}
+
+public enum SampleSharedConfigStoreError: LocalizedError, Equatable, Sendable {
+    case suiteUnavailable(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .suiteUnavailable(identifier):
+            return "Shared defaults suite unavailable for \(identifier)."
+        }
+    }
+}
+
+public struct SampleSharedConfigStore {
+    public let appGroupIdentifier: String
+    public let configKey: String
+    private let userDefaults: UserDefaults
+
+    public init(
+        appGroupIdentifier: String = SampleDefaults.appGroupIdentifier,
+        configKey: String = SampleDefaults.sharedConfigDefaultsKey
+    ) throws {
+        guard let userDefaults = UserDefaults(suiteName: appGroupIdentifier) else {
+            throw SampleSharedConfigStoreError.suiteUnavailable(appGroupIdentifier)
+        }
+        self.appGroupIdentifier = appGroupIdentifier
+        self.configKey = configKey
+        self.userDefaults = userDefaults
+    }
+
+    public func save(_ config: SampleConfig) throws {
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(config)
+        userDefaults.set(data, forKey: configKey)
+        _ = userDefaults.synchronize()
+    }
+
+    public func load() throws -> SampleConfig? {
+        _ = userDefaults.synchronize()
+        guard let data = userDefaults.data(forKey: configKey) else {
+            return nil
+        }
+        return try JSONDecoder().decode(SampleConfig.self, from: data)
+    }
+
+    public func clear() {
+        userDefaults.removeObject(forKey: configKey)
+        _ = userDefaults.synchronize()
     }
 }

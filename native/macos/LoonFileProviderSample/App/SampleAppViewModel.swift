@@ -31,6 +31,7 @@ final class SampleAppViewModel: ObservableObject {
             let configURL = try store.ensureDefaultConfigFile()
             configFilePath = configURL.path
             let status = store.loadStatus()
+            try syncSharedConfig(for: status)
             configStatusText = describeConfigStatus(status)
             errorText = status.decodeErrorDescription
 
@@ -57,6 +58,7 @@ final class SampleAppViewModel: ObservableObject {
             let store = try configLocator.configStore()
             _ = try store.ensureDefaultConfigFile()
             let status = store.loadStatus()
+            try syncSharedConfig(for: status)
             configStatusText = describeConfigStatus(status)
             guard let config = status.parsedConfig else {
                 throw sampleNSError(
@@ -112,5 +114,14 @@ final class SampleAppViewModel: ObservableObject {
             return "Config is valid for \(parsedConfig.exposedNamespaces.count) namespace(s)."
         }
         return "Config needs edits:\n" + status.validationErrors.joined(separator: "\n")
+    }
+
+    private func syncSharedConfig(for status: SampleConfigStatus) throws {
+        let sharedStore = try configLocator.sharedConfigStore()
+        guard status.isValid, let config = status.parsedConfig else {
+            sharedStore.clear()
+            return
+        }
+        try sharedStore.save(config)
     }
 }
