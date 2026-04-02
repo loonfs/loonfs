@@ -6,11 +6,11 @@ This spec defines the HTTP API that backs the `loon namespace` CLI (spec 070). A
 
 The API splits into three groups:
 
-1. **Content endpoints** — immutable, content-addressed block and manifest storage. The caller splits files into 16 MiB blocks, uploads them individually, then constructs a manifest. These operations are idempotent.
-2. **Metadata endpoints** — atomic namespace tree mutations. The caller references previously uploaded content by manifest digest. The server validates all content exists, then commits the change atomically (WAL write + CAS head update).
+1. **Content endpoints** — immutable, content-addressed block storage. The caller splits files into 16 MiB blocks and uploads them individually. These operations are idempotent and have no effect on the namespace tree.
+2. **Metadata endpoints** — atomic namespace tree mutations. For file creates and replaces, the caller provides the ordered block list. The server constructs the content manifest internally, validates all blocks are durable, and commits the change atomically (WAL write + CAS head update).
 3. **Namespace management** — create, list, delete, rename namespaces.
 
-Content uploads are staging — they don't change the namespace tree. The metadata commit is the atomicity boundary. If the caller crashes mid-upload, some orphaned blocks may exist in the store. They are harmless (immutable, content-addressed) and can be garbage-collected.
+Block uploads are staging — they don't change the namespace tree. The metadata commit is the atomicity boundary. If the caller crashes mid-upload, some orphaned blocks may exist in the store. They are harmless (immutable, content-addressed) and can be garbage-collected.
 
 ---
 
@@ -43,7 +43,7 @@ Every error response is a JSON body:
 | `invalid_path` | 400 | Malformed or relative path |
 | `invalid_name` | 400 | Namespace name is empty or invalid |
 | `invalid_digest` | 400 | Digest does not match uploaded content |
-| `content_missing` | 400 | Manifest references blocks that don't exist, or file mutation references a manifest that doesn't exist |
+| `content_missing` | 400 | One or more blocks referenced in the request don't exist in the namespace |
 | `is_directory` | 400 | Operation requires a file but path is a directory |
 | `payload_too_large` | 413 | Block exceeds 16 MiB |
 
@@ -55,7 +55,7 @@ Authentication is out of scope for this spec.
 
 ## Content endpoints
 
-These endpoints store immutable, content-addressed data. They use create-if-absent semantics — uploading a block or manifest that already exists is a no-op.
+These endpoints store and retrieve immutable, content-addressed block data. Uploads use create-if-absent semantics — uploading a block that already exists is a no-op.
 
 ### Upload block
 
@@ -105,48 +105,9 @@ Content-Length: 16777216
 
 ---
 
-### Upload manifest
-
-```
-PUT /v1/namespaces/{name}/manifests/{manifest_digest}
-Content-Type: application/json
-```
-
-The request body is a `ContentManifestEnvelope` JSON object:
-
-```json
-{
-  "kind": "namespace_content_manifest",
-  "format_version": 1,
-  "payload_checksum_sha256": "...",
-  "payload": {
-    "namespace_id": "ns-a1b2c3",
-    "file_size_bytes": 33554432,
-    "file_digest_sha256": "sha256:...",
-    "block_size_bytes": 16777216,
-    "blocks": [
-      { "content_digest_sha256": "sha256:aaa...", "plaintext_size_bytes": 16777216 },
-      { "content_digest_sha256": "sha256:bbb...", "plaintext_size_bytes": 16777216 }
-    ]
-  }
-}
-```
-
-The server verifies:
-1. The SHA-256 of the JSON body matches `{manifest_digest}`.
-2. The `payload_checksum_sha256` matches the payload.
-
-The server does **not** verify that referenced blocks exist at upload time — that check happens at metadata commit time.
-
-**Response**:
-- `201 Created` — manifest stored
-- `200 OK` — manifest already existed
-
-**Errors**: `invalid_digest` if the body doesn't match the manifest digest.
-
----
-
 ### Download manifest
+
+Manifests are created server-side during metadata commits. This endpoint provides read access for block-level downloads.
 
 ```
 GET /v1/namespaces/{name}/manifests/{manifest_digest}
@@ -257,7 +218,12 @@ Content-Type: application/json
 
 ```json
 {
-  "content_manifest_digest": "sha256:..."
+  "file_size_bytes": 33554432,
+  "file_digest_sha256": "sha256:...",
+  "blocks": [
+    { "content_digest_sha256": "sha256:aaa...", "plaintext_size_bytes": 16777216 },
+    { "content_digest_sha256": "sha256:bbb...", "plaintext_size_bytes": 16777216 }
+  ]
 }
 ```
 
@@ -269,17 +235,18 @@ Content-Type: application/json
   "kind": "file",
   "inode_id": 42,
   "revision_no": 1,
-  "size_bytes": 4096,
+  "size_bytes": 33554432,
   "content_manifest_digest": "sha256:..."
 }
 ```
 
 **Server behavior**:
-1. Validates that the manifest exists and all referenced blocks are durable.
-2. Resolves the parent path. If intermediate directories are missing, auto-creates them via `create_dir` commits.
-3. Commits `create_file(parent_inode, display_name, content_manifest_digest)`.
+1. Constructs a `ContentManifestEnvelope` from the provided block list, file digest, and file size. Computes the manifest digest and stores it (create-if-absent).
+2. Validates that all referenced blocks are durable and match the listed digests and sizes.
+3. Resolves the parent path. If intermediate directories are missing, auto-creates them via `create_dir` commits.
+4. Commits `create_file(parent_inode, display_name, content_manifest_digest)`.
 
-**Errors**: `already_exists` if the path already exists. `content_missing` if the manifest or any of its blocks don't exist.
+**Errors**: `already_exists` if the path already exists. `content_missing` if any referenced blocks don't exist.
 
 ---
 
@@ -294,7 +261,12 @@ Content-Type: application/json
 
 ```json
 {
-  "content_manifest_digest": "sha256:..."
+  "file_size_bytes": 33554432,
+  "file_digest_sha256": "sha256:...",
+  "blocks": [
+    { "content_digest_sha256": "sha256:aaa...", "plaintext_size_bytes": 16777216 },
+    { "content_digest_sha256": "sha256:bbb...", "plaintext_size_bytes": 16777216 }
+  ]
 }
 ```
 
@@ -306,17 +278,18 @@ Content-Type: application/json
   "kind": "file",
   "inode_id": 42,
   "revision_no": 4,
-  "size_bytes": 4096,
+  "size_bytes": 33554432,
   "content_manifest_digest": "sha256:..."
 }
 ```
 
 **Server behavior**:
-1. Validates that the manifest exists and all referenced blocks are durable.
-2. Resolves the path to an existing file inode and reads its current `revision_no`.
-3. Commits `replace_file(inode_id, base_revision_no, content_manifest_digest)`.
+1. Constructs a `ContentManifestEnvelope` from the provided block list, file digest, and file size. Computes the manifest digest and stores it (create-if-absent).
+2. Validates that all referenced blocks are durable and match the listed digests and sizes.
+3. Resolves the path to an existing file inode and reads its current `revision_no`.
+4. Commits `replace_file(inode_id, base_revision_no, content_manifest_digest)`.
 
-**Errors**: `not_found` if the path doesn't exist. `is_directory` if the path is a directory. `content_missing` if the manifest or any of its blocks don't exist.
+**Errors**: `not_found` if the path doesn't exist. `is_directory` if the path is a directory. `content_missing` if any referenced blocks don't exist.
 
 ---
 
@@ -529,8 +502,8 @@ How each CLI command maps to API calls:
 | `loon namespace rename OLD NEW` | `PATCH /v1/namespaces/{name}` |
 | `loon namespace ls NS [PATH]` | `GET /v1/namespaces/{name}/ls` |
 | `loon namespace get NS PATH` | `GET /v1/namespaces/{name}/files/{path}` |
-| `loon namespace put NS LOCAL REMOTE` | `HEAD` blocks → `PUT` missing blocks → `PUT` manifest → `POST /files/{path}` (or `PUT` if `--force`) |
+| `loon namespace put NS LOCAL REMOTE` | `HEAD` blocks → `PUT` missing blocks → `POST /files/{path}` (or `PUT` if `--force`) with block list |
 | `loon namespace rm NS PATH` | `DELETE /v1/namespaces/{name}/files/{path}` |
 | `loon namespace cp NS SRC DST` | `POST /v1/namespaces/{name}/cp` |
 
-The `put` command is the only multi-step operation: the CLI splits the local file into blocks, checks which blocks already exist (HEAD), uploads missing blocks, constructs and uploads the manifest, then commits the metadata mutation.
+The `put` command is the only multi-step operation: the CLI splits the local file into blocks, checks which blocks already exist (HEAD), uploads missing blocks, then commits the metadata mutation with the block list.
