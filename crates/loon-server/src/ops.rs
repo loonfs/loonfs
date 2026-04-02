@@ -1,6 +1,3 @@
-use crate::genesis::bootstrap_basis_metadata_state;
-use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
-use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::core::checkpoint::{
     load_checkpoint, load_checkpoint_manifest, prepare_checkpoint, prepare_checkpoint_head_publish,
     publish_checkpoint_head, CheckpointBuildError, CheckpointHeadPublishRequest,
@@ -9,6 +6,9 @@ use crate::core::checkpoint::{
 };
 use crate::core::content::{read_durable_content_bytes, DurableContentValidationError};
 use crate::core::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use crate::genesis::bootstrap_basis_metadata_state;
+use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
 };
@@ -772,10 +772,10 @@ mod tests {
         translate_authoritative_state_to_remote_observations, AuthoritativePathReadError,
         NamespaceBootstrapError, NamespaceBootstrapParams,
     };
-    use crate::genesis::bootstrap_basis_metadata_state;
-    use crate::mutation::{execute_client_mutation, ClientMutationExecutionParams};
     use crate::core::checkpoint::prepare_checkpoint;
     use crate::core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
+    use crate::genesis::bootstrap_basis_metadata_state;
+    use crate::mutation::{execute_client_mutation, ClientMutationExecutionParams};
     use crate::objectstore::fs::LocalFsStore;
     use crate::objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
     use crate::objectstore::ObjectStore;

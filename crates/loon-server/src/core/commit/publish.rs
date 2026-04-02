@@ -1,6 +1,6 @@
 use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan, PreparedCommitHeadPublish};
-use crate::objectstore::ObjectStoreError;
 use crate::objectstore::keys::namespace_head;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope};
 

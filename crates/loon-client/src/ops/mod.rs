@@ -9,8 +9,8 @@ pub mod import;
 mod observe;
 mod sync;
 
-use anyhow::{anyhow, bail, Context, Result};
 use crate::state_db::{ClientNamespaceStateSummary, SqliteStateDb};
+use anyhow::{anyhow, bail, Context, Result};
 use loon_types::server::{NamespaceBootstrapParams, NamespaceStateSummary, ServerTransport};
 use loon_types::{NamespaceId, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use file::{run_file_command, FileCommand, FileCommandOutput};
 pub use import::{
     import_authoritative_remote_observations, AuthoritativeObservationImportError,
     AuthoritativeObservationImportReport,
@@ -28,7 +29,6 @@ pub use observe::{
     ObserveMoveError, ObserveMoveReport, ObserveSubtreeError, ObserveSubtreeReport,
     ObservedPathKind,
 };
-pub use file::{run_file_command, FileCommand, FileCommandOutput};
 pub use sync::{
     sync_once, sync_until_idle, SyncOnceError, SyncOnceOutcome, SyncOnceReport, SyncUntilIdleError,
     SyncUntilIdleReport,

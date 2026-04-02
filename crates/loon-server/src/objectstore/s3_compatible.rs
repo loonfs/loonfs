@@ -1,8 +1,8 @@
-use crate::objectstore::ObjectStoreError;
+use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
 use crate::objectstore::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
-use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use crate::objectstore::ObjectStoreError;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::primitives::ByteStream;

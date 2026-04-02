@@ -5,8 +5,7 @@ use loon_server::objectstore::r2::R2StoreConfig;
 use loon_server::objectstore::s3::AwsS3StoreConfig;
 use loon_server::objectstore::ConfiguredObjectStore;
 use loon_server::ops::{
-    bootstrap_namespace as server_bootstrap_namespace,
-    list_authoritative_path as server_list_path,
+    bootstrap_namespace as server_bootstrap_namespace, list_authoritative_path as server_list_path,
     load_namespace_state_summary as server_load_namespace_state_summary,
     read_authoritative_file_bytes as server_read_file_bytes,
     resolve_authoritative_path as server_resolve_path,
@@ -857,10 +856,7 @@ fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId,
     let file_digest_sha256 = sha256_digest(bytes);
     let block_digest = sha256_digest(bytes);
     store
-        .put_if_absent(
-            &blob(namespace_id.as_str(), &block_digest),
-            bytes,
-        )
+        .put_if_absent(&blob(namespace_id.as_str(), &block_digest), bytes)
         .expect("write content block");
     let manifest = ContentManifestEnvelope::from_payload(ContentManifestPayload {
         namespace_id: namespace_id.clone(),
@@ -952,7 +948,10 @@ impl loon_types::server::ServerTransport for TestLocalTransport {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<loon_types::server::NamespaceStateSummary, Self::Error> {
-        Ok(server_load_namespace_state_summary(&self.store, namespace_id)?)
+        Ok(server_load_namespace_state_summary(
+            &self.store,
+            namespace_id,
+        )?)
     }
 
     fn load_remote_observations(
@@ -969,7 +968,11 @@ impl loon_types::server::ServerTransport for TestLocalTransport {
         namespace_id: &NamespaceId,
         params: &loon_types::server::NamespaceBootstrapParams,
     ) -> Result<loon_types::server::BootstrappedNamespace, Self::Error> {
-        Ok(server_bootstrap_namespace(&self.store, namespace_id, params)?)
+        Ok(server_bootstrap_namespace(
+            &self.store,
+            namespace_id,
+            params,
+        )?)
     }
 
     fn list_path(
@@ -1000,9 +1003,7 @@ impl loon_types::server::ServerTransport for TestLocalTransport {
     }
 }
 
-fn test_make_transport(
-    config: &loon_client::ops::OpsConfig,
-) -> anyhow::Result<TestLocalTransport> {
+fn test_make_transport(config: &loon_client::ops::OpsConfig) -> anyhow::Result<TestLocalTransport> {
     let store = test_open_store(config)?;
     Ok(TestLocalTransport {
         store,
@@ -1013,9 +1014,7 @@ fn test_make_transport(
     })
 }
 
-fn test_open_store(
-    config: &loon_client::ops::OpsConfig,
-) -> anyhow::Result<ConfiguredObjectStore> {
+fn test_open_store(config: &loon_client::ops::OpsConfig) -> anyhow::Result<ConfiguredObjectStore> {
     match &config.object_store {
         loon_client::ops::OpsObjectStoreSpec::LocalFs { root, key_prefix } => {
             ConfiguredObjectStore::local_fs(root, key_prefix.as_deref()).map_err(Into::into)

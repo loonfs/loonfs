@@ -1,10 +1,10 @@
-use crate::ops::OpsConfig;
-use anyhow::Result;
 use crate::local_fs::{
     observe_delete_path as client_observe_delete_path,
     observe_local_path as client_observe_local_path, observe_move_path as client_observe_move_path,
     observe_subtree_path as client_observe_subtree_path,
 };
+use crate::ops::OpsConfig;
+use anyhow::Result;
 use loon_types::NamespaceId;
 use std::path::Path;
 

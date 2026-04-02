@@ -269,15 +269,13 @@ mod tests {
     use super::{
         parse_authoritative_path_selector, run_file_command, FileCommand, FileCommandOutput,
     };
-    use crate::ops::{
-        OpsClientConfig, OpsConfig, OpsObjectStoreSpec, OpsSection, OpsServerConfig,
-    };
+    use crate::ops::{OpsClientConfig, OpsConfig, OpsObjectStoreSpec, OpsSection, OpsServerConfig};
+    use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
     use loon_server::objectstore::keys::{blob, content_manifest};
     use loon_server::objectstore::ConfiguredObjectStore;
-    use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
     use loon_server::ops::{
-        bootstrap_namespace,
-        list_authoritative_path, read_authoritative_file_bytes, resolve_authoritative_path,
+        bootstrap_namespace, list_authoritative_path, read_authoritative_file_bytes,
+        resolve_authoritative_path,
     };
     use loon_testkit::tempdir::TestDir;
     use loon_types::server::{
@@ -285,9 +283,9 @@ mod tests {
         NamespaceBootstrapParams, NamespaceStateSummary, ServerTransport,
     };
     use loon_types::{
-        sha256_digest, ChangeSeq, ClientMutationOp, ClientMutationRequest,
-        ClientMutationResponse, ContentBlockDescriptor, ContentManifestEnvelope,
-        ContentManifestPayload, NamespaceId, ObjectStore, ObservedRemoteInode,
+        sha256_digest, ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse,
+        ContentBlockDescriptor, ContentManifestEnvelope, ContentManifestPayload, NamespaceId,
+        ObjectStore, ObservedRemoteInode,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -308,21 +306,27 @@ mod tests {
             &self,
             _request: &ClientMutationRequest,
         ) -> Result<ClientMutationResponse, Self::Error> {
-            Err(TestTransportError("execute_mutation not used in file tests".into()))
+            Err(TestTransportError(
+                "execute_mutation not used in file tests".into(),
+            ))
         }
 
         fn load_namespace_state_summary(
             &self,
             _namespace_id: &NamespaceId,
         ) -> Result<NamespaceStateSummary, Self::Error> {
-            Err(TestTransportError("load_namespace_state_summary not used in file tests".into()))
+            Err(TestTransportError(
+                "load_namespace_state_summary not used in file tests".into(),
+            ))
         }
 
         fn load_remote_observations(
             &self,
             _namespace_id: &NamespaceId,
         ) -> Result<(ChangeSeq, Vec<ObservedRemoteInode>), Self::Error> {
-            Err(TestTransportError("load_remote_observations not used in file tests".into()))
+            Err(TestTransportError(
+                "load_remote_observations not used in file tests".into(),
+            ))
         }
 
         fn bootstrap_namespace(
@@ -330,7 +334,9 @@ mod tests {
             _namespace_id: &NamespaceId,
             _params: &NamespaceBootstrapParams,
         ) -> Result<BootstrappedNamespace, Self::Error> {
-            Err(TestTransportError("bootstrap_namespace not used in file tests".into()))
+            Err(TestTransportError(
+                "bootstrap_namespace not used in file tests".into(),
+            ))
         }
 
         fn list_path(
@@ -391,17 +397,23 @@ mod tests {
         let namespace_id = NamespaceId::from("demo");
         seed_namespace_with_hello_file(&config_path, &namespace_id, b"hello from loon\n");
 
-        let ls = run_file_command(FileCommand::Ls {
-            config_path: config_path.clone(),
-            selector: "demo:/".to_owned(),
-        }, &test_make_transport)
+        let ls = run_file_command(
+            FileCommand::Ls {
+                config_path: config_path.clone(),
+                selector: "demo:/".to_owned(),
+            },
+            &test_make_transport,
+        )
         .expect("run ls");
         assert_eq!(ls, FileCommandOutput::Text("hello.txt\n".to_owned()));
 
-        let stat = run_file_command(FileCommand::Stat {
-            config_path: config_path.clone(),
-            selector: "demo:/hello.txt".to_owned(),
-        }, &test_make_transport)
+        let stat = run_file_command(
+            FileCommand::Stat {
+                config_path: config_path.clone(),
+                selector: "demo:/hello.txt".to_owned(),
+            },
+            &test_make_transport,
+        )
         .expect("run stat");
         let stat_text = match stat {
             FileCommandOutput::Text(text) => text,
@@ -412,11 +424,14 @@ mod tests {
 
         let download_dir = temp_dir.path().join("downloads");
         fs::create_dir_all(&download_dir).expect("create download dir");
-        let get = run_file_command(FileCommand::Get {
-            config_path: config_path.clone(),
-            selector: "demo:/hello.txt".to_owned(),
-            local_path: download_dir.clone(),
-        }, &test_make_transport)
+        let get = run_file_command(
+            FileCommand::Get {
+                config_path: config_path.clone(),
+                selector: "demo:/hello.txt".to_owned(),
+                local_path: download_dir.clone(),
+            },
+            &test_make_transport,
+        )
         .expect("run get");
         let get_text = match get {
             FileCommandOutput::Text(text) => text,
@@ -428,10 +443,13 @@ mod tests {
             b"hello from loon\n"
         );
 
-        let cat = run_file_command(FileCommand::Cat {
-            config_path,
-            selector: "demo:/hello.txt".to_owned(),
-        }, &test_make_transport)
+        let cat = run_file_command(
+            FileCommand::Cat {
+                config_path,
+                selector: "demo:/hello.txt".to_owned(),
+            },
+            &test_make_transport,
+        )
         .expect("run cat");
         assert_eq!(cat, FileCommandOutput::Bytes(b"hello from loon\n".to_vec()));
     }
@@ -445,20 +463,26 @@ mod tests {
 
         let existing_target = temp_dir.path().join("existing.txt");
         fs::write(&existing_target, b"present").expect("seed existing target");
-        let existing_error = run_file_command(FileCommand::Get {
-            config_path: config_path.clone(),
-            selector: "demo:/hello.txt".to_owned(),
-            local_path: existing_target,
-        }, &test_make_transport)
+        let existing_error = run_file_command(
+            FileCommand::Get {
+                config_path: config_path.clone(),
+                selector: "demo:/hello.txt".to_owned(),
+                local_path: existing_target,
+            },
+            &test_make_transport,
+        )
         .expect_err("existing target should fail");
         assert!(existing_error.to_string().contains("already exists"));
 
         let missing_parent = temp_dir.path().join("missing/download.txt");
-        let missing_parent_error = run_file_command(FileCommand::Get {
-            config_path,
-            selector: "demo:/hello.txt".to_owned(),
-            local_path: missing_parent,
-        }, &test_make_transport)
+        let missing_parent_error = run_file_command(
+            FileCommand::Get {
+                config_path,
+                selector: "demo:/hello.txt".to_owned(),
+                local_path: missing_parent,
+            },
+            &test_make_transport,
+        )
         .expect_err("missing parent should fail");
         assert!(missing_parent_error
             .to_string()

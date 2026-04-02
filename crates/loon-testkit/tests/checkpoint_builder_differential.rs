@@ -4,15 +4,15 @@ use loon_server::core::checkpoint::{
 };
 use loon_server::core::invariants::CHECKPOINT_OBJECT_IMMUTABLE_INVARIANTS;
 use loon_server::core::metadata::MetadataState;
-use loon_testkit::model::{
-    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointRow,
-    ModelCheckpointSegment, ModelMetadataState, ModelNamespace,
-};
 use loon_server::objectstore::keys::snapshot_manifest;
 use loon_testkit::invariants::{
     evaluate_checkpoint_object_invariants, CheckpointObjectInvariantInputs,
     CheckpointObjectInvariantReport, CheckpointObjectInvariantSnapshot,
     StoredCheckpointSegmentSnapshot,
+};
+use loon_testkit::model::{
+    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointRow,
+    ModelCheckpointSegment, ModelMetadataState, ModelNamespace,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -270,11 +270,13 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|tombstone| loon_testkit::model::ModelSubtreeTombstoneRecord {
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-                tombstone_op_index: tombstone.tombstone_op_index,
-            })
+            .map(
+                |tombstone| loon_testkit::model::ModelSubtreeTombstoneRecord {
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                    tombstone_op_index: tombstone.tombstone_op_index,
+                },
+            )
             .collect(),
     }
 }

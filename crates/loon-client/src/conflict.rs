@@ -13,7 +13,6 @@ use loon_types::object_store_keys::{
     conflict_artifact, conflict_artifact_archive, conflict_artifact_archive_prefix,
     conflict_artifact_prefix,
 };
-use loon_types::{ObjectStore, ObjectStoreError};
 use loon_types::{
     deterministic_conflict_id, deterministic_subtree_conflict_id, ChangeSeq,
     ConflictArtifactArchiveEnvelope, ConflictArtifactEnvelope, ConflictArtifactKind,
@@ -21,6 +20,7 @@ use loon_types::{
     InodeKind, NamespaceId, SubtreeConflictArtifactEntry, SubtreeConflictArtifactEnvelope,
     SubtreeConflictArtifactRootSummary,
 };
+use loon_types::{ObjectStore, ObjectStoreError};
 use serde_json::{Error as JsonError, Value};
 use std::cmp::Ordering;
 use std::fs;

@@ -3,12 +3,6 @@ mod lease;
 pub(crate) mod loading;
 mod translate;
 
-use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
-use crate::mutation::lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
-use crate::mutation::translate::{
-    build_client_mutation_response, translate_client_mutation_request,
-    validate_referenced_durable_content,
-};
 use crate::core::commit::{
     build_commit_plan, prepare_commit_head_publish, publish_commit_head, CommitHeadPublishError,
     CommitPlan, CommitRequest, CommitValidationContext, CommitValidationError,
@@ -16,6 +10,12 @@ use crate::core::commit::{
 };
 use crate::core::metadata::{MetadataApplyError, MetadataState};
 use crate::core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
+use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::mutation::lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
+use crate::mutation::translate::{
+    build_client_mutation_response, translate_client_mutation_request,
+    validate_referenced_durable_content,
+};
 use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{ClientMutationRequest, ClientMutationResponse};
@@ -182,10 +182,10 @@ mod tests {
         execute_client_mutation, translate_client_mutation_request, ClientMutationExecutionError,
         ClientMutationExecutionParams,
     };
-    use crate::mutation::loading::{read_head_object, read_lease_object};
     use crate::core::checkpoint::prepare_checkpoint;
     use crate::core::content::DurableContentValidationError;
     use crate::core::metadata::MetadataState;
+    use crate::mutation::loading::{read_head_object, read_lease_object};
     use crate::objectstore::fs::LocalFsStore;
     use crate::objectstore::keys::{
         blob, content_manifest, namespace_head, namespace_lease, wal_commit,

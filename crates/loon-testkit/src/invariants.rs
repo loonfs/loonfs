@@ -6,8 +6,8 @@ use loon_server::core::metadata::{
 use loon_server::core::wal::PreparedWalCommit;
 use loon_server::core::wal::StoredWalObject;
 use loon_server::objectstore::keys::{
-    blob, conflict_artifact, derived_progress, snapshot_manifest, snapshot_table,
-    wal_commit, SnapshotTableFamily,
+    blob, conflict_artifact, derived_progress, snapshot_manifest, snapshot_table, wal_commit,
+    SnapshotTableFamily,
 };
 use loon_types::{
     checkpoint_page_checksum_sha256, content_manifest_payload_checksum_sha256,
@@ -6256,5 +6256,4 @@ mod tests {
                 .passed
         );
     }
-
 }

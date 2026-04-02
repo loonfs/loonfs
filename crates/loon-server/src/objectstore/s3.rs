@@ -1,6 +1,6 @@
-use crate::objectstore::ObjectStoreError;
 use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
 use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use crate::objectstore::ObjectStoreError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwsS3StoreConfig {

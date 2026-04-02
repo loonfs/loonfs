@@ -3,6 +3,11 @@ use crate::invariants::{
     evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_wal_replay_invariants,
     CheckpointReplayInvariantInputs, NamespaceCoreInvariantReport, WalReplayInvariantInputs,
 };
+use crate::model::{
+    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointRow,
+    ModelCheckpointSegment, ModelCheckpointTable, ModelMetadataMutation, ModelMetadataState,
+    ModelNamespace, ModelWalCommit,
+};
 use crate::render::render_trace;
 use crate::scenario::Scenario;
 use crate::seed::Seed;
@@ -17,12 +22,9 @@ use loon_server::core::metadata::{
 use loon_server::core::wal::{
     replay_wal_commit_with_metadata, replay_wal_tail_with_metadata, StoredWalObject,
 };
-use crate::model::{
-    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointRow,
-    ModelCheckpointSegment, ModelCheckpointTable, ModelMetadataMutation, ModelMetadataState,
-    ModelNamespace, ModelWalCommit,
+use loon_server::objectstore::keys::{
+    snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily,
 };
-use loon_server::objectstore::keys::{snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily};
 use loon_types::{
     encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
     encode_wal_commit_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,

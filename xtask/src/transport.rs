@@ -5,8 +5,7 @@ use loon_server::objectstore::r2::R2StoreConfig;
 use loon_server::objectstore::s3::AwsS3StoreConfig;
 use loon_server::objectstore::ConfiguredObjectStore;
 use loon_server::ops::{
-    bootstrap_namespace as server_bootstrap_namespace,
-    list_authoritative_path as server_list_path,
+    bootstrap_namespace as server_bootstrap_namespace, list_authoritative_path as server_list_path,
     load_namespace_state_summary as server_load_namespace_state_summary,
     read_authoritative_file_bytes as server_read_file_bytes,
     resolve_authoritative_path as server_resolve_path,
@@ -69,7 +68,10 @@ impl ServerTransport for LocalTransport {
         &self,
         namespace_id: &NamespaceId,
     ) -> std::result::Result<NamespaceStateSummary, Self::Error> {
-        Ok(server_load_namespace_state_summary(&self.store, namespace_id)?)
+        Ok(server_load_namespace_state_summary(
+            &self.store,
+            namespace_id,
+        )?)
     }
 
     fn load_remote_observations(
@@ -86,7 +88,11 @@ impl ServerTransport for LocalTransport {
         namespace_id: &NamespaceId,
         params: &NamespaceBootstrapParams,
     ) -> std::result::Result<BootstrappedNamespace, Self::Error> {
-        Ok(server_bootstrap_namespace(&self.store, namespace_id, params)?)
+        Ok(server_bootstrap_namespace(
+            &self.store,
+            namespace_id,
+            params,
+        )?)
     }
 
     fn list_path(

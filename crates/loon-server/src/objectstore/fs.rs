@@ -1,6 +1,6 @@
-use crate::objectstore::ObjectStoreError;
-use crate::objectstore::keyspace::validate_segments;
 use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use crate::objectstore::keyspace::validate_segments;
+use crate::objectstore::ObjectStoreError;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};

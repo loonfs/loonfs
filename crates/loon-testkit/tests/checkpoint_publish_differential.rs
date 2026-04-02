@@ -3,16 +3,16 @@ use loon_server::core::checkpoint::{
     CheckpointHeadPublishRequest, StoredCheckpointManifest, StoredCheckpointSegment,
 };
 use loon_server::core::progress::load_retention_authorizers;
-use loon_testkit::model::{
-    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointPublishAuthorizers,
-    ModelCheckpointRow, ModelCheckpointSegment, ModelCheckpointTable, ModelNamespace,
-    ModelProgressObject,
-};
 use loon_server::objectstore::fs::LocalFsStore;
 use loon_server::objectstore::ObjectStore;
 use loon_testkit::invariants::{
     evaluate_checkpoint_head_publish_invariants, BackgroundWorkInvariantReport,
     CheckpointHeadPublishInvariantInputs, CheckpointProgressAuthorizer,
+};
+use loon_testkit::model::{
+    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointPublishAuthorizers,
+    ModelCheckpointRow, ModelCheckpointSegment, ModelCheckpointTable, ModelNamespace,
+    ModelProgressObject,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;

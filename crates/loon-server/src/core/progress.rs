@@ -1,5 +1,5 @@
-use crate::objectstore::ObjectStoreError;
 use crate::objectstore::keys::derived_progress;
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{
     payload_checksum_sha256, ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId,

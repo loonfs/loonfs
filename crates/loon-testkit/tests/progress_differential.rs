@@ -2,7 +2,6 @@ use loon_server::core::progress::{
     publish_progress, read_progress_object, LoadedProgressObject, ProgressLoadError,
     ProgressPublishOutcome,
 };
-use loon_testkit::model::{ModelNamespace, ModelProgressObject};
 use loon_server::objectstore::fs::LocalFsStore;
 use loon_server::objectstore::keys::derived_progress;
 use loon_server::objectstore::ObjectStore;
@@ -10,6 +9,7 @@ use loon_testkit::invariants::{
     evaluate_progress_publish_invariants, BackgroundWorkInvariantReport, ProgressInvariantSnapshot,
     ProgressPublishInvariantInputs, ProgressPublishOutcomeKind,
 };
+use loon_testkit::model::{ModelNamespace, ModelProgressObject};
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_types::{ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId, ProgressState};

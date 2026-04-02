@@ -1,11 +1,11 @@
-use crate::objectstore::ObjectStoreError;
+use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
 use crate::objectstore::fs::LocalFsStore;
 use crate::objectstore::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
 use crate::objectstore::r2::{R2Store, R2StoreConfig};
 use crate::objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
-use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use crate::objectstore::ObjectStoreError;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,11 +136,11 @@ impl ObjectStore for ConfiguredObjectStore {
 #[cfg(test)]
 mod tests {
     use super::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
-    use crate::objectstore::ObjectStoreError;
     use crate::objectstore::fs::LocalFsStore;
     use crate::objectstore::r2::R2StoreConfig;
     use crate::objectstore::s3::AwsS3StoreConfig;
     use crate::objectstore::ObjectStore;
+    use crate::objectstore::ObjectStoreError;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

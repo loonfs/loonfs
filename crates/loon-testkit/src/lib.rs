@@ -8,10 +8,10 @@
 
 pub mod client;
 pub mod explore;
-pub mod model;
 pub mod fixtures;
 pub mod invariants;
 pub mod minimize;
+pub mod model;
 pub mod render;
 pub mod replay;
 pub mod scenario;

@@ -1,7 +1,11 @@
 use anyhow::Result;
 
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<String> {
-    loon_client::ops::run_args(args, crate::transport::make_transport, crate::transport::open_store)
+    loon_client::ops::run_args(
+        args,
+        crate::transport::make_transport,
+        crate::transport::open_store,
+    )
 }
 
 #[cfg(test)]

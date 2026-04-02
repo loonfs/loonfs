@@ -3,10 +3,10 @@ use crate::core::metadata::{
 };
 use crate::core::progress::LoadedRetentionAuthorizers;
 use crate::core::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
-use crate::objectstore::ObjectStoreError;
 use crate::objectstore::keys::{
     namespace_head, snapshot_manifest, snapshot_table, SnapshotTableFamily,
 };
+use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,

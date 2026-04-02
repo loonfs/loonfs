@@ -1,4 +1,3 @@
-use super::*;
 use super::client::{
     authoritative_snapshot_import_batch_rollback_is_atomic,
     authoritative_snapshot_import_discovers_remote_only_state,
@@ -43,6 +42,7 @@ use super::client::{
     sync_until_idle_stops_on_no_work,
 };
 use super::namespace::ModelLeaseAcquireError;
+use super::*;
 use loon_types::{
     ChangeSeq, FenceToken, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
     SubtreeConflictArtifactEntry, CONTENT_BLOCK_SIZE_BYTES,

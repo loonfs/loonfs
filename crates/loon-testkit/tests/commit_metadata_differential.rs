@@ -4,12 +4,12 @@ use loon_server::core::commit::{
 };
 use loon_server::core::metadata::MetadataState;
 use loon_server::core::wal::prepare_wal_commit;
+use loon_testkit::invariants::{
+    evaluate_namespace_commit_invariants, CommitInvariantInputs, NamespaceCoreInvariantReport,
+};
 use loon_testkit::model::{
     ModelCommitValidationRequest, ModelMetadataMutation, ModelMetadataPreconditionError,
     ModelMetadataState, ModelNamespace,
-};
-use loon_testkit::invariants::{
-    evaluate_namespace_commit_invariants, CommitInvariantInputs, NamespaceCoreInvariantReport,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -479,11 +479,13 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|tombstone| loon_testkit::model::ModelSubtreeTombstoneRecord {
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-                tombstone_op_index: tombstone.tombstone_op_index,
-            })
+            .map(
+                |tombstone| loon_testkit::model::ModelSubtreeTombstoneRecord {
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                    tombstone_op_index: tombstone.tombstone_op_index,
+                },
+            )
             .collect(),
     }
 }
@@ -525,11 +527,13 @@ fn metadata_state_from_model(metadata_state: &ModelMetadataState) -> MetadataSta
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|tombstone| loon_server::core::metadata::SubtreeTombstoneRecord {
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-                tombstone_op_index: tombstone.tombstone_op_index,
-            })
+            .map(
+                |tombstone| loon_server::core::metadata::SubtreeTombstoneRecord {
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                    tombstone_op_index: tombstone.tombstone_op_index,
+                },
+            )
             .collect(),
     }
 }

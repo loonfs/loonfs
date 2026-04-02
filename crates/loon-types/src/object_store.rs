@@ -52,11 +52,8 @@ pub enum ObjectStoreError {
 
 pub trait ObjectStore {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
-    fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Vec<u8>>, ObjectStoreError>;
+    fn get(&self, key: &str, range: Option<ByteRange>)
+        -> Result<Option<Vec<u8>>, ObjectStoreError>;
     fn put(
         &self,
         key: &str,
