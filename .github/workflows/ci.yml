@@ -37,6 +37,8 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
