@@ -1,5 +1,6 @@
+pub use crate::core::control_types::{HeadStateEnvelope, LeaseStateEnvelope};
 use loon_types::FenceToken;
-pub use loon_types::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
+pub use loon_types::{HeadState, LeaseState};
 use thiserror::Error;
 
 pub fn head_and_lease_fence_tokens_agree(head: &HeadState, lease: &LeaseState) -> bool {

@@ -15,10 +15,10 @@ use loon_server::objectstore::fs::LocalFsStore;
 use loon_server::objectstore::keys::{namespace_head, namespace_lease};
 use loon_server::objectstore::ObjectStore;
 use loon_testkit::scenario::Scenario;
+use loon_server::core::control_types::{ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope};
 use loon_types::{
-    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind,
-    HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId,
-    RevisionNo,
+    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, HeadState, InodeId,
+    InodeKind, LeaseState, NamespaceId, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;

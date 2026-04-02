@@ -16,14 +16,16 @@ use loon_testkit::model::{
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
-use loon_types::{
+use loon_server::core::checkpoint_types::{
     checkpoint_page_checksum_sha256, encode_checkpoint_manifest_json,
-    encode_checkpoint_segment_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,
-    CheckpointManifestPayload, CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor,
-    CheckpointSegmentEnvelope, CheckpointSegmentPayload, CheckpointTableFamily,
-    CheckpointTableManifest, ControlObjectEnvelope, ControlObjectKind, FenceToken, HeadState,
-    HeadStateEnvelope, InodeId, NamespaceId, ProgressState,
+    encode_checkpoint_segment_envelope_zstd, CheckpointManifestEnvelope, CheckpointManifestPayload,
+    CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
+    CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest,
 };
+use loon_server::core::control_types::{
+    ControlObjectEnvelope, ControlObjectKind, HeadStateEnvelope, ProgressState,
+};
+use loon_types::{ChangeSeq, FenceToken, HeadState, InodeId, NamespaceId};
 use serde::Deserialize;
 
 const TEST_WRITER_VERSION: &str = "loon-testkit-differential";

@@ -8,14 +8,15 @@ use crate::objectstore::keys::{
 };
 use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
-use loon_types::{
+use crate::core::checkpoint_types::{
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
-    encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd, ChangeSeq,
+    encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
     CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage, CheckpointRow,
     CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointSegmentPayload,
-    CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind, HeadState,
-    HeadStateEnvelope, NamespaceId,
+    CheckpointTableFamily, CheckpointTableManifest,
 };
+use crate::core::control_types::{ControlObjectKind, HeadStateEnvelope};
+use loon_types::{ChangeSeq, HeadState, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -1006,14 +1007,19 @@ mod tests {
         SnapshotTableFamily,
     };
     use crate::objectstore::ObjectStore;
-    use loon_types::{
+    use crate::core::checkpoint_types::{
         decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
-        encode_checkpoint_manifest_json, encode_wal_commit_envelope_zstd, ChangeSeq,
-        CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointSegmentDescriptor,
-        CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind, FenceToken, HeadState,
-        HeadStateEnvelope, InodeId, InodeKind, NamespaceId, ProgressState, ProgressStateEnvelope,
-        RevisionNo, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+        encode_checkpoint_manifest_json, CheckpointManifestEnvelope, CheckpointManifestPayload,
+        CheckpointSegmentDescriptor, CheckpointTableFamily, CheckpointTableManifest,
     };
+    use crate::core::control_types::{
+        ControlObjectKind, HeadStateEnvelope, ProgressState, ProgressStateEnvelope,
+    };
+    use crate::core::wal_types::{
+        encode_wal_commit_envelope_zstd, WalCommitEnvelope, WalCommitPayload, WalOp,
+        WalPrecondition,
+    };
+    use loon_types::{ChangeSeq, FenceToken, HeadState, InodeId, InodeKind, NamespaceId, RevisionNo};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};

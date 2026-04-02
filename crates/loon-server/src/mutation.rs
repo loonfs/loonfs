@@ -192,12 +192,17 @@ mod tests {
     };
     use crate::objectstore::ObjectStore;
     use loon_testkit::scenario::Scenario;
+    use crate::core::control_types::{
+        ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope,
+    };
+    use crate::core::wal_types::{
+        decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, WalCommitEnvelope,
+        WalCommitPayload, WalOp,
+    };
     use loon_types::{
-        decode_wal_commit_envelope_zstd, encode_content_manifest_json,
-        encode_wal_commit_envelope_zstd, sha256_digest, ChangeSeq, ClientMutationRequest,
-        ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, FenceToken, HeadState,
-        HeadStateEnvelope, InodeId, LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,
-        WalCommitEnvelope, WalCommitPayload, WalOp,
+        encode_content_manifest_json, sha256_digest, ChangeSeq, ClientMutationRequest,
+        ContentManifestEnvelope, ContentManifestPayload, FenceToken, HeadState, InodeId, LeaseState,
+        NamespaceId, RevisionNo,
     };
     use serde::Deserialize;
     use std::fs;

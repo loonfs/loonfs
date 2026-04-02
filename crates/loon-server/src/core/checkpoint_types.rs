@@ -1,6 +1,6 @@
 use crate::digest::sha256_hex;
-use crate::{ChangeSeq, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo};
 use ciborium::{de::from_reader, ser::into_writer};
+use loon_types::{ChangeSeq, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -354,4 +354,173 @@ pub fn decode_checkpoint_segment_envelope_zstd(
     }
 
     Ok(envelope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_manifest_round_trips_through_json() {
+        let payload = sample_checkpoint_manifest_payload();
+        let envelope = CheckpointManifestEnvelope::from_payload("test-writer", payload.clone())
+            .expect("build manifest envelope");
+
+        let encoded = encode_checkpoint_manifest_json(&envelope).expect("encode manifest");
+        let decoded = decode_checkpoint_manifest_json(&encoded).expect("decode manifest");
+
+        assert_eq!(
+            decoded.kind,
+            CheckpointManifestKind::NamespaceCheckpointManifest
+        );
+        assert_eq!(decoded.format_version, CHECKPOINT_MANIFEST_FORMAT_VERSION);
+        assert_eq!(decoded.payload, payload);
+        assert!(decoded
+            .has_valid_payload_checksum()
+            .expect("recompute manifest checksum"));
+    }
+
+    #[test]
+    fn checkpoint_manifest_checksum_detects_tampering() {
+        let payload = sample_checkpoint_manifest_payload();
+        let mut envelope = CheckpointManifestEnvelope::from_payload("test-writer", payload)
+            .expect("build manifest envelope");
+        envelope.payload.checkpoint_seq = ChangeSeq(41);
+
+        let encoded = encode_checkpoint_manifest_json(&envelope).expect("encode manifest");
+        let error = decode_checkpoint_manifest_json(&encoded).expect_err("tampering should fail");
+
+        assert!(matches!(
+            error,
+            CheckpointManifestCodecError::ChecksumMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn checkpoint_manifest_checksum_helper_matches_envelope_value() {
+        let payload = sample_checkpoint_manifest_payload();
+        let envelope = CheckpointManifestEnvelope::from_payload("test-writer", payload)
+            .expect("build manifest envelope");
+
+        assert_eq!(
+            envelope.payload_checksum_sha256,
+            checkpoint_manifest_payload_checksum_sha256(&envelope.payload)
+                .expect("recompute manifest checksum")
+        );
+    }
+
+    #[test]
+    fn checkpoint_segment_round_trips_through_cbor_zstd() {
+        let payload = sample_checkpoint_segment_payload();
+        let envelope = CheckpointSegmentEnvelope::from_payload("test-writer", payload.clone())
+            .expect("build checkpoint segment envelope");
+
+        let encoded =
+            encode_checkpoint_segment_envelope_zstd(&envelope).expect("encode checkpoint segment");
+        let decoded =
+            decode_checkpoint_segment_envelope_zstd(&encoded).expect("decode checkpoint segment");
+
+        assert_eq!(
+            decoded.kind,
+            CheckpointSegmentKind::NamespaceCheckpointSegment
+        );
+        assert_eq!(decoded.format_version, CHECKPOINT_SEGMENT_FORMAT_VERSION);
+        assert_eq!(decoded.payload, payload);
+        assert!(decoded
+            .has_valid_payload_checksum()
+            .expect("recompute checkpoint segment checksum"));
+        assert_eq!(
+            decoded
+                .page_checksums_sha256()
+                .expect("compute page checksums from payload"),
+            vec![checkpoint_page_checksum_sha256(&decoded.payload.pages[0])
+                .expect("compute page checksum")]
+        );
+    }
+
+    #[test]
+    fn checkpoint_segment_checksum_detects_tampering() {
+        let payload = sample_checkpoint_segment_payload();
+        let mut envelope = CheckpointSegmentEnvelope::from_payload("test-writer", payload)
+            .expect("build checkpoint segment envelope");
+        envelope.payload.row_count = 3;
+
+        let encoded =
+            encode_checkpoint_segment_envelope_zstd(&envelope).expect("encode checkpoint segment");
+        let error = decode_checkpoint_segment_envelope_zstd(&encoded)
+            .expect_err("tampered checkpoint segment should fail");
+
+        assert!(matches!(
+            error,
+            CheckpointSegmentCodecError::ChecksumMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn checkpoint_segment_checksum_helper_matches_envelope_value() {
+        let payload = sample_checkpoint_segment_payload();
+        let envelope = CheckpointSegmentEnvelope::from_payload("test-writer", payload)
+            .expect("build checkpoint segment envelope");
+
+        assert_eq!(
+            envelope.payload_checksum_sha256,
+            checkpoint_segment_payload_checksum_sha256(&envelope.payload)
+                .expect("recompute checkpoint segment checksum")
+        );
+    }
+
+    fn sample_checkpoint_manifest_payload() -> CheckpointManifestPayload {
+        CheckpointManifestPayload {
+            namespace_id: NamespaceId::from("ns-1"),
+            checkpoint_seq: ChangeSeq(40),
+            active_fence_token: FenceToken(8),
+            next_inode_id: InodeId(501),
+            retention_floor_seq: ChangeSeq(40),
+            verified: true,
+            tables: vec![CheckpointTableManifest {
+                family: CheckpointTableFamily::Inodes,
+                segments: vec![CheckpointSegmentDescriptor {
+                    object_key:
+                        "namespaces/ns-1/snapshots/00000000000000000040/tables/inodes-00000.sst.zst"
+                            .to_owned(),
+                    segment_index: 0,
+                    row_count: 500,
+                    min_key: "inode-1".to_owned(),
+                    max_key: "inode-500".to_owned(),
+                    payload_checksum_sha256: "seg-checksum-1".to_owned(),
+                    page_checksums_sha256: vec!["page-checksum-1".to_owned()],
+                }],
+            }],
+        }
+    }
+
+    fn sample_checkpoint_segment_payload() -> CheckpointSegmentPayload {
+        CheckpointSegmentPayload {
+            namespace_id: NamespaceId::from("ns-1"),
+            checkpoint_seq: ChangeSeq(40),
+            family: CheckpointTableFamily::Inodes,
+            segment_index: 0,
+            row_count: 2,
+            min_key: "inode-1".to_owned(),
+            max_key: "inode-2".to_owned(),
+            pages: vec![CheckpointPage {
+                page_index: 0,
+                min_key: "inode-1".to_owned(),
+                max_key: "inode-2".to_owned(),
+                row_keys: vec!["inode-1".to_owned(), "inode-2".to_owned()],
+                rows: vec![
+                    CheckpointRow::Inode {
+                        inode_id: InodeId(1),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(1),
+                    },
+                    CheckpointRow::Inode {
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::File,
+                        created_seq: ChangeSeq(2),
+                    },
+                ],
+            }],
+        }
+    }
 }

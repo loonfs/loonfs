@@ -23,11 +23,11 @@ use loon_testkit::model::{
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_testkit::tempdir::TestDir;
+use loon_server::core::control_types::{ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope};
 use loon_types::{
     decode_content_manifest_json, encode_content_manifest_json, sha256_digest,
-    ClientMutationRequest, ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind,
-    HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId,
-    CONTENT_BLOCK_SIZE_BYTES,
+    ClientMutationRequest, ContentManifestEnvelope, ContentManifestPayload, HeadState, LeaseState,
+    NamespaceId, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;

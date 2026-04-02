@@ -25,13 +25,16 @@ use loon_server::core::wal::{
 use loon_server::objectstore::keys::{
     snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily,
 };
-use loon_types::{
+use loon_server::core::checkpoint_types::{
     encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
-    encode_wal_commit_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,
-    CheckpointManifestPayload, CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor,
-    CheckpointSegmentEnvelope, CheckpointSegmentPayload, CheckpointTableFamily, FenceToken,
-    HeadState, InodeId, NamespaceId, RevisionNo, WalCommitEnvelope, WalCommitPayload, WalOp,
+    CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage, CheckpointRow,
+    CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointSegmentPayload,
+    CheckpointTableFamily,
 };
+use loon_server::core::wal_types::{
+    encode_wal_commit_envelope_zstd, WalCommitEnvelope, WalCommitPayload, WalOp,
+};
+use loon_types::{ChangeSeq, FenceToken, HeadState, InodeId, NamespaceId, RevisionNo};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -749,7 +752,7 @@ fn materialize_checkpoint_fixture(
                     actual.clone()
                 })
                 .collect();
-            loon_types::CheckpointTableManifest {
+            loon_server::core::checkpoint_types::CheckpointTableManifest {
                 family: table.family,
                 segments,
             }

@@ -5,11 +5,14 @@
 //! invariant checking. It does not perform I/O — storage operations are in `loon-objectstore`.
 
 pub mod checkpoint;
+pub mod checkpoint_types;
 pub mod commit;
 pub mod content;
+pub mod control_types;
 pub mod invariants;
 pub mod metadata;
 pub mod namespace;
 pub mod path;
 pub mod progress;
 pub mod wal;
+pub mod wal_types;

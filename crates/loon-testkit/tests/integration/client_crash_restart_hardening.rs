@@ -27,11 +27,11 @@ use loon_server::objectstore::keys::{
 use loon_server::objectstore::ObjectStore;
 use loon_testkit::fixtures::load_fixture;
 use loon_testkit::tempdir::TestDir;
+use loon_server::core::control_types::{ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope};
 use loon_types::{
     ChangeSeq, ClientMutationRequest, ClientMutationResponse, ConflictArtifactLoserSummary,
-    ConflictArtifactWinnerSummary, ConflictClass, ControlObjectKind, HeadState, HeadStateEnvelope,
-    InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId, RevisionNo,
-    SubtreeConflictArtifactEntry, SubtreeConflictArtifactRootSummary,
+    ConflictArtifactWinnerSummary, ConflictClass, HeadState, InodeId, InodeKind, LeaseState,
+    NamespaceId, RevisionNo, SubtreeConflictArtifactEntry, SubtreeConflictArtifactRootSummary,
 };
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};

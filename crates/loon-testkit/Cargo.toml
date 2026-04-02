@@ -14,6 +14,6 @@ serde_yaml.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 loon-client = { path = "../loon-client" }
-loon-server = { path = "../loon-server" }
+loon-server = { path = "../loon-server", features = ["testkit"] }
 loon-sim = { path = "../loon-sim" }
 loon-types = { path = "../loon-types" }

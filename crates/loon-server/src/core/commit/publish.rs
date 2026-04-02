@@ -2,7 +2,8 @@ use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan, PreparedC
 use crate::objectstore::keys::namespace_head;
 use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
-use loon_types::{ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope};
+use crate::core::control_types::{ControlObjectKind, HeadStateEnvelope};
+use loon_types::{ChangeSeq, HeadState};
 
 pub fn prepare_commit_head_publish(
     current_head: &HeadState,

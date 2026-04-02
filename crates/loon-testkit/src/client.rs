@@ -2,10 +2,8 @@ use loon_server::core::checkpoint::prepare_checkpoint;
 use loon_server::core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
 use loon_server::objectstore::keys::namespace_head;
 use loon_server::objectstore::ObjectStore;
-use loon_types::{
-    ChangeSeq, ClientMutationOp, ClientMutationRequest, ControlObjectKind, HeadStateEnvelope,
-    InodeId, InodeKind,
-};
+use loon_server::core::control_types::{ControlObjectKind, HeadStateEnvelope};
+use loon_types::{ChangeSeq, ClientMutationOp, ClientMutationRequest, InodeId, InodeKind};
 
 pub fn seed_server_basis_for_request<S: ObjectStore>(
     store: &S,

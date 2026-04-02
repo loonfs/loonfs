@@ -9,13 +9,15 @@ use loon_server::objectstore::keys::{
     blob, conflict_artifact, derived_progress, snapshot_manifest, snapshot_table, wal_commit,
     SnapshotTableFamily,
 };
+use loon_server::core::checkpoint_types::{
+    checkpoint_page_checksum_sha256, decode_checkpoint_manifest_json,
+    decode_checkpoint_segment_envelope_zstd, CheckpointManifestEnvelope, CheckpointRow,
+    CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointTableFamily,
+};
+use loon_server::core::wal_types::{decode_wal_commit_envelope_zstd, WalCommitEnvelope, WalOp};
 use loon_types::{
-    checkpoint_page_checksum_sha256, content_manifest_payload_checksum_sha256,
-    decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
-    decode_wal_commit_envelope_zstd, sha256_digest, ChangeSeq, CheckpointManifestEnvelope,
-    CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointTableFamily,
-    ContentManifestEnvelope, FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceId,
-    RevisionNo, WalCommitEnvelope, WalOp,
+    content_manifest_payload_checksum_sha256, sha256_digest, ChangeSeq, ContentManifestEnvelope,
+    FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -3777,7 +3779,7 @@ fn wal_replay_applies_metadata_rows_check(
 
 fn checkpoint_manifest_key_matches_seq_check(
     stored_manifest: &StoredCheckpointManifest,
-    manifest: Option<&loon_types::CheckpointManifestEnvelope>,
+    manifest: Option<&loon_server::core::checkpoint_types::CheckpointManifestEnvelope>,
 ) -> InvariantCheck {
     match manifest {
         Some(manifest) => {
@@ -3803,7 +3805,7 @@ fn checkpoint_manifest_key_matches_seq_check(
 }
 
 fn checkpoint_manifest_must_be_verified_check(
-    manifest: Option<&loon_types::CheckpointManifestEnvelope>,
+    manifest: Option<&loon_server::core::checkpoint_types::CheckpointManifestEnvelope>,
 ) -> InvariantCheck {
     match manifest {
         Some(manifest) => InvariantCheck {
@@ -3821,7 +3823,7 @@ fn checkpoint_manifest_must_be_verified_check(
 
 fn checkpoint_replay_requires_all_manifest_segments_check(
     stored_segments: &[StoredCheckpointSegment],
-    manifest: Option<&loon_types::CheckpointManifestEnvelope>,
+    manifest: Option<&loon_server::core::checkpoint_types::CheckpointManifestEnvelope>,
 ) -> InvariantCheck {
     match manifest {
         Some(manifest) => {
@@ -3856,7 +3858,7 @@ fn checkpoint_replay_requires_all_manifest_segments_check(
 
 fn checkpoint_segment_descriptor_matches_payload_check(
     stored_segments: &[StoredCheckpointSegment],
-    manifest: Option<&loon_types::CheckpointManifestEnvelope>,
+    manifest: Option<&loon_server::core::checkpoint_types::CheckpointManifestEnvelope>,
     decoded_segments: Option<&[DecodedCheckpointSegment]>,
 ) -> InvariantCheck {
     let Some(manifest) = manifest else {
@@ -4030,7 +4032,7 @@ fn decode_checkpoint_segments(
 
 fn reconstruct_checkpoint_metadata(
     stored_segments: &[StoredCheckpointSegment],
-    manifest: Option<&loon_types::CheckpointManifestEnvelope>,
+    manifest: Option<&loon_server::core::checkpoint_types::CheckpointManifestEnvelope>,
 ) -> Result<MetadataState, String> {
     let Some(manifest) = manifest else {
         return Err("manifest_decode_failed".to_owned());
@@ -4366,16 +4368,18 @@ mod tests {
         blob, conflict_artifact, content_manifest, derived_progress, snapshot_manifest,
         snapshot_table, SnapshotTableFamily,
     };
-    use loon_types::{
+    use loon_server::core::checkpoint_types::{
         checkpoint_page_checksum_sha256, decode_checkpoint_manifest_json,
         decode_checkpoint_segment_envelope_zstd, encode_checkpoint_manifest_json,
-        encode_checkpoint_segment_envelope_zstd, encode_content_manifest_json, sha256_digest,
-        ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage,
-        CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-        CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest,
-        ContentBlockDescriptor, ContentManifestEnvelope, ContentManifestPayload, FenceToken,
-        HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
-        CONTENT_BLOCK_SIZE_BYTES,
+        encode_checkpoint_segment_envelope_zstd, CheckpointManifestEnvelope,
+        CheckpointManifestPayload, CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor,
+        CheckpointSegmentEnvelope, CheckpointSegmentPayload, CheckpointTableFamily,
+        CheckpointTableManifest,
+    };
+    use loon_types::{
+        encode_content_manifest_json, sha256_digest, ChangeSeq, ContentBlockDescriptor,
+        ContentManifestEnvelope, ContentManifestPayload, FenceToken, HeadState, InodeId, InodeKind,
+        LeaseState, NamespaceId, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
     };
     use std::collections::BTreeMap;
 

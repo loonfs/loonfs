@@ -13,10 +13,10 @@ use crate::objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
 };
 use crate::objectstore::ObjectStore;
+use crate::core::control_types::{ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope};
 use loon_types::{
-    decode_content_manifest_json, ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope,
-    InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId, ObservedRemoteInode,
-    RevisionNo,
+    decode_content_manifest_json, ChangeSeq, HeadState, InodeId, InodeKind, LeaseState,
+    NamespaceId, ObservedRemoteInode, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -779,11 +779,11 @@ mod tests {
     use crate::objectstore::fs::LocalFsStore;
     use crate::objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
     use crate::objectstore::ObjectStore;
+    use crate::core::control_types::{ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope};
     use loon_types::{
         sha256_digest, ChangeSeq, ClientMutationOp, ClientMutationRequest, ContentBlockDescriptor,
-        ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, FenceToken, HeadState,
-        HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId,
-        RevisionNo,
+        ContentManifestEnvelope, ContentManifestPayload, FenceToken, HeadState, InodeId, InodeKind,
+        LeaseState, NamespaceId, RevisionNo,
     };
     use std::fs;
     use std::path::PathBuf;

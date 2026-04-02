@@ -1,4 +1,5 @@
-use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
+use crate::core::wal_types::WalOp;
+use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -628,7 +629,8 @@ mod tests {
         DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
         VisiblePathError,
     };
-    use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
+    use crate::core::wal_types::WalOp;
+    use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo};
 
     #[test]
     fn apply_committed_wal_ops_appends_create_dir_rows() {

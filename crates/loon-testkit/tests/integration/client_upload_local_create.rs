@@ -21,10 +21,10 @@ use loon_testkit::invariants::{
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
+use loon_server::core::control_types::{ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope};
 use loon_types::{
-    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind,
-    CreatedRemoteInode, HeadState, HeadStateEnvelope, InodeId, LeaseState, LeaseStateEnvelope,
-    NamespaceId, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
+    ChangeSeq, ClientMutationOp, ClientMutationRequest, ClientMutationResponse, CreatedRemoteInode,
+    HeadState, InodeId, LeaseState, NamespaceId, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::Deserialize;
 use std::fs;

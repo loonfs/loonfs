@@ -1129,6 +1129,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-sdk-s3",
+ "ciborium",
  "http",
  "loon-testkit",
  "loon-types",
@@ -1137,6 +1138,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -1167,12 +1169,10 @@ dependencies = [
 name = "loon-types"
 version = "0.1.0"
 dependencies = [
- "ciborium",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
- "zstd",
 ]
 
 [[package]]

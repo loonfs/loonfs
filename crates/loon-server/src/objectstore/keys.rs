@@ -1,3 +1,11 @@
+// Re-export client-visible key builders from loon-types.
+pub use loon_types::object_store_keys::{
+    blob, conflict_artifact, conflict_artifact_archive, conflict_artifact_archive_prefix,
+    conflict_artifact_prefix, content_manifest,
+};
+
+// Server-only key builders and types below.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotTableFamily {
     Inodes,
@@ -29,30 +37,6 @@ pub fn wal_commit(namespace: &str, seq: u64, commit_id: &str) -> String {
     format!("namespaces/{namespace}/wal/{seq:020}-{commit_id}.cbor.zst")
 }
 
-pub fn blob(namespace: &str, digest: &str) -> String {
-    format!("namespaces/{namespace}/blobs/{digest}")
-}
-
-pub fn content_manifest(namespace: &str, digest: &str) -> String {
-    format!("namespaces/{namespace}/manifests/{digest}.json")
-}
-
-pub fn conflict_artifact(namespace: &str, conflict_id: &str) -> String {
-    format!("namespaces/{namespace}/conflicts/{conflict_id}.json")
-}
-
-pub fn conflict_artifact_prefix(namespace: &str) -> String {
-    format!("namespaces/{namespace}/conflicts/")
-}
-
-pub fn conflict_artifact_archive(namespace: &str, conflict_id: &str) -> String {
-    format!("namespaces/{namespace}/conflict-archives/{conflict_id}.json")
-}
-
-pub fn conflict_artifact_archive_prefix(namespace: &str) -> String {
-    format!("namespaces/{namespace}/conflict-archives/")
-}
-
 pub fn snapshot_manifest(namespace: &str, seq: u64) -> String {
     format!("namespaces/{namespace}/snapshots/{seq:020}/manifest.json")
 }
@@ -79,15 +63,10 @@ pub fn queue_shard(shard_index: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        blob, conflict_artifact, conflict_artifact_archive, conflict_artifact_archive_prefix,
-        conflict_artifact_prefix, content_manifest, derived_progress, namespace_head,
-        namespace_lease, queue_shard, snapshot_manifest, snapshot_table, wal_commit,
-        SnapshotTableFamily,
-    };
+    use super::*;
 
     #[test]
-    fn key_builders_match_spec_examples() {
+    fn server_key_builders_match_spec_examples() {
         assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/head.json");
         assert_eq!(namespace_lease("ns-1"), "namespaces/ns-1/lease.json");
         assert_eq!(
@@ -107,6 +86,10 @@ mod tests {
             "namespaces/ns-1/derived/BuildSnapshot/progress.json"
         );
         assert_eq!(queue_shard(17), "queue/shards/00017.json");
+    }
+
+    #[test]
+    fn client_key_re_exports_match_spec_examples() {
         assert_eq!(
             blob("ns-1", "sha256:abcd"),
             "namespaces/ns-1/blobs/sha256:abcd"

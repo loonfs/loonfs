@@ -5,7 +5,8 @@ use super::{
 };
 use crate::core::invariants::INVARIANTS;
 use crate::core::metadata::MetadataState;
-use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
+use crate::core::wal_types::WalOp;
+use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo};
 
 pub fn build_commit_plan(
     request: &CommitRequest,

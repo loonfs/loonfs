@@ -1,9 +1,10 @@
 use crate::objectstore::keys::{namespace_head, namespace_lease};
 use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
-use loon_types::{
-    payload_checksum_sha256, ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope, NamespaceId,
+use crate::core::control_types::{
+    payload_checksum_sha256, ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope,
 };
+use loon_types::NamespaceId;
 use serde::Serialize;
 use serde::{Deserialize, Serialize as DeriveSerialize};
 use thiserror::Error;

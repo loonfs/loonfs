@@ -12,7 +12,8 @@ use loon_testkit::invariants::{
 use loon_testkit::model::{ModelNamespace, ModelProgressObject};
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
-use loon_types::{ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId, ProgressState};
+use loon_server::core::control_types::{ControlObjectEnvelope, ControlObjectKind, ProgressState};
+use loon_types::{ChangeSeq, NamespaceId};
 use serde::Deserialize;
 
 const TEST_WRITER_VERSION: &str = "loon-testkit-differential";

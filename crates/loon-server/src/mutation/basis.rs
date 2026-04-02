@@ -10,7 +10,8 @@ use crate::mutation::loading::{
 };
 use crate::objectstore::keys::snapshot_manifest;
 use crate::objectstore::ObjectStore;
-use loon_types::{HeadState, HeadStateEnvelope, NamespaceId};
+use crate::core::control_types::HeadStateEnvelope;
+use loon_types::{HeadState, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

@@ -20,10 +20,8 @@ use loon_testkit::invariants::{
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
 use loon_testkit::tempdir::TestDir;
-use loon_types::{
-    ClientMutationResponse, ControlObjectKind, HeadState, HeadStateEnvelope, InodeId, LeaseState,
-    LeaseStateEnvelope, NamespaceId,
-};
+use loon_server::core::control_types::{ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope};
+use loon_types::{ClientMutationResponse, HeadState, InodeId, LeaseState, NamespaceId};
 use serde::Deserialize;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;

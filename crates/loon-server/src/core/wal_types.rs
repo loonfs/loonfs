@@ -1,6 +1,6 @@
 use crate::digest::sha256_hex;
-use crate::{ChangeSeq, FenceToken, InodeId, NamespaceId, RevisionNo};
 use ciborium::{de::from_reader, ser::into_writer};
+use loon_types::{ChangeSeq, FenceToken, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -171,4 +171,77 @@ pub fn decode_wal_commit_envelope_zstd(bytes: &[u8]) -> Result<WalCommitEnvelope
     }
 
     Ok(envelope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wal_commit_envelope_round_trips_through_cbor_zstd() {
+        let payload = sample_wal_payload();
+        let envelope = WalCommitEnvelope::from_payload("test-writer", payload.clone())
+            .expect("build WAL envelope");
+
+        let encoded = encode_wal_commit_envelope_zstd(&envelope).expect("encode WAL envelope");
+        let decoded = decode_wal_commit_envelope_zstd(&encoded).expect("decode WAL envelope");
+
+        assert_eq!(decoded.kind, envelope.kind);
+        assert_eq!(decoded.format_version, WAL_FORMAT_VERSION);
+        assert_eq!(decoded.payload, payload);
+        assert!(decoded
+            .has_valid_payload_checksum()
+            .expect("recompute payload checksum"));
+    }
+
+    #[test]
+    fn wal_payload_checksum_detects_tampering() {
+        let payload = sample_wal_payload();
+        let mut envelope =
+            WalCommitEnvelope::from_payload("test-writer", payload).expect("build WAL envelope");
+
+        envelope.payload.seq = ChangeSeq(43);
+        let encoded = encode_wal_commit_envelope_zstd(&envelope).expect("encode WAL envelope");
+        let error =
+            decode_wal_commit_envelope_zstd(&encoded).expect_err("tampering should fail");
+
+        assert!(matches!(error, WalCodecError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn wal_checksum_helper_matches_envelope_value() {
+        let payload = sample_wal_payload();
+        let envelope =
+            WalCommitEnvelope::from_payload("test-writer", payload).expect("build WAL envelope");
+
+        assert_eq!(
+            envelope.payload_checksum_sha256,
+            wal_payload_checksum_sha256(&envelope.payload).expect("recompute checksum")
+        );
+    }
+
+    fn sample_wal_payload() -> WalCommitPayload {
+        WalCommitPayload {
+            namespace_id: NamespaceId::from("ns-1"),
+            seq: ChangeSeq(42),
+            base_head_seq: ChangeSeq(41),
+            commit_id: "req-20260311-0001".to_owned(),
+            request_id: "req-20260311-0001".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(8),
+            ops: vec![WalOp::ReplaceFile {
+                op_index: 0,
+                inode_id: InodeId(42),
+                base_revision: RevisionNo(7),
+                content_manifest_digest: "sha256:manifest".to_owned(),
+            }],
+            preconditions: vec![
+                WalPrecondition::HeadSeqIs(ChangeSeq(41)),
+                WalPrecondition::InodeRevisionIs {
+                    inode_id: InodeId(42),
+                    revision: RevisionNo(7),
+                },
+            ],
+        }
+    }
 }

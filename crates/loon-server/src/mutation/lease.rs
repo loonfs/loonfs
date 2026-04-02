@@ -3,9 +3,8 @@ use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjec
 use crate::mutation::ClientMutationExecutionParams;
 use crate::objectstore::ObjectStore;
 use crate::objectstore::ObjectStoreError;
-use loon_types::{
-    ControlObjectKind, FenceToken, HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId,
-};
+use crate::core::control_types::{ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope};
+use loon_types::{FenceToken, LeaseState, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -247,10 +246,10 @@ mod tests {
     use crate::objectstore::keys::{namespace_head, namespace_lease};
     use crate::objectstore::ObjectStore;
     use loon_testkit::tempdir::TestDir;
-    use loon_types::{
-        ChangeSeq, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope, InodeId,
-        LeaseState, LeaseStateEnvelope, NamespaceId,
+    use crate::core::control_types::{
+        ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope,
     };
+    use loon_types::{ChangeSeq, FenceToken, HeadState, InodeId, LeaseState, NamespaceId};
 
     #[test]
     fn renews_active_holder_without_rotating_fence() {

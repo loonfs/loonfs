@@ -1,10 +1,11 @@
 use crate::objectstore::keys::derived_progress;
 use crate::objectstore::ObjectStoreError;
 use crate::objectstore::{ObjectMetadata, ObjectStore};
-use loon_types::{
-    payload_checksum_sha256, ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId,
-    ProgressState, ProgressStateEnvelope,
+use crate::core::control_types::{
+    payload_checksum_sha256, ControlObjectEnvelope, ControlObjectKind, ProgressState,
+    ProgressStateEnvelope,
 };
+use loon_types::{ChangeSeq, NamespaceId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -340,10 +341,10 @@ mod tests {
     use crate::objectstore::fs::LocalFsStore;
     use crate::objectstore::keys::derived_progress;
     use crate::objectstore::ObjectStore;
-    use loon_types::{
-        payload_checksum_sha256, ChangeSeq, ControlObjectEnvelope, ControlObjectKind, NamespaceId,
-        ProgressState,
+    use crate::core::control_types::{
+        payload_checksum_sha256, ControlObjectEnvelope, ControlObjectKind, ProgressState,
     };
+    use loon_types::{ChangeSeq, NamespaceId};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};

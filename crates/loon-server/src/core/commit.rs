@@ -1,7 +1,7 @@
 use crate::core::metadata::MetadataState;
+use crate::core::control_types::HeadStateEnvelope;
 use loon_types::{
-    ChangeSeq, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState,
-    NamespaceId, RevisionNo,
+    ChangeSeq, FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -305,9 +305,9 @@ mod tests {
     use crate::objectstore::fs::LocalFsStore;
     use crate::objectstore::keys::namespace_head;
     use crate::objectstore::ObjectStore;
+    use crate::core::control_types::{ControlObjectKind, HeadStateEnvelope};
     use loon_types::{
-        ChangeSeq, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
-        LeaseState, NamespaceId, RevisionNo,
+        ChangeSeq, FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
     };
     use std::fs;
     use std::path::{Path, PathBuf};

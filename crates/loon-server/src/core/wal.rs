@@ -1,10 +1,11 @@
 use crate::core::commit::{CommitOp, CommitPlan, CommitRequest, Precondition};
 use crate::core::metadata::{MetadataApplyError, MetadataState};
 use crate::objectstore::keys::wal_commit;
-use loon_types::{
-    decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, ChangeSeq, HeadState,
-    InodeId, NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+use crate::core::wal_types::{
+    decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, WalCommitEnvelope,
+    WalCommitPayload, WalOp, WalPrecondition,
 };
+use loon_types::{ChangeSeq, HeadState, InodeId, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,10 +477,12 @@ mod tests {
     };
     use crate::core::metadata::{InodeRecord, MetadataState, RevisionRecord};
     use crate::objectstore::keys::wal_commit;
-    use loon_types::{
-        decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, ChangeSeq, FenceToken,
-        HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo, WalCommitEnvelope,
+    use crate::core::wal_types::{
+        decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, WalCommitEnvelope,
         WalCommitPayload, WalEnvelopeKind, WalOp, WalPrecondition,
+    };
+    use loon_types::{
+        ChangeSeq, FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
     };
 
     #[test]

@@ -6,7 +6,13 @@
 
 #![forbid(unsafe_code)]
 
+mod digest;
+
+#[cfg(any(test, feature = "testkit"))]
 pub mod core;
+#[cfg(not(any(test, feature = "testkit")))]
+pub(crate) mod core;
+
 pub(crate) mod genesis;
 pub mod mutation;
 pub mod objectstore;
