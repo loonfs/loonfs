@@ -1,5 +1,4 @@
-#[path = "common/support.rs"]
-mod support;
+use super::common::support;
 
 use loon_client::executor::{
     execute_upload_local_create_from_path, ExecuteUploadLocalCreateError,
@@ -198,7 +197,7 @@ fn upload_local_create_progress_invariant_trace_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-transfer-invariants/client/upload_local_create_from_path_progresses_one_block_per_tick.txt"
+            "../../../../tests/snapshots/client-transfer-invariants/client/upload_local_create_from_path_progresses_one_block_per_tick.txt"
         )
     );
 }

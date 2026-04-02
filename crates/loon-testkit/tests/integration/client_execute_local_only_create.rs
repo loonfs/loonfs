@@ -1,5 +1,4 @@
-#[path = "common/support.rs"]
-mod support;
+use super::common::support;
 
 use loon_client::executor::{
     execute_local_only_create, ExecuteLocalOnlyCreateError, ExecuteUploadLocalCreateError,

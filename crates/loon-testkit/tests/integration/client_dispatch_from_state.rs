@@ -1,5 +1,4 @@
-#[path = "common/support.rs"]
-mod support;
+use super::common::support;
 
 use loon_client::executor::{dispatch_client_mutation_from_state, DispatchClientMutationError};
 use loon_client::planner::{plan_file, PlannedActionRecord};

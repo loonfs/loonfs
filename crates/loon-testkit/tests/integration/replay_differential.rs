@@ -60,7 +60,7 @@ fn wal_tail_replay_snapshot_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/replay-differential/native/wal_tail_replay_advances_head.txt"
+            "../../../../tests/snapshots/replay-differential/native/wal_tail_replay_advances_head.txt"
         )
     );
 }
@@ -75,7 +75,7 @@ fn checkpoint_plus_wal_tail_snapshot_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/replay-differential/native/checkpoint_manifest_plus_wal_tail_reproduces_head.txt"
+            "../../../../tests/snapshots/replay-differential/native/checkpoint_manifest_plus_wal_tail_reproduces_head.txt"
         )
     );
 }

@@ -250,7 +250,7 @@ fn download_remote_only_multitick_invariant_trace_matches_checked_in_artifact() 
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-transfer-invariants/client/execute_next_client_action_multitick_remote_only_file_download_survives_restart.txt"
+            "../../../../tests/snapshots/client-transfer-invariants/client/execute_next_client_action_multitick_remote_only_file_download_survives_restart.txt"
         )
     );
 }

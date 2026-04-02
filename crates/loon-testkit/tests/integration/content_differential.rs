@@ -51,7 +51,7 @@ fn small_file_upload_snapshot_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/content-differential/client/small_file_upload_writes_block_and_manifest.txt"
+            "../../../../tests/snapshots/content-differential/client/small_file_upload_writes_block_and_manifest.txt"
         )
     );
 }
@@ -88,7 +88,7 @@ fn native_create_file_snapshot_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/content-differential/native/client_create_file_commit_writes_wal_and_head.txt"
+            "../../../../tests/snapshots/content-differential/native/client_create_file_commit_writes_wal_and_head.txt"
         )
     );
 }

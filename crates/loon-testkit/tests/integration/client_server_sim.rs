@@ -1,5 +1,4 @@
-#[path = "common/client_server_support.rs"]
-mod client_server_support;
+use super::common::client_server_support;
 
 use client_server_support::run_client_server_fixture_report;
 use loon_testkit::invariants::{
@@ -17,7 +16,7 @@ fn delayed_response_after_restart_reuses_pending_request_id_and_converges_once()
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/sim-interleavings/sim/client_delayed_response_reuses_pending_request.txt"
+            "../../../../tests/snapshots/sim-interleavings/sim/client_delayed_response_reuses_pending_request.txt"
         )
     );
 }
@@ -33,7 +32,7 @@ fn duplicate_authoritative_response_is_idempotent() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/sim-interleavings/sim/client_duplicate_authoritative_response.txt"
+            "../../../../tests/snapshots/sim-interleavings/sim/client_duplicate_authoritative_response.txt"
         )
     );
 }
@@ -49,7 +48,7 @@ fn remote_observation_before_matching_response_converges_without_duplicate_apply
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/sim-interleavings/sim/client_remote_observation_before_response.txt"
+            "../../../../tests/snapshots/sim-interleavings/sim/client_remote_observation_before_response.txt"
         )
     );
 }

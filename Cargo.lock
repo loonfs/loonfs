@@ -1111,7 +1111,6 @@ name = "loon-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "loon-server",
  "loon-sim",
  "loon-testkit",
  "loon-types",
@@ -1160,6 +1159,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]

@@ -48,7 +48,7 @@ fn remote_only_file_discovery_invariant_trace_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_discovers_remote_only_file.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/client_remote_observation_discovers_remote_only_file.txt"
         )
     );
 }

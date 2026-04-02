@@ -1,5 +1,4 @@
-#[path = "common/client_server_support.rs"]
-mod client_server_support;
+use super::common::client_server_support;
 
 use anyhow::Result;
 use client_server_support::{
@@ -48,7 +47,7 @@ fn client_server_fault_pool_exploration_is_deterministic() {
     assert_snapshot_eq(
         &report.render_summary(),
         include_str!(
-            "../../../tests/snapshots/sim-explore/client_explore_success_with_fault_pool.txt"
+            "../../../../tests/snapshots/sim-explore/client_explore_success_with_fault_pool.txt"
         ),
     );
 }
@@ -74,7 +73,7 @@ fn client_server_fault_pool_failure_minimizes_to_plain_sim_repro() {
     assert_snapshot_eq(
         &rendered,
         include_str!(
-            "../../../tests/snapshots/sim-explore/client_explore_fault_failure_minimize.txt"
+            "../../../../tests/snapshots/sim-explore/client_explore_fault_failure_minimize.txt"
         ),
     );
 

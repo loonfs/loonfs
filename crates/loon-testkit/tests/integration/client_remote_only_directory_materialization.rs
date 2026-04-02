@@ -241,7 +241,7 @@ fn remote_only_directory_materialization_invariant_trace_matches_checked_in_arti
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/client-reconciliation-invariants/client/execute_next_client_action_materializes_remote_only_directory.txt"
+            "../../../../tests/snapshots/client-reconciliation-invariants/client/execute_next_client_action_materializes_remote_only_directory.txt"
         )
     );
 }

@@ -41,7 +41,7 @@ fn checkpoint_builder_snapshot_matches_checked_in_artifact() {
     assert_eq!(
         report.rendered_trace,
         include_str!(
-            "../../../tests/snapshots/checkpoint-builder-differential/native/checkpoint_builder_writes_verified_manifest_and_segments.txt"
+            "../../../../tests/snapshots/checkpoint-builder-differential/native/checkpoint_builder_writes_verified_manifest_and_segments.txt"
         )
     );
 }
