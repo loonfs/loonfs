@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod file;
 mod import;
 mod observe;
 mod sync;
@@ -19,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use file::{run_file_command, FileCommand, FileCommandOutput};
 pub use import::{
     import_authoritative_remote_observations, AuthoritativeObservationImportError,
     AuthoritativeObservationImportReport,

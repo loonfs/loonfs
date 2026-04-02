@@ -1,0 +1,42 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_stats_root_directory_and_file
+initial:
+  head:
+    namespace_id: demo
+    seq: 14
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/report.txt
+        inode_id: 3
+        inode_kind: file
+        revision_no: 2
+        size_bytes: 19
+        content_digest: sha256:file
+        content_manifest_digest: sha256:manifest
+actions:
+  - stat_path:
+      selector: demo:/
+  - stat_path:
+      selector: demo:/docs
+  - stat_path:
+      selector: demo:/docs/report.txt
+expect:
+  stats:
+    - selector: demo:/
+      inode_kind: dir
+      absolute_path: /
+    - selector: demo:/docs
+      inode_kind: dir
+      absolute_path: /docs
+    - selector: demo:/docs/report.txt
+      inode_kind: file
+      absolute_path: /docs/report.txt
+      revision_no: 2
+      size_bytes: 19

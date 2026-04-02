@@ -1,6 +1,12 @@
+use loon_objectstore::ObjectStore;
 use loon_ops::OpsCommand;
+use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
+use loon_server::ops::{bootstrap_namespace, NamespaceBootstrapParams};
 use loon_testkit::tempdir::TestDir;
-use loon_types::NamespaceId;
+use loon_types::{
+    sha256_digest, ClientMutationOp, ClientMutationRequest, ContentBlockDescriptor,
+    ContentManifestEnvelope, ContentManifestPayload, NamespaceId,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,6 +29,86 @@ fn help_ops_mentions_bootstrap_namespace() {
     let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
     assert!(stdout.contains("bootstrap-namespace"));
     assert!(stdout.contains("Use `bootstrap-namespace`"));
+}
+
+#[test]
+fn help_file_mentions_authoritative_subcommands() {
+    let output = run_loon(["help", "file"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("ls"));
+    assert!(stdout.contains("stat"));
+    assert!(stdout.contains("get"));
+    assert!(stdout.contains("cat"));
+}
+
+#[test]
+fn file_ls_and_cat_read_authoritative_state_directly() {
+    let temp_dir = TestDir::new("loon-cli-file-read");
+    let config_path = write_demo_local_fs_config(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    seed_authoritative_hello_file(&config_path, &namespace_id, b"hello from loon\n");
+
+    let ls = run_loon([
+        "file",
+        "ls",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/",
+    ]);
+    assert!(ls.status.success());
+    assert_eq!(
+        String::from_utf8(ls.stdout).expect("utf-8 stdout"),
+        "hello.txt\n"
+    );
+
+    let cat = run_loon([
+        "file",
+        "cat",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/hello.txt",
+    ]);
+    assert!(cat.status.success());
+    assert_eq!(cat.stdout, b"hello from loon\n");
+    assert!(cat.stderr.is_empty());
+}
+
+#[test]
+fn file_get_writes_download_without_touching_existing_target() {
+    let temp_dir = TestDir::new("loon-cli-file-get");
+    let config_path = write_demo_local_fs_config(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    seed_authoritative_hello_file(&config_path, &namespace_id, b"hello from loon\n");
+    let download_dir = temp_dir.path().join("downloads");
+    fs::create_dir_all(&download_dir).expect("create downloads dir");
+
+    let get = run_loon([
+        "file",
+        "get",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/hello.txt",
+        download_dir.to_str().expect("utf-8 path"),
+    ]);
+    assert!(get.status.success());
+    assert_eq!(
+        fs::read(download_dir.join("hello.txt")).expect("read downloaded file"),
+        b"hello from loon\n"
+    );
+
+    let second_get = run_loon([
+        "file",
+        "get",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/hello.txt",
+        download_dir.to_str().expect("utf-8 path"),
+    ]);
+    assert!(!second_get.status.success());
+    assert!(String::from_utf8(second_get.stderr)
+        .expect("utf-8 stderr")
+        .contains("already exists"));
 }
 
 #[test]
@@ -730,4 +816,69 @@ now_ms = {now_ms}
     )
     .expect("write ops config");
     config_path
+}
+
+fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId, bytes: &[u8]) {
+    let config = loon_ops::OpsConfig::load(config_path).expect("load config");
+    let store = config.open_store().expect("open store");
+    bootstrap_namespace(
+        &store,
+        namespace_id,
+        &NamespaceBootstrapParams {
+            holder_id: config.server.writer_id.clone(),
+            writer_version: config.server.writer_version.clone(),
+            now_ms: config.ops.now_ms.expect("configured now_ms"),
+            lease_duration_ms: config.server.lease_duration_ms,
+            allow_existing: false,
+        },
+    )
+    .expect("bootstrap namespace");
+
+    let file_digest_sha256 = sha256_digest(bytes);
+    let block_digest = sha256_digest(bytes);
+    store
+        .put_if_absent(
+            &loon_objectstore::keys::blob(namespace_id.as_str(), &block_digest),
+            bytes,
+        )
+        .expect("write content block");
+    let manifest = ContentManifestEnvelope::from_payload(ContentManifestPayload {
+        namespace_id: namespace_id.clone(),
+        file_size_bytes: bytes.len() as u64,
+        file_digest_sha256,
+        block_size_bytes: bytes.len() as u64,
+        blocks: vec![ContentBlockDescriptor {
+            content_digest_sha256: block_digest,
+            plaintext_size_bytes: bytes.len() as u64,
+        }],
+    })
+    .expect("build manifest");
+    let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
+    let manifest_digest = sha256_digest(&manifest_bytes);
+    store
+        .put_if_absent(
+            &loon_objectstore::keys::content_manifest(namespace_id.as_str(), &manifest_digest),
+            &manifest_bytes,
+        )
+        .expect("write manifest");
+
+    execute_client_mutation(
+        &store,
+        &ClientMutationRequest {
+            namespace_id: namespace_id.clone(),
+            client_request_id: "create-file".to_owned(),
+            op: ClientMutationOp::CreateFile {
+                parent_inode_id: loon_types::InodeId(1),
+                display_name: "hello.txt".to_owned(),
+                content_manifest_digest: manifest_digest,
+            },
+        },
+        &ClientMutationExecutionParams {
+            writer_id: config.server.writer_id,
+            writer_version: config.server.writer_version,
+            now_ms: 2_000,
+            lease_duration_ms: config.server.lease_duration_ms,
+        },
+    )
+    .expect("create authoritative file");
 }

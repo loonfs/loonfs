@@ -7,13 +7,16 @@ use loon_core::checkpoint::{
     CheckpointPublishError, CheckpointReplayError, StoredCheckpointManifest,
     StoredCheckpointSegment,
 };
+use loon_core::content::{read_durable_content_bytes, DurableContentValidationError};
+use loon_core::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
 use loon_objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
 };
 use loon_objectstore::ObjectStore;
 use loon_types::{
     decode_content_manifest_json, ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope,
-    LeaseState, LeaseStateEnvelope, NamespaceId, ObservedRemoteInode, RevisionNo,
+    InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId, ObservedRemoteInode,
+    RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -158,6 +161,80 @@ pub enum RemoteObservationTranslationError {
 impl From<BasisLoadError> for RemoteObservationTranslationError {
     fn from(value: BasisLoadError) -> Self {
         Self::Basis(Box::new(value))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativePathEntry {
+    pub namespace_id: NamespaceId,
+    pub absolute_path: String,
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub authoritative_head_seq: ChangeSeq,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+    pub revision_no: Option<RevisionNo>,
+    pub size_bytes: Option<u64>,
+    pub content_digest: Option<String>,
+    pub content_manifest_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeFileBytes {
+    pub entry: AuthoritativePathEntry,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub enum AuthoritativePathReadError {
+    #[error(transparent)]
+    Basis(Box<BasisLoadError>),
+    #[error(transparent)]
+    VisiblePath(VisiblePathError),
+    #[error("file command requires file at `{absolute_path}` (inode `{inode_id:?}` kind `{inode_kind:?}`)")]
+    FileCommandRequiresFile {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    #[error(
+        "directory command requires directory at `{absolute_path}` (inode `{inode_id:?}` kind `{inode_kind:?}`)"
+    )]
+    DirectoryCommandRequiresDirectory {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    #[error("visible file at `{absolute_path}` is missing its current revision head")]
+    FileRevisionMissing {
+        absolute_path: String,
+        inode_id: InodeId,
+    },
+    #[error(transparent)]
+    DurableContent(Box<DurableContentValidationError>),
+    #[error("failed to read content manifest `{object_key}`: {message}")]
+    ReadManifest { object_key: String, message: String },
+    #[error("missing content manifest `{object_key}`")]
+    MissingManifest { object_key: String },
+    #[error("failed to decode content manifest `{object_key}`: {message}")]
+    DecodeManifest { object_key: String, message: String },
+}
+
+impl From<BasisLoadError> for AuthoritativePathReadError {
+    fn from(value: BasisLoadError) -> Self {
+        Self::Basis(Box::new(value))
+    }
+}
+
+impl From<VisiblePathError> for AuthoritativePathReadError {
+    fn from(value: VisiblePathError) -> Self {
+        Self::VisiblePath(value)
+    }
+}
+
+impl From<DurableContentValidationError> for AuthoritativePathReadError {
+    fn from(value: DurableContentValidationError) -> Self {
+        Self::DurableContent(Box::new(value))
     }
 }
 
@@ -427,11 +504,10 @@ pub fn translate_authoritative_state_to_remote_observations<S: ObjectStore>(
             .as_ref()
             .map(|revision| revision.content_manifest_digest.clone());
         let content_digest = match content_manifest_digest.as_deref() {
-            Some(manifest_digest) => Some(load_file_digest_from_manifest(
-                store,
-                namespace_id,
-                manifest_digest,
-            )?),
+            Some(manifest_digest) => Some(
+                load_file_content_summary_from_manifest(store, namespace_id, manifest_digest)?
+                    .file_digest_sha256,
+            ),
             None => None,
         };
         let revision_no = revision
@@ -459,6 +535,107 @@ pub fn translate_authoritative_state_to_remote_observations<S: ObjectStore>(
     }
 
     Ok(observed)
+}
+
+pub fn resolve_authoritative_path<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<AuthoritativePathEntry, AuthoritativePathReadError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let resolved = basis
+        .metadata_state
+        .resolve_visible_path(absolute_path, basis.head.seq)?;
+    build_authoritative_path_entry(
+        store,
+        namespace_id,
+        basis.head.seq,
+        &basis.metadata_state,
+        &resolved,
+    )
+}
+
+pub fn list_authoritative_path<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<Vec<AuthoritativePathEntry>, AuthoritativePathReadError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let resolved = basis
+        .metadata_state
+        .resolve_visible_path(absolute_path, basis.head.seq)?;
+    if resolved.inode_kind == InodeKind::File {
+        return Ok(vec![build_authoritative_path_entry(
+            store,
+            namespace_id,
+            basis.head.seq,
+            &basis.metadata_state,
+            &resolved,
+        )?]);
+    }
+    if resolved.inode_kind != InodeKind::Dir {
+        return Err(
+            AuthoritativePathReadError::DirectoryCommandRequiresDirectory {
+                absolute_path: resolved.absolute_path,
+                inode_id: resolved.inode_id,
+                inode_kind: resolved.inode_kind,
+            },
+        );
+    }
+
+    basis
+        .metadata_state
+        .visible_children(resolved.inode_id, basis.head.seq)
+        .into_iter()
+        .map(|direntry| {
+            let child = basis
+                .metadata_state
+                .visible_inode(direntry.child_inode_id, basis.head.seq)
+                .expect("visible child listing should resolve inode");
+            build_authoritative_path_entry(
+                store,
+                namespace_id,
+                basis.head.seq,
+                &basis.metadata_state,
+                &ResolvedVisiblePath {
+                    absolute_path: join_absolute_path(
+                        &resolved.absolute_path,
+                        &direntry.display_name,
+                    ),
+                    inode_id: direntry.child_inode_id,
+                    inode_kind: child.inode_kind,
+                    parent_inode_id: Some(direntry.parent_inode_id),
+                    display_name: direntry.display_name,
+                },
+            )
+        })
+        .collect()
+}
+
+pub fn read_authoritative_file_bytes<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<AuthoritativeFileBytes, AuthoritativePathReadError> {
+    let entry = resolve_authoritative_path(store, namespace_id, absolute_path)?;
+    if entry.inode_kind != InodeKind::File {
+        return Err(AuthoritativePathReadError::FileCommandRequiresFile {
+            absolute_path: entry.absolute_path,
+            inode_id: entry.inode_id,
+            inode_kind: entry.inode_kind,
+        });
+    }
+    let content_manifest_digest = entry.content_manifest_digest.clone().ok_or(
+        AuthoritativePathReadError::FileRevisionMissing {
+            absolute_path: entry.absolute_path.clone(),
+            inode_id: entry.inode_id,
+        },
+    )?;
+    let read = read_durable_content_bytes(store, namespace_id, &content_manifest_digest)?;
+    Ok(AuthoritativeFileBytes {
+        entry,
+        bytes: read.bytes,
+    })
 }
 
 fn load_namespace_checkpoint_manifest<S: ObjectStore>(
@@ -490,28 +667,142 @@ fn load_namespace_checkpoint_manifest<S: ObjectStore>(
     })
 }
 
-fn load_file_digest_from_manifest<S: ObjectStore>(
+fn load_file_content_summary_from_manifest<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_digest: &str,
-) -> Result<String, RemoteObservationTranslationError> {
+) -> Result<AuthoritativeFileContentSummary, ManifestSummaryLoadError> {
     let object_key = content_manifest(namespace_id.as_str(), manifest_digest);
     let manifest_bytes = store
         .get(&object_key, None)
-        .map_err(|err| RemoteObservationTranslationError::ReadManifest {
+        .map_err(|err| ManifestSummaryLoadError::ReadManifest {
             object_key: object_key.clone(),
             message: err.to_string(),
         })?
-        .ok_or_else(|| RemoteObservationTranslationError::MissingManifest {
+        .ok_or_else(|| ManifestSummaryLoadError::MissingManifest {
             object_key: object_key.clone(),
         })?;
     let manifest = decode_content_manifest_json(&manifest_bytes).map_err(|err| {
-        RemoteObservationTranslationError::DecodeManifest {
+        ManifestSummaryLoadError::DecodeManifest {
             object_key: object_key.clone(),
             message: err.to_string(),
         }
     })?;
-    Ok(manifest.payload.file_digest_sha256)
+    Ok(AuthoritativeFileContentSummary {
+        file_size_bytes: manifest.payload.file_size_bytes,
+        file_digest_sha256: manifest.payload.file_digest_sha256,
+    })
+}
+
+fn build_authoritative_path_entry<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head_seq: ChangeSeq,
+    metadata_state: &MetadataState,
+    resolved: &ResolvedVisiblePath,
+) -> Result<AuthoritativePathEntry, AuthoritativePathReadError> {
+    let revision = metadata_state.latest_revision_head_at_seq(resolved.inode_id, head_seq);
+    let content_manifest_digest = revision
+        .as_ref()
+        .map(|revision| revision.content_manifest_digest.clone());
+    let (size_bytes, content_digest) = match content_manifest_digest.as_deref() {
+        Some(manifest_digest) => {
+            let summary =
+                load_file_content_summary_from_manifest(store, namespace_id, manifest_digest)
+                    .map_err(AuthoritativePathReadError::from)?;
+            (
+                Some(summary.file_size_bytes),
+                Some(summary.file_digest_sha256),
+            )
+        }
+        None => (None, None),
+    };
+
+    Ok(AuthoritativePathEntry {
+        namespace_id: namespace_id.clone(),
+        absolute_path: resolved.absolute_path.clone(),
+        inode_id: resolved.inode_id,
+        inode_kind: resolved.inode_kind.clone(),
+        authoritative_head_seq: head_seq,
+        parent_inode_id: resolved.parent_inode_id,
+        display_name: resolved.display_name.clone(),
+        revision_no: revision.as_ref().map(|revision| revision.revision_no),
+        size_bytes,
+        content_digest,
+        content_manifest_digest,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthoritativeFileContentSummary {
+    file_size_bytes: u64,
+    file_digest_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+enum ManifestSummaryLoadError {
+    #[error("failed to read content manifest `{object_key}`: {message}")]
+    ReadManifest { object_key: String, message: String },
+    #[error("missing content manifest `{object_key}`")]
+    MissingManifest { object_key: String },
+    #[error("failed to decode content manifest `{object_key}`: {message}")]
+    DecodeManifest { object_key: String, message: String },
+}
+
+impl From<ManifestSummaryLoadError> for RemoteObservationTranslationError {
+    fn from(value: ManifestSummaryLoadError) -> Self {
+        match value {
+            ManifestSummaryLoadError::ReadManifest {
+                object_key,
+                message,
+            } => Self::ReadManifest {
+                object_key,
+                message,
+            },
+            ManifestSummaryLoadError::MissingManifest { object_key } => {
+                Self::MissingManifest { object_key }
+            }
+            ManifestSummaryLoadError::DecodeManifest {
+                object_key,
+                message,
+            } => Self::DecodeManifest {
+                object_key,
+                message,
+            },
+        }
+    }
+}
+
+impl From<ManifestSummaryLoadError> for AuthoritativePathReadError {
+    fn from(value: ManifestSummaryLoadError) -> Self {
+        match value {
+            ManifestSummaryLoadError::ReadManifest {
+                object_key,
+                message,
+            } => Self::ReadManifest {
+                object_key,
+                message,
+            },
+            ManifestSummaryLoadError::MissingManifest { object_key } => {
+                Self::MissingManifest { object_key }
+            }
+            ManifestSummaryLoadError::DecodeManifest {
+                object_key,
+                message,
+            } => Self::DecodeManifest {
+                object_key,
+                message,
+            },
+        }
+    }
+}
+
+fn join_absolute_path(base: &str, component: &str) -> String {
+    if base == "/" {
+        format!("/{component}")
+    } else {
+        format!("{base}/{component}")
+    }
 }
 
 fn wal_seq_from_key(
@@ -540,9 +831,10 @@ fn wal_seq_from_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_namespace, load_namespace_state_summary,
-        translate_authoritative_state_to_remote_observations, NamespaceBootstrapError,
-        NamespaceBootstrapParams,
+        bootstrap_namespace, list_authoritative_path, load_namespace_state_summary,
+        read_authoritative_file_bytes, resolve_authoritative_path,
+        translate_authoritative_state_to_remote_observations, AuthoritativePathReadError,
+        NamespaceBootstrapError, NamespaceBootstrapParams,
     };
     use crate::genesis::bootstrap_basis_metadata_state;
     use crate::mutation::{execute_client_mutation, ClientMutationExecutionParams};
@@ -759,6 +1051,290 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_authoritative_path_reads_root_and_nested_file() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-resolve");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+        let uploaded = write_uploaded_content(&store, &namespace_id, b"report bytes\n");
+        let head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(2),
+            active_fence_token: FenceToken(0),
+            next_inode_id: InodeId(4),
+            snapshot_hint_seq: None,
+            retention_floor_seq: ChangeSeq(0),
+        };
+        let lease = sample_lease(&namespace_id);
+        seed_control_objects(&store, &head, &lease);
+        seed_verified_basis(
+            &store,
+            &head,
+            &MetadataState {
+                inodes: vec![
+                    InodeRecord {
+                        inode_id: InodeId(1),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(0),
+                    },
+                    InodeRecord {
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(1),
+                    },
+                    InodeRecord {
+                        inode_id: InodeId(3),
+                        inode_kind: InodeKind::File,
+                        created_seq: ChangeSeq(2),
+                    },
+                ],
+                direntries: vec![
+                    DirentryRecord {
+                        parent_inode_id: InodeId(1),
+                        name_key: "docs".to_owned(),
+                        display_name: "docs".to_owned(),
+                        child_inode_id: InodeId(2),
+                        bind_seq: ChangeSeq(1),
+                        bind_op_index: 0,
+                    },
+                    DirentryRecord {
+                        parent_inode_id: InodeId(2),
+                        name_key: "report.txt".to_owned(),
+                        display_name: "report.txt".to_owned(),
+                        child_inode_id: InodeId(3),
+                        bind_seq: ChangeSeq(2),
+                        bind_op_index: 0,
+                    },
+                ],
+                revisions: vec![RevisionRecord {
+                    inode_id: InodeId(3),
+                    revision_no: RevisionNo(1),
+                    committed_seq: ChangeSeq(2),
+                    revision_op_index: 0,
+                    content_manifest_digest: uploaded.content_manifest_digest.clone(),
+                }],
+                subtree_tombstones: Vec::new(),
+            },
+        );
+
+        let root = resolve_authoritative_path(&store, &namespace_id, "/").expect("resolve root");
+        assert_eq!(root.absolute_path, "/");
+        assert_eq!(root.inode_id, InodeId(1));
+        assert_eq!(root.inode_kind, InodeKind::Dir);
+
+        let file =
+            resolve_authoritative_path(&store, &namespace_id, "/docs/report.txt").expect("file");
+        assert_eq!(file.absolute_path, "/docs/report.txt");
+        assert_eq!(file.inode_id, InodeId(3));
+        assert_eq!(file.inode_kind, InodeKind::File);
+        assert_eq!(file.revision_no, Some(RevisionNo(1)));
+        assert_eq!(file.size_bytes, Some(13));
+        assert_eq!(file.content_digest, Some(uploaded.file_digest_sha256));
+    }
+
+    #[test]
+    fn list_authoritative_path_lists_sorted_visible_children() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-list");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+        let head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(2),
+            active_fence_token: FenceToken(0),
+            next_inode_id: InodeId(5),
+            snapshot_hint_seq: None,
+            retention_floor_seq: ChangeSeq(0),
+        };
+        let lease = sample_lease(&namespace_id);
+        seed_control_objects(&store, &head, &lease);
+        seed_verified_basis(
+            &store,
+            &head,
+            &MetadataState {
+                inodes: vec![
+                    InodeRecord {
+                        inode_id: InodeId(1),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(0),
+                    },
+                    InodeRecord {
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(1),
+                    },
+                    InodeRecord {
+                        inode_id: InodeId(3),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(1),
+                    },
+                    InodeRecord {
+                        inode_id: InodeId(4),
+                        inode_kind: InodeKind::File,
+                        created_seq: ChangeSeq(2),
+                    },
+                ],
+                direntries: vec![
+                    DirentryRecord {
+                        parent_inode_id: InodeId(1),
+                        name_key: "docs".to_owned(),
+                        display_name: "docs".to_owned(),
+                        child_inode_id: InodeId(2),
+                        bind_seq: ChangeSeq(1),
+                        bind_op_index: 0,
+                    },
+                    DirentryRecord {
+                        parent_inode_id: InodeId(1),
+                        name_key: "archive".to_owned(),
+                        display_name: "archive".to_owned(),
+                        child_inode_id: InodeId(3),
+                        bind_seq: ChangeSeq(1),
+                        bind_op_index: 0,
+                    },
+                    DirentryRecord {
+                        parent_inode_id: InodeId(1),
+                        name_key: "hello.txt".to_owned(),
+                        display_name: "hello.txt".to_owned(),
+                        child_inode_id: InodeId(4),
+                        bind_seq: ChangeSeq(2),
+                        bind_op_index: 0,
+                    },
+                ],
+                revisions: Vec::new(),
+                subtree_tombstones: Vec::new(),
+            },
+        );
+
+        let listed = list_authoritative_path(&store, &namespace_id, "/").expect("list root");
+        let names = listed
+            .into_iter()
+            .map(|entry| {
+                format!(
+                    "{}{}",
+                    entry.display_name,
+                    if entry.inode_kind == InodeKind::Dir {
+                        "/"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["archive/", "docs/", "hello.txt"]);
+    }
+
+    #[test]
+    fn read_authoritative_file_bytes_returns_validated_bytes() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-read");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+        let uploaded = seed_head_and_lease(
+            &store,
+            &HeadState {
+                namespace_id: namespace_id.clone(),
+                seq: ChangeSeq(1),
+                active_fence_token: FenceToken(0),
+                next_inode_id: InodeId(3),
+                snapshot_hint_seq: None,
+                retention_floor_seq: ChangeSeq(0),
+            },
+            &sample_lease(&namespace_id),
+        );
+
+        let read =
+            read_authoritative_file_bytes(&store, &namespace_id, "/hello.txt").expect("read file");
+        assert_eq!(
+            read.entry.content_manifest_digest,
+            Some(uploaded.content_manifest_digest)
+        );
+        assert_eq!(read.bytes, b"hello from loon\n");
+    }
+
+    #[test]
+    fn read_authoritative_file_bytes_rejects_directory_and_missing_blocks() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-read-errors");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+        let head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(1),
+            active_fence_token: FenceToken(0),
+            next_inode_id: InodeId(3),
+            snapshot_hint_seq: None,
+            retention_floor_seq: ChangeSeq(0),
+        };
+        let lease = sample_lease(&namespace_id);
+        seed_control_objects(&store, &head, &lease);
+
+        let manifest = ContentManifestEnvelope::from_payload(ContentManifestPayload {
+            namespace_id: namespace_id.clone(),
+            file_size_bytes: 5,
+            file_digest_sha256: "sha256:missing".to_owned(),
+            block_size_bytes: 5,
+            blocks: vec![ContentBlockDescriptor {
+                content_digest_sha256: "sha256:missing-block".to_owned(),
+                plaintext_size_bytes: 5,
+            }],
+        })
+        .expect("build manifest");
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
+        let missing_manifest_digest = sha256_digest(&manifest_bytes);
+        store
+            .put_if_absent(
+                &content_manifest(namespace_id.as_str(), &missing_manifest_digest),
+                &manifest_bytes,
+            )
+            .expect("write broken manifest");
+
+        seed_verified_basis(
+            &store,
+            &head,
+            &MetadataState {
+                inodes: vec![
+                    InodeRecord {
+                        inode_id: InodeId(1),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(0),
+                    },
+                    InodeRecord {
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::File,
+                        created_seq: ChangeSeq(1),
+                    },
+                ],
+                direntries: vec![DirentryRecord {
+                    parent_inode_id: InodeId(1),
+                    name_key: "broken.txt".to_owned(),
+                    display_name: "broken.txt".to_owned(),
+                    child_inode_id: InodeId(2),
+                    bind_seq: ChangeSeq(1),
+                    bind_op_index: 0,
+                }],
+                revisions: vec![RevisionRecord {
+                    inode_id: InodeId(2),
+                    revision_no: RevisionNo(1),
+                    committed_seq: ChangeSeq(1),
+                    revision_op_index: 0,
+                    content_manifest_digest: missing_manifest_digest,
+                }],
+                subtree_tombstones: Vec::new(),
+            },
+        );
+
+        let directory_error =
+            read_authoritative_file_bytes(&store, &namespace_id, "/").expect_err("dir should fail");
+        assert!(matches!(
+            directory_error,
+            AuthoritativePathReadError::FileCommandRequiresFile { inode_id, .. } if inode_id == InodeId(1)
+        ));
+
+        let broken_error = read_authoritative_file_bytes(&store, &namespace_id, "/broken.txt")
+            .expect_err("missing block should fail");
+        assert!(matches!(
+            broken_error,
+            AuthoritativePathReadError::DurableContent(_)
+        ));
+    }
+
     fn write_uploaded_content(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
@@ -800,27 +1376,7 @@ mod tests {
         head: &HeadState,
         lease: &LeaseState,
     ) -> UploadedContent {
-        let head_envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::NamespaceHead,
-            "loon-server-test",
-            head.clone(),
-        )
-        .expect("encode head envelope");
-        let head_bytes = serde_json::to_vec(&head_envelope).expect("serialize head envelope");
-        store
-            .put_if_absent(&namespace_head(head.namespace_id.as_str()), &head_bytes)
-            .expect("seed head object");
-
-        let lease_envelope = LeaseStateEnvelope::from_state(
-            ControlObjectKind::NamespaceLease,
-            "loon-server-test",
-            lease.clone(),
-        )
-        .expect("encode lease envelope");
-        let lease_bytes = serde_json::to_vec(&lease_envelope).expect("serialize lease envelope");
-        store
-            .put_if_absent(&namespace_lease(lease.namespace_id.as_str()), &lease_bytes)
-            .expect("seed lease object");
+        seed_control_objects(store, head, lease);
 
         let uploaded = write_uploaded_content(store, &head.namespace_id, b"hello from loon\n");
         let mut metadata_state = bootstrap_basis_metadata_state();
@@ -846,6 +1402,30 @@ mod tests {
         });
         seed_verified_basis(store, head, &metadata_state);
         uploaded
+    }
+
+    fn seed_control_objects(store: &LocalFsStore, head: &HeadState, lease: &LeaseState) {
+        let head_envelope = HeadStateEnvelope::from_state(
+            ControlObjectKind::NamespaceHead,
+            "loon-server-test",
+            head.clone(),
+        )
+        .expect("encode head envelope");
+        let head_bytes = serde_json::to_vec(&head_envelope).expect("serialize head envelope");
+        store
+            .put_if_absent(&namespace_head(head.namespace_id.as_str()), &head_bytes)
+            .expect("seed head object");
+
+        let lease_envelope = LeaseStateEnvelope::from_state(
+            ControlObjectKind::NamespaceLease,
+            "loon-server-test",
+            lease.clone(),
+        )
+        .expect("encode lease envelope");
+        let lease_bytes = serde_json::to_vec(&lease_envelope).expect("serialize lease envelope");
+        store
+            .put_if_absent(&namespace_lease(lease.namespace_id.as_str()), &lease_bytes)
+            .expect("seed lease object");
     }
 
     fn seed_verified_basis(store: &LocalFsStore, head: &HeadState, metadata_state: &MetadataState) {
@@ -884,6 +1464,15 @@ mod tests {
         namespace_id: NamespaceId,
         file_digest_sha256: String,
         content_manifest_digest: String,
+    }
+
+    fn sample_lease(namespace_id: &NamespaceId) -> LeaseState {
+        LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-a".to_owned(),
+            fence_token: FenceToken(0),
+            lease_expires_at_ms: 60_000,
+        }
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {

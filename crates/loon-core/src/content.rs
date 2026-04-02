@@ -17,6 +17,12 @@ pub struct ValidatedDurableContent {
     pub checked_invariants: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadDurableContent {
+    pub validated: ValidatedDurableContent,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum DurableContentValidationError {
     #[error("missing content manifest object `{object_key}`")]
@@ -170,6 +176,26 @@ pub fn validate_durable_content_reference<S: ObjectStore>(
     })
 }
 
+pub fn read_durable_content_bytes<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_manifest_digest: &str,
+) -> Result<ReadDurableContent, DurableContentValidationError> {
+    let validated =
+        validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
+    let mut bytes = Vec::with_capacity(usize::try_from(validated.file_size_bytes).unwrap_or(0));
+    for block_descriptor in &validated.manifest_envelope.payload.blocks {
+        let block_object_key = blob(
+            namespace_id.as_str(),
+            &block_descriptor.content_digest_sha256,
+        );
+        let block_bytes = load_required_object(store, &block_object_key, false)?;
+        bytes.extend_from_slice(&block_bytes);
+    }
+
+    Ok(ReadDurableContent { validated, bytes })
+}
+
 fn load_required_object<S: ObjectStore>(
     store: &S,
     object_key: &str,
@@ -192,7 +218,10 @@ fn load_required_object<S: ObjectStore>(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_durable_content_reference, DurableContentValidationError};
+    use super::{
+        read_durable_content_bytes, validate_durable_content_reference,
+        DurableContentValidationError,
+    };
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{blob, content_manifest};
     use loon_objectstore::ObjectStore;
@@ -235,6 +264,35 @@ mod tests {
         assert!(validated
             .checked_invariants
             .contains(&"content_manifest_blocks_match_descriptors".to_owned()));
+    }
+
+    #[test]
+    fn read_durable_content_bytes_returns_validated_bytes() {
+        let temp_dir = TestDir::new("core-content-read-bytes");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+        let namespace_id = NamespaceId::from("ns-1");
+        let content_bytes = b"hello from loon\n";
+        let block_digest = sha256_digest(content_bytes);
+        let manifest_envelope = sample_manifest(&namespace_id, content_bytes);
+        let manifest_digest =
+            content_manifest_digest_sha256(&manifest_envelope).expect("compute manifest digest");
+
+        store
+            .put_if_absent(&blob(namespace_id.as_str(), &block_digest), content_bytes)
+            .expect("seed block object");
+        store
+            .put_if_absent(
+                &content_manifest(namespace_id.as_str(), &manifest_digest),
+                &encode_content_manifest_json(&manifest_envelope).expect("encode manifest"),
+            )
+            .expect("seed manifest object");
+
+        let read = read_durable_content_bytes(&store, &namespace_id, &manifest_digest)
+            .expect("read durable content bytes");
+
+        assert_eq!(read.bytes, content_bytes);
+        assert_eq!(read.validated.file_size_bytes, content_bytes.len() as u64);
+        assert_eq!(read.validated.file_digest_sha256, block_digest);
     }
 
     #[test]

@@ -256,6 +256,31 @@ pub struct ModelObservedRemoteInode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelResolvedVisiblePath {
+    pub absolute_path: String,
+    pub inode_id: InodeId,
+    pub inode_kind: InodeKind,
+    pub parent_inode_id: Option<InodeId>,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelVisiblePathError {
+    InvalidAbsolutePath {
+        absolute_path: String,
+    },
+    RootMissing,
+    PathNotFound {
+        absolute_path: String,
+    },
+    PathComponentNotDirectory {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelLocalOnlyObservationCandidate {
     pub client_file_id: String,
     pub namespace_id: NamespaceId,

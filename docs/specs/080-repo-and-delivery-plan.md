@@ -154,6 +154,15 @@ Constraints for that shell:
 - `loon-cli` may add CLI-only affordances such as help text, completions, manpage generation,
   config inspection, `doctor`, and version output, but it must not become a second owner of
   `loon-ops` config semantics, command behavior, or stdout rendering
+- the first broader user-facing `loon-cli` surface may widen beyond `loon ops ...` only when the
+  behavior still lives in shared library code rather than in the binary shell
+- the first user-facing authoritative file slice is read-only:
+  - `loon file ls <namespace:/path>`
+  - `loon file stat <namespace:/path>`
+  - `loon file get <namespace:/path> <local-path>`
+  - `loon file cat <namespace:/path>`
+- those product commands must read authority directly from object storage and verified namespace
+  basis rather than wrapping client import/observe/sync flows
 - `loon ops ...` still requires explicit `--config`
 - config discovery convenience is limited to `loon config ...` and `loon doctor`
 - the shell is intentionally narrow in the current phase; there is still no watcher, and subtree
@@ -204,6 +213,10 @@ For `loon-cli`, the intended activation path is now active: it is a frontend ove
 a second owner of config parsing, command grammar, or rendering semantics. The current checked-in
 operator manual is `docs/runbooks/loon-cli.md`, and generated `loon manpages ...` output must stay
 consistent with the active clap grammar.
+
+That binary may now also grow a separate user-facing authoritative file surface, but only as a thin
+frontend over shared library behavior. The product shell must not fork namespace semantics away
+from the existing authoritative core.
 
 ## What should happen early
 

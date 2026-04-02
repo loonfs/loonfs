@@ -252,3 +252,20 @@ At the end of this roadmap phase:
 - `loon-ops` owns the shared shell contract
 - `loon-cli` is active as a thin frontend, while broader public CLI surface is still deferred
 - the project can return to client behavior work without losing a clear local operator path
+
+## Next user-facing CLI widening
+
+The next product-facing CLI slice should not widen `loon ops ...` further.
+
+Rules:
+
+- keep `loon ops ...` as the explicit operator/debug shell
+- add a separate user-facing authoritative file surface in `loon-cli`
+- the first product slice is read-only:
+  - `loon file ls <namespace:/path>`
+  - `loon file stat <namespace:/path>`
+  - `loon file get <namespace:/path> <local-path>`
+  - `loon file cat <namespace:/path>`
+- those commands must read authority directly from verified namespace basis and immutable content
+  objects
+- they must not route through client SQLite state, mirror observation, or sync execution

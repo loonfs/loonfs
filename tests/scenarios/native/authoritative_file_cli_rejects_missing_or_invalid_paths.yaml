@@ -1,0 +1,33 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_rejects_missing_or_invalid_paths
+initial:
+  head:
+    namespace_id: demo
+    seq: 5
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/report.txt
+        inode_id: 3
+        inode_kind: file
+actions:
+  - stat_path:
+      selector: demo:/missing.txt
+  - stat_path:
+      selector: demo:/docs/report.txt/child
+  - stat_path:
+      selector: demo:/docs/../secret.txt
+expect:
+  failures:
+    - selector: demo:/missing.txt
+      error: path_not_found
+    - selector: demo:/docs/report.txt/child
+      error: path_component_not_directory
+    - selector: demo:/docs/../secret.txt
+      error: invalid_selector_syntax

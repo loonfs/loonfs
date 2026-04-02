@@ -1,6 +1,7 @@
 use crate::cmd::completion::{render_completion, CompletionCommand};
 use crate::cmd::config::{render_config, ConfigCommand};
 use crate::cmd::doctor::{render_doctor, DoctorCommand};
+use crate::cmd::file::FileArgs;
 use crate::cmd::manpages::{render_manpages, ManpagesCommand};
 use crate::cmd::ops::OpsArgs;
 use crate::cmd::version::render_version;
@@ -8,6 +9,12 @@ use crate::error::{CliError, CliResult};
 use clap::{CommandFactory, Parser, Subcommand};
 
 const ROOT_AFTER_HELP: &str = "Examples:\n  loon help ops bootstrap-namespace\n  loon ops bootstrap-namespace --config ./loondb-demo.local.toml --namespace demo\n  loon config validate\n  loon doctor\n  loon manpages ./target/man\n\n`bootstrap-namespace` is the supported namespace-init path today.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CliOutput {
+    Text(String),
+    Bytes(Vec<u8>),
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,6 +34,8 @@ struct Cli {
 enum RootCommand {
     /// Operability commands backed by the shared loon-ops contract.
     Ops(OpsArgs),
+    /// Read authoritative namespace state directly as files and paths.
+    File(FileArgs),
     /// Resolve, show, or validate the existing ops TOML config.
     Config(crate::cmd::config::ConfigArgs),
     /// Run local CLI diagnostics without mutating namespace state.
@@ -42,6 +51,7 @@ enum RootCommand {
 #[derive(Debug, PartialEq, Eq)]
 enum ParsedCommand {
     Ops(loon_ops::OpsCommand),
+    File(loon_ops::FileCommand),
     Config(ConfigCommand),
     Doctor(DoctorCommand),
     Completion(CompletionCommand),
@@ -51,23 +61,31 @@ enum ParsedCommand {
 
 pub fn run(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
-) -> CliResult<String> {
+) -> CliResult<CliOutput> {
     match parse_args(args)? {
-        ParsedCommand::Ops(command) => loon_ops::run_command(command).map_err(CliError::from),
-        ParsedCommand::Config(command) => render_config(command).map_err(CliError::from),
-        ParsedCommand::Doctor(command) => render_doctor(command).map_err(CliError::from),
-        ParsedCommand::Completion(command) => {
-            render_completion(build_command(), command).map_err(CliError::from)
-        }
-        ParsedCommand::Manpages(command) => {
-            render_manpages(build_command(), command).map_err(CliError::from)
-        }
-        ParsedCommand::Version => Ok(render_version()),
+        ParsedCommand::Ops(command) => loon_ops::run_command(command)
+            .map(CliOutput::Text)
+            .map_err(CliError::from),
+        ParsedCommand::File(command) => loon_ops::run_file_command(command)
+            .map(|output| match output {
+                loon_ops::FileCommandOutput::Text(text) => CliOutput::Text(text),
+                loon_ops::FileCommandOutput::Bytes(bytes) => CliOutput::Bytes(bytes),
+            })
+            .map_err(CliError::from),
+        ParsedCommand::Config(command) => render_config(command)
+            .map(CliOutput::Text)
+            .map_err(CliError::from),
+        ParsedCommand::Doctor(command) => render_doctor(command)
+            .map(CliOutput::Text)
+            .map_err(CliError::from),
+        ParsedCommand::Completion(command) => render_completion(build_command(), command)
+            .map(CliOutput::Text)
+            .map_err(CliError::from),
+        ParsedCommand::Manpages(command) => render_manpages(build_command(), command)
+            .map(CliOutput::Text)
+            .map_err(CliError::from),
+        ParsedCommand::Version => Ok(CliOutput::Text(render_version())),
     }
-}
-
-pub(crate) fn build_command() -> clap::Command {
-    Cli::command()
 }
 
 fn parse_args(
@@ -76,6 +94,7 @@ fn parse_args(
     let cli = Cli::try_parse_from(args).map_err(CliError::from)?;
     match cli.command {
         RootCommand::Ops(args) => Ok(ParsedCommand::Ops(args.into_command())),
+        RootCommand::File(args) => Ok(ParsedCommand::File(args.into_command()?)),
         RootCommand::Config(args) => Ok(ParsedCommand::Config(args.into_command())),
         RootCommand::Doctor(args) => Ok(ParsedCommand::Doctor(args.into_command())),
         RootCommand::Completion(args) => Ok(ParsedCommand::Completion(args.into_command())),
@@ -84,15 +103,19 @@ fn parse_args(
     }
 }
 
+pub(crate) fn build_command() -> clap::Command {
+    Cli::command()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ParsedCommand;
+    use super::{CliOutput, ParsedCommand};
     use crate::app::parse_args;
     use crate::cmd::completion::{CompletionCommand, CompletionShell};
     use crate::cmd::config::ConfigCommand;
     use crate::cmd::doctor::DoctorCommand;
     use crate::cmd::manpages::ManpagesCommand;
-    use loon_ops::OpsCommand;
+    use loon_ops::{FileCommand, OpsCommand};
     use loon_types::NamespaceId;
     use std::path::PathBuf;
 
@@ -115,6 +138,26 @@ mod tests {
                 config_path: PathBuf::from("demo.toml"),
                 namespace_id: NamespaceId::from("demo"),
                 allow_existing: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_file_ls_with_selector() {
+        let parsed = parse_args([
+            "loon",
+            "file",
+            "ls",
+            "--config",
+            "demo.toml",
+            "demo:/docs/report.txt",
+        ])
+        .expect("parse file ls");
+        assert_eq!(
+            parsed,
+            ParsedCommand::File(FileCommand::Ls {
+                config_path: std::path::PathBuf::from("demo.toml"),
+                selector: "demo:/docs/report.txt".to_owned(),
             })
         );
     }
@@ -242,6 +285,18 @@ mod tests {
     fn parses_version_command() {
         let parsed = parse_args(["loon", "version"]).expect("parse version command");
         assert_eq!(parsed, ParsedCommand::Version);
+    }
+
+    #[test]
+    fn cli_output_distinguishes_text_and_bytes() {
+        assert_eq!(
+            CliOutput::Text("ok".to_owned()),
+            CliOutput::Text("ok".to_owned())
+        );
+        assert_eq!(
+            CliOutput::Bytes(vec![1, 2, 3]),
+            CliOutput::Bytes(vec![1, 2, 3])
+        );
     }
 
     #[test]

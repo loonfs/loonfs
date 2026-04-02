@@ -1,7 +1,8 @@
 use crate::{
     AppliedModelMetadataState, ModelDirentryRecord, ModelInodeRecord, ModelMetadataApplyError,
-    ModelMetadataMutation, ModelMetadataPreconditionError, ModelMetadataState, ModelRevisionRecord,
-    ModelSubtreeTombstoneRecord,
+    ModelMetadataMutation, ModelMetadataPreconditionError, ModelMetadataState,
+    ModelResolvedVisiblePath, ModelRevisionRecord, ModelSubtreeTombstoneRecord,
+    ModelVisiblePathError,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo};
 use std::collections::BTreeSet;
@@ -313,6 +314,112 @@ impl ModelMetadataState {
         Some(direntry)
     }
 
+    pub fn visible_children(
+        &self,
+        parent_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Vec<ModelDirentryRecord> {
+        let Some(parent) = self.visible_inode(parent_inode_id, base_seq) else {
+            return Vec::new();
+        };
+        if parent.inode_kind != InodeKind::Dir {
+            return Vec::new();
+        }
+
+        let mut children = self
+            .direntries
+            .iter()
+            .filter(|direntry| {
+                direntry.parent_inode_id == parent_inode_id && direntry.bind_seq <= base_seq
+            })
+            .filter(|direntry| {
+                self.active_child_binding_at_seq(parent_inode_id, &direntry.name_key, base_seq)
+                    .map(|active| {
+                        active.child_inode_id == direntry.child_inode_id
+                            && active.bind_seq == direntry.bind_seq
+                            && active.bind_op_index == direntry.bind_op_index
+                    })
+                    .unwrap_or(false)
+            })
+            .filter(|direntry| {
+                self.visible_inode(direntry.child_inode_id, base_seq)
+                    .is_some()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then(left.child_inode_id.0.cmp(&right.child_inode_id.0))
+        });
+        children
+    }
+
+    pub fn resolve_visible_path(
+        &self,
+        absolute_path: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<ModelResolvedVisiblePath, ModelVisiblePathError> {
+        let components = parse_absolute_path_components(absolute_path)?;
+        let root_inode_id = InodeId(1);
+        let root = self
+            .visible_inode(root_inode_id, base_seq)
+            .ok_or(ModelVisiblePathError::RootMissing)?;
+        if components.is_empty() {
+            return Ok(ModelResolvedVisiblePath {
+                absolute_path: "/".to_owned(),
+                inode_id: root_inode_id,
+                inode_kind: root.inode_kind,
+                parent_inode_id: None,
+                display_name: String::new(),
+            });
+        }
+
+        let mut current_inode_id = root_inode_id;
+        let mut current_absolute_path = "/".to_owned();
+        let mut current_parent_inode_id = None;
+        let mut current_display_name = String::new();
+
+        for component in components {
+            let current_inode = self.visible_inode(current_inode_id, base_seq).ok_or(
+                ModelVisiblePathError::PathNotFound {
+                    absolute_path: current_absolute_path.clone(),
+                },
+            )?;
+            if current_inode.inode_kind != InodeKind::Dir {
+                return Err(ModelVisiblePathError::PathComponentNotDirectory {
+                    absolute_path: current_absolute_path,
+                    inode_id: current_inode_id,
+                    inode_kind: current_inode.inode_kind,
+                });
+            }
+
+            let next_absolute_path = join_absolute_path(&current_absolute_path, &component);
+            let direntry = self
+                .visible_child(current_inode_id, &component, base_seq)
+                .ok_or(ModelVisiblePathError::PathNotFound {
+                    absolute_path: next_absolute_path.clone(),
+                })?;
+            current_inode_id = direntry.child_inode_id;
+            current_parent_inode_id = Some(direntry.parent_inode_id);
+            current_display_name = direntry.display_name.clone();
+            current_absolute_path = next_absolute_path;
+        }
+
+        let inode = self.visible_inode(current_inode_id, base_seq).ok_or(
+            ModelVisiblePathError::PathNotFound {
+                absolute_path: current_absolute_path.clone(),
+            },
+        )?;
+        Ok(ModelResolvedVisiblePath {
+            absolute_path: current_absolute_path,
+            inode_id: current_inode_id,
+            inode_kind: inode.inode_kind,
+            parent_inode_id: current_parent_inode_id,
+            display_name: current_display_name,
+        })
+    }
+
     pub fn ensure_child_name_absent(
         &self,
         parent_inode_id: InodeId,
@@ -536,5 +643,156 @@ impl ModelMetadataState {
 fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
     if !invariants.iter().any(|existing| existing == name) {
         invariants.push(name.to_owned());
+    }
+}
+
+fn parse_absolute_path_components(
+    absolute_path: &str,
+) -> Result<Vec<String>, ModelVisiblePathError> {
+    if !absolute_path.starts_with('/') {
+        return Err(ModelVisiblePathError::InvalidAbsolutePath {
+            absolute_path: absolute_path.to_owned(),
+        });
+    }
+
+    let mut components = Vec::new();
+    for component in absolute_path.split('/') {
+        if component.is_empty() {
+            continue;
+        }
+        if component == "." || component == ".." {
+            return Err(ModelVisiblePathError::InvalidAbsolutePath {
+                absolute_path: absolute_path.to_owned(),
+            });
+        }
+        components.push(component.to_owned());
+    }
+    Ok(components)
+}
+
+fn join_absolute_path(base: &str, component: &str) -> String {
+    if base == "/" {
+        format!("/{component}")
+    } else {
+        format!("{base}/{component}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ModelDirentryRecord, ModelInodeRecord, ModelMetadataState, ModelRevisionRecord};
+
+    #[test]
+    fn resolve_visible_path_accepts_root_and_nested_file() {
+        let metadata = sample_metadata();
+
+        let root = metadata
+            .resolve_visible_path("/", ChangeSeq(3))
+            .expect("resolve root");
+        assert_eq!(root.absolute_path, "/");
+        assert_eq!(root.inode_id, InodeId(1));
+        assert_eq!(root.inode_kind, InodeKind::Dir);
+
+        let file = metadata
+            .resolve_visible_path("/docs/report.txt", ChangeSeq(3))
+            .expect("resolve file");
+        assert_eq!(file.absolute_path, "/docs/report.txt");
+        assert_eq!(file.inode_id, InodeId(3));
+        assert_eq!(file.inode_kind, InodeKind::File);
+        assert_eq!(file.parent_inode_id, Some(InodeId(2)));
+    }
+
+    #[test]
+    fn visible_children_only_returns_active_visible_bindings_in_order() {
+        let metadata = sample_metadata();
+        let children = metadata.visible_children(InodeId(1), ChangeSeq(3));
+        let names = children
+            .into_iter()
+            .map(|child| child.display_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["archive", "docs"]);
+    }
+
+    #[test]
+    fn resolve_visible_path_rejects_invalid_and_non_directory_components() {
+        let metadata = sample_metadata();
+
+        let invalid = metadata
+            .resolve_visible_path("/docs/../secret.txt", ChangeSeq(3))
+            .expect_err("invalid path should fail");
+        assert!(matches!(
+            invalid,
+            ModelVisiblePathError::InvalidAbsolutePath { .. }
+        ));
+
+        let non_directory = metadata
+            .resolve_visible_path("/docs/report.txt/child", ChangeSeq(3))
+            .expect_err("file component should fail");
+        assert!(matches!(
+            non_directory,
+            ModelVisiblePathError::PathComponentNotDirectory { inode_id, .. } if inode_id == InodeId(3)
+        ));
+    }
+
+    fn sample_metadata() -> ModelMetadataState {
+        ModelMetadataState {
+            inodes: vec![
+                ModelInodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(0),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(3),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(4),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(2),
+                },
+            ],
+            direntries: vec![
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(1),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(2),
+                    bind_seq: ChangeSeq(1),
+                    bind_op_index: 0,
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "report.txt".to_owned(),
+                    display_name: "report.txt".to_owned(),
+                    child_inode_id: InodeId(3),
+                    bind_seq: ChangeSeq(1),
+                    bind_op_index: 0,
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(1),
+                    name_key: "archive".to_owned(),
+                    display_name: "archive".to_owned(),
+                    child_inode_id: InodeId(4),
+                    bind_seq: ChangeSeq(2),
+                    bind_op_index: 0,
+                },
+            ],
+            revisions: vec![ModelRevisionRecord {
+                inode_id: InodeId(3),
+                revision_no: RevisionNo(1),
+                committed_seq: ChangeSeq(1),
+                revision_op_index: 0,
+                content_manifest_digest: "sha256:report".to_owned(),
+            }],
+            subtree_tombstones: Vec::new(),
+        }
     }
 }

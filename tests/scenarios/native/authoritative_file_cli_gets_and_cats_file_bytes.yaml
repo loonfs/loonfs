@@ -1,0 +1,29 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_gets_and_cats_file_bytes
+initial:
+  head:
+    namespace_id: demo
+    seq: 3
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /hello.txt
+        inode_id: 2
+        inode_kind: file
+        revision_no: 1
+        size_bytes: 16
+        content_manifest_digest: sha256:manifest
+  content:
+    selector: demo:/hello.txt
+    bytes_utf8: hello from loon
+actions:
+  - get_file:
+      selector: demo:/hello.txt
+      local_path: ./hello.txt
+  - cat_file:
+      selector: demo:/hello.txt
+expect:
+  bytes_utf8: hello from loon

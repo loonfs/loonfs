@@ -1097,9 +1097,12 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
+ "loon-objectstore",
  "loon-ops",
+ "loon-server",
  "loon-testkit",
  "loon-types",
+ "serde_json",
  "toml",
 ]
 

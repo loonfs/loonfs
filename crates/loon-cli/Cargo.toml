@@ -19,4 +19,7 @@ loon-types = { path = "../loon-types" }
 toml.workspace = true
 
 [dev-dependencies]
+loon-objectstore = { path = "../loon-objectstore" }
+loon-server = { path = "../loon-server" }
 loon-testkit = { path = "../loon-testkit" }
+serde_json.workspace = true
