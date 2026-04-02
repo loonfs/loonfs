@@ -1,0 +1,35 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_get_recursive_downloads_directory_tree
+initial:
+  head:
+    namespace_id: demo
+    seq: 8
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/a.txt
+        inode_id: 3
+        inode_kind: file
+      - absolute_path: /docs/subdir
+        inode_id: 4
+        inode_kind: dir
+      - absolute_path: /docs/subdir/b.txt
+        inode_id: 5
+        inode_kind: file
+actions:
+  - get_recursive:
+      selector: demo:/docs
+      local_path: ./docs-download
+expect:
+  downloaded_tree:
+    root: ./docs-download
+    files:
+      - a.txt
+      - subdir/b.txt
+

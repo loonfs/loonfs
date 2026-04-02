@@ -289,6 +289,35 @@ pub struct ModelResolvedVisibleCreateTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelVisibleSubtreeDirectory {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub inode_id: InodeId,
+    pub parent_inode_id: InodeId,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelVisibleSubtreeFile {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub inode_id: InodeId,
+    pub parent_inode_id: InodeId,
+    pub display_name: String,
+    pub revision_no: RevisionNo,
+    pub content_manifest_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelVisibleDirectorySubtree {
+    pub root: ModelResolvedVisiblePath,
+    #[serde(default)]
+    pub directories: Vec<ModelVisibleSubtreeDirectory>,
+    #[serde(default)]
+    pub files: Vec<ModelVisibleSubtreeFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelVisiblePathMutationError {
     VisiblePath(ModelVisiblePathError),
     RootPathRejected {
@@ -306,6 +335,25 @@ pub enum ModelVisiblePathMutationError {
     },
     IdenticalSourceAndDestination {
         absolute_path: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelVisibleSubtreeError {
+    VisiblePath(ModelVisiblePathError),
+    RootNotDirectory {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    UnsupportedDescendant {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    FileRevisionMissing {
+        absolute_path: String,
+        inode_id: InodeId,
     },
 }
 

@@ -45,6 +45,8 @@ fn help_file_mentions_authoritative_subcommands() {
     assert!(stdout.contains("mkdir"));
     assert!(stdout.contains("rm"));
     assert!(stdout.contains("mv"));
+    assert!(stdout.contains("--recursive"));
+    assert!(stdout.contains("--replace"));
 }
 
 #[test]
@@ -117,6 +119,82 @@ fn file_get_writes_download_without_touching_existing_target() {
 }
 
 #[test]
+fn file_get_recursive_writes_exact_output_root() {
+    let temp_dir = TestDir::new("loon-cli-file-get-recursive");
+    let config_path = write_demo_local_fs_config(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    bootstrap_empty_namespace(&config_path, &namespace_id);
+
+    let docs_dir = temp_dir.path().join("docs");
+    fs::create_dir_all(&docs_dir).expect("create local docs dir");
+    let source_file = docs_dir.join("hello.txt");
+    fs::write(&source_file, b"hello from loon\n").expect("write source file");
+    let nested_dir = docs_dir.join("drafts");
+    fs::create_dir_all(&nested_dir).expect("create drafts dir");
+    let note_file = nested_dir.join("note.txt");
+    fs::write(&note_file, b"nested note\n").expect("write note file");
+
+    let mkdir_docs = run_loon([
+        "file",
+        "mkdir",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs",
+    ]);
+    assert!(mkdir_docs.status.success());
+    let mkdir_drafts = run_loon([
+        "file",
+        "mkdir",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs/drafts",
+    ]);
+    assert!(mkdir_drafts.status.success());
+    let put_hello = run_loon([
+        "file",
+        "put",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        source_file.to_str().expect("utf-8 path"),
+        "demo:/docs/hello.txt",
+    ]);
+    assert!(put_hello.status.success());
+    let put_note = run_loon([
+        "file",
+        "put",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        note_file.to_str().expect("utf-8 path"),
+        "demo:/docs/drafts/note.txt",
+    ]);
+    assert!(put_note.status.success());
+
+    let output_root = temp_dir.path().join("downloaded-docs");
+    let get = run_loon([
+        "file",
+        "get",
+        "--recursive",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs",
+        output_root.to_str().expect("utf-8 path"),
+    ]);
+    assert!(get.status.success());
+    let stdout = String::from_utf8(get.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("recursive: true"));
+    assert!(stdout.contains("file_count: 2"));
+    assert!(stdout.contains("directory_count: 2"));
+    assert_eq!(
+        fs::read(output_root.join("hello.txt")).expect("read recursive hello"),
+        b"hello from loon\n"
+    );
+    assert_eq!(
+        fs::read(output_root.join("drafts/note.txt")).expect("read recursive note"),
+        b"nested note\n"
+    );
+}
+
+#[test]
 fn file_put_replace_cp_mkdir_rm_and_mv_run_as_authoritative_commands() {
     let temp_dir = TestDir::new("loon-cli-file-write");
     let config_path = write_demo_local_fs_config(temp_dir.path());
@@ -179,7 +257,23 @@ fn file_put_replace_cp_mkdir_rm_and_mv_run_as_authoritative_commands() {
     let cp_stdout = String::from_utf8(cp.stdout).expect("utf-8 stdout");
     assert!(cp_stdout.contains("from: demo:/docs/hello.txt"));
     assert!(cp_stdout.contains("to: demo:/docs/hello-copy.txt"));
+    assert!(cp_stdout.contains("replace: false"));
     assert!(cp_stdout.contains("absolute_path: /docs/hello-copy.txt"));
+
+    let cp_replace = run_loon([
+        "file",
+        "cp",
+        "--replace",
+        "--config",
+        config_path.to_str().expect("utf-8 path"),
+        "demo:/docs/hello.txt",
+        "demo:/docs/hello-copy.txt",
+    ]);
+    assert!(cp_replace.status.success());
+    let cp_replace_stdout = String::from_utf8(cp_replace.stdout).expect("utf-8 stdout");
+    assert!(cp_replace_stdout.contains("replace: true"));
+    assert!(cp_replace_stdout.contains("to: demo:/docs/hello-copy.txt"));
+    assert!(cp_replace_stdout.contains("revision_no: 2"));
 
     let mv = run_loon([
         "file",

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  loon file ls demo:/\n  loon file stat demo:/docs/report.txt\n  loon file get demo:/hello.txt ./downloads\n  loon file cat demo:/hello.txt\n  loon file put ./hello.txt demo:/docs/hello.txt\n  loon file put --replace ./hello-v2.txt demo:/docs/hello.txt\n  loon file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file mkdir demo:/docs\n  loon file rm --recursive demo:/docs/archive\n  loon file mv demo:/docs/hello.txt demo:/docs/archive.txt"
+    after_help = "Examples:\n  loon file ls demo:/\n  loon file stat demo:/docs/report.txt\n  loon file get demo:/hello.txt ./downloads\n  loon file get --recursive demo:/docs ./downloaded-docs\n  loon file cat demo:/hello.txt\n  loon file put ./hello.txt demo:/docs/hello.txt\n  loon file put --replace ./hello-v2.txt demo:/docs/hello.txt\n  loon file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file cp --replace demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file mkdir demo:/docs\n  loon file rm --recursive demo:/docs/archive\n  loon file mv demo:/docs/hello.txt demo:/docs/archive.txt"
 )]
 pub struct FileArgs {
     #[command(subcommand)]
@@ -25,7 +25,7 @@ enum FileSubcommand {
     /// Upload one local file to an exact authoritative destination path.
     Put(FilePutArgs),
     /// Copy one authoritative file to a new exact path within the same namespace.
-    Cp(FilePathPairArgs),
+    Cp(FileCpArgs),
     /// Create one authoritative directory at an exact path.
     Mkdir(FileSelectorArgs),
     /// Delete one authoritative file or directory subtree.
@@ -53,9 +53,11 @@ struct FileSelectorArgs {
 struct FileGetArgs {
     #[command(flatten)]
     selector: FileSelectorArgs,
+    #[arg(long, help = "Recursively download one authoritative directory tree.")]
+    recursive: bool,
     #[arg(
         value_name = "LOCAL_PATH",
-        help = "Destination file path or existing directory."
+        help = "Destination file path, existing directory, or exact output root for --recursive."
     )]
     local_path: PathBuf,
 }
@@ -113,6 +115,17 @@ struct FilePathPairArgs {
     to_selector: String,
 }
 
+#[derive(Debug, Clone, Args)]
+struct FileCpArgs {
+    #[command(flatten)]
+    pair: FilePathPairArgs,
+    #[arg(
+        long,
+        help = "Replace an existing visible authoritative destination file instead of requiring absence."
+    )]
+    replace: bool,
+}
+
 impl FileArgs {
     pub(crate) fn into_command(self) -> anyhow::Result<FileCommand> {
         match self.command {
@@ -128,6 +141,7 @@ impl FileArgs {
                 config_path: resolve_config_path(args.selector.config)?.path,
                 selector: args.selector.selector,
                 local_path: args.local_path,
+                recursive: args.recursive,
             }),
             FileSubcommand::Cat(args) => Ok(FileCommand::Cat {
                 config_path: resolve_config_path(args.config)?.path,
@@ -140,9 +154,10 @@ impl FileArgs {
                 replace: args.replace,
             }),
             FileSubcommand::Cp(args) => Ok(FileCommand::Cp {
-                config_path: resolve_config_path(args.config)?.path,
-                from_selector: args.from_selector,
-                to_selector: args.to_selector,
+                config_path: resolve_config_path(args.pair.config)?.path,
+                from_selector: args.pair.from_selector,
+                to_selector: args.pair.to_selector,
+                replace: args.replace,
             }),
             FileSubcommand::Mkdir(args) => Ok(FileCommand::Mkdir {
                 config_path: resolve_config_path(args.config)?.path,

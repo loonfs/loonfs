@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 loon-client = { path = "../loon-client" }
+loon-core = { path = "../loon-core" }
 loon-objectstore = { path = "../loon-objectstore" }
 loon-server = { path = "../loon-server" }
 loon-types = { path = "../loon-types" }
@@ -18,5 +19,4 @@ thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-loon-core = { path = "../loon-core" }
 loon-testkit = { path = "../loon-testkit" }

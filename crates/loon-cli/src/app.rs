@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_file_put_replace_rm_mv_and_cp() {
+    fn parses_file_put_replace_get_recursive_rm_mv_and_cp() {
         let replace = parse_args([
             "loon",
             "file",
@@ -205,6 +205,27 @@ mod tests {
                 local_path: PathBuf::from("./hello-v2.txt"),
                 selector: "demo:/docs/hello.txt".to_owned(),
                 replace: true,
+            })
+        );
+
+        let get_recursive = parse_args([
+            "loon",
+            "file",
+            "get",
+            "--recursive",
+            "--config",
+            "demo.toml",
+            "demo:/docs",
+            "./downloads",
+        ])
+        .expect("parse file get --recursive");
+        assert_eq!(
+            get_recursive,
+            ParsedCommand::File(FileCommand::Get {
+                config_path: PathBuf::from("demo.toml"),
+                selector: "demo:/docs".to_owned(),
+                local_path: PathBuf::from("./downloads"),
+                recursive: true,
             })
         );
 
@@ -250,6 +271,7 @@ mod tests {
             "loon",
             "file",
             "cp",
+            "--replace",
             "--config",
             "demo.toml",
             "demo:/docs/a.txt",
@@ -262,6 +284,7 @@ mod tests {
                 config_path: PathBuf::from("demo.toml"),
                 from_selector: "demo:/docs/a.txt".to_owned(),
                 to_selector: "demo:/docs/c.txt".to_owned(),
+                replace: true,
             })
         );
     }

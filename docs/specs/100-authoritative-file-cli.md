@@ -9,6 +9,7 @@ The first user-facing product shell is a separate authoritative file surface:
 - `loon file ls <namespace:/path>`
 - `loon file stat <namespace:/path>`
 - `loon file get <namespace:/path> <local-path>`
+- `loon file get --recursive <namespace:/absolute/path> <local-path>`
 - `loon file cat <namespace:/path>`
 - `loon file put <local-file> <namespace:/absolute/path>`
 - `loon file put --replace <local-file> <namespace:/absolute/path>`
@@ -134,10 +135,17 @@ Rules:
 
 Rules:
 
-- file-only in this slice
+- plain `get` is file-only
+- `get --recursive` is directory-only
 - reads authoritative bytes directly from the content manifest and block objects
-- if destination exists and is a directory, write `<dest>/<basename>`
-- otherwise treat destination as the exact target path
+- plain `get`:
+  - if destination exists and is a directory, write `<dest>/<basename>`
+  - otherwise treat destination as the exact target path
+- `get --recursive`:
+  - treats the provided local path as the exact destination root path
+  - destination root must be absent
+  - destination parent must already exist and be a directory
+  - preflights the whole output tree before writing any files
 - fail if the final target already exists
 - fail if the target parent directory does not already exist
 - do not auto-create directories
@@ -193,9 +201,15 @@ Rules:
 - source selector must not be root
 - destination selector must not be root
 - destination selector names the exact final remote path
-- destination must be absent
+- destination must be absent unless `--replace` is present
+- plain `cp` is create-only
+- `cp --replace` is update-only:
+  - destination must resolve to one visible file
+  - absent destination is rejected
+  - directory destination is rejected
 - identical normalized source and destination paths are explicit errors
-- `cp` creates a new inode and preserves the source binding unchanged
+- plain `cp` creates a new inode and preserves the source binding unchanged
+- `cp --replace` preserves destination inode identity and updates only its file revision/content
 - `cp` reuses the source file's current manifest digest; it does not re-upload content objects
 
 ### `loon file mkdir`
@@ -257,8 +271,10 @@ Additional rules:
 
 - `put --replace` resolves the destination to one visible file and commits `ReplaceFile` against
   that file's current revision under the same leased basis
-- `cp` resolves source and destination under one leased basis and commits `CreateFile` at the
-  destination with the source file's current manifest digest
+- plain `cp` resolves source and destination under one leased basis and commits `CreateFile` at
+  the destination with the source file's current manifest digest
+- `cp --replace` resolves source and destination under one leased basis and commits `ReplaceFile`
+  on the destination inode with the source file's current manifest digest
 - `loon-ops` and `loon-cli` must not resolve a path to an inode and then call the current
   inode-addressed mutation path as two separate authoritative steps
 - selector resolution and authoritative commit validation must therefore observe one coherent basis

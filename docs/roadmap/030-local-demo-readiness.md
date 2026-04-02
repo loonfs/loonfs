@@ -265,10 +265,12 @@ Rules:
   - `loon file ls <namespace:/path>`
   - `loon file stat <namespace:/path>`
   - `loon file get <namespace:/path> <local-path>`
+  - `loon file get --recursive <namespace:/absolute/path> <local-path>`
   - `loon file cat <namespace:/path>`
   - `loon file put <local-file> <namespace:/absolute/path>`
   - `loon file put --replace <local-file> <namespace:/absolute/path>`
   - `loon file cp <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
+  - `loon file cp --replace <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
   - `loon file mkdir <namespace:/absolute/path>`
   - `loon file rm [--recursive] <namespace:/absolute/path>`
   - `loon file mv <from-namespace:/absolute/path> <to-namespace:/absolute/path>`

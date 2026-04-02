@@ -15,7 +15,8 @@ use loon_core::content::{
     DurableContentValidationError, UploadError,
 };
 use loon_core::metadata::{
-    MetadataState, ResolvedVisiblePath, VisiblePathError, VisiblePathMutationError,
+    MetadataState, ResolvedVisiblePath, VisibleDirectorySubtree, VisiblePathError,
+    VisiblePathMutationError, VisibleSubtreeError,
 };
 use loon_objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
@@ -207,6 +208,37 @@ pub struct AuthoritativeCpResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeSubtreeDirectoryEntry {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub inode_id: InodeId,
+    pub parent_inode_id: InodeId,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeSubtreeFileEntry {
+    pub relative_path: String,
+    pub absolute_path: String,
+    pub inode_id: InodeId,
+    pub parent_inode_id: InodeId,
+    pub display_name: String,
+    pub revision_no: RevisionNo,
+    pub content_manifest_digest: String,
+    pub size_bytes: u64,
+    pub content_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeSubtreeDownload {
+    pub root: AuthoritativePathEntry,
+    #[serde(default)]
+    pub directories: Vec<AuthoritativeSubtreeDirectoryEntry>,
+    #[serde(default)]
+    pub files: Vec<AuthoritativeSubtreeFileEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthoritativeMkdirResult {
     pub entry: AuthoritativePathEntry,
     pub committed_seq: ChangeSeq,
@@ -255,6 +287,14 @@ pub enum AuthoritativePathReadError {
     FileRevisionMissing {
         absolute_path: String,
         inode_id: InodeId,
+    },
+    #[error(
+        "recursive subtree download does not support descendant kind `{inode_kind:?}` at `{absolute_path}` (inode `{inode_id:?}`)"
+    )]
+    UnsupportedSubtreeDescendant {
+        absolute_path: String,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
     },
     #[error(transparent)]
     DurableContent(Box<DurableContentValidationError>),
@@ -900,6 +940,90 @@ pub fn cp_authoritative_file_within_namespace<S: ObjectStore>(
     })
 }
 
+pub fn cp_replace_authoritative_file_within_namespace<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    from_absolute_path: &str,
+    to_absolute_path: &str,
+    params: &ClientMutationExecutionParams,
+) -> Result<AuthoritativeCpResult, AuthoritativePathWriteError> {
+    crate::mutation::lease::acquire_or_renew_namespace_lease(store, namespace_id, params)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    basis
+        .metadata_state
+        .ensure_distinct_visible_paths(from_absolute_path, to_absolute_path)?;
+    let source = basis
+        .metadata_state
+        .resolve_visible_file_target(from_absolute_path, basis.head.seq)?;
+    let target = basis
+        .metadata_state
+        .resolve_visible_file_target(to_absolute_path, basis.head.seq)?;
+    let source_revision = basis
+        .metadata_state
+        .latest_revision_head_at_seq(source.inode_id, basis.head.seq)
+        .ok_or_else(|| AuthoritativePathReadError::FileRevisionMissing {
+            absolute_path: source.absolute_path.clone(),
+            inode_id: source.inode_id,
+        })?;
+    let target_revision = basis
+        .metadata_state
+        .latest_revision_head_at_seq(target.inode_id, basis.head.seq)
+        .ok_or_else(|| AuthoritativePathReadError::FileRevisionMissing {
+            absolute_path: target.absolute_path.clone(),
+            inode_id: target.inode_id,
+        })?;
+    let validated = validate_durable_content_reference(
+        store,
+        namespace_id,
+        &source_revision.content_manifest_digest,
+    )?;
+    let request = ClientMutationRequest {
+        namespace_id: namespace_id.clone(),
+        client_request_id: build_authoritative_request_id(
+            "cp-replace",
+            &target.absolute_path,
+            params,
+        ),
+        op: ClientMutationOp::ReplaceFile {
+            inode_id: target.inode_id,
+            base_revision_no: target_revision.revision_no,
+            content_manifest_digest: source_revision.content_manifest_digest,
+        },
+    };
+    let executed =
+        execute_client_mutation_against_basis(store, &request, params, basis, Some(validated))?;
+    let entry = resolve_entry_from_metadata_state(
+        store,
+        namespace_id,
+        executed.head_publish.resulting_head.seq,
+        &executed.resulting_metadata_state,
+        &target.absolute_path,
+    )?;
+    Ok(AuthoritativeCpResult {
+        entry,
+        committed_seq: executed.head_publish.resulting_head.seq,
+    })
+}
+
+pub fn collect_authoritative_subtree_download<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<AuthoritativeSubtreeDownload, AuthoritativePathReadError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let subtree = basis
+        .metadata_state
+        .collect_visible_directory_subtree(absolute_path, basis.head.seq)
+        .map_err(map_visible_subtree_error)?;
+    build_authoritative_subtree_download(
+        store,
+        namespace_id,
+        basis.head.seq,
+        &basis.metadata_state,
+        subtree,
+    )
+}
+
 pub fn mkdir_authoritative_path<S: ObjectStore>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1068,6 +1192,37 @@ fn reject_root_path(absolute_path: &str) -> Result<(), AuthoritativePathWriteErr
     Ok(())
 }
 
+fn map_visible_subtree_error(error: VisibleSubtreeError) -> AuthoritativePathReadError {
+    match error {
+        VisibleSubtreeError::VisiblePath(error) => AuthoritativePathReadError::VisiblePath(error),
+        VisibleSubtreeError::RootNotDirectory {
+            absolute_path,
+            inode_id,
+            inode_kind,
+        } => AuthoritativePathReadError::DirectoryCommandRequiresDirectory {
+            absolute_path,
+            inode_id,
+            inode_kind,
+        },
+        VisibleSubtreeError::UnsupportedDescendant {
+            absolute_path,
+            inode_id,
+            inode_kind,
+        } => AuthoritativePathReadError::UnsupportedSubtreeDescendant {
+            absolute_path,
+            inode_id,
+            inode_kind,
+        },
+        VisibleSubtreeError::FileRevisionMissing {
+            absolute_path,
+            inode_id,
+        } => AuthoritativePathReadError::FileRevisionMissing {
+            absolute_path,
+            inode_id,
+        },
+    }
+}
+
 fn build_authoritative_request_id(
     operation: &str,
     absolute_path: &str,
@@ -1175,6 +1330,58 @@ fn build_authoritative_path_entry<S: ObjectStore>(
     })
 }
 
+fn build_authoritative_subtree_download<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head_seq: ChangeSeq,
+    metadata_state: &MetadataState,
+    subtree: VisibleDirectorySubtree,
+) -> Result<AuthoritativeSubtreeDownload, AuthoritativePathReadError> {
+    let root = build_authoritative_path_entry(
+        store,
+        namespace_id,
+        head_seq,
+        metadata_state,
+        &subtree.root,
+    )?;
+    let directories = subtree
+        .directories
+        .into_iter()
+        .map(|directory| AuthoritativeSubtreeDirectoryEntry {
+            relative_path: directory.relative_path,
+            absolute_path: directory.absolute_path,
+            inode_id: directory.inode_id,
+            parent_inode_id: directory.parent_inode_id,
+            display_name: directory.display_name,
+        })
+        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    for file in subtree.files {
+        let summary = load_file_content_summary_from_manifest(
+            store,
+            namespace_id,
+            &file.content_manifest_digest,
+        )?;
+        files.push(AuthoritativeSubtreeFileEntry {
+            relative_path: file.relative_path,
+            absolute_path: file.absolute_path,
+            inode_id: file.inode_id,
+            parent_inode_id: file.parent_inode_id,
+            display_name: file.display_name,
+            revision_no: file.revision_no,
+            content_manifest_digest: file.content_manifest_digest,
+            size_bytes: summary.file_size_bytes,
+            content_digest: summary.file_digest_sha256,
+        });
+    }
+
+    Ok(AuthoritativeSubtreeDownload {
+        root,
+        directories,
+        files,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuthoritativeFileContentSummary {
     file_size_bytes: u64,
@@ -1273,9 +1480,10 @@ fn wal_seq_from_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_namespace, cp_authoritative_file_within_namespace, list_authoritative_path,
-        load_namespace_state_summary, mkdir_authoritative_path, mv_authoritative_path,
-        put_authoritative_file_from_path, read_authoritative_file_bytes,
+        bootstrap_namespace, collect_authoritative_subtree_download,
+        cp_authoritative_file_within_namespace, cp_replace_authoritative_file_within_namespace,
+        list_authoritative_path, load_namespace_state_summary, mkdir_authoritative_path,
+        mv_authoritative_path, put_authoritative_file_from_path, read_authoritative_file_bytes,
         replace_authoritative_file_from_path, resolve_authoritative_path, rm_authoritative_path,
         translate_authoritative_state_to_remote_observations, AuthoritativePathReadError,
         AuthoritativePathWriteError, NamespaceBootstrapError, NamespaceBootstrapParams,
@@ -1963,6 +2171,93 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_cp_replace_preserves_destination_inode_and_source_visibility() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-cp-replace");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir docs");
+
+        let source_path = temp_dir.join("source.txt");
+        fs::write(&source_path, b"source bytes\n").expect("write source");
+        put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &source_path,
+            "/docs/source.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put source");
+
+        let target_path = temp_dir.join("target.txt");
+        fs::write(&target_path, b"target bytes\n").expect("write target");
+        let target_created = put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &target_path,
+            "/docs/target.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_300,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put target");
+
+        let replaced = cp_replace_authoritative_file_within_namespace(
+            &store,
+            &namespace_id,
+            "/docs/source.txt",
+            "/docs/target.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_400,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("copy replace target");
+        assert_eq!(replaced.entry.inode_id, target_created.entry.inode_id);
+        assert_eq!(replaced.entry.revision_no, Some(RevisionNo(2)));
+
+        let source_bytes = read_authoritative_file_bytes(&store, &namespace_id, "/docs/source.txt")
+            .expect("read source after replace");
+        let target_bytes = read_authoritative_file_bytes(&store, &namespace_id, "/docs/target.txt")
+            .expect("read target after replace");
+        assert_eq!(source_bytes.bytes, b"source bytes\n");
+        assert_eq!(target_bytes.bytes, source_bytes.bytes);
+    }
+
+    #[test]
     fn authoritative_rm_rejects_directory_without_recursive() {
         let temp_dir = unique_temp_dir("server-ops-authoritative-rm-dir");
         let store = LocalFsStore::new(&temp_dir).expect("create store");
@@ -2098,6 +2393,279 @@ mod tests {
                     error.as_ref(),
                     crate::mutation::lease::LeaseAcquireError::HeldByOtherWriter { .. }
                 )
+        ));
+    }
+
+    #[test]
+    fn authoritative_cp_replace_rejects_active_foreign_holder() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-copy-replace-foreign-holder");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir docs");
+
+        let source_path = temp_dir.join("hello.txt");
+        fs::write(&source_path, b"hello from write path\n").expect("write local source");
+        put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &source_path,
+            "/docs/hello.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put authoritative file");
+        let target_path = temp_dir.join("target.txt");
+        fs::write(&target_path, b"target\n").expect("write target source");
+        put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &target_path,
+            "/docs/target.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_300,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put target file");
+
+        let summary =
+            load_namespace_state_summary(&store, &namespace_id).expect("load namespace summary");
+        let foreign_lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-b".to_owned(),
+            fence_token: summary.head.active_fence_token,
+            lease_expires_at_ms: 2_000,
+        };
+        let lease_envelope = LeaseStateEnvelope::from_state(
+            ControlObjectKind::NamespaceLease,
+            "loon-server-test",
+            foreign_lease,
+        )
+        .expect("encode foreign lease");
+        let lease_bytes = serde_json::to_vec(&lease_envelope).expect("serialize foreign lease");
+        store
+            .put_overwrite(&namespace_lease(namespace_id.as_str()), &lease_bytes)
+            .expect("overwrite lease with foreign holder");
+
+        let error = cp_replace_authoritative_file_within_namespace(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            "/docs/target.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_500,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect_err("active foreign lease holder should fail");
+        assert!(matches!(
+            error,
+            AuthoritativePathWriteError::LeaseAcquire(error)
+                if matches!(
+                    error.as_ref(),
+                    crate::mutation::lease::LeaseAcquireError::HeldByOtherWriter { .. }
+                )
+        ));
+    }
+
+    #[test]
+    fn collect_authoritative_subtree_download_returns_deterministic_entries() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-subtree-download");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir docs");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs/drafts",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_150,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir drafts");
+
+        let report_path = temp_dir.join("report.txt");
+        fs::write(&report_path, b"report bytes\n").expect("write report source");
+        put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &report_path,
+            "/docs/report.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put report file");
+
+        let note_path = temp_dir.join("note.txt");
+        fs::write(&note_path, b"note bytes\n").expect("write note source");
+        put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &note_path,
+            "/docs/drafts/note.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_250,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put note file");
+
+        let subtree = collect_authoritative_subtree_download(&store, &namespace_id, "/docs")
+            .expect("collect subtree");
+        assert_eq!(subtree.root.absolute_path, "/docs");
+        assert_eq!(
+            subtree
+                .directories
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["drafts"]
+        );
+        assert_eq!(
+            subtree
+                .files
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["drafts/note.txt", "report.txt"]
+        );
+    }
+
+    #[test]
+    fn collect_authoritative_subtree_download_rejects_unsupported_descendants() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-subtree-unsupported");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+        let head = HeadState {
+            namespace_id: namespace_id.clone(),
+            seq: ChangeSeq(2),
+            active_fence_token: FenceToken(0),
+            next_inode_id: InodeId(4),
+            snapshot_hint_seq: None,
+            retention_floor_seq: ChangeSeq(0),
+        };
+        let lease = sample_lease(&namespace_id);
+        seed_control_objects(&store, &head, &lease);
+        seed_verified_basis(
+            &store,
+            &head,
+            &MetadataState {
+                inodes: vec![
+                    InodeRecord {
+                        inode_id: InodeId(1),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(0),
+                    },
+                    InodeRecord {
+                        inode_id: InodeId(2),
+                        inode_kind: InodeKind::Dir,
+                        created_seq: ChangeSeq(1),
+                    },
+                    InodeRecord {
+                        inode_id: InodeId(3),
+                        inode_kind: InodeKind::Symlink,
+                        created_seq: ChangeSeq(2),
+                    },
+                ],
+                direntries: vec![
+                    DirentryRecord {
+                        parent_inode_id: InodeId(1),
+                        name_key: "docs".to_owned(),
+                        display_name: "docs".to_owned(),
+                        child_inode_id: InodeId(2),
+                        bind_seq: ChangeSeq(1),
+                        bind_op_index: 0,
+                    },
+                    DirentryRecord {
+                        parent_inode_id: InodeId(2),
+                        name_key: "shortcut".to_owned(),
+                        display_name: "shortcut".to_owned(),
+                        child_inode_id: InodeId(3),
+                        bind_seq: ChangeSeq(2),
+                        bind_op_index: 0,
+                    },
+                ],
+                revisions: Vec::new(),
+                subtree_tombstones: Vec::new(),
+            },
+        );
+
+        let error = collect_authoritative_subtree_download(&store, &namespace_id, "/docs")
+            .expect_err("unsupported descendant should fail");
+        assert!(matches!(
+            error,
+            AuthoritativePathReadError::UnsupportedSubtreeDescendant {
+                absolute_path,
+                inode_id,
+                inode_kind,
+            } if absolute_path == "/docs/shortcut"
+                && inode_id == InodeId(3)
+                && inode_kind == InodeKind::Symlink
         ));
     }
 

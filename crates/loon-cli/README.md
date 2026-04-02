@@ -6,7 +6,7 @@ Current scope:
 
 - `loon ops ...` reuses the shared `loon-ops` subcommand grammar and output semantics unchanged
 - `loon file ...` is the product-facing authoritative file surface for direct read and write
-  operations, including explicit replace and same-namespace copy
+  operations, including explicit replace, same-namespace copy, and recursive download
 - `loon config ...` and `loon doctor` are CLI-only discovery/diagnostic affordances over the same
   existing ops TOML config shape
 - `loon completion ...`, `loon manpages ...`, and `loon version` are CLI-only affordances

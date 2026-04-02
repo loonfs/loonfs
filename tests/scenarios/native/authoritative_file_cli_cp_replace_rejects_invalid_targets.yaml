@@ -1,0 +1,40 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_cp_replace_rejects_invalid_targets
+initial:
+  head:
+    namespace_id: demo
+    seq: 9
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /docs
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /docs/source.txt
+        inode_id: 3
+        inode_kind: file
+      - absolute_path: /docs/archive
+        inode_id: 4
+        inode_kind: dir
+actions:
+  - copy_file:
+      replace: true
+      from: demo:/docs/source.txt
+      to: demo:/docs/missing.txt
+  - copy_file:
+      replace: true
+      from: demo:/docs/source.txt
+      to: demo:/docs/archive
+  - copy_file:
+      replace: true
+      from: demo:/docs/source.txt
+      to: demo:/docs//source.txt
+expect:
+  errors:
+    - destination_absent
+    - destination_is_directory
+    - identical_paths
+

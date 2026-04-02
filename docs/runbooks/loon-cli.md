@@ -94,10 +94,12 @@ Current commands:
 cargo run -p loon-cli -- file ls demo:/
 cargo run -p loon-cli -- file stat demo:/docs/report.txt
 cargo run -p loon-cli -- file get demo:/hello.txt ./downloads
+cargo run -p loon-cli -- file get --recursive demo:/docs ./docs-download
 cargo run -p loon-cli -- file cat demo:/hello.txt
 cargo run -p loon-cli -- file put ./hello.txt demo:/docs/hello.txt
 cargo run -p loon-cli -- file put --replace ./hello-v2.txt demo:/docs/hello.txt
 cargo run -p loon-cli -- file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt
+cargo run -p loon-cli -- file cp --replace demo:/docs/hello.txt demo:/docs/existing.txt
 cargo run -p loon-cli -- file mkdir demo:/docs/archive
 cargo run -p loon-cli -- file rm demo:/docs/hello.txt
 cargo run -p loon-cli -- file rm --recursive demo:/docs/archive
@@ -110,7 +112,10 @@ Strict v1 rules:
 - `put` is local-file only
 - plain `put` is create-only
 - `put --replace` is update-only and requires an existing visible file destination
-- `cp` is same-namespace, file-only, and create-only
+- plain `get` is file-only
+- `get --recursive` is directory-only and downloads to one absent exact local root path
+- plain `cp` is same-namespace, file-only, and create-only
+- `cp --replace` is same-namespace, file-only, and update-only
 - `put` and `mv` treat the destination selector as the exact final path
 - `cp` treats both selectors as exact final paths too
 - destination overwrite is never implicit

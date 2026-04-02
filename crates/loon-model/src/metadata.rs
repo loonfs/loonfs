@@ -2,7 +2,9 @@ use crate::{
     AppliedModelMetadataState, ModelDirentryRecord, ModelInodeRecord, ModelMetadataApplyError,
     ModelMetadataMutation, ModelMetadataPreconditionError, ModelMetadataState,
     ModelResolvedVisibleCreateTarget, ModelResolvedVisiblePath, ModelRevisionRecord,
-    ModelSubtreeTombstoneRecord, ModelVisiblePathError, ModelVisiblePathMutationError,
+    ModelSubtreeTombstoneRecord, ModelVisibleDirectorySubtree, ModelVisiblePathError,
+    ModelVisiblePathMutationError, ModelVisibleSubtreeDirectory, ModelVisibleSubtreeError,
+    ModelVisibleSubtreeFile,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo};
 use std::collections::BTreeSet;
@@ -495,6 +497,40 @@ impl ModelMetadataState {
         Ok(())
     }
 
+    pub fn collect_visible_directory_subtree(
+        &self,
+        absolute_path: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<ModelVisibleDirectorySubtree, ModelVisibleSubtreeError> {
+        let root = self
+            .resolve_visible_path(absolute_path, base_seq)
+            .map_err(ModelVisibleSubtreeError::VisiblePath)?;
+        if root.inode_kind != InodeKind::Dir {
+            return Err(ModelVisibleSubtreeError::RootNotDirectory {
+                absolute_path: root.absolute_path,
+                inode_id: root.inode_id,
+                inode_kind: root.inode_kind,
+            });
+        }
+
+        let mut directories = Vec::new();
+        let mut files = Vec::new();
+        self.collect_visible_subtree_children(
+            &root.absolute_path,
+            &root.absolute_path,
+            root.inode_id,
+            base_seq,
+            &mut directories,
+            &mut files,
+        )?;
+
+        Ok(ModelVisibleDirectorySubtree {
+            root,
+            directories,
+            files,
+        })
+    }
+
     pub fn ensure_child_name_absent(
         &self,
         parent_inode_id: InodeId,
@@ -690,6 +726,74 @@ impl ModelMetadataState {
             .cloned()
     }
 
+    fn collect_visible_subtree_children(
+        &self,
+        subtree_root_absolute_path: &str,
+        parent_absolute_path: &str,
+        parent_inode_id: InodeId,
+        base_seq: ChangeSeq,
+        directories: &mut Vec<ModelVisibleSubtreeDirectory>,
+        files: &mut Vec<ModelVisibleSubtreeFile>,
+    ) -> Result<(), ModelVisibleSubtreeError> {
+        for child in self.visible_children(parent_inode_id, base_seq) {
+            let child_absolute_path = join_absolute_path(parent_absolute_path, &child.display_name);
+            let child_inode = self
+                .inode_at_seq(child.child_inode_id, base_seq)
+                .ok_or_else(|| {
+                    ModelVisibleSubtreeError::VisiblePath(ModelVisiblePathError::PathNotFound {
+                        absolute_path: child_absolute_path.clone(),
+                    })
+                })?;
+            let relative_path =
+                relative_path_from_root(subtree_root_absolute_path, &child_absolute_path);
+            match child_inode.inode_kind {
+                InodeKind::Dir => {
+                    directories.push(ModelVisibleSubtreeDirectory {
+                        relative_path,
+                        absolute_path: child_absolute_path.clone(),
+                        inode_id: child.child_inode_id,
+                        parent_inode_id: child.parent_inode_id,
+                        display_name: child.display_name.clone(),
+                    });
+                    self.collect_visible_subtree_children(
+                        subtree_root_absolute_path,
+                        &child_absolute_path,
+                        child.child_inode_id,
+                        base_seq,
+                        directories,
+                        files,
+                    )?;
+                }
+                InodeKind::File => {
+                    let revision = self
+                        .latest_revision_head_at_seq(child.child_inode_id, base_seq)
+                        .ok_or(ModelVisibleSubtreeError::FileRevisionMissing {
+                            absolute_path: child_absolute_path.clone(),
+                            inode_id: child.child_inode_id,
+                        })?;
+                    files.push(ModelVisibleSubtreeFile {
+                        relative_path,
+                        absolute_path: child_absolute_path,
+                        inode_id: child.child_inode_id,
+                        parent_inode_id: child.parent_inode_id,
+                        display_name: child.display_name,
+                        revision_no: revision.revision_no,
+                        content_manifest_digest: revision.content_manifest_digest,
+                    });
+                }
+                InodeKind::Symlink | InodeKind::Mount => {
+                    return Err(ModelVisibleSubtreeError::UnsupportedDescendant {
+                        absolute_path: child_absolute_path,
+                        inode_id: child.child_inode_id,
+                        inode_kind: child_inode.inode_kind,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn is_ancestor_of(
         &self,
         ancestor_inode_id: InodeId,
@@ -750,6 +854,17 @@ fn join_absolute_path(base: &str, component: &str) -> String {
         format!("/{component}")
     } else {
         format!("{base}/{component}")
+    }
+}
+
+fn relative_path_from_root(root_absolute_path: &str, absolute_path: &str) -> String {
+    if root_absolute_path == "/" {
+        absolute_path.trim_start_matches('/').to_owned()
+    } else {
+        absolute_path
+            .strip_prefix(&format!("{root_absolute_path}/"))
+            .expect("descendant path should be rooted under subtree path")
+            .to_owned()
     }
 }
 
@@ -932,6 +1047,79 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn collect_visible_directory_subtree_returns_deterministic_relative_entries() {
+        let metadata = sample_metadata();
+
+        let subtree = metadata
+            .collect_visible_directory_subtree("/docs", ChangeSeq(3))
+            .expect("collect subtree");
+
+        assert_eq!(subtree.root.absolute_path, "/docs");
+        assert_eq!(
+            subtree
+                .directories
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["drafts"]
+        );
+        assert_eq!(
+            subtree
+                .files
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["drafts/note.txt", "report.txt"]
+        );
+    }
+
+    #[test]
+    fn collect_visible_directory_subtree_rejects_unsupported_descendants() {
+        let mut metadata = sample_metadata();
+        metadata.inodes.push(ModelInodeRecord {
+            inode_id: InodeId(7),
+            inode_kind: InodeKind::Mount,
+            created_seq: ChangeSeq(3),
+        });
+        metadata.direntries.push(ModelDirentryRecord {
+            parent_inode_id: InodeId(2),
+            name_key: "mount".to_owned(),
+            display_name: "mount".to_owned(),
+            child_inode_id: InodeId(7),
+            bind_seq: ChangeSeq(3),
+            bind_op_index: 0,
+        });
+
+        let error = metadata
+            .collect_visible_directory_subtree("/docs", ChangeSeq(3))
+            .expect_err("unsupported descendant should fail");
+        assert!(matches!(
+            error,
+            ModelVisibleSubtreeError::UnsupportedDescendant { absolute_path, inode_id, inode_kind }
+                if absolute_path == "/docs/mount"
+                    && inode_id == InodeId(7)
+                    && inode_kind == InodeKind::Mount
+        ));
+    }
+
+    #[test]
+    fn collect_visible_directory_subtree_rejects_files_missing_revision_heads() {
+        let mut metadata = sample_metadata();
+        metadata
+            .revisions
+            .retain(|revision| revision.inode_id != InodeId(6));
+
+        let error = metadata
+            .collect_visible_directory_subtree("/docs", ChangeSeq(3))
+            .expect_err("missing file revision should fail");
+        assert!(matches!(
+            error,
+            ModelVisibleSubtreeError::FileRevisionMissing { absolute_path, inode_id }
+                if absolute_path == "/docs/drafts/note.txt" && inode_id == InodeId(6)
+        ));
+    }
+
     fn sample_metadata() -> ModelMetadataState {
         ModelMetadataState {
             inodes: vec![
@@ -954,6 +1142,16 @@ mod tests {
                     inode_id: InodeId(4),
                     inode_kind: InodeKind::Dir,
                     created_seq: ChangeSeq(2),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(5),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(2),
+                },
+                ModelInodeRecord {
+                    inode_id: InodeId(6),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(3),
                 },
             ],
             direntries: vec![
@@ -981,14 +1179,39 @@ mod tests {
                     bind_seq: ChangeSeq(2),
                     bind_op_index: 0,
                 },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "drafts".to_owned(),
+                    display_name: "drafts".to_owned(),
+                    child_inode_id: InodeId(5),
+                    bind_seq: ChangeSeq(2),
+                    bind_op_index: 0,
+                },
+                ModelDirentryRecord {
+                    parent_inode_id: InodeId(5),
+                    name_key: "note.txt".to_owned(),
+                    display_name: "note.txt".to_owned(),
+                    child_inode_id: InodeId(6),
+                    bind_seq: ChangeSeq(3),
+                    bind_op_index: 0,
+                },
             ],
-            revisions: vec![ModelRevisionRecord {
-                inode_id: InodeId(3),
-                revision_no: RevisionNo(1),
-                committed_seq: ChangeSeq(1),
-                revision_op_index: 0,
-                content_manifest_digest: "sha256:report".to_owned(),
-            }],
+            revisions: vec![
+                ModelRevisionRecord {
+                    inode_id: InodeId(3),
+                    revision_no: RevisionNo(1),
+                    committed_seq: ChangeSeq(1),
+                    revision_op_index: 0,
+                    content_manifest_digest: "sha256:report".to_owned(),
+                },
+                ModelRevisionRecord {
+                    inode_id: InodeId(6),
+                    revision_no: RevisionNo(1),
+                    committed_seq: ChangeSeq(3),
+                    revision_op_index: 0,
+                    content_manifest_digest: "sha256:note".to_owned(),
+                },
+            ],
             subtree_tombstones: Vec::new(),
         }
     }

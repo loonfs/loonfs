@@ -1,15 +1,18 @@
 use crate::OpsConfig;
 use anyhow::{bail, Context, Result};
+use loon_core::content::read_durable_content_bytes;
 use loon_server::mutation::ClientMutationExecutionParams;
 use loon_server::ops::{
-    cp_authoritative_file_within_namespace, list_authoritative_path, mkdir_authoritative_path,
-    mv_authoritative_path, put_authoritative_file_from_path, read_authoritative_file_bytes,
-    replace_authoritative_file_from_path, resolve_authoritative_path, rm_authoritative_path,
-    AuthoritativeFileBytes, AuthoritativePathEntry,
+    collect_authoritative_subtree_download, cp_authoritative_file_within_namespace,
+    cp_replace_authoritative_file_within_namespace, list_authoritative_path,
+    mkdir_authoritative_path, mv_authoritative_path, put_authoritative_file_from_path,
+    read_authoritative_file_bytes, replace_authoritative_file_from_path,
+    resolve_authoritative_path, rm_authoritative_path, AuthoritativeFileBytes,
+    AuthoritativePathEntry, AuthoritativeSubtreeDownload,
 };
 use loon_types::NamespaceId;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,6 +32,7 @@ pub enum FileCommand {
         config_path: PathBuf,
         selector: String,
         local_path: PathBuf,
+        recursive: bool,
     },
     Cat {
         config_path: PathBuf,
@@ -58,6 +62,7 @@ pub enum FileCommand {
         config_path: PathBuf,
         from_selector: String,
         to_selector: String,
+        replace: bool,
     },
 }
 
@@ -78,6 +83,16 @@ struct FileGetReport {
     source: String,
     written_to: String,
     size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FileGetRecursiveReport {
+    source: String,
+    written_to: String,
+    recursive: bool,
+    file_count: u64,
+    directory_count: u64,
+    total_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +134,7 @@ struct FileMvReport {
 struct FileCpReport {
     from: String,
     to: String,
+    replace: bool,
     entry: AuthoritativePathEntry,
     committed_seq: ChangeSeqReport,
 }
@@ -144,6 +160,14 @@ enum FileGetError {
     },
     #[error("download source is not a file selector: `{selector}`")]
     SourceNotFile { selector: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecursiveGetWriteResult {
+    written_to: String,
+    file_count: u64,
+    directory_count: u64,
+    total_size_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -245,36 +269,62 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             config_path,
             selector,
             local_path,
+            recursive,
         } => {
             let config = OpsConfig::load(&config_path)?;
             let store = config.open_store()?;
             let selector_str = selector.clone();
             let selector = parse_authoritative_path_selector(&selector)?;
-            let read = read_authoritative_file_bytes(
-                &store,
-                &selector.namespace_id,
-                &selector.absolute_path,
-            )?;
-            if read.entry.inode_kind != loon_types::InodeKind::File {
-                return Err(FileGetError::SourceNotFile {
-                    selector: selector_str,
+            if recursive {
+                let subtree = collect_authoritative_subtree_download(
+                    &store,
+                    &selector.namespace_id,
+                    &selector.absolute_path,
+                )?;
+                let result = write_downloaded_subtree(
+                    &store,
+                    &selector.namespace_id,
+                    &subtree,
+                    &local_path,
+                )?;
+                let report = FileGetRecursiveReport {
+                    source: selector_str,
+                    written_to: result.written_to,
+                    recursive: true,
+                    file_count: result.file_count,
+                    directory_count: result.directory_count,
+                    total_size_bytes: result.total_size_bytes,
+                };
+                Ok(FileCommandOutput::Text(
+                    serde_yaml::to_string(&report).context("render recursive file get report")?,
+                ))
+            } else {
+                let read = read_authoritative_file_bytes(
+                    &store,
+                    &selector.namespace_id,
+                    &selector.absolute_path,
+                )?;
+                if read.entry.inode_kind != loon_types::InodeKind::File {
+                    return Err(FileGetError::SourceNotFile {
+                        selector: selector_str,
+                    }
+                    .into());
                 }
-                .into());
+                let target_path = resolve_download_target(&read, &local_path)?;
+                write_downloaded_file(&target_path, &read.bytes)?;
+                let written_to = fs::canonicalize(&target_path)
+                    .unwrap_or(target_path.clone())
+                    .display()
+                    .to_string();
+                let report = FileGetReport {
+                    source: selector_str,
+                    written_to,
+                    size_bytes: read.bytes.len() as u64,
+                };
+                Ok(FileCommandOutput::Text(
+                    serde_yaml::to_string(&report).context("render file get report")?,
+                ))
             }
-            let target_path = resolve_download_target(&read, &local_path)?;
-            write_downloaded_file(&target_path, &read.bytes)?;
-            let written_to = fs::canonicalize(&target_path)
-                .unwrap_or(target_path.clone())
-                .display()
-                .to_string();
-            let report = FileGetReport {
-                source: selector_str,
-                written_to,
-                size_bytes: read.bytes.len() as u64,
-            };
-            Ok(FileCommandOutput::Text(
-                serde_yaml::to_string(&report).context("render file get report")?,
-            ))
         }
         FileCommand::Cat {
             config_path,
@@ -417,22 +467,34 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             config_path,
             from_selector,
             to_selector,
+            replace,
         } => {
             let from = parse_authoritative_path_selector(&from_selector)?;
             let to = parse_authoritative_path_selector(&to_selector)?;
             ensure_same_namespace(&from, &to, &from_selector, &to_selector)?;
             let config = OpsConfig::load(&config_path)?;
             let store = config.open_store()?;
-            let result = cp_authoritative_file_within_namespace(
-                &store,
-                &from.namespace_id,
-                &from.absolute_path,
-                &to.absolute_path,
-                &mutation_params(&config),
-            )?;
+            let result = if replace {
+                cp_replace_authoritative_file_within_namespace(
+                    &store,
+                    &from.namespace_id,
+                    &from.absolute_path,
+                    &to.absolute_path,
+                    &mutation_params(&config),
+                )?
+            } else {
+                cp_authoritative_file_within_namespace(
+                    &store,
+                    &from.namespace_id,
+                    &from.absolute_path,
+                    &to.absolute_path,
+                    &mutation_params(&config),
+                )?
+            };
             let report = FileCpReport {
                 from: from_selector,
                 to: to_selector,
+                replace,
                 entry: result.entry,
                 committed_seq: ChangeSeqReport {
                     seq: result.committed_seq.0,
@@ -574,6 +636,152 @@ fn write_downloaded_file(target_path: &Path, bytes: &[u8]) -> Result<(), FileGet
     Ok(())
 }
 
+fn write_downloaded_subtree<S: loon_objectstore::ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    subtree: &AuthoritativeSubtreeDownload,
+    destination_root: &Path,
+) -> Result<RecursiveGetWriteResult, FileGetError> {
+    if destination_root.exists() {
+        return Err(FileGetError::TargetAlreadyExists {
+            path: destination_root.display().to_string(),
+        });
+    }
+    let parent =
+        destination_root
+            .parent()
+            .ok_or_else(|| FileGetError::TargetParentUnavailable {
+                path: destination_root.display().to_string(),
+            })?;
+    if !parent.is_dir() {
+        return Err(FileGetError::TargetParentMissing {
+            path: parent.display().to_string(),
+        });
+    }
+
+    let stage_root = parent.join(format!(
+        ".loon-get-tree-stage-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    ));
+
+    let result = (|| -> Result<RecursiveGetWriteResult, FileGetError> {
+        fs::create_dir(&stage_root).map_err(|source| FileGetError::LocalWrite {
+            operation: "create_stage_root",
+            path: stage_root.display().to_string(),
+            source,
+        })?;
+
+        for directory in &subtree.directories {
+            let directory_path = stage_root.join(&directory.relative_path);
+            fs::create_dir(&directory_path).map_err(|source| FileGetError::LocalWrite {
+                operation: "create_stage_directory",
+                path: directory_path.display().to_string(),
+                source,
+            })?;
+        }
+
+        let mut total_size_bytes = 0u64;
+        for file in &subtree.files {
+            let read =
+                read_durable_content_bytes(store, namespace_id, &file.content_manifest_digest)
+                    .map_err(anyhow::Error::from)
+                    .context(format!(
+                        "read immutable content for recursive get `{}`",
+                        file.absolute_path
+                    ))
+                    .map_err(|source| FileGetError::LocalWrite {
+                        operation: "read_recursive_source",
+                        path: file.absolute_path.clone(),
+                        source: std::io::Error::other(source.to_string()),
+                    })?;
+            let target_path = stage_root.join(&file.relative_path);
+            let parent = target_path
+                .parent()
+                .expect("recursive staged file should have a parent");
+            let stage_file_path = parent.join(format!(
+                ".loon-get-file-stage-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("clock after epoch")
+                    .as_nanos()
+            ));
+            let mut stage_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&stage_file_path)
+                .map_err(|source| FileGetError::LocalWrite {
+                    operation: "create_stage_file",
+                    path: stage_file_path.display().to_string(),
+                    source,
+                })?;
+            stage_file
+                .write_all(&read.bytes)
+                .map_err(|source| FileGetError::LocalWrite {
+                    operation: "write_stage_file",
+                    path: stage_file_path.display().to_string(),
+                    source,
+                })?;
+            stage_file
+                .sync_all()
+                .map_err(|source| FileGetError::LocalWrite {
+                    operation: "sync_stage_file",
+                    path: stage_file_path.display().to_string(),
+                    source,
+                })?;
+            drop(stage_file);
+            fs::rename(&stage_file_path, &target_path).map_err(|source| {
+                FileGetError::LocalWrite {
+                    operation: "rename_stage_file",
+                    path: target_path.display().to_string(),
+                    source,
+                }
+            })?;
+            total_size_bytes = total_size_bytes.saturating_add(read.bytes.len() as u64);
+        }
+
+        for directory in subtree.directories.iter().rev() {
+            sync_directory(&stage_root.join(&directory.relative_path))?;
+        }
+        sync_directory(&stage_root)?;
+        fs::rename(&stage_root, destination_root).map_err(|source| FileGetError::LocalWrite {
+            operation: "rename_stage_root",
+            path: destination_root.display().to_string(),
+            source,
+        })?;
+        sync_directory(parent)?;
+        let written_to = fs::canonicalize(destination_root)
+            .unwrap_or(destination_root.to_path_buf())
+            .display()
+            .to_string();
+        Ok(RecursiveGetWriteResult {
+            written_to,
+            file_count: subtree.files.len() as u64,
+            directory_count: subtree.directories.len() as u64 + 1,
+            total_size_bytes,
+        })
+    })();
+
+    if result.is_err() && stage_root.exists() {
+        let _ = fs::remove_dir_all(&stage_root);
+    }
+    result
+}
+
+fn sync_directory(path: &Path) -> Result<(), FileGetError> {
+    File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|source| FileGetError::LocalWrite {
+            operation: "sync_directory",
+            path: path.display().to_string(),
+            source,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -642,6 +850,7 @@ mod tests {
             config_path: config_path.clone(),
             selector: "demo:/hello.txt".to_owned(),
             local_path: download_dir.clone(),
+            recursive: false,
         })
         .expect("run get");
         let get_text = match get {
@@ -720,6 +929,7 @@ mod tests {
             config_path: config_path.clone(),
             from_selector: "demo:/docs/hello.txt".to_owned(),
             to_selector: "demo:/docs/hello-copy.txt".to_owned(),
+            replace: false,
         })
         .expect("run cp");
         let cp_text = match cp {
@@ -728,6 +938,7 @@ mod tests {
         };
         assert!(cp_text.contains("from: demo:/docs/hello.txt"));
         assert!(cp_text.contains("to: demo:/docs/hello-copy.txt"));
+        assert!(cp_text.contains("replace: false"));
         assert!(cp_text.contains("absolute_path: /docs/hello-copy.txt"));
 
         let mv = run_file_command(FileCommand::Mv {
@@ -879,6 +1090,7 @@ mod tests {
             config_path: config_path.clone(),
             from_selector: "demo:/docs/hello.txt".to_owned(),
             to_selector: "demo:/docs/archive".to_owned(),
+            replace: false,
         })
         .expect_err("occupied destination should fail");
         assert!(occupied_error.to_string().contains("already occupied"));
@@ -887,6 +1099,7 @@ mod tests {
             config_path: config_path.clone(),
             from_selector: "demo:/docs/hello.txt".to_owned(),
             to_selector: "demo:/docs//hello.txt".to_owned(),
+            replace: false,
         })
         .expect_err("identical path copy should fail");
         assert!(identical_error.to_string().contains("identical path"));
@@ -895,6 +1108,7 @@ mod tests {
             config_path,
             from_selector: "demo:/docs/hello.txt".to_owned(),
             to_selector: "other:/docs/hello.txt".to_owned(),
+            replace: false,
         })
         .expect_err("cross namespace copy should fail");
         assert!(cross_namespace_error
@@ -915,6 +1129,7 @@ mod tests {
             config_path: config_path.clone(),
             selector: "demo:/hello.txt".to_owned(),
             local_path: existing_target,
+            recursive: false,
         })
         .expect_err("existing target should fail");
         assert!(existing_error.to_string().contains("already exists"));
@@ -924,11 +1139,196 @@ mod tests {
             config_path,
             selector: "demo:/hello.txt".to_owned(),
             local_path: missing_parent,
+            recursive: false,
         })
         .expect_err("missing parent should fail");
         assert!(missing_parent_error
             .to_string()
             .contains("parent directory is missing"));
+    }
+
+    #[test]
+    fn cp_replace_and_recursive_get_follow_authoritative_semantics() {
+        let temp_dir = TestDir::new("loon-ops-file-cp-replace-recursive-get");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_empty_namespace(&config_path, &namespace_id);
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/docs".to_owned(),
+        })
+        .expect("mkdir docs");
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/docs/drafts".to_owned(),
+        })
+        .expect("mkdir drafts");
+
+        let source_file = temp_dir.path().join("source.txt");
+        fs::write(&source_file, b"source bytes\n").expect("write source file");
+        run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: source_file,
+            selector: "demo:/docs/source.txt".to_owned(),
+            replace: false,
+        })
+        .expect("put source");
+
+        let target_file = temp_dir.path().join("target.txt");
+        fs::write(&target_file, b"target bytes\n").expect("write target file");
+        run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: target_file,
+            selector: "demo:/docs/target.txt".to_owned(),
+            replace: false,
+        })
+        .expect("put target");
+
+        let note_file = temp_dir.path().join("note.txt");
+        fs::write(&note_file, b"note bytes\n").expect("write note file");
+        run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: note_file,
+            selector: "demo:/docs/drafts/note.txt".to_owned(),
+            replace: false,
+        })
+        .expect("put note");
+
+        let cp_replace = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/docs/source.txt".to_owned(),
+            to_selector: "demo:/docs/target.txt".to_owned(),
+            replace: true,
+        })
+        .expect("run cp --replace");
+        let cp_replace_text = match cp_replace {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text cp --replace output, got {other:?}"),
+        };
+        assert!(cp_replace_text.contains("replace: true"));
+        assert!(cp_replace_text.contains("to: demo:/docs/target.txt"));
+        assert!(cp_replace_text.contains("revision_no: 2"));
+
+        let recursive_root = temp_dir.path().join("recursive-download");
+        let recursive_get = run_file_command(FileCommand::Get {
+            config_path: config_path.clone(),
+            selector: "demo:/docs".to_owned(),
+            local_path: recursive_root.clone(),
+            recursive: true,
+        })
+        .expect("run recursive get");
+        let recursive_get_text = match recursive_get {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text recursive get output, got {other:?}"),
+        };
+        assert!(recursive_get_text.contains("recursive: true"));
+        assert!(recursive_get_text.contains("file_count: 3"));
+        assert!(recursive_get_text.contains("directory_count: 2"));
+        assert_eq!(
+            fs::read(recursive_root.join("source.txt")).expect("read downloaded source"),
+            b"source bytes\n"
+        );
+        assert_eq!(
+            fs::read(recursive_root.join("target.txt")).expect("read downloaded target"),
+            b"source bytes\n"
+        );
+        assert_eq!(
+            fs::read(recursive_root.join("drafts/note.txt")).expect("read downloaded note"),
+            b"note bytes\n"
+        );
+    }
+
+    #[test]
+    fn cp_replace_and_recursive_get_fail_closed_for_invalid_targets() {
+        let temp_dir = TestDir::new("loon-ops-file-cp-replace-recursive-get-errors");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_empty_namespace(&config_path, &namespace_id);
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/docs".to_owned(),
+        })
+        .expect("mkdir docs");
+        let source_file = temp_dir.path().join("source.txt");
+        fs::write(&source_file, b"source bytes\n").expect("write source file");
+        run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: source_file,
+            selector: "demo:/docs/source.txt".to_owned(),
+            replace: false,
+        })
+        .expect("put source");
+
+        let absent_cp_replace = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/docs/source.txt".to_owned(),
+            to_selector: "demo:/docs/missing.txt".to_owned(),
+            replace: true,
+        })
+        .expect_err("absent cp replace target should fail");
+        assert!(absent_cp_replace
+            .to_string()
+            .contains("visible path not found"));
+
+        let directory_cp_replace = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/docs/source.txt".to_owned(),
+            to_selector: "demo:/docs".to_owned(),
+            replace: true,
+        })
+        .expect_err("directory cp replace target should fail");
+        assert!(directory_cp_replace
+            .to_string()
+            .contains("must resolve to visible file"));
+
+        let identical_cp_replace = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/docs/source.txt".to_owned(),
+            to_selector: "demo:/docs//source.txt".to_owned(),
+            replace: true,
+        })
+        .expect_err("identical cp replace target should fail");
+        assert!(identical_cp_replace.to_string().contains("identical path"));
+
+        let recursive_file_error = run_file_command(FileCommand::Get {
+            config_path: config_path.clone(),
+            selector: "demo:/docs/source.txt".to_owned(),
+            local_path: temp_dir.path().join("download-file-root"),
+            recursive: true,
+        })
+        .expect_err("recursive get file selector should fail");
+        assert!(recursive_file_error
+            .to_string()
+            .contains("directory command requires directory"));
+
+        let existing_root = temp_dir.path().join("existing-root");
+        fs::create_dir_all(&existing_root).expect("seed existing root");
+        let existing_root_error = run_file_command(FileCommand::Get {
+            config_path: config_path.clone(),
+            selector: "demo:/docs".to_owned(),
+            local_path: existing_root,
+            recursive: true,
+        })
+        .expect_err("existing recursive target root should fail");
+        assert!(existing_root_error.to_string().contains("already exists"));
+
+        let missing_parent_root = temp_dir.path().join("missing-parent/output-root");
+        let missing_parent_error = run_file_command(FileCommand::Get {
+            config_path,
+            selector: "demo:/docs".to_owned(),
+            local_path: missing_parent_root.clone(),
+            recursive: true,
+        })
+        .expect_err("missing recursive target parent should fail");
+        assert!(missing_parent_error
+            .to_string()
+            .contains("parent directory is missing"));
+        assert!(
+            !missing_parent_root.exists(),
+            "failed recursive get should leave final destination absent"
+        );
     }
 
     fn write_local_fs_config(root: &Path) -> PathBuf {
