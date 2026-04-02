@@ -18,5 +18,4 @@ sha2.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-loon-server = { path = "../loon-server" }
 loon-testkit = { path = "../loon-testkit" }
