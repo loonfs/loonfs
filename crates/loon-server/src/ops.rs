@@ -1,18 +1,18 @@
-use crate::genesis::bootstrap_basis_metadata_state;
-use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
-use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
-use loon_core::checkpoint::{
+use crate::core::checkpoint::{
     load_checkpoint, load_checkpoint_manifest, prepare_checkpoint, prepare_checkpoint_head_publish,
     publish_checkpoint_head, CheckpointBuildError, CheckpointHeadPublishRequest,
     CheckpointPublishError, CheckpointReplayError, StoredCheckpointManifest,
     StoredCheckpointSegment,
 };
-use loon_core::content::{read_durable_content_bytes, DurableContentValidationError};
-use loon_core::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
-use loon_objectstore::keys::{
+use crate::core::content::{read_durable_content_bytes, DurableContentValidationError};
+use crate::core::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use crate::genesis::bootstrap_basis_metadata_state;
+use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
+use crate::objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
 };
-use loon_objectstore::ObjectStore;
+use crate::objectstore::ObjectStore;
 use loon_types::{
     decode_content_manifest_json, ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope,
     InodeId, InodeKind, LeaseState, LeaseStateEnvelope, NamespaceId, ObservedRemoteInode,
@@ -21,56 +21,11 @@ use loon_types::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceBootstrapParams {
-    pub holder_id: String,
-    pub writer_version: String,
-    pub now_ms: u64,
-    pub lease_duration_ms: u64,
-    pub allow_existing: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BootstrappedNamespace {
-    pub namespace_id: NamespaceId,
-    pub created: bool,
-    pub head: HeadState,
-    pub lease: LeaseState,
-    pub checkpoint_seq: ChangeSeq,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceCheckpointBasisSummary {
-    pub checkpoint_seq: ChangeSeq,
-    pub manifest_object_key: String,
-    pub table_object_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceWalTailSummary {
-    pub object_count: usize,
-    pub first_seq: Option<ChangeSeq>,
-    pub last_seq: Option<ChangeSeq>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceMetadataSummary {
-    pub inode_count: usize,
-    pub visible_inode_count: usize,
-    pub direntry_count: usize,
-    pub revision_count: usize,
-    pub subtree_tombstone_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceStateSummary {
-    pub namespace_id: NamespaceId,
-    pub head: HeadState,
-    pub lease: LeaseState,
-    pub checkpoint_basis: Option<NamespaceCheckpointBasisSummary>,
-    pub wal_tail: NamespaceWalTailSummary,
-    pub metadata: NamespaceMetadataSummary,
-}
+// Re-export wire types from loon-types so existing `loon_server::ops::*` paths work.
+pub use loon_types::{
+    BootstrappedNamespace, NamespaceBootstrapParams, NamespaceCheckpointBasisSummary,
+    NamespaceMetadataSummary, NamespaceStateSummary, NamespaceWalTailSummary,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum NamespaceBootstrapError {
@@ -164,26 +119,7 @@ impl From<BasisLoadError> for RemoteObservationTranslationError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthoritativePathEntry {
-    pub namespace_id: NamespaceId,
-    pub absolute_path: String,
-    pub inode_id: InodeId,
-    pub inode_kind: InodeKind,
-    pub authoritative_head_seq: ChangeSeq,
-    pub parent_inode_id: Option<InodeId>,
-    pub display_name: String,
-    pub revision_no: Option<RevisionNo>,
-    pub size_bytes: Option<u64>,
-    pub content_digest: Option<String>,
-    pub content_manifest_digest: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthoritativeFileBytes {
-    pub entry: AuthoritativePathEntry,
-    pub bytes: Vec<u8>,
-}
+pub use loon_types::server::{AuthoritativeFileBytes, AuthoritativePathEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum AuthoritativePathReadError {
@@ -675,15 +611,15 @@ fn load_file_content_summary_from_manifest<S: ObjectStore>(
     let object_key = content_manifest(namespace_id.as_str(), manifest_digest);
     let manifest_bytes = store
         .get(&object_key, None)
-        .map_err(|err| ManifestSummaryLoadError::ReadManifest {
+        .map_err(|err| ManifestSummaryLoadError::Read {
             object_key: object_key.clone(),
             message: err.to_string(),
         })?
-        .ok_or_else(|| ManifestSummaryLoadError::MissingManifest {
+        .ok_or_else(|| ManifestSummaryLoadError::Missing {
             object_key: object_key.clone(),
         })?;
     let manifest = decode_content_manifest_json(&manifest_bytes).map_err(|err| {
-        ManifestSummaryLoadError::DecodeManifest {
+        ManifestSummaryLoadError::Decode {
             object_key: object_key.clone(),
             message: err.to_string(),
         }
@@ -742,27 +678,27 @@ struct AuthoritativeFileContentSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 enum ManifestSummaryLoadError {
     #[error("failed to read content manifest `{object_key}`: {message}")]
-    ReadManifest { object_key: String, message: String },
+    Read { object_key: String, message: String },
     #[error("missing content manifest `{object_key}`")]
-    MissingManifest { object_key: String },
+    Missing { object_key: String },
     #[error("failed to decode content manifest `{object_key}`: {message}")]
-    DecodeManifest { object_key: String, message: String },
+    Decode { object_key: String, message: String },
 }
 
 impl From<ManifestSummaryLoadError> for RemoteObservationTranslationError {
     fn from(value: ManifestSummaryLoadError) -> Self {
         match value {
-            ManifestSummaryLoadError::ReadManifest {
+            ManifestSummaryLoadError::Read {
                 object_key,
                 message,
             } => Self::ReadManifest {
                 object_key,
                 message,
             },
-            ManifestSummaryLoadError::MissingManifest { object_key } => {
+            ManifestSummaryLoadError::Missing { object_key } => {
                 Self::MissingManifest { object_key }
             }
-            ManifestSummaryLoadError::DecodeManifest {
+            ManifestSummaryLoadError::Decode {
                 object_key,
                 message,
             } => Self::DecodeManifest {
@@ -776,17 +712,17 @@ impl From<ManifestSummaryLoadError> for RemoteObservationTranslationError {
 impl From<ManifestSummaryLoadError> for AuthoritativePathReadError {
     fn from(value: ManifestSummaryLoadError) -> Self {
         match value {
-            ManifestSummaryLoadError::ReadManifest {
+            ManifestSummaryLoadError::Read {
                 object_key,
                 message,
             } => Self::ReadManifest {
                 object_key,
                 message,
             },
-            ManifestSummaryLoadError::MissingManifest { object_key } => {
+            ManifestSummaryLoadError::Missing { object_key } => {
                 Self::MissingManifest { object_key }
             }
-            ManifestSummaryLoadError::DecodeManifest {
+            ManifestSummaryLoadError::Decode {
                 object_key,
                 message,
             } => Self::DecodeManifest {
@@ -836,13 +772,13 @@ mod tests {
         translate_authoritative_state_to_remote_observations, AuthoritativePathReadError,
         NamespaceBootstrapError, NamespaceBootstrapParams,
     };
+    use crate::core::checkpoint::prepare_checkpoint;
+    use crate::core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
     use crate::genesis::bootstrap_basis_metadata_state;
     use crate::mutation::{execute_client_mutation, ClientMutationExecutionParams};
-    use loon_core::checkpoint::prepare_checkpoint;
-    use loon_core::metadata::{DirentryRecord, InodeRecord, MetadataState, RevisionRecord};
-    use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
-    use loon_objectstore::ObjectStore;
+    use crate::objectstore::fs::LocalFsStore;
+    use crate::objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
+    use crate::objectstore::ObjectStore;
     use loon_types::{
         sha256_digest, ChangeSeq, ClientMutationOp, ClientMutationRequest, ContentBlockDescriptor,
         ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, FenceToken, HeadState,

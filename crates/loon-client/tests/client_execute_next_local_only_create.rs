@@ -10,10 +10,10 @@ use loon_client::state_db::{
     BoundLocalOnlyFile, ClientFileId, LocalFileStateRow, LocalOnlyFileStateRow,
     LocalOnlyPlannedActionRow, RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
 };
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::{namespace_head, namespace_lease};
-use loon_objectstore::ObjectStore;
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::keys::{namespace_head, namespace_lease};
+use loon_server::objectstore::ObjectStore;
 use loon_testkit::scenario::Scenario;
 use loon_types::{
     ClientMutationOp, ClientMutationRequest, ClientMutationResponse, ControlObjectKind, HeadState,

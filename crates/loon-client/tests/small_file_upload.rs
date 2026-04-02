@@ -1,7 +1,7 @@
 use loon_client::upload::{upload_small_file_from_path, UploadedBlockObject};
-use loon_model::build_uploaded_content;
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::ObjectStore;
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::ObjectStore;
+use loon_testkit::model::build_uploaded_content;
 use loon_testkit::scenario::Scenario;
 use loon_types::{decode_content_manifest_json, ContentManifestPayload, NamespaceId};
 use serde::Deserialize;

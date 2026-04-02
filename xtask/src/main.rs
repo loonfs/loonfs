@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 mod conflicts;
 mod ops;
 mod rc;
+mod transport;
 
 use loon_testkit::fixtures::{fixture_path, fixture_paths};
 use loon_testkit::minimize::minimize_replay_scenario;

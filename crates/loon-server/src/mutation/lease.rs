@@ -1,8 +1,8 @@
+use crate::core::namespace::{next_takeover_head, HeadFenceTakeoverError};
 use crate::mutation::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::mutation::ClientMutationExecutionParams;
-use loon_core::namespace::{next_takeover_head, HeadFenceTakeoverError};
-use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::ObjectStore;
+use crate::objectstore::ObjectStore;
+use crate::objectstore::ObjectStoreError;
 use loon_types::{
     ControlObjectKind, FenceToken, HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId,
 };
@@ -243,9 +243,9 @@ mod tests {
     use super::{acquire_or_renew_namespace_lease, LeaseAcquireError};
     use crate::mutation::loading::{read_head_object, read_lease_object};
     use crate::mutation::ClientMutationExecutionParams;
-    use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{namespace_head, namespace_lease};
-    use loon_objectstore::ObjectStore;
+    use crate::objectstore::fs::LocalFsStore;
+    use crate::objectstore::keys::{namespace_head, namespace_lease};
+    use crate::objectstore::ObjectStore;
     use loon_testkit::tempdir::TestDir;
     use loon_types::{
         ChangeSeq, ControlObjectKind, FenceToken, HeadState, HeadStateEnvelope, InodeId,

@@ -1,6 +1,6 @@
 use crate::cmd::config::resolve_config_path;
 use clap::{Args, Subcommand};
-use loon_ops::FileCommand;
+use loon_client::ops::FileCommand;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]

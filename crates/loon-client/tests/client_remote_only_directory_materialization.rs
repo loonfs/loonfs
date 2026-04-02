@@ -7,7 +7,7 @@ use loon_client::state_db::{
     AppliedInodeMutation, FileSyncViews, LocalFileStateRow, PlannedActionRow, RemoteFileStateRow,
     SqliteStateDb, SyncAnchorRow,
 };
-use loon_objectstore::fs::LocalFsStore;
+use loon_server::objectstore::fs::LocalFsStore;
 use loon_testkit::invariants::{
     evaluate_remote_only_directory_materialization_invariants, ClientReconciliationInvariantReport,
     RemoteOnlyDirectoryMaterializationInvariantInputs,

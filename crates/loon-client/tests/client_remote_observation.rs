@@ -12,8 +12,8 @@ use loon_client::state_db::{
     TransferDirection, TransferLedgerRow, TransferState,
 };
 use loon_client::upload::upload_small_file_from_path;
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::content_manifest;
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::keys::content_manifest;
 use loon_testkit::invariants::{
     evaluate_apply_remote_delete_invariants, evaluate_apply_remote_rename_invariants,
     evaluate_apply_remote_subtree_delete_invariants,

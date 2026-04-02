@@ -1097,12 +1097,12 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
- "loon-objectstore",
- "loon-ops",
+ "loon-client",
  "loon-server",
  "loon-testkit",
  "loon-types",
  "serde_json",
+ "thiserror",
  "toml",
 ]
 
@@ -1110,9 +1110,7 @@ dependencies = [
 name = "loon-client"
 version = "0.1.0"
 dependencies = [
- "loon-core",
- "loon-model",
- "loon-objectstore",
+ "anyhow",
  "loon-server",
  "loon-sim",
  "loon-testkit",
@@ -1123,83 +1121,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "thiserror",
-]
-
-[[package]]
-name = "loon-core"
-version = "0.1.0"
-dependencies = [
- "loon-objectstore",
- "loon-types",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "loon-macos"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "loon-client",
- "loon-objectstore",
- "loon-ops",
- "loon-testkit",
- "loon-types",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
-]
-
-[[package]]
-name = "loon-model"
-version = "0.1.0"
-dependencies = [
- "loon-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "loon-objectstore"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "aws-sdk-s3",
- "http",
- "serde",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "loon-ops"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "loon-client",
- "loon-core",
- "loon-objectstore",
- "loon-server",
- "loon-testkit",
- "loon-types",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
  "toml",
-]
-
-[[package]]
-name = "loon-queue"
-version = "0.1.0"
-dependencies = [
- "loon-objectstore",
- "loon-types",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1207,14 +1129,15 @@ name = "loon-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "loon-core",
- "loon-objectstore",
- "loon-queue",
+ "aws-sdk-s3",
+ "http",
  "loon-testkit",
  "loon-types",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -1231,10 +1154,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "loon-client",
- "loon-core",
- "loon-model",
- "loon-objectstore",
- "loon-queue",
  "loon-server",
  "loon-sim",
  "loon-types",
@@ -2273,11 +2192,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "loon-client",
- "loon-objectstore",
- "loon-ops",
+ "loon-server",
  "loon-testkit",
  "loon-types",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

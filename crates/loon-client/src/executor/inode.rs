@@ -28,8 +28,8 @@ use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use crate::upload::{
     finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
 };
-use loon_objectstore::keys::conflict_artifact as conflict_artifact_key;
-use loon_objectstore::ObjectStore;
+use loon_types::object_store_keys::conflict_artifact as conflict_artifact_key;
+use loon_types::ObjectStore;
 use loon_types::{
     sha256_digest, ClientMutationRequest, ClientMutationResponse, ConflictArtifactKind,
     ConflictArtifactLoserSummary, ConflictArtifactWinnerSummary, ConflictClass, InodeId, InodeKind,

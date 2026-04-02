@@ -1,18 +1,18 @@
-use loon_core::checkpoint::{
+use loon_server::core::checkpoint::{
     load_checkpoint, prepare_checkpoint, PreparedCheckpoint, StoredCheckpointManifest,
     StoredCheckpointSegment,
 };
-use loon_core::invariants::CHECKPOINT_OBJECT_IMMUTABLE_INVARIANTS;
-use loon_core::metadata::MetadataState;
-use loon_model::{
-    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointRow,
-    ModelCheckpointSegment, ModelMetadataState, ModelNamespace,
-};
-use loon_objectstore::keys::snapshot_manifest;
+use loon_server::core::invariants::CHECKPOINT_OBJECT_IMMUTABLE_INVARIANTS;
+use loon_server::core::metadata::MetadataState;
+use loon_server::objectstore::keys::snapshot_manifest;
 use loon_testkit::invariants::{
     evaluate_checkpoint_object_invariants, CheckpointObjectInvariantInputs,
     CheckpointObjectInvariantReport, CheckpointObjectInvariantSnapshot,
     StoredCheckpointSegmentSnapshot,
+};
+use loon_testkit::model::{
+    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointRow,
+    ModelCheckpointSegment, ModelMetadataState, ModelNamespace,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -238,7 +238,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         inodes: metadata_state
             .inodes
             .iter()
-            .map(|inode| loon_model::ModelInodeRecord {
+            .map(|inode| loon_testkit::model::ModelInodeRecord {
                 inode_id: inode.inode_id,
                 inode_kind: inode.inode_kind.clone(),
                 created_seq: inode.created_seq,
@@ -247,7 +247,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         direntries: metadata_state
             .direntries
             .iter()
-            .map(|direntry| loon_model::ModelDirentryRecord {
+            .map(|direntry| loon_testkit::model::ModelDirentryRecord {
                 parent_inode_id: direntry.parent_inode_id,
                 name_key: direntry.name_key.clone(),
                 display_name: direntry.display_name.clone(),
@@ -259,7 +259,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         revisions: metadata_state
             .revisions
             .iter()
-            .map(|revision| loon_model::ModelRevisionRecord {
+            .map(|revision| loon_testkit::model::ModelRevisionRecord {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
@@ -270,11 +270,13 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|tombstone| loon_model::ModelSubtreeTombstoneRecord {
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-                tombstone_op_index: tombstone.tombstone_op_index,
-            })
+            .map(
+                |tombstone| loon_testkit::model::ModelSubtreeTombstoneRecord {
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                    tombstone_op_index: tombstone.tombstone_op_index,
+                },
+            )
             .collect(),
     }
 }

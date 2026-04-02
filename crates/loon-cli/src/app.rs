@@ -4,8 +4,8 @@ use crate::cmd::doctor::{render_doctor, DoctorCommand};
 use crate::cmd::file::FileArgs;
 use crate::cmd::manpages::{render_manpages, ManpagesCommand};
 use crate::cmd::ops::OpsArgs;
-use crate::cmd::version::render_version;
 use crate::error::{CliError, CliResult};
+use crate::transport::{make_transport, open_store};
 use clap::{CommandFactory, Parser, Subcommand};
 
 const ROOT_AFTER_HELP: &str = "Examples:\n  loon help ops bootstrap-namespace\n  loon ops bootstrap-namespace --config ./loondb-demo.local.toml --namespace demo\n  loon config validate\n  loon doctor\n  loon manpages ./target/man\n\n`bootstrap-namespace` is the supported namespace-init path today.";
@@ -50,8 +50,8 @@ enum RootCommand {
 
 #[derive(Debug, PartialEq, Eq)]
 enum ParsedCommand {
-    Ops(loon_ops::OpsCommand),
-    File(loon_ops::FileCommand),
+    Ops(loon_client::ops::OpsCommand),
+    File(loon_client::ops::FileCommand),
     Config(ConfigCommand),
     Doctor(DoctorCommand),
     Completion(CompletionCommand),
@@ -63,15 +63,19 @@ pub fn run(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
 ) -> CliResult<CliOutput> {
     match parse_args(args)? {
-        ParsedCommand::Ops(command) => loon_ops::run_command(command)
-            .map(CliOutput::Text)
-            .map_err(CliError::from),
-        ParsedCommand::File(command) => loon_ops::run_file_command(command)
-            .map(|output| match output {
-                loon_ops::FileCommandOutput::Text(text) => CliOutput::Text(text),
-                loon_ops::FileCommandOutput::Bytes(bytes) => CliOutput::Bytes(bytes),
-            })
-            .map_err(CliError::from),
+        ParsedCommand::Ops(command) => {
+            loon_client::ops::run_command(command, &make_transport, &open_store)
+                .map(CliOutput::Text)
+                .map_err(CliError::from)
+        }
+        ParsedCommand::File(command) => {
+            loon_client::ops::run_file_command(command, &make_transport)
+                .map(|output| match output {
+                    loon_client::ops::FileCommandOutput::Text(text) => CliOutput::Text(text),
+                    loon_client::ops::FileCommandOutput::Bytes(bytes) => CliOutput::Bytes(bytes),
+                })
+                .map_err(CliError::from)
+        }
         ParsedCommand::Config(command) => render_config(command)
             .map(CliOutput::Text)
             .map_err(CliError::from),
@@ -84,8 +88,16 @@ pub fn run(
         ParsedCommand::Manpages(command) => render_manpages(build_command(), command)
             .map(CliOutput::Text)
             .map_err(CliError::from),
-        ParsedCommand::Version => Ok(CliOutput::Text(render_version())),
+        ParsedCommand::Version => Ok(render_version()),
     }
+}
+
+pub(crate) fn build_command() -> clap::Command {
+    Cli::command()
+}
+
+fn render_version() -> CliOutput {
+    CliOutput::Text(crate::cmd::version::render_version())
 }
 
 fn parse_args(
@@ -103,10 +115,6 @@ fn parse_args(
     }
 }
 
-pub(crate) fn build_command() -> clap::Command {
-    Cli::command()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{CliOutput, ParsedCommand};
@@ -115,7 +123,7 @@ mod tests {
     use crate::cmd::config::ConfigCommand;
     use crate::cmd::doctor::DoctorCommand;
     use crate::cmd::manpages::ManpagesCommand;
-    use loon_ops::{FileCommand, OpsCommand};
+    use loon_client::ops::{FileCommand, OpsCommand};
     use loon_types::NamespaceId;
     use std::path::PathBuf;
 

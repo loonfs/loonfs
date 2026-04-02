@@ -1,11 +1,21 @@
-use loon_objectstore::ObjectStore;
-use loon_ops::OpsCommand;
+use loon_client::ops::OpsCommand;
 use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
-use loon_server::ops::{bootstrap_namespace, NamespaceBootstrapParams};
+use loon_server::objectstore::keys::{blob, content_manifest};
+use loon_server::objectstore::r2::R2StoreConfig;
+use loon_server::objectstore::s3::AwsS3StoreConfig;
+use loon_server::objectstore::ConfiguredObjectStore;
+use loon_server::ops::{
+    bootstrap_namespace as server_bootstrap_namespace, list_authoritative_path as server_list_path,
+    load_namespace_state_summary as server_load_namespace_state_summary,
+    read_authoritative_file_bytes as server_read_file_bytes,
+    resolve_authoritative_path as server_resolve_path,
+    translate_authoritative_state_to_remote_observations as server_translate,
+    NamespaceBootstrapError, NamespaceStateSummaryError, RemoteObservationTranslationError,
+};
 use loon_testkit::tempdir::TestDir;
 use loon_types::{
     sha256_digest, ClientMutationOp, ClientMutationRequest, ContentBlockDescriptor,
-    ContentManifestEnvelope, ContentManifestPayload, NamespaceId,
+    ContentManifestEnvelope, ContentManifestPayload, NamespaceId, ObjectStore,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -313,11 +323,15 @@ fn ops_smoke_stdout_matches_loon_ops_exactly() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf-8 stdout"),
-        loon_ops::run_command(OpsCommand::Smoke {
-            config_path: ops_config_path,
-            namespace_id: namespace_id.clone(),
-        })
-        .expect("run loon_ops smoke")
+        loon_client::ops::run_command(
+            OpsCommand::Smoke {
+                config_path: ops_config_path,
+                namespace_id: namespace_id.clone(),
+            },
+            &test_make_transport,
+            &test_open_store,
+        )
+        .expect("run loon_client::ops smoke")
     );
 }
 
@@ -340,12 +354,16 @@ fn bootstrap_namespace_stdout_matches_loon_ops_exactly() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf-8 stdout"),
-        loon_ops::run_command(OpsCommand::BootstrapNamespace {
-            config_path: ops_config_path,
-            namespace_id,
-            allow_existing: false,
-        })
-        .expect("run loon_ops bootstrap")
+        loon_client::ops::run_command(
+            OpsCommand::BootstrapNamespace {
+                config_path: ops_config_path,
+                namespace_id,
+                allow_existing: false,
+            },
+            &test_make_transport,
+            &test_open_store,
+        )
+        .expect("run loon_client::ops bootstrap")
     );
 }
 
@@ -820,12 +838,12 @@ now_ms = {now_ms}
 }
 
 fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId, bytes: &[u8]) {
-    let config = loon_ops::OpsConfig::load(config_path).expect("load config");
-    let store = config.open_store().expect("open store");
-    bootstrap_namespace(
+    let config = loon_client::ops::OpsConfig::load(config_path).expect("load config");
+    let store = test_open_store(&config).expect("open store");
+    server_bootstrap_namespace(
         &store,
         namespace_id,
-        &NamespaceBootstrapParams {
+        &loon_types::server::NamespaceBootstrapParams {
             holder_id: config.server.writer_id.clone(),
             writer_version: config.server.writer_version.clone(),
             now_ms: config.ops.now_ms.expect("configured now_ms"),
@@ -838,10 +856,7 @@ fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId,
     let file_digest_sha256 = sha256_digest(bytes);
     let block_digest = sha256_digest(bytes);
     store
-        .put_if_absent(
-            &loon_objectstore::keys::blob(namespace_id.as_str(), &block_digest),
-            bytes,
-        )
+        .put_if_absent(&blob(namespace_id.as_str(), &block_digest), bytes)
         .expect("write content block");
     let manifest = ContentManifestEnvelope::from_payload(ContentManifestPayload {
         namespace_id: namespace_id.clone(),
@@ -858,7 +873,7 @@ fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId,
     let manifest_digest = sha256_digest(&manifest_bytes);
     store
         .put_if_absent(
-            &loon_objectstore::keys::content_manifest(namespace_id.as_str(), &manifest_digest),
+            &content_manifest(namespace_id.as_str(), &manifest_digest),
             &manifest_bytes,
         )
         .expect("write manifest");
@@ -882,4 +897,163 @@ fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId,
         },
     )
     .expect("create authoritative file");
+}
+
+// --- Test transport/store factories for `run_command` calls ---
+
+struct TestLocalTransport {
+    store: ConfiguredObjectStore,
+    writer_id: String,
+    writer_version: String,
+    now_ms: u64,
+    lease_duration_ms: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum TestTransportError {
+    #[error(transparent)]
+    Bootstrap(#[from] NamespaceBootstrapError),
+    #[error(transparent)]
+    StateSummary(#[from] NamespaceStateSummaryError),
+    #[error(transparent)]
+    RemoteObservations(#[from] RemoteObservationTranslationError),
+    #[error("mutation execution failed: {0}")]
+    Mutation(String),
+    #[error("file read failed: {0}")]
+    FileRead(String),
+}
+
+impl loon_types::server::ServerTransport for TestLocalTransport {
+    type Error = TestTransportError;
+
+    fn execute_mutation(
+        &self,
+        request: &loon_types::ClientMutationRequest,
+    ) -> Result<loon_types::ClientMutationResponse, Self::Error> {
+        execute_client_mutation(
+            &self.store,
+            request,
+            &ClientMutationExecutionParams {
+                writer_id: self.writer_id.clone(),
+                writer_version: self.writer_version.clone(),
+                now_ms: self.now_ms,
+                lease_duration_ms: self.lease_duration_ms,
+            },
+        )
+        .map(|executed| executed.response)
+        .map_err(|err| TestTransportError::Mutation(err.to_string()))
+    }
+
+    fn load_namespace_state_summary(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<loon_types::server::NamespaceStateSummary, Self::Error> {
+        Ok(server_load_namespace_state_summary(
+            &self.store,
+            namespace_id,
+        )?)
+    }
+
+    fn load_remote_observations(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<(loon_types::ChangeSeq, Vec<loon_types::ObservedRemoteInode>), Self::Error> {
+        let summary = server_load_namespace_state_summary(&self.store, namespace_id)?;
+        let observations = server_translate(&self.store, namespace_id)?;
+        Ok((summary.head.seq, observations))
+    }
+
+    fn bootstrap_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        params: &loon_types::server::NamespaceBootstrapParams,
+    ) -> Result<loon_types::server::BootstrappedNamespace, Self::Error> {
+        Ok(server_bootstrap_namespace(
+            &self.store,
+            namespace_id,
+            params,
+        )?)
+    }
+
+    fn list_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<Vec<loon_types::server::AuthoritativePathEntry>, Self::Error> {
+        server_list_path(&self.store, namespace_id, absolute_path)
+            .map_err(|e| TestTransportError::FileRead(e.to_string()))
+    }
+
+    fn resolve_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<loon_types::server::AuthoritativePathEntry, Self::Error> {
+        server_resolve_path(&self.store, namespace_id, absolute_path)
+            .map_err(|e| TestTransportError::FileRead(e.to_string()))
+    }
+
+    fn read_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<loon_types::server::AuthoritativeFileBytes, Self::Error> {
+        server_read_file_bytes(&self.store, namespace_id, absolute_path)
+            .map_err(|e| TestTransportError::FileRead(e.to_string()))
+    }
+}
+
+fn test_make_transport(config: &loon_client::ops::OpsConfig) -> anyhow::Result<TestLocalTransport> {
+    let store = test_open_store(config)?;
+    Ok(TestLocalTransport {
+        store,
+        writer_id: config.server.writer_id.clone(),
+        writer_version: config.server.writer_version.clone(),
+        now_ms: config.now_ms(),
+        lease_duration_ms: config.server.lease_duration_ms,
+    })
+}
+
+fn test_open_store(config: &loon_client::ops::OpsConfig) -> anyhow::Result<ConfiguredObjectStore> {
+    match &config.object_store {
+        loon_client::ops::OpsObjectStoreSpec::LocalFs { root, key_prefix } => {
+            ConfiguredObjectStore::local_fs(root, key_prefix.as_deref()).map_err(Into::into)
+        }
+        loon_client::ops::OpsObjectStoreSpec::AwsS3 {
+            bucket,
+            region,
+            endpoint_url,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            key_prefix,
+            force_path_style,
+        } => ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
+            bucket: bucket.clone(),
+            region: region.clone(),
+            endpoint_url: endpoint_url.clone(),
+            access_key_id: access_key_id.clone(),
+            secret_access_key: secret_access_key.clone(),
+            session_token: session_token.clone(),
+            key_prefix: key_prefix.clone(),
+            force_path_style: *force_path_style,
+        })
+        .map_err(Into::into),
+        loon_client::ops::OpsObjectStoreSpec::CloudflareR2 {
+            bucket,
+            account_id,
+            endpoint_url,
+            access_key_id,
+            secret_access_key,
+            key_prefix,
+        } => ConfiguredObjectStore::cloudflare_r2(R2StoreConfig {
+            bucket: bucket.clone(),
+            account_id: account_id.clone(),
+            endpoint_url: endpoint_url.clone(),
+            access_key_id: access_key_id.clone(),
+            secret_access_key: secret_access_key.clone(),
+            key_prefix: key_prefix.clone(),
+        })
+        .map_err(Into::into),
+    }
 }

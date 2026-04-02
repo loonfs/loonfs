@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Result};
-use loon_ops::{run_command, OpsCommand};
+use loon_client::ops::{run_command, OpsCommand};
 use loon_types::NamespaceId;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -84,10 +84,14 @@ impl RcLocalRunner for ProcessRunner {
     }
 
     fn run_ops_smoke(&mut self, config_path: &Path, namespace_id: &NamespaceId) -> Result<String> {
-        run_command(OpsCommand::Smoke {
-            config_path: config_path.to_path_buf(),
-            namespace_id: namespace_id.clone(),
-        })
+        run_command(
+            OpsCommand::Smoke {
+                config_path: config_path.to_path_buf(),
+                namespace_id: namespace_id.clone(),
+            },
+            &crate::transport::make_transport,
+            &crate::transport::open_store,
+        )
     }
 }
 

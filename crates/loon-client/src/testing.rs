@@ -12,11 +12,10 @@ use crate::local_apply::LocalApplyError;
 use crate::state_db::{
     ClientFileId, ConflictArtifactArchiveRow, ConflictArtifactRow, SqliteStateDb,
 };
-use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
 use loon_sim::faults::{
     FaultPlan, InjectedClientFault, InjectedStoreErrorKind, InjectedStoreOperation,
 };
+use loon_types::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, NamespaceId};
 use std::path::Path;
 use std::path::PathBuf;

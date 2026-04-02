@@ -14,7 +14,7 @@ use super::*;
 use crate::executor::dispatch::dispatch_inode_mutation_from_state_with_hooks;
 use crate::state_db::{ClientFileId, SqliteStateDb};
 use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
-use loon_objectstore::ObjectStore;
+use loon_types::ObjectStore;
 use loon_types::{ClientMutationRequest, ClientMutationResponse, InodeId, NamespaceId};
 use std::path::PathBuf;
 

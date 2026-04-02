@@ -7,7 +7,7 @@ use crate::planner::{plan_file, PlannerDecision, PlannerError};
 use crate::state_db::{
     ClientFileId, ClientNamespaceStateSummary, FileSyncViews, SqliteStateDb, StateDbError,
 };
-use loon_objectstore::ObjectStore;
+use loon_types::ObjectStore;
 use loon_types::{InodeId, InodeKind, NamespaceId};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

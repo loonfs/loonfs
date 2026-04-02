@@ -7,9 +7,9 @@ use loon_client::state_db::{
     SqliteStateDb, SyncAnchorRow, TransferDirection, TransferLedgerRow, TransferState,
 };
 use loon_client::upload::{upload_small_file_from_path, UploadedContent};
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::{blob, content_manifest};
-use loon_objectstore::ObjectStore;
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::keys::{blob, content_manifest};
+use loon_server::objectstore::ObjectStore;
 use loon_testkit::invariants::{
     evaluate_download_transfer_invariants, DownloadTransferInvariantInputs,
     DownloadTransferOutcomeKind,

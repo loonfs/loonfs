@@ -3,21 +3,21 @@ mod lease;
 pub(crate) mod loading;
 mod translate;
 
+use crate::core::commit::{
+    build_commit_plan, prepare_commit_head_publish, publish_commit_head, CommitHeadPublishError,
+    CommitPlan, CommitRequest, CommitValidationContext, CommitValidationError,
+    PreparedCommitHeadPublish,
+};
+use crate::core::metadata::{MetadataApplyError, MetadataState};
+use crate::core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
 use crate::mutation::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::mutation::lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
 use crate::mutation::translate::{
     build_client_mutation_response, translate_client_mutation_request,
     validate_referenced_durable_content,
 };
-use loon_core::commit::{
-    build_commit_plan, prepare_commit_head_publish, publish_commit_head, CommitHeadPublishError,
-    CommitPlan, CommitRequest, CommitValidationContext, CommitValidationError,
-    PreparedCommitHeadPublish,
-};
-use loon_core::metadata::{MetadataApplyError, MetadataState};
-use loon_core::wal::{prepare_wal_commit, PreparedWalCommit, WalBuildError};
-use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::{ObjectMetadata, ObjectStore};
+use crate::objectstore::ObjectStoreError;
+use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{ClientMutationRequest, ClientMutationResponse};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -52,7 +52,7 @@ pub enum ClientMutationExecutionError {
     #[error(transparent)]
     LeaseAcquire(Box<LeaseAcquireError>),
     #[error("durable content validation failed: {0}")]
-    DurableContent(loon_core::content::DurableContentValidationError),
+    DurableContent(crate::core::content::DurableContentValidationError),
     #[error(transparent)]
     Translate(ClientMutationTranslationError),
     #[error("commit validation failed: {0:?}")]
@@ -182,15 +182,15 @@ mod tests {
         execute_client_mutation, translate_client_mutation_request, ClientMutationExecutionError,
         ClientMutationExecutionParams,
     };
+    use crate::core::checkpoint::prepare_checkpoint;
+    use crate::core::content::DurableContentValidationError;
+    use crate::core::metadata::MetadataState;
     use crate::mutation::loading::{read_head_object, read_lease_object};
-    use loon_core::checkpoint::prepare_checkpoint;
-    use loon_core::content::DurableContentValidationError;
-    use loon_core::metadata::MetadataState;
-    use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{
+    use crate::objectstore::fs::LocalFsStore;
+    use crate::objectstore::keys::{
         blob, content_manifest, namespace_head, namespace_lease, wal_commit,
     };
-    use loon_objectstore::ObjectStore;
+    use crate::objectstore::ObjectStore;
     use loon_testkit::scenario::Scenario;
     use loon_types::{
         decode_wal_commit_envelope_zstd, encode_content_manifest_json,
@@ -236,7 +236,7 @@ mod tests {
         assert_eq!(translated.writer_id, "writer-a");
         assert!(matches!(
             &translated.ops[0],
-            loon_core::commit::CommitOp::CreateDir {
+            crate::core::commit::CommitOp::CreateDir {
                 parent_inode,
                 display_name
             } if *parent_inode == loon_types::InodeId(2) && display_name == "drafts"
@@ -244,12 +244,12 @@ mod tests {
         assert_eq!(
             translated.preconditions,
             vec![
-                loon_core::commit::Precondition::HeadSeqIs(loon_types::ChangeSeq(41)),
-                loon_core::commit::Precondition::ChildNameAbsent {
+                crate::core::commit::Precondition::HeadSeqIs(loon_types::ChangeSeq(41)),
+                crate::core::commit::Precondition::ChildNameAbsent {
                     parent_inode: loon_types::InodeId(2),
                     name_key: "drafts".to_owned(),
                 },
-                loon_core::commit::Precondition::AncestorsNotSubtreeDeleted {
+                crate::core::commit::Precondition::AncestorsNotSubtreeDeleted {
                     inode_id: loon_types::InodeId(2),
                 },
             ]
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(translated.writer_id, "writer-a");
         assert!(matches!(
             &translated.ops[0],
-            loon_core::commit::CommitOp::ReplaceFile {
+            crate::core::commit::CommitOp::ReplaceFile {
                 inode_id,
                 base_revision,
                 content_manifest_digest
@@ -300,12 +300,12 @@ mod tests {
         assert_eq!(
             translated.preconditions,
             vec![
-                loon_core::commit::Precondition::HeadSeqIs(loon_types::ChangeSeq(41)),
-                loon_core::commit::Precondition::InodeRevisionIs {
+                crate::core::commit::Precondition::HeadSeqIs(loon_types::ChangeSeq(41)),
+                crate::core::commit::Precondition::InodeRevisionIs {
                     inode_id: loon_types::InodeId(42),
                     revision: loon_types::RevisionNo(17),
                 },
-                loon_core::commit::Precondition::AncestorsNotSubtreeDeleted {
+                crate::core::commit::Precondition::AncestorsNotSubtreeDeleted {
                     inode_id: loon_types::InodeId(42),
                 },
             ]
@@ -790,18 +790,18 @@ mod tests {
         };
         let checkpoint_metadata = MetadataState {
             inodes: vec![
-                loon_core::metadata::InodeRecord {
+                crate::core::metadata::InodeRecord {
                     inode_id: loon_types::InodeId(902),
                     inode_kind: loon_types::InodeKind::Dir,
                     created_seq: ChangeSeq(1),
                 },
-                loon_core::metadata::InodeRecord {
+                crate::core::metadata::InodeRecord {
                     inode_id: loon_types::InodeId(42),
                     inode_kind: loon_types::InodeKind::File,
                     created_seq: ChangeSeq(1),
                 },
             ],
-            revisions: vec![loon_core::metadata::RevisionRecord {
+            revisions: vec![crate::core::metadata::RevisionRecord {
                 inode_id: loon_types::InodeId(42),
                 revision_no: RevisionNo(16),
                 committed_seq: ChangeSeq(16),

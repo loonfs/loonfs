@@ -8,7 +8,7 @@ use crate::testing::{ClientExecutionHooks, NoopClientExecutionHooks};
 use crate::upload::{
     finalize_planned_upload, plan_upload_from_path, upload_planned_block_from_path,
 };
-use loon_objectstore::ObjectStore;
+use loon_types::ObjectStore;
 use loon_types::{ClientMutationOp, ClientMutationRequest, ClientMutationResponse, InodeKind};
 use serde_json::json;
 use std::path::Path;

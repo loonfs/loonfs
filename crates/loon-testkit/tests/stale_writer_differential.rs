@@ -1,10 +1,10 @@
-use loon_core::commit::{
+use loon_server::core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
     Precondition,
 };
-use loon_core::metadata::MetadataState;
-use loon_core::namespace::head_and_lease_fence_tokens_agree;
-use loon_model::{
+use loon_server::core::metadata::MetadataState;
+use loon_server::core::namespace::head_and_lease_fence_tokens_agree;
+use loon_testkit::model::{
     ModelAction, ModelCommitValidationError, ModelCommitValidationRequest, ModelMetadataState,
     ModelNamespace,
 };

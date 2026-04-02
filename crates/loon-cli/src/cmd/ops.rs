@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use loon_ops::OpsCommand;
+use loon_client::ops::OpsCommand;
 use loon_types::NamespaceId;
 use std::path::PathBuf;
 

@@ -1,15 +1,15 @@
-use loon_core::commit::{
+use loon_server::core::commit::{
     build_commit_plan, prepare_commit_head_publish, CommitOp, CommitRequest,
     CommitValidationContext, Precondition,
 };
-use loon_core::metadata::MetadataState;
-use loon_core::wal::prepare_wal_commit;
-use loon_model::{
-    ModelCommitValidationRequest, ModelMetadataMutation, ModelMetadataPreconditionError,
-    ModelMetadataState, ModelNamespace,
-};
+use loon_server::core::metadata::MetadataState;
+use loon_server::core::wal::prepare_wal_commit;
 use loon_testkit::invariants::{
     evaluate_namespace_commit_invariants, CommitInvariantInputs, NamespaceCoreInvariantReport,
+};
+use loon_testkit::model::{
+    ModelCommitValidationRequest, ModelMetadataMutation, ModelMetadataPreconditionError,
+    ModelMetadataState, ModelNamespace,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -447,7 +447,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         inodes: metadata_state
             .inodes
             .iter()
-            .map(|inode| loon_model::ModelInodeRecord {
+            .map(|inode| loon_testkit::model::ModelInodeRecord {
                 inode_id: inode.inode_id,
                 inode_kind: inode.inode_kind.clone(),
                 created_seq: inode.created_seq,
@@ -456,7 +456,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         direntries: metadata_state
             .direntries
             .iter()
-            .map(|direntry| loon_model::ModelDirentryRecord {
+            .map(|direntry| loon_testkit::model::ModelDirentryRecord {
                 parent_inode_id: direntry.parent_inode_id,
                 name_key: direntry.name_key.clone(),
                 display_name: direntry.display_name.clone(),
@@ -468,7 +468,7 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         revisions: metadata_state
             .revisions
             .iter()
-            .map(|revision| loon_model::ModelRevisionRecord {
+            .map(|revision| loon_testkit::model::ModelRevisionRecord {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
@@ -479,11 +479,13 @@ fn model_metadata_from_core(metadata_state: &MetadataState) -> ModelMetadataStat
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|tombstone| loon_model::ModelSubtreeTombstoneRecord {
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-                tombstone_op_index: tombstone.tombstone_op_index,
-            })
+            .map(
+                |tombstone| loon_testkit::model::ModelSubtreeTombstoneRecord {
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                    tombstone_op_index: tombstone.tombstone_op_index,
+                },
+            )
             .collect(),
     }
 }
@@ -493,7 +495,7 @@ fn metadata_state_from_model(metadata_state: &ModelMetadataState) -> MetadataSta
         inodes: metadata_state
             .inodes
             .iter()
-            .map(|inode| loon_core::metadata::InodeRecord {
+            .map(|inode| loon_server::core::metadata::InodeRecord {
                 inode_id: inode.inode_id,
                 inode_kind: inode.inode_kind.clone(),
                 created_seq: inode.created_seq,
@@ -502,7 +504,7 @@ fn metadata_state_from_model(metadata_state: &ModelMetadataState) -> MetadataSta
         direntries: metadata_state
             .direntries
             .iter()
-            .map(|direntry| loon_core::metadata::DirentryRecord {
+            .map(|direntry| loon_server::core::metadata::DirentryRecord {
                 parent_inode_id: direntry.parent_inode_id,
                 name_key: direntry.name_key.clone(),
                 display_name: direntry.display_name.clone(),
@@ -514,7 +516,7 @@ fn metadata_state_from_model(metadata_state: &ModelMetadataState) -> MetadataSta
         revisions: metadata_state
             .revisions
             .iter()
-            .map(|revision| loon_core::metadata::RevisionRecord {
+            .map(|revision| loon_server::core::metadata::RevisionRecord {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
@@ -525,11 +527,13 @@ fn metadata_state_from_model(metadata_state: &ModelMetadataState) -> MetadataSta
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|tombstone| loon_core::metadata::SubtreeTombstoneRecord {
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-                tombstone_op_index: tombstone.tombstone_op_index,
-            })
+            .map(
+                |tombstone| loon_server::core::metadata::SubtreeTombstoneRecord {
+                    root_inode_id: tombstone.root_inode_id,
+                    tombstone_seq: tombstone.tombstone_seq,
+                    tombstone_op_index: tombstone.tombstone_op_index,
+                },
+            )
             .collect(),
     }
 }

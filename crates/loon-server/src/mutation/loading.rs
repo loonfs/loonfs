@@ -1,6 +1,6 @@
-use loon_objectstore::error::ObjectStoreError;
-use loon_objectstore::keys::{namespace_head, namespace_lease};
-use loon_objectstore::{ObjectMetadata, ObjectStore};
+use crate::objectstore::keys::{namespace_head, namespace_lease};
+use crate::objectstore::ObjectStoreError;
+use crate::objectstore::{ObjectMetadata, ObjectStore};
 use loon_types::{
     payload_checksum_sha256, ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope, NamespaceId,
 };

@@ -139,5 +139,5 @@ cargo run -p loon-cli -- doctor --config ./loondb-demo.local.toml
 
 ## Related runbooks
 
-- RC path: [local-rc.md](/Users/conormccarter/Code/loondb/docs/runbooks/local-rc.md)
-- Provider-backed conformance: [provider-conformance.md](/Users/conormccarter/Code/loondb/docs/runbooks/provider-conformance.md)
+- RC path: [local-rc.md](local-rc.md)
+- Provider-backed conformance: [provider-conformance.md](provider-conformance.md)

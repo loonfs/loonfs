@@ -8,7 +8,7 @@ use loon_client::state_db::{
     RemoteFileStateRow, SqliteStateDb, SyncAnchorRow,
 };
 use loon_client::upload::upload_small_file_from_path;
-use loon_objectstore::fs::LocalFsStore;
+use loon_server::objectstore::fs::LocalFsStore;
 use loon_testkit::tempdir::TestDir;
 use loon_types::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
 use std::fs;

@@ -1,18 +1,18 @@
-use loon_core::checkpoint::{
+use loon_server::core::checkpoint::{
     load_checkpoint, prepare_checkpoint_head_publish, publish_checkpoint_head,
     CheckpointHeadPublishRequest, StoredCheckpointManifest, StoredCheckpointSegment,
 };
-use loon_core::progress::load_retention_authorizers;
-use loon_model::{
-    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointPublishAuthorizers,
-    ModelCheckpointRow, ModelCheckpointSegment, ModelCheckpointTable, ModelNamespace,
-    ModelProgressObject,
-};
-use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::ObjectStore;
+use loon_server::core::progress::load_retention_authorizers;
+use loon_server::objectstore::fs::LocalFsStore;
+use loon_server::objectstore::ObjectStore;
 use loon_testkit::invariants::{
     evaluate_checkpoint_head_publish_invariants, BackgroundWorkInvariantReport,
     CheckpointHeadPublishInvariantInputs, CheckpointProgressAuthorizer,
+};
+use loon_testkit::model::{
+    ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointPublishAuthorizers,
+    ModelCheckpointRow, ModelCheckpointSegment, ModelCheckpointTable, ModelNamespace,
+    ModelProgressObject,
 };
 use loon_testkit::render::render_trace;
 use loon_testkit::scenario::Scenario;
@@ -308,7 +308,7 @@ fn seed_head(store: &LocalFsStore, head: &HeadState) -> String {
     .expect("build head envelope");
     store
         .put_if_absent(
-            &loon_objectstore::keys::namespace_head(head.namespace_id.as_str()),
+            &loon_server::objectstore::keys::namespace_head(head.namespace_id.as_str()),
             &serde_json::to_vec(&envelope).expect("encode head"),
         )
         .expect("seed head")
@@ -319,7 +319,7 @@ fn seed_head(store: &LocalFsStore, head: &HeadState) -> String {
 fn read_head(store: &LocalFsStore, namespace_id: &NamespaceId) -> HeadState {
     let bytes = store
         .get(
-            &loon_objectstore::keys::namespace_head(namespace_id.as_str()),
+            &loon_server::objectstore::keys::namespace_head(namespace_id.as_str()),
             None,
         )
         .expect("read head bytes")
@@ -553,7 +553,7 @@ fn model_authorizer(progress: &ModelProgressObject) -> CheckpointProgressAuthori
 }
 
 fn core_authorizer(
-    progress: &loon_core::progress::LoadedProgressObject,
+    progress: &loon_server::core::progress::LoadedProgressObject,
 ) -> CheckpointProgressAuthorizer<'_> {
     CheckpointProgressAuthorizer {
         namespace_id: &progress.envelope.state.namespace_id,

@@ -3,26 +3,28 @@ use crate::invariants::{
     evaluate_namespace_checkpoint_replay_invariants, evaluate_namespace_wal_replay_invariants,
     CheckpointReplayInvariantInputs, NamespaceCoreInvariantReport, WalReplayInvariantInputs,
 };
-use crate::render::render_trace;
-use crate::scenario::Scenario;
-use crate::seed::Seed;
-use anyhow::{bail, Result};
-use loon_core::checkpoint::{
-    load_checkpoint, replay_from_checkpoint_and_wal_tail_with_metadata, StoredCheckpointManifest,
-    StoredCheckpointSegment,
-};
-use loon_core::metadata::{
-    DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
-};
-use loon_core::wal::{
-    replay_wal_commit_with_metadata, replay_wal_tail_with_metadata, StoredWalObject,
-};
-use loon_model::{
+use crate::model::{
     ModelCheckpoint, ModelCheckpointFamily, ModelCheckpointPage, ModelCheckpointRow,
     ModelCheckpointSegment, ModelCheckpointTable, ModelMetadataMutation, ModelMetadataState,
     ModelNamespace, ModelWalCommit,
 };
-use loon_objectstore::keys::{snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily};
+use crate::render::render_trace;
+use crate::scenario::Scenario;
+use crate::seed::Seed;
+use anyhow::{bail, Result};
+use loon_server::core::checkpoint::{
+    load_checkpoint, replay_from_checkpoint_and_wal_tail_with_metadata, StoredCheckpointManifest,
+    StoredCheckpointSegment,
+};
+use loon_server::core::metadata::{
+    DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+};
+use loon_server::core::wal::{
+    replay_wal_commit_with_metadata, replay_wal_tail_with_metadata, StoredWalObject,
+};
+use loon_server::objectstore::keys::{
+    snapshot_manifest, snapshot_table, wal_commit, SnapshotTableFamily,
+};
 use loon_types::{
     encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
     encode_wal_commit_envelope_zstd, ChangeSeq, CheckpointManifestEnvelope,
@@ -1014,7 +1016,7 @@ fn model_metadata_state_from_core(metadata_state: &MetadataState) -> ModelMetada
         inodes: metadata_state
             .inodes
             .iter()
-            .map(|inode| loon_model::ModelInodeRecord {
+            .map(|inode| crate::model::ModelInodeRecord {
                 inode_id: inode.inode_id,
                 inode_kind: inode.inode_kind.clone(),
                 created_seq: inode.created_seq,
@@ -1023,7 +1025,7 @@ fn model_metadata_state_from_core(metadata_state: &MetadataState) -> ModelMetada
         direntries: metadata_state
             .direntries
             .iter()
-            .map(|direntry| loon_model::ModelDirentryRecord {
+            .map(|direntry| crate::model::ModelDirentryRecord {
                 parent_inode_id: direntry.parent_inode_id,
                 name_key: direntry.name_key.clone(),
                 display_name: direntry.display_name.clone(),
@@ -1035,7 +1037,7 @@ fn model_metadata_state_from_core(metadata_state: &MetadataState) -> ModelMetada
         revisions: metadata_state
             .revisions
             .iter()
-            .map(|revision| loon_model::ModelRevisionRecord {
+            .map(|revision| crate::model::ModelRevisionRecord {
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
@@ -1046,7 +1048,7 @@ fn model_metadata_state_from_core(metadata_state: &MetadataState) -> ModelMetada
         subtree_tombstones: metadata_state
             .subtree_tombstones
             .iter()
-            .map(|tombstone| loon_model::ModelSubtreeTombstoneRecord {
+            .map(|tombstone| crate::model::ModelSubtreeTombstoneRecord {
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
                 tombstone_op_index: tombstone.tombstone_op_index,
