@@ -4,11 +4,12 @@ use loon_core::content::read_durable_content_bytes;
 use loon_server::mutation::ClientMutationExecutionParams;
 use loon_server::ops::{
     collect_authoritative_subtree_download, cp_authoritative_file_within_namespace,
-    cp_replace_authoritative_file_within_namespace, list_authoritative_path,
-    mkdir_authoritative_path, mv_authoritative_path, put_authoritative_file_from_path,
-    put_authoritative_subtree_from_path, read_authoritative_file_bytes,
-    replace_authoritative_file_from_path, resolve_authoritative_path, rm_authoritative_path,
-    AuthoritativeFileBytes, AuthoritativePathEntry, AuthoritativeRecursivePutResult,
+    cp_authoritative_subtree_within_namespace, cp_replace_authoritative_file_within_namespace,
+    list_authoritative_path, mkdir_authoritative_path, mv_authoritative_path,
+    put_authoritative_file_from_path, put_authoritative_subtree_from_path,
+    read_authoritative_file_bytes, replace_authoritative_file_from_path,
+    resolve_authoritative_path, rm_authoritative_path, AuthoritativeFileBytes,
+    AuthoritativePathEntry, AuthoritativeRecursiveCpResult, AuthoritativeRecursivePutResult,
     AuthoritativeSubtreeDownload,
 };
 use loon_types::NamespaceId;
@@ -65,6 +66,7 @@ pub enum FileCommand {
         from_selector: String,
         to_selector: String,
         replace: bool,
+        recursive: bool,
     },
 }
 
@@ -154,6 +156,18 @@ struct FileCpReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FileCpRecursiveReport {
+    source: String,
+    destination: String,
+    recursive: bool,
+    directory_count: u64,
+    file_count: u64,
+    total_size_bytes: u64,
+    root_entry: AuthoritativePathEntry,
+    committed_seq: ChangeSeqReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ChangeSeqReport {
     seq: u64,
 }
@@ -214,6 +228,12 @@ enum FilePathPairSelectorError {
         from_selector: String,
         to_selector: String,
     },
+}
+
+#[derive(Debug, Error)]
+enum FileCpCommandError {
+    #[error("file cp flags `--recursive` and `--replace` are mutually exclusive")]
+    RecursiveReplaceConflict,
 }
 
 pub(crate) fn parse_authoritative_path_selector(
@@ -510,41 +530,60 @@ pub fn run_file_command(command: FileCommand) -> Result<FileCommandOutput> {
             from_selector,
             to_selector,
             replace,
+            recursive,
         } => {
+            if recursive && replace {
+                return Err(FileCpCommandError::RecursiveReplaceConflict.into());
+            }
             let from = parse_authoritative_path_selector(&from_selector)?;
             let to = parse_authoritative_path_selector(&to_selector)?;
             ensure_same_namespace(&from, &to, &from_selector, &to_selector)?;
             let config = OpsConfig::load(&config_path)?;
             let store = config.open_store()?;
-            let result = if replace {
-                cp_replace_authoritative_file_within_namespace(
+            if recursive {
+                let result = cp_authoritative_subtree_within_namespace(
                     &store,
                     &from.namespace_id,
                     &from.absolute_path,
                     &to.absolute_path,
                     &mutation_params(&config),
-                )?
+                )?;
+                Ok(FileCommandOutput::Text(render_recursive_cp_report(
+                    &from_selector,
+                    &to_selector,
+                    result,
+                )?))
             } else {
-                cp_authoritative_file_within_namespace(
-                    &store,
-                    &from.namespace_id,
-                    &from.absolute_path,
-                    &to.absolute_path,
-                    &mutation_params(&config),
-                )?
-            };
-            let report = FileCpReport {
-                from: from_selector,
-                to: to_selector,
-                replace,
-                entry: result.entry,
-                committed_seq: ChangeSeqReport {
-                    seq: result.committed_seq.0,
-                },
-            };
-            Ok(FileCommandOutput::Text(
-                serde_yaml::to_string(&report).context("render file cp report")?,
-            ))
+                let result = if replace {
+                    cp_replace_authoritative_file_within_namespace(
+                        &store,
+                        &from.namespace_id,
+                        &from.absolute_path,
+                        &to.absolute_path,
+                        &mutation_params(&config),
+                    )?
+                } else {
+                    cp_authoritative_file_within_namespace(
+                        &store,
+                        &from.namespace_id,
+                        &from.absolute_path,
+                        &to.absolute_path,
+                        &mutation_params(&config),
+                    )?
+                };
+                let report = FileCpReport {
+                    from: from_selector,
+                    to: to_selector,
+                    replace,
+                    entry: result.entry,
+                    committed_seq: ChangeSeqReport {
+                        seq: result.committed_seq.0,
+                    },
+                };
+                Ok(FileCommandOutput::Text(
+                    serde_yaml::to_string(&report).context("render file cp report")?,
+                ))
+            }
         }
     }
 }
@@ -641,6 +680,26 @@ fn render_recursive_put_report(
         },
     };
     serde_yaml::to_string(&report).context("render recursive file put report")
+}
+
+fn render_recursive_cp_report(
+    from_selector: &str,
+    to_selector: &str,
+    result: AuthoritativeRecursiveCpResult,
+) -> Result<String> {
+    let report = FileCpRecursiveReport {
+        source: from_selector.to_owned(),
+        destination: to_selector.to_owned(),
+        recursive: true,
+        directory_count: result.directory_count,
+        file_count: result.file_count,
+        total_size_bytes: result.total_size_bytes,
+        root_entry: result.root_entry,
+        committed_seq: ChangeSeqReport {
+            seq: result.committed_seq.0,
+        },
+    };
+    serde_yaml::to_string(&report).context("render recursive file cp report")
 }
 
 fn render_ls_entry(entry: AuthoritativePathEntry) -> String {
@@ -1015,6 +1074,7 @@ mod tests {
             from_selector: "demo:/docs/hello.txt".to_owned(),
             to_selector: "demo:/docs/hello-copy.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect("run cp");
         let cp_text = match cp {
@@ -1287,6 +1347,175 @@ mod tests {
     }
 
     #[test]
+    fn recursive_cp_creates_nested_destination_tree_atomically() {
+        let temp_dir = TestDir::new("loon-ops-file-cp-recursive");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_empty_namespace(&config_path, &namespace_id);
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/imports".to_owned(),
+        })
+        .expect("mkdir imports");
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/archive".to_owned(),
+        })
+        .expect("mkdir archive");
+
+        let docs_root = temp_dir.path().join("docs");
+        let drafts_root = docs_root.join("drafts");
+        fs::create_dir_all(&drafts_root).expect("create local drafts dir");
+        fs::write(docs_root.join("report.txt"), b"report bytes\n").expect("write report");
+        fs::write(drafts_root.join("note.txt"), b"note bytes\n").expect("write note");
+        run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: docs_root,
+            selector: "demo:/imports/docs".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect("seed source subtree");
+
+        let cp = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/imports/docs".to_owned(),
+            to_selector: "demo:/archive/docs-copy".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect("run recursive cp");
+        let cp_text = match cp {
+            FileCommandOutput::Text(text) => text,
+            other => panic!("expected text recursive cp output, got {other:?}"),
+        };
+        assert!(cp_text.contains("recursive: true"));
+        assert!(cp_text.contains("directory_count: 2"));
+        assert!(cp_text.contains("file_count: 2"));
+        assert!(cp_text.contains("destination: demo:/archive/docs-copy"));
+
+        let listing = run_file_command(FileCommand::Ls {
+            config_path: config_path.clone(),
+            selector: "demo:/archive/docs-copy".to_owned(),
+        })
+        .expect("list copied subtree");
+        assert_eq!(
+            listing,
+            FileCommandOutput::Text("drafts/\nreport.txt\n".to_owned())
+        );
+        let report_bytes = run_file_command(FileCommand::Cat {
+            config_path: config_path.clone(),
+            selector: "demo:/archive/docs-copy/report.txt".to_owned(),
+        })
+        .expect("cat copied report");
+        assert_eq!(
+            report_bytes,
+            FileCommandOutput::Bytes(b"report bytes\n".to_vec())
+        );
+        let note_bytes = run_file_command(FileCommand::Cat {
+            config_path: config_path.clone(),
+            selector: "demo:/archive/docs-copy/drafts/note.txt".to_owned(),
+        })
+        .expect("cat copied note");
+        assert_eq!(
+            note_bytes,
+            FileCommandOutput::Bytes(b"note bytes\n".to_vec())
+        );
+
+        let source_listing = run_file_command(FileCommand::Ls {
+            config_path,
+            selector: "demo:/imports/docs".to_owned(),
+        })
+        .expect("list source subtree after recursive cp");
+        assert_eq!(
+            source_listing,
+            FileCommandOutput::Text("drafts/\nreport.txt\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn recursive_cp_fails_closed_for_invalid_targets_and_flags() {
+        let temp_dir = TestDir::new("loon-ops-file-cp-recursive-errors");
+        let config_path = write_local_fs_config(temp_dir.path());
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_empty_namespace(&config_path, &namespace_id);
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/imports".to_owned(),
+        })
+        .expect("mkdir imports");
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/archive".to_owned(),
+        })
+        .expect("mkdir archive");
+
+        let docs_root = temp_dir.path().join("docs");
+        fs::create_dir_all(&docs_root).expect("create docs root");
+        let report_path = docs_root.join("report.txt");
+        fs::write(&report_path, b"report bytes\n").expect("write report");
+        run_file_command(FileCommand::Put {
+            config_path: config_path.clone(),
+            local_path: docs_root,
+            selector: "demo:/imports/docs".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect("seed source subtree");
+
+        let replace_conflict = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/imports/docs".to_owned(),
+            to_selector: "demo:/archive/docs-copy".to_owned(),
+            replace: true,
+            recursive: true,
+        })
+        .expect_err("recursive cp replace conflict should fail");
+        assert!(replace_conflict.to_string().contains("mutually exclusive"));
+
+        let file_source = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/imports/docs/report.txt".to_owned(),
+            to_selector: "demo:/archive/report-copy".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect_err("recursive cp file source should fail");
+        assert!(file_source
+            .to_string()
+            .contains("recursive subtree root must be a directory"));
+
+        run_file_command(FileCommand::Mkdir {
+            config_path: config_path.clone(),
+            selector: "demo:/archive/existing".to_owned(),
+        })
+        .expect("mkdir occupied destination");
+        let occupied = run_file_command(FileCommand::Cp {
+            config_path: config_path.clone(),
+            from_selector: "demo:/imports/docs".to_owned(),
+            to_selector: "demo:/archive/existing".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect_err("occupied recursive copy destination should fail");
+        assert!(occupied.to_string().contains("already occupied"));
+
+        let cross_namespace = run_file_command(FileCommand::Cp {
+            config_path,
+            from_selector: "demo:/imports/docs".to_owned(),
+            to_selector: "other:/archive/docs-copy".to_owned(),
+            replace: false,
+            recursive: true,
+        })
+        .expect_err("cross namespace recursive copy should fail");
+        assert!(cross_namespace
+            .to_string()
+            .contains("requires both selectors in one namespace"));
+    }
+
+    #[test]
     fn copy_rejects_occupied_directory_and_cross_namespace_targets() {
         let temp_dir = TestDir::new("loon-ops-file-copy-errors");
         let config_path = write_local_fs_config(temp_dir.path());
@@ -1319,6 +1548,7 @@ mod tests {
             from_selector: "demo:/docs/hello.txt".to_owned(),
             to_selector: "demo:/docs/archive".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect_err("occupied destination should fail");
         assert!(occupied_error.to_string().contains("already occupied"));
@@ -1328,6 +1558,7 @@ mod tests {
             from_selector: "demo:/docs/hello.txt".to_owned(),
             to_selector: "demo:/docs//hello.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect_err("identical path copy should fail");
         assert!(identical_error.to_string().contains("identical path"));
@@ -1337,6 +1568,7 @@ mod tests {
             from_selector: "demo:/docs/hello.txt".to_owned(),
             to_selector: "other:/docs/hello.txt".to_owned(),
             replace: false,
+            recursive: false,
         })
         .expect_err("cross namespace copy should fail");
         assert!(cross_namespace_error
@@ -1431,6 +1663,7 @@ mod tests {
             from_selector: "demo:/docs/source.txt".to_owned(),
             to_selector: "demo:/docs/target.txt".to_owned(),
             replace: true,
+            recursive: false,
         })
         .expect("run cp --replace");
         let cp_replace_text = match cp_replace {
@@ -1498,6 +1731,7 @@ mod tests {
             from_selector: "demo:/docs/source.txt".to_owned(),
             to_selector: "demo:/docs/missing.txt".to_owned(),
             replace: true,
+            recursive: false,
         })
         .expect_err("absent cp replace target should fail");
         assert!(absent_cp_replace
@@ -1509,6 +1743,7 @@ mod tests {
             from_selector: "demo:/docs/source.txt".to_owned(),
             to_selector: "demo:/docs".to_owned(),
             replace: true,
+            recursive: false,
         })
         .expect_err("directory cp replace target should fail");
         assert!(directory_cp_replace
@@ -1520,6 +1755,7 @@ mod tests {
             from_selector: "demo:/docs/source.txt".to_owned(),
             to_selector: "demo:/docs//source.txt".to_owned(),
             replace: true,
+            recursive: false,
         })
         .expect_err("identical cp replace target should fail");
         assert!(identical_cp_replace.to_string().contains("identical path"));

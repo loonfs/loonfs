@@ -101,6 +101,7 @@ cargo run -p loon-cli -- file put --replace ./hello-v2.txt demo:/docs/hello.txt
 cargo run -p loon-cli -- file put --recursive ./docs demo:/uploaded-docs
 cargo run -p loon-cli -- file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt
 cargo run -p loon-cli -- file cp --replace demo:/docs/hello.txt demo:/docs/existing.txt
+cargo run -p loon-cli -- file cp --recursive demo:/docs demo:/docs-copy
 cargo run -p loon-cli -- file mkdir demo:/docs/archive
 cargo run -p loon-cli -- file rm demo:/docs/hello.txt
 cargo run -p loon-cli -- file rm --recursive demo:/docs/archive
@@ -119,6 +120,7 @@ Strict v1 rules:
 - `get --recursive` is directory-only and downloads to one absent exact local root path
 - plain `cp` is same-namespace, file-only, and create-only
 - `cp --replace` is same-namespace, file-only, and update-only
+- `cp --recursive` is same-namespace, directory-only, create-only, and exact-root
 - `put` and `mv` treat the destination selector as the exact final path
 - `cp` treats both selectors as exact final paths too
 - destination overwrite is never implicit

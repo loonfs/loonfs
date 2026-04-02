@@ -309,6 +309,29 @@ mod tests {
                 from_selector: "demo:/docs/a.txt".to_owned(),
                 to_selector: "demo:/docs/c.txt".to_owned(),
                 replace: true,
+                recursive: false,
+            })
+        );
+
+        let recursive_cp = parse_args([
+            "loon",
+            "file",
+            "cp",
+            "--recursive",
+            "--config",
+            "demo.toml",
+            "demo:/docs",
+            "demo:/docs-copy",
+        ])
+        .expect("parse recursive file cp");
+        assert_eq!(
+            recursive_cp,
+            ParsedCommand::File(FileCommand::Cp {
+                config_path: PathBuf::from("demo.toml"),
+                from_selector: "demo:/docs".to_owned(),
+                to_selector: "demo:/docs-copy".to_owned(),
+                replace: false,
+                recursive: true,
             })
         );
     }

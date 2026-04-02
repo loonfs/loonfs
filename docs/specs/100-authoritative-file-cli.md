@@ -15,6 +15,7 @@ The first user-facing product shell is a separate authoritative file surface:
 - `loon file put --replace <local-file> <namespace:/absolute/path>`
 - `loon file put --recursive <local-dir> <namespace:/absolute/path>`
 - `loon file cp <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
+- `loon file cp --recursive <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
 - `loon file mkdir <namespace:/absolute/path>`
 - `loon file rm [--recursive] <namespace:/absolute/path>`
 - `loon file mv <from-namespace:/absolute/path> <to-namespace:/absolute/path>`
@@ -207,17 +208,28 @@ Rules:
 Rules:
 
 - source and destination selectors must be in the same namespace
-- `cp` is file-only
-- source must resolve to one visible file
+- plain `cp` and `cp --replace` are file-only
+- `cp --recursive` is directory-only and create-only
 - source selector must not be root
 - destination selector must not be root
 - destination selector names the exact final remote path
-- destination must be absent unless `--replace` is present
+- destination must be absent unless `--replace` is present on plain file copy
 - plain `cp` is create-only
 - `cp --replace` is update-only:
   - destination must resolve to one visible file
   - absent destination is rejected
   - directory destination is rejected
+- `cp --recursive`:
+  - source must resolve to one visible directory
+  - destination must resolve as one exact absent directory root create target
+  - destination parent must already exist as a visible directory
+  - `--recursive` and `--replace` are mutually exclusive
+  - empty source directories are valid
+  - copied directories and files get new inode identities at the destination
+  - unsupported visible descendants are rejected before metadata publish:
+    - symlink
+    - mount
+    - file descendants missing a current revision head
 - identical normalized source and destination paths are explicit errors
 - plain `cp` creates a new inode and preserves the source binding unchanged
 - `cp --replace` preserves destination inode identity and updates only its file revision/content
@@ -294,6 +306,14 @@ Additional rules:
   the destination with the source file's current manifest digest
 - `cp --replace` resolves source and destination under one leased basis and commits `ReplaceFile`
   on the destination inode with the source file's current manifest digest
+- `cp --recursive` resolves source and destination under one leased basis and commits one ordered
+  multi-op `CommitRequest` that creates:
+  - the exact destination root directory
+  - descendant directories in lexicographic relative-path order
+  - descendant files in lexicographic relative-path order
+- `cp --recursive` is atomic at metadata publish time:
+  - no copied subtree entries become visible until the one commit succeeds
+  - source visibility remains unchanged throughout the operation
 - `loon-ops` and `loon-cli` must not resolve a path to an inode and then call the current
   inode-addressed mutation path as two separate authoritative steps
 - selector resolution and authoritative commit validation must therefore observe one coherent basis

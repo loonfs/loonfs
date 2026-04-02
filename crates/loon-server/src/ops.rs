@@ -18,8 +18,9 @@ use loon_core::content::{
     DurableContentValidationError, UploadError,
 };
 use loon_core::metadata::{
-    MetadataState, RecursivePutLocalEntry, RecursivePutPlanError, ResolvedVisiblePath,
-    VisibleDirectorySubtree, VisiblePathError, VisiblePathMutationError, VisibleSubtreeError,
+    MetadataState, RecursiveCopyPlanError, RecursivePutLocalEntry, RecursivePutPlanError,
+    ResolvedVisiblePath, VisibleDirectorySubtree, VisiblePathError, VisiblePathMutationError,
+    VisibleSubtreeError,
 };
 use loon_objectstore::keys::{
     content_manifest, namespace_head, namespace_lease, snapshot_manifest,
@@ -31,6 +32,7 @@ use loon_types::{
     LeaseStateEnvelope, NamespaceId, ObservedRemoteInode, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -215,6 +217,15 @@ pub struct AuthoritativeRecursivePutResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthoritativeRecursiveCpResult {
+    pub root_entry: AuthoritativePathEntry,
+    pub committed_seq: ChangeSeq,
+    pub directory_count: u64,
+    pub file_count: u64,
+    pub total_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthoritativeCpResult {
     pub entry: AuthoritativePathEntry,
     pub committed_seq: ChangeSeq,
@@ -361,6 +372,8 @@ pub enum AuthoritativePathWriteError {
     #[error(transparent)]
     RecursivePutPlan(Box<RecursivePutPlanError>),
     #[error(transparent)]
+    RecursiveCopyPlan(Box<RecursiveCopyPlanError>),
+    #[error(transparent)]
     PathRead(Box<AuthoritativePathReadError>),
     #[error(transparent)]
     Mutation(Box<ClientMutationExecutionError>),
@@ -411,6 +424,12 @@ impl From<RecursivePutSourceError> for AuthoritativePathWriteError {
 impl From<RecursivePutPlanError> for AuthoritativePathWriteError {
     fn from(value: RecursivePutPlanError) -> Self {
         Self::RecursivePutPlan(Box::new(value))
+    }
+}
+
+impl From<RecursiveCopyPlanError> for AuthoritativePathWriteError {
+    fn from(value: RecursiveCopyPlanError) -> Self {
+        Self::RecursiveCopyPlan(Box::new(value))
     }
 }
 
@@ -1032,6 +1051,84 @@ pub fn replace_authoritative_file_from_path<S: ObjectStore>(
     Ok(AuthoritativePutResult {
         entry,
         committed_seq: executed.head_publish.resulting_head.seq,
+    })
+}
+
+pub fn cp_authoritative_subtree_within_namespace<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    from_absolute_path: &str,
+    to_absolute_path: &str,
+    params: &ClientMutationExecutionParams,
+) -> Result<AuthoritativeRecursiveCpResult, AuthoritativePathWriteError> {
+    crate::mutation::lease::acquire_or_renew_namespace_lease(store, namespace_id, params)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let plan = basis.metadata_state.plan_recursive_copy_subtree(
+        from_absolute_path,
+        to_absolute_path,
+        basis.head.seq,
+    )?;
+
+    let mut validated_invariants = Vec::new();
+    let mut validated_manifest_digests = BTreeSet::new();
+    let mut total_size_bytes = 0u64;
+    for file in &plan.files {
+        let summary = load_file_content_summary_from_manifest(
+            store,
+            namespace_id,
+            &file.content_manifest_digest,
+        )
+        .map_err(AuthoritativePathReadError::from)?;
+        total_size_bytes = total_size_bytes
+            .checked_add(summary.file_size_bytes)
+            .expect("recursive copy total size should fit in u64");
+        if validated_manifest_digests.insert(file.content_manifest_digest.clone()) {
+            let validated = validate_durable_content_reference(
+                store,
+                namespace_id,
+                &file.content_manifest_digest,
+            )?;
+            extend_unique_strings(&mut validated_invariants, &validated.checked_invariants);
+        }
+    }
+
+    let commit_request = CommitRequest {
+        namespace_id: namespace_id.clone(),
+        request_id: build_authoritative_request_id(
+            "cp-recursive",
+            &plan.target.absolute_path,
+            params,
+        ),
+        writer_id: params.writer_id.clone(),
+        writer_fence_token: basis.head.active_fence_token,
+        planned_head_seq: basis.head.seq,
+        ops: basis
+            .metadata_state
+            .build_recursive_put_commit_ops(&plan, basis.head.next_inode_id),
+        preconditions: vec![Precondition::HeadSeqIs(basis.head.seq)],
+    };
+    let executed = execute_commit_request_against_basis(
+        store,
+        &commit_request,
+        params,
+        basis,
+        &validated_invariants,
+    )?;
+    let root_entry = resolve_entry_from_metadata_state(
+        store,
+        namespace_id,
+        executed.head_publish.resulting_head.seq,
+        &executed.resulting_metadata_state,
+        &plan.target.absolute_path,
+    )?;
+
+    Ok(AuthoritativeRecursiveCpResult {
+        root_entry,
+        committed_seq: executed.head_publish.resulting_head.seq,
+        directory_count: u64::try_from(plan.directories.len())
+            .expect("directory count should fit in u64"),
+        file_count: u64::try_from(plan.files.len()).expect("file count should fit in u64"),
+        total_size_bytes,
     })
 }
 
@@ -1745,11 +1842,12 @@ fn wal_seq_from_key(
 mod tests {
     use super::{
         bootstrap_namespace, collect_authoritative_subtree_download,
-        cp_authoritative_file_within_namespace, cp_replace_authoritative_file_within_namespace,
-        list_authoritative_path, load_namespace_state_summary, mkdir_authoritative_path,
-        mv_authoritative_path, put_authoritative_file_from_path,
-        put_authoritative_subtree_from_path, read_authoritative_file_bytes,
-        replace_authoritative_file_from_path, resolve_authoritative_path, rm_authoritative_path,
+        cp_authoritative_file_within_namespace, cp_authoritative_subtree_within_namespace,
+        cp_replace_authoritative_file_within_namespace, list_authoritative_path,
+        load_namespace_state_summary, mkdir_authoritative_path, mv_authoritative_path,
+        put_authoritative_file_from_path, put_authoritative_subtree_from_path,
+        read_authoritative_file_bytes, replace_authoritative_file_from_path,
+        resolve_authoritative_path, rm_authoritative_path,
         translate_authoritative_state_to_remote_observations, AuthoritativePathReadError,
         AuthoritativePathWriteError, NamespaceBootstrapError, NamespaceBootstrapParams,
     };
@@ -2520,6 +2618,327 @@ mod tests {
             .expect("read target after replace");
         assert_eq!(source_bytes.bytes, b"source bytes\n");
         assert_eq!(target_bytes.bytes, source_bytes.bytes);
+    }
+
+    #[test]
+    fn authoritative_recursive_cp_commits_nested_subtree_atomically() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-cp-recursive");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir docs");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs/drafts",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_150,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir drafts");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/archive",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_175,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir archive");
+
+        let report_path = temp_dir.join("report.txt");
+        fs::write(&report_path, b"report bytes\n").expect("write report source");
+        put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &report_path,
+            "/docs/report.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put report file");
+        let note_path = temp_dir.join("note.txt");
+        fs::write(&note_path, b"note bytes\n").expect("write note source");
+        put_authoritative_file_from_path(
+            &store,
+            &namespace_id,
+            &note_path,
+            "/docs/drafts/note.txt",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_250,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("put note file");
+
+        let source_root = resolve_authoritative_path(&store, &namespace_id, "/docs")
+            .expect("resolve source root");
+        let source_report = resolve_authoritative_path(&store, &namespace_id, "/docs/report.txt")
+            .expect("resolve source report");
+        let copied = cp_authoritative_subtree_within_namespace(
+            &store,
+            &namespace_id,
+            "/docs",
+            "/archive/docs-copy",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_300,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("copy authoritative subtree");
+        assert_eq!(copied.root_entry.absolute_path, "/archive/docs-copy");
+        assert_eq!(copied.directory_count, 2);
+        assert_eq!(copied.file_count, 2);
+        assert_eq!(copied.total_size_bytes, 24);
+        assert_ne!(copied.root_entry.inode_id, source_root.inode_id);
+
+        let copied_report =
+            resolve_authoritative_path(&store, &namespace_id, "/archive/docs-copy/report.txt")
+                .expect("resolve copied report");
+        assert_ne!(copied_report.inode_id, source_report.inode_id);
+        assert_eq!(
+            copied_report.content_manifest_digest,
+            source_report.content_manifest_digest
+        );
+
+        let source_listing =
+            list_authoritative_path(&store, &namespace_id, "/docs").expect("list source subtree");
+        assert_eq!(
+            source_listing
+                .iter()
+                .map(|entry| entry.absolute_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/docs/drafts", "/docs/report.txt"]
+        );
+        let copied_listing = list_authoritative_path(&store, &namespace_id, "/archive/docs-copy")
+            .expect("list copied subtree");
+        assert_eq!(
+            copied_listing
+                .iter()
+                .map(|entry| entry.absolute_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/archive/docs-copy/drafts", "/archive/docs-copy/report.txt"]
+        );
+        let report_bytes =
+            read_authoritative_file_bytes(&store, &namespace_id, "/archive/docs-copy/report.txt")
+                .expect("read copied report");
+        let note_bytes = read_authoritative_file_bytes(
+            &store,
+            &namespace_id,
+            "/archive/docs-copy/drafts/note.txt",
+        )
+        .expect("read copied note");
+        assert_eq!(report_bytes.bytes, b"report bytes\n");
+        assert_eq!(note_bytes.bytes, b"note bytes\n");
+    }
+
+    #[test]
+    fn authoritative_recursive_cp_supports_empty_directory_and_fails_closed_before_commit() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-cp-recursive-empty");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+        for (now_ms, path) in [
+            (1_100, "/empty-src"),
+            (1_150, "/archive"),
+            (1_200, "/archive/existing"),
+        ] {
+            mkdir_authoritative_path(
+                &store,
+                &namespace_id,
+                path,
+                &ClientMutationExecutionParams {
+                    writer_id: "writer-a".to_owned(),
+                    writer_version: "loon-server-test".to_owned(),
+                    now_ms,
+                    lease_duration_ms: 60_000,
+                },
+            )
+            .expect("mkdir authoritative path");
+        }
+
+        let copied = cp_authoritative_subtree_within_namespace(
+            &store,
+            &namespace_id,
+            "/empty-src",
+            "/archive/empty-copy",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_250,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("copy empty subtree");
+        assert_eq!(copied.root_entry.absolute_path, "/archive/empty-copy");
+        assert_eq!(copied.directory_count, 1);
+        assert_eq!(copied.file_count, 0);
+
+        let occupied = cp_authoritative_subtree_within_namespace(
+            &store,
+            &namespace_id,
+            "/empty-src",
+            "/archive/existing",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_300,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect_err("occupied recursive destination should fail");
+        assert!(matches!(
+            occupied,
+            AuthoritativePathWriteError::RecursiveCopyPlan(error)
+                if matches!(
+                    error.as_ref(),
+                    loon_core::metadata::RecursiveCopyPlanError::RecursivePutPlan(plan_error)
+                        if matches!(
+                            plan_error,
+                            loon_core::metadata::RecursivePutPlanError::VisiblePathMutation(
+                                loon_core::metadata::VisiblePathMutationError::DestinationOccupied { .. }
+                            )
+                        )
+                )
+        ));
+        assert!(
+            resolve_authoritative_path(&store, &namespace_id, "/archive/existing/report.txt")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn authoritative_recursive_cp_rejects_active_foreign_holder() {
+        let temp_dir = unique_temp_dir("server-ops-authoritative-cp-recursive-foreign-holder");
+        let store = LocalFsStore::new(&temp_dir).expect("create store");
+        let namespace_id = NamespaceId::from("demo");
+
+        bootstrap_namespace(
+            &store,
+            &namespace_id,
+            &NamespaceBootstrapParams {
+                holder_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_000,
+                lease_duration_ms: 60_000,
+                allow_existing: false,
+            },
+        )
+        .expect("bootstrap namespace");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/docs",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_100,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir docs");
+        mkdir_authoritative_path(
+            &store,
+            &namespace_id,
+            "/archive",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_150,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("mkdir archive");
+
+        let summary =
+            load_namespace_state_summary(&store, &namespace_id).expect("load namespace summary");
+        let foreign_lease = LeaseState {
+            namespace_id: namespace_id.clone(),
+            holder_id: "writer-b".to_owned(),
+            fence_token: summary.head.active_fence_token,
+            lease_expires_at_ms: 2_000,
+        };
+        let lease_envelope = LeaseStateEnvelope::from_state(
+            ControlObjectKind::NamespaceLease,
+            "loon-server-test",
+            foreign_lease,
+        )
+        .expect("encode foreign lease");
+        let lease_bytes = serde_json::to_vec(&lease_envelope).expect("serialize foreign lease");
+        store
+            .put_overwrite(&namespace_lease(namespace_id.as_str()), &lease_bytes)
+            .expect("overwrite lease with foreign holder");
+
+        let error = cp_authoritative_subtree_within_namespace(
+            &store,
+            &namespace_id,
+            "/docs",
+            "/archive/docs-copy",
+            &ClientMutationExecutionParams {
+                writer_id: "writer-a".to_owned(),
+                writer_version: "loon-server-test".to_owned(),
+                now_ms: 1_200,
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect_err("active foreign holder should fail");
+        assert!(matches!(
+            error,
+            AuthoritativePathWriteError::LeaseAcquire(error)
+                if matches!(
+                    error.as_ref(),
+                    crate::mutation::lease::LeaseAcquireError::HeldByOtherWriter { .. }
+                )
+        ));
     }
 
     #[test]

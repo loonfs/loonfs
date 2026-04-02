@@ -1,11 +1,12 @@
 use crate::{
     AppliedModelMetadataState, ModelDirentryRecord, ModelInodeRecord, ModelMetadataApplyError,
     ModelMetadataMutation, ModelMetadataPreconditionError, ModelMetadataState,
-    ModelRecursivePutDirectory, ModelRecursivePutFile, ModelRecursivePutLocalEntry,
-    ModelRecursivePutPlan, ModelRecursivePutPlanError, ModelResolvedVisibleCreateTarget,
-    ModelResolvedVisiblePath, ModelRevisionRecord, ModelSubtreeTombstoneRecord,
-    ModelVisibleDirectorySubtree, ModelVisiblePathError, ModelVisiblePathMutationError,
-    ModelVisibleSubtreeDirectory, ModelVisibleSubtreeError, ModelVisibleSubtreeFile,
+    ModelRecursiveCopyPlanError, ModelRecursivePutDirectory, ModelRecursivePutFile,
+    ModelRecursivePutLocalEntry, ModelRecursivePutPlan, ModelRecursivePutPlanError,
+    ModelResolvedVisibleCreateTarget, ModelResolvedVisiblePath, ModelRevisionRecord,
+    ModelSubtreeTombstoneRecord, ModelVisibleDirectorySubtree, ModelVisiblePathError,
+    ModelVisiblePathMutationError, ModelVisibleSubtreeDirectory, ModelVisibleSubtreeError,
+    ModelVisibleSubtreeFile,
 };
 use loon_types::{ChangeSeq, InodeId, InodeKind, RevisionNo};
 use std::collections::{BTreeMap, BTreeSet};
@@ -627,6 +628,30 @@ impl ModelMetadataState {
         })
     }
 
+    pub fn plan_recursive_copy_subtree(
+        &self,
+        source_absolute_path: &str,
+        destination_absolute_path: &str,
+        base_seq: ChangeSeq,
+    ) -> Result<ModelRecursivePutPlan, ModelRecursiveCopyPlanError> {
+        let source = self
+            .resolve_visible_path(source_absolute_path, base_seq)
+            .map_err(ModelVisibleSubtreeError::VisiblePath)
+            .map_err(ModelRecursiveCopyPlanError::VisibleSubtree)?;
+        if source.absolute_path == "/" {
+            return Err(ModelRecursiveCopyPlanError::RootSourceRejected {
+                absolute_path: source.absolute_path,
+            });
+        }
+
+        let subtree = self
+            .collect_visible_directory_subtree(source_absolute_path, base_seq)
+            .map_err(ModelRecursiveCopyPlanError::VisibleSubtree)?;
+        let local_entries = recursive_copy_local_entries_from_visible_subtree(&subtree);
+        self.plan_recursive_put_subtree(destination_absolute_path, base_seq, &local_entries)
+            .map_err(ModelRecursiveCopyPlanError::RecursivePutPlan)
+    }
+
     pub fn ensure_child_name_absent(
         &self,
         parent_inode_id: InodeId,
@@ -990,6 +1015,41 @@ fn normalize_recursive_put_entries(
         }
     }
     Ok(normalized)
+}
+
+fn recursive_copy_local_entries_from_visible_subtree(
+    subtree: &ModelVisibleDirectorySubtree,
+) -> Vec<ModelRecursivePutLocalEntry> {
+    let mut local_entries = Vec::with_capacity(1 + subtree.directories.len() + subtree.files.len());
+    local_entries.push(ModelRecursivePutLocalEntry {
+        relative_path: String::new(),
+        inode_kind: InodeKind::Dir,
+        content_manifest_digest: None,
+        size_bytes: None,
+    });
+    local_entries.extend(
+        subtree
+            .directories
+            .iter()
+            .map(|directory| ModelRecursivePutLocalEntry {
+                relative_path: directory.relative_path.clone(),
+                inode_kind: InodeKind::Dir,
+                content_manifest_digest: None,
+                size_bytes: None,
+            }),
+    );
+    local_entries.extend(
+        subtree
+            .files
+            .iter()
+            .map(|file| ModelRecursivePutLocalEntry {
+                relative_path: file.relative_path.clone(),
+                inode_kind: InodeKind::File,
+                content_manifest_digest: Some(file.content_manifest_digest.clone()),
+                size_bytes: Some(0),
+            }),
+    );
+    local_entries
 }
 
 fn normalize_relative_path(relative_path: &str) -> Result<String, ModelRecursivePutPlanError> {
@@ -1449,6 +1509,82 @@ mod tests {
                 relative_path,
                 parent_relative_path
             } if relative_path == "docs.txt/note.txt" && parent_relative_path == "docs.txt"
+        ));
+    }
+
+    #[test]
+    fn plan_recursive_copy_subtree_reuses_visible_relative_entries_deterministically() {
+        let metadata = sample_metadata();
+        let plan = metadata
+            .plan_recursive_copy_subtree("/docs", "/archive/docs-copy", ChangeSeq(3))
+            .expect("plan recursive copy subtree");
+
+        assert_eq!(plan.target.absolute_path, "/archive/docs-copy");
+        assert_eq!(
+            plan.directories
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["", "drafts"]
+        );
+        assert_eq!(
+            plan.files
+                .iter()
+                .map(|entry| entry.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["drafts/note.txt", "report.txt"]
+        );
+        assert_eq!(
+            plan.files
+                .iter()
+                .map(|entry| entry.content_manifest_digest.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sha256:note", "sha256:report"]
+        );
+    }
+
+    #[test]
+    fn plan_recursive_copy_subtree_rejects_root_source_and_unsupported_descendants() {
+        let metadata = sample_metadata();
+
+        let root_error = metadata
+            .plan_recursive_copy_subtree("/", "/archive/root-copy", ChangeSeq(3))
+            .expect_err("root recursive copy source should fail");
+        assert!(matches!(
+            root_error,
+            ModelRecursiveCopyPlanError::RootSourceRejected { absolute_path }
+                if absolute_path == "/"
+        ));
+
+        let mut unsupported_metadata = sample_metadata();
+        unsupported_metadata.inodes.push(ModelInodeRecord {
+            inode_id: InodeId(7),
+            inode_kind: InodeKind::Symlink,
+            created_seq: ChangeSeq(3),
+        });
+        unsupported_metadata.direntries.push(ModelDirentryRecord {
+            parent_inode_id: InodeId(2),
+            name_key: "shortcut".to_owned(),
+            display_name: "shortcut".to_owned(),
+            child_inode_id: InodeId(7),
+            bind_seq: ChangeSeq(3),
+            bind_op_index: 0,
+        });
+
+        let unsupported = unsupported_metadata
+            .plan_recursive_copy_subtree("/docs", "/archive/docs-copy", ChangeSeq(3))
+            .expect_err("unsupported descendant should fail");
+        assert!(matches!(
+            unsupported,
+            ModelRecursiveCopyPlanError::VisibleSubtree(
+                ModelVisibleSubtreeError::UnsupportedDescendant {
+                    absolute_path,
+                    inode_id,
+                    inode_kind
+                }
+            ) if absolute_path == "/docs/shortcut"
+                && inode_id == InodeId(7)
+                && inode_kind == InodeKind::Symlink
         ));
     }
 

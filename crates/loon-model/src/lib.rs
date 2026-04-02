@@ -421,6 +421,13 @@ pub enum ModelRecursivePutPlanError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelRecursiveCopyPlanError {
+    RootSourceRejected { absolute_path: String },
+    VisibleSubtree(ModelVisibleSubtreeError),
+    RecursivePutPlan(ModelRecursivePutPlanError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelLocalOnlyObservationCandidate {
     pub client_file_id: String,
     pub namespace_id: NamespaceId,

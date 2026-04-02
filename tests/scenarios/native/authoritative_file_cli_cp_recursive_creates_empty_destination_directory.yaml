@@ -1,0 +1,29 @@
+schema_version: 1
+scenario_kind: native
+name: authoritative_file_cli_cp_recursive_creates_empty_destination_directory
+initial:
+  head:
+    namespace_id: demo
+    seq: 6
+  metadata_state:
+    visible_bindings:
+      - absolute_path: /
+        inode_id: 1
+        inode_kind: dir
+      - absolute_path: /empty-src
+        inode_id: 2
+        inode_kind: dir
+      - absolute_path: /archive
+        inode_id: 3
+        inode_kind: dir
+actions:
+  - copy_recursive:
+      from: demo:/empty-src
+      to: demo:/archive/empty-copy
+expect:
+  created:
+    selector: demo:/archive/empty-copy
+    inode_kind: dir
+  file_count: 0
+  directory_count: 1
+

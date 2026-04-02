@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 #[command(
-    after_help = "Examples:\n  loon file ls demo:/\n  loon file stat demo:/docs/report.txt\n  loon file get demo:/hello.txt ./downloads\n  loon file get --recursive demo:/docs ./downloaded-docs\n  loon file cat demo:/hello.txt\n  loon file put ./hello.txt demo:/docs/hello.txt\n  loon file put --replace ./hello-v2.txt demo:/docs/hello.txt\n  loon file put --recursive ./docs demo:/uploaded-docs\n  loon file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file cp --replace demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file mkdir demo:/docs\n  loon file rm --recursive demo:/docs/archive\n  loon file mv demo:/docs/hello.txt demo:/docs/archive.txt"
+    after_help = "Examples:\n  loon file ls demo:/\n  loon file stat demo:/docs/report.txt\n  loon file get demo:/hello.txt ./downloads\n  loon file get --recursive demo:/docs ./downloaded-docs\n  loon file cat demo:/hello.txt\n  loon file put ./hello.txt demo:/docs/hello.txt\n  loon file put --replace ./hello-v2.txt demo:/docs/hello.txt\n  loon file put --recursive ./docs demo:/uploaded-docs\n  loon file cp demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file cp --replace demo:/docs/hello.txt demo:/docs/hello-copy.txt\n  loon file cp --recursive demo:/docs demo:/docs-copy\n  loon file mkdir demo:/docs\n  loon file rm --recursive demo:/docs/archive\n  loon file mv demo:/docs/hello.txt demo:/docs/archive.txt"
 )]
 pub struct FileArgs {
     #[command(subcommand)]
@@ -24,7 +24,7 @@ enum FileSubcommand {
     Cat(FileSelectorArgs),
     /// Upload one local file or directory to an exact authoritative destination path.
     Put(FilePutArgs),
-    /// Copy one authoritative file to a new exact path within the same namespace.
+    /// Copy one authoritative file or directory tree to a new exact path within the same namespace.
     Cp(FileCpArgs),
     /// Create one authoritative directory at an exact path.
     Mkdir(FileSelectorArgs),
@@ -127,6 +127,12 @@ struct FileCpArgs {
     pair: FilePathPairArgs,
     #[arg(
         long,
+        conflicts_with = "replace",
+        help = "Recursively copy one authoritative directory tree to an exact absent destination root."
+    )]
+    recursive: bool,
+    #[arg(
+        long,
         help = "Replace an existing visible authoritative destination file instead of requiring absence."
     )]
     replace: bool,
@@ -165,6 +171,7 @@ impl FileArgs {
                 from_selector: args.pair.from_selector,
                 to_selector: args.pair.to_selector,
                 replace: args.replace,
+                recursive: args.recursive,
             }),
             FileSubcommand::Mkdir(args) => Ok(FileCommand::Mkdir {
                 config_path: resolve_config_path(args.config)?.path,
