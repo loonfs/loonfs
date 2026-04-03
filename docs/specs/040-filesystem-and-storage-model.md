@@ -21,7 +21,7 @@ Paths are projections built from visible directory bindings. This gives LoonFS t
 1. renames do not change identity
 2. mutation requests do not have to guess which path name was current at the moment of commit
 
-Name collisions are governed by a versioned `NamePolicy`. The first policy is `macos_ci_v1`:
+Name collisions are governed by a versioned `NamePolicy`. The first policy is `nfc_casefold_v1`:
 
 - preserve `display_name` exactly for presentation
 - derive `name_key` using Unicode NFC normalization and case folding
