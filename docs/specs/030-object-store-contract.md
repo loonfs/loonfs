@@ -17,6 +17,10 @@ A conforming object-store adapter must provide only a small set of primitives:
 
 Higher layers must not depend on provider-specific HTTP codes, headers, SDK error strings, or multipart-upload details.
 
+Adapters may additionally provide conditional read or cache-revalidation operations such as
+`get if-none-match`, but higher layers must not depend on them for correctness. They are optional
+optimizations, not part of the minimum portable contract.
+
 ## Required semantics
 
 | Requirement | Meaning |
