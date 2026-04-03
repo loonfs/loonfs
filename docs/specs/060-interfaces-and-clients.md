@@ -33,6 +33,196 @@ A representative v0 binding is shown below.
 
 Long-running transfers may additionally expose session or job resources. The exact endpoint set is less important than the semantic rule: once a long-running operation begins, the server-issued session or job id becomes the stable in-flight identifier of that operation.
 
+A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
+
+### 2.1 `GET /filesystem/stat`
+
+```json
+{
+  "namespace_id": "demo",
+  "absolute_path": "/docs/report.txt",
+  "inode_id": 42,
+  "inode_kind": "FILE",
+  "head_seq": 418,
+  "revision_no": 7,
+  "size_bytes": 19482,
+  "content_manifest_digest": "sha256:report-v7"
+}
+```
+
+### 2.2 `GET /filesystem/list`
+
+```json
+{
+  "namespace_id": "demo",
+  "absolute_path": "/docs",
+  "head_seq": 418,
+  "entries": [
+    {
+      "display_name": "report.txt",
+      "absolute_path": "/docs/report.txt",
+      "inode_id": 42,
+      "inode_kind": "FILE"
+    },
+    {
+      "display_name": "slides",
+      "absolute_path": "/docs/slides",
+      "inode_id": 43,
+      "inode_kind": "DIR"
+    }
+  ]
+}
+```
+
+### 2.3 `GET /filesystem/content`
+
+The response body is the authoritative file bytes. Metadata may be exposed in headers, but the
+body itself is raw content rather than JSON.
+
+### 2.4 `POST /filesystem/operations`
+
+Representative request:
+
+```json
+{
+  "request_id": "req_01J...",
+  "message": "move report and publish new bytes",
+  "annotations": {
+    "source": "cli"
+  },
+  "ops": [
+    {
+      "op": "put",
+      "path": "/docs/report.txt",
+      "content_manifest_digest": "sha256:report-v8"
+    },
+    {
+      "op": "mv",
+      "source_path": "/docs/report.txt",
+      "destination_path": "/reports/report.txt"
+    }
+  ]
+}
+```
+
+Representative response:
+
+```json
+{
+  "namespace_id": "demo",
+  "committed_seq": 419,
+  "results": [
+    {
+      "op_index": 0,
+      "inode_id": 42,
+      "revision_no": 8
+    },
+    {
+      "op_index": 1,
+      "inode_id": 42,
+      "absolute_path": "/reports/report.txt"
+    }
+  ]
+}
+```
+
+### 2.5 `POST /uploads`
+
+The exact upload exchange may vary more than the other examples on this page. Implementations may
+use delegated upload, service-proxied upload, or another equivalent staged-upload flow, as long as
+the returned upload state is sufficient to make content durable before commit.
+
+Representative response:
+
+```json
+{
+  "upload_id": "upl_01J...",
+  "block_size_bytes": 16777216,
+  "mode": "delegated"
+}
+```
+
+### 2.6 `POST /commits`
+
+Representative request:
+
+```json
+{
+  "request_id": "req_01J...",
+  "planned_head_seq": 418,
+  "message": "replace report bytes",
+  "annotations": {
+    "source": "sync"
+  },
+  "preconditions": [
+    {
+      "type": "HeadSeqIs",
+      "expected_seq": 418
+    },
+    {
+      "type": "InodeRevisionIs",
+      "inode_id": 42,
+      "revision_no": 7
+    },
+    {
+      "type": "AncestorsNotSubtreeDeleted",
+      "inode_id": 42
+    }
+  ],
+  "ops": [
+    {
+      "op": "replace_file",
+      "inode_id": 42,
+      "base_revision_no": 7,
+      "content_manifest_digest": "sha256:report-v8"
+    }
+  ]
+}
+```
+
+Representative response:
+
+```json
+{
+  "namespace_id": "demo",
+  "commit_id": "c_01J...",
+  "committed_seq": 419,
+  "results": [
+    {
+      "op_index": 0,
+      "inode_id": 42,
+      "revision_no": 8
+    }
+  ]
+}
+```
+
+### 2.7 `GET /changes`
+
+```json
+{
+  "namespace_id": "demo",
+  "from_exclusive_seq": 418,
+  "through_seq": 420,
+  "changes": [
+    {
+      "seq": 419,
+      "commit_id": "c_01J...",
+      "request_id": "req_01J...",
+      "message": "replace report bytes",
+      "ops": [
+        {
+          "op_index": 0,
+          "op": "replace_file",
+          "inode_id": 42,
+          "revision_no": 8
+        }
+      ]
+    }
+  ]
+}
+```
+
 ## 3. Client profiles
 
 These profiles are defined by the surface a client uses, not by whether the implementation is a
