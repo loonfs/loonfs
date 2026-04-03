@@ -67,6 +67,7 @@ A representative v0 binding is shown below.
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
+| Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Publish an explicit commit | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 
@@ -165,19 +166,37 @@ Representative response:
 }
 ```
 
-### 3.5 `POST /uploads`
+### 3.5 Upload transport
 
-The exact upload exchange may vary more than the other examples on this page. Implementations may
-use delegated upload, service-proxied upload, or another equivalent staged-upload flow, as long as
-the returned upload state is sufficient to make content durable before commit.
+The upload transport standardizes staged content publication, not one specific byte path.
 
-Representative response:
+A conforming implementation may support either:
+
+- **delegated upload**, where the service issues upload targets and the client writes blocks directly to storage;
+- **service-proxied upload**, where the client sends blocks through the service.
+
+The important semantic rule is the same in both cases:
+
+- `complete` succeeds only after the referenced blocks and manifest are durable;
+- the returned `content_manifest_digest` is then safe to reference from a commit.
+
+Representative begin-upload response:
 
 ```json
 {
   "upload_id": "upl_01J...",
   "block_size_bytes": 16777216,
   "mode": "delegated"
+}
+```
+
+Representative complete-upload response:
+
+```json
+{
+  "namespace_id": "demo",
+  "upload_id": "upl_01J...",
+  "content_manifest_digest": "sha256:report-v8"
 }
 ```
 
