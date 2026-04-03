@@ -21,15 +21,20 @@ The spec deliberately avoids relying on multi-object transactions or provider-sp
 
 ## 3. Durable object families
 
-At a minimum, LoonFS stores the following durable object families in object storage.
+The required durable families and canonical key shapes are:
 
-| Family | Mutability | Purpose |
-| --- | --- | --- |
-| **Content blocks** | Immutable | Store file bytes. |
-| **Content manifests** | Immutable | Describe file size, digest, block size, and the ordered block list. |
-| **WAL entries** | Immutable | Record committed metadata changes. |
-| **Checkpoints** | Immutable | Record verified snapshots of namespace metadata. |
-| **Control objects** | Small and mutable or short-lived | Track heads, leases, sessions, jobs, and similar coordination state. |
+| Family | Mutability | Purpose | Standard object key pattern |
+| --- | --- | --- | --- |
+| **Namespace head** | Mutable | Record the current visible boundary and replay hints. | `namespaces/{namespace_id}/head.json` |
+| **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/lease.json` |
+| **Content blocks** | Immutable | Store file bytes. | `namespaces/{namespace_id}/blobs/{block_digest_sha256}` |
+| **Content manifests** | Immutable | Describe file size, digest, block size, and the ordered block list. | `namespaces/{namespace_id}/manifests/{content_manifest_digest}.json` |
+| **WAL entries** | Immutable | Record committed metadata changes. | `namespaces/{namespace_id}/wal/{seq}-{commit_id}.cbor.zst` |
+| **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/manifest.json` |
+| **Checkpoint segments** | Immutable | Store verified checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/tables/{family}-{segment_index}.sst.zst` |
+
+These key shapes are part of the interoperable storage contract. Implementations may add other
+control-plane objects.
 
 ## 4. Immutable content rules
 
