@@ -53,20 +53,12 @@ A resource may carry optional structured properties such as display hints, appli
 
 These properties belong to the resource, not to the commit. They should move with the inode when the path changes.
 
-## 6. External resources
-
-A dynamic external resource, such as a URL or a provider document id, should normally be represented as a regular file whose content is a typed descriptor.
-
-A special inode kind is not required for this in the core model.
-
-## 7. Timestamps
+## 6. Timestamps
 
 The semantic creation marker in the core model is the create commit in namespace history, not a wall-clock field.
 
-An implementation may expose wall-clock timestamps such as `committed_at` or `created_at`, but these are optional and non-semantic unless the spec later standardizes stronger rules for them.
+An implementation may expose wall-clock timestamps such as `committed_at` or `created_at`, but these are optional and non-semantic.
 
-## 8. Hooks and downstream processing
-
-Inline write hooks are outside the core spec.
+## 7. Hooks and downstream processing
 
 The preferred extension point is the committed change feed. Downstream systems such as indexers, notification services, preview builders, or policy engines should consume committed changes rather than becoming part of the core mutation path.
