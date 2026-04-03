@@ -1,59 +1,81 @@
-# Spec 000: LoonDB overview
+# LoonFS overview
 
-## What LoonDB is
+LoonFS is a filesystem and sync engine whose only durable dependency is object storage.
 
-LoonDB is a Dropbox-like sync engine with an object-storage-only durable backend.
+Its durable system of record is intentionally small:
 
-The durable system of record is made of:
-
-- immutable content blocks
+- immutable file-content blocks
 - immutable content manifests
-- immutable namespace WAL entries
-- small mutable head / lease / queue control objects
+- immutable namespace write-ahead log (WAL) entries
+- immutable checkpoint objects
+- small mutable control objects such as the namespace head, leases, and progress markers
 
-Everything else is cache or rebuildable acceleration.
+Everything else is cache, coordination, or a rebuildable acceleration structure.
 
-## Why the design looks like this
+## Design goals
 
-We want a system that is:
+| Goal | Why it matters |
+| --- | --- |
+| Simple durable model | A new reader should be able to explain where truth lives and how it becomes visible. |
+| Object-store portability | The system should run anywhere that satisfies a small storage contract. |
+| Deterministic recovery | After a crash, readers and writers should reconstruct the same state from durable objects alone. |
+| Clear concurrency rules | Races should fail explicitly rather than silently merging or overwriting. |
+| Shared semantics across modes | Local server mode, hosted server mode, mirror clients, and later on-demand clients should all use the same core model. |
 
-- simpler to reason about than a multi-service metadata stack
-- easy to run in local-server mode and remote-server mode
-- naturally portable across S3-class object stores
-- compatible with deterministic testing
-- scalable where object storage is naturally scalable, without adding coordination layers
+## The few rules that matter most
 
-## Plain-language shape of the product
+| Area | Rule |
+| --- | --- |
+| Identity | The canonical identity of an item is `(namespace_id, inode_id)`. |
+| Naming | Paths are views built from directory bindings. They are not the mutation identity model. |
+| Ordering | Each namespace has one total order of visible metadata commits, numbered by `seq`. |
+| Visibility | A metadata change becomes visible only when `head.json` advances successfully. |
+| Content safety | A file revision is visible only after its referenced content blocks and content manifest are already durable. |
+| Replay | Readers reconstruct state from a verified checkpoint plus the WAL tail after that checkpoint. |
+| Derived state | Background indices may improve performance, but correctness must not depend on them. |
 
-There are four client buckets:
+## Plain-language shape of the system
 
-1. stateless readers
-2. continuous sync clients (with on-demand or eager content fetching)
-3. deterministic batch sync CLIs
-4. later streamed / mounted-drive clients
+```text
+client uploads content  --->  object store
+client sends commit     --->  authoritative mutation service
+service writes WAL/head --->  object store
+workers build indexes   --->  object store
+readers recover state   --->  head + checkpoint + WAL
+```
 
-The first server milestone is not “every sync feature.” It is a small, correct metadata engine with strong invariants.
+A typical file edit looks like this:
 
-## Most important invariants
-
-- identity is `(namespace_id, inode_id)`
-- paths are lookup views
-- a namespace has a total order of visible metadata commits
-- a revision is visible only after its content is durable
-- derived indices are disposable
-
-## Example
-
-A file edit should look like this:
-
-1. upload any missing blocks
-2. upload the file manifest
-3. validate preconditions against the current namespace head
-4. write an immutable WAL commit object
-5. advance the namespace head with CAS
+1. upload any missing content blocks
+2. upload the content manifest
+3. validate the write against the current namespace head
+4. write one immutable WAL entry
+5. advance the namespace head with compare-and-swap
 
 The file becomes visible only after step 5.
 
-## Failure mode this prevents
+## What this spec does not try to freeze
 
-This prevents “dangling revisions,” where metadata points to content that is not actually durable.
+This core spec does **not** define:
+
+- a repository layout
+- milestone-specific feature boundaries
+- a particular client database schema
+- one internal queue implementation
+- one platform integration strategy
+
+Those can evolve without changing the public contract, as long as the durable rules in this spec still hold.
+
+## Reading guide
+
+Start here, then read the docs in this order:
+
+1. `010-glossary`
+2. `020-architecture-overview`
+3. `030-object-store-contract`
+4. `040-filesystem-and-storage-model`
+5. `050-mutation-model`
+6. `055-http-api-binding`
+7. `060-background-work`
+8. `070-client-requirements`
+9. `080-versioning-and-conformance`

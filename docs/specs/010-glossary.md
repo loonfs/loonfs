@@ -1,78 +1,33 @@
-# Spec 010: glossary
+# Glossary
 
-This file defines project terms in plain language.
+This glossary defines the terms used across the LoonFS spec in plain language.
 
-## Seq
+| Term | Meaning |
+| --- | --- |
+| **Namespace** | The unit of serialized metadata history. Each namespace has its own head, WAL, checkpoints, and `seq` order. |
+| **Inode** | The durable identity of a filesystem item inside one namespace. An inode keeps the same identity when its path changes. |
+| **Direntry** | A name binding that places one inode under one parent directory and one name. |
+| **Path** | A human-friendly projection built by walking visible directory bindings. Paths can change; inodes do not. |
+| **Seq** | The namespace-local sequence number that gives the visible order of committed metadata changes. |
+| **Revision** | One immutable committed version of a file’s content. Revisions are ordered by `revision_no` within an inode. |
+| **Content manifest** | The immutable object that describes a file’s size, digest, block size, and ordered list of content blocks. |
+| **Checkpoint** | A verified snapshot of namespace metadata at one chosen `seq`. It lets readers avoid replaying an unbounded WAL history. |
+| **WAL** | The write-ahead log of immutable commit objects that record namespace mutations in order. |
+| **Retention floor** | The oldest `seq` from which the system still promises incremental replay. Clients older than that point must re-bootstrap. |
+| **Derived index** | Rebuildable helper state that improves performance but is not part of durable truth. |
+| **Fence token** | A writer generation number used to prevent stale lease holders from publishing after takeover. |
+| **Mount** | A directory-like inode that exposes another namespace, or a subtree of another namespace, inside the current tree. |
+| **NamePolicy** | The shared, versioned rule for how names are normalized for collision checks. |
+| **Conflict artifact** | A durable record that preserves losing content when the client must keep the canonical winner path stable. |
+| **Cursor** | A client bookmark, usually an `after_seq` value, used to resume reading changes incrementally. |
 
-A seq is a namespace-local sequence number.
+## Three ideas worth remembering
 
-Why it exists:
-it gives a single answer to “what order did visible metadata commits happen in?”
+1. **Identity is inode-based.**  
+   Paths are presentation. Mutations do not target paths.
 
-Example:
-a rename might become seq 418.
+2. **Visibility is head-based.**  
+   A WAL object may exist, but the change is not visible until the head advances.
 
-Failure mode prevented:
-ambiguous ordering between concurrent changes.
-
-## Cursor
-
-A cursor is a client bookmark.
-
-Why it exists:
-it lets a client ask for “everything after what I already saw.”
-
-Example:
-`changes(after_seq=418)`.
-
-Failure mode prevented:
-expensive full rescans and uncertain incremental replay.
-
-## Derived index
-
-A derived index is rebuildable helper state.
-
-Why it exists:
-it makes hot reads fast without becoming part of the durable truth.
-
-Example:
-a paged directory listing cache.
-
-Failure mode prevented:
-conflating convenience structures with canonical history.
-
-## Retention floor
-
-The retention floor is the oldest point from which the system still promises incremental replay.
-
-Why it exists:
-old WAL history cannot be kept forever.
-
-Example:
-“clients may resume incrementally from any seq at or above the retention floor.”
-
-Failure mode prevented:
-promising infinite incremental history.
-
-## retention_floor_seq
-
-This is the concrete sequence number for the current retention floor.
-
-Example:
-if `retention_floor_seq = 950`, a client that only has state through seq 900 must re-bootstrap.
-
-Failure mode prevented:
-vague retention behavior.
-
-## Fencing token
-
-A fencing token is a writer generation number.
-
-Why it exists:
-when lease ownership changes, the new writer must be able to prove it is newer than any old writer.
-
-Example:
-writer A holds token 41. It stalls. Writer B takes over with token 42. Even if A wakes up later, it must not be able to publish.
-
-Failure mode prevented:
-stale writers overwriting newer state.
+3. **Performance features are disposable.**  
+   Checkpoints and indices are important, but only because they can be rebuilt from durable truth.
