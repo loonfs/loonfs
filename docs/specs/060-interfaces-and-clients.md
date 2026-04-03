@@ -4,14 +4,16 @@
 
 LoonFS has two peer public surfaces.
 
-| Surface | Intended users | Shape |
+| Surface | Purpose | Shape |
 | --- | --- | --- |
-| **Filesystem operations** | Humans, CLIs, direct applications | Path-oriented commands such as `ls`, `stat`, `get`, `put`, `mkdir`, `mv`, `cp`, and `rm`. |
-| **Upload, commit, and change feed** | Sync clients, service writers, batch tools, replication | Explicit content staging, explicit commit, and incremental change consumption. |
+| **Filesystem operations** | User-facing filesystem actions | Path-oriented commands such as `ls`, `stat`, `get`, `put`, `mkdir`, `mv`, `cp`, and `rm`. |
+| **Upload, commit, and change feed** | Explicit staging, publication, and incremental consumption | Explicit content staging, explicit commit, and incremental change consumption. |
 
 The filesystem surface exists because user intent is naturally path-based. The upload-and-commit surface exists because long-running and stateful clients need explicit control over staging, validation, and replay.
 
-Neither surface is "more real" than the other. They share the same namespace, inode, content, and visibility rules.
+A single client may use or expose both surfaces.
+
+Both surfaces share the same namespace, inode, content, and visibility rules.
 
 ## 2. Representative HTTP binding
 
@@ -21,10 +23,10 @@ A representative v0 binding is shown below.
 
 | Purpose | Representative HTTP shape |
 | --- | --- |
-| Stat a path | `GET /v0/namespaces/{ns}/fs/stat?path=/docs/report.txt` |
-| List a path | `GET /v0/namespaces/{ns}/fs/list?path=/docs` |
-| Read file content | `GET /v0/namespaces/{ns}/fs/content?path=/docs/report.txt` |
-| Apply path-oriented operations | `POST /v0/namespaces/{ns}/fs/operations` |
+| Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
+| List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs` |
+| Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
+| Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Publish an explicit commit | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
