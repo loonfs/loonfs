@@ -15,7 +15,45 @@ A single client may use or expose both surfaces.
 
 Both surfaces share the same namespace, inode, content, and visibility rules.
 
-## 2. Representative HTTP binding
+## 2. Minimal upload, commit, and change-feed model
+
+The lower-level writer surface has three stages:
+
+1. make content durable
+2. commit metadata visibility
+3. observe ordered changes through the change feed
+
+This split is deliberate:
+
+- content durability is not visibility;
+- WAL durability is not visibility;
+- head advance is the visibility point.
+
+### 2.1 Commit request envelope
+
+A commit request carries the following logical fields:
+
+| Field | Meaning |
+| --- | --- |
+| `request_id` | Client-generated stable idempotency key for this logical commit request. The same value must be reused for safe retries. |
+| `planned_head_seq` | The history point the client planned against. Preconditions are evaluated against authoritative state at this boundary. |
+| `preconditions` | Explicit checks such as `HeadSeqIs`, `InodeRevisionIs`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
+| `ops` | Ordered list of mutation operations. Operation order is preserved through validation, commit, and change-feed output. |
+| `message` | Optional human-readable description of the mutation event. |
+| `annotations` | Optional structured metadata attached to the commit request. |
+
+The server validates that request against authoritative namespace state, writes one immutable WAL
+entry, advances the head with compare-and-swap, and returns success only after the head update
+succeeds.
+
+The change feed returns ordered committed changes after an explicit cursor. If the requested cursor
+is older than the retention floor, the caller must re-bootstrap instead of expecting older
+incremental history to remain available.
+
+The path-oriented filesystem surface may compile higher-level operations into this lower-level
+model, but both surfaces preserve the same identity, content-durability, and visibility rules.
+
+## 3. Representative HTTP binding
 
 HTTP is one transport binding for these abstract operations. It is not the underlying semantics.
 
@@ -35,7 +73,7 @@ Long-running transfers may additionally expose session or job resources. The exa
 
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
 
-### 2.1 `GET /filesystem/stat`
+### 3.1 `GET /filesystem/stat`
 
 ```json
 {
@@ -50,7 +88,7 @@ A few representative requests and responses are shown below. These examples are 
 }
 ```
 
-### 2.2 `GET /filesystem/list`
+### 3.2 `GET /filesystem/list`
 
 ```json
 {
@@ -74,12 +112,12 @@ A few representative requests and responses are shown below. These examples are 
 }
 ```
 
-### 2.3 `GET /filesystem/content`
+### 3.3 `GET /filesystem/content`
 
 The response body is the authoritative file bytes. Metadata may be exposed in headers, but the
 body itself is raw content rather than JSON.
 
-### 2.4 `POST /filesystem/operations`
+### 3.4 `POST /filesystem/operations`
 
 Representative request:
 
@@ -126,7 +164,7 @@ Representative response:
 }
 ```
 
-### 2.5 `POST /uploads`
+### 3.5 `POST /uploads`
 
 The exact upload exchange may vary more than the other examples on this page. Implementations may
 use delegated upload, service-proxied upload, or another equivalent staged-upload flow, as long as
@@ -142,7 +180,7 @@ Representative response:
 }
 ```
 
-### 2.6 `POST /commits`
+### 3.6 `POST /commits`
 
 Representative request:
 
@@ -197,7 +235,7 @@ Representative response:
 }
 ```
 
-### 2.7 `GET /changes`
+### 3.7 `GET /changes`
 
 ```json
 {
@@ -223,12 +261,12 @@ Representative response:
 }
 ```
 
-## 3. Client profiles
+## 4. Client profiles
 
 These profiles are defined by the surface a client uses, not by whether the implementation is a
 CLI, desktop app, web app, SDK, or service. A single client may implement more than one profile.
 
-### 3.1 Path-oriented client
+### 4.1 Path-oriented client
 
 This client uses the path-oriented surface.
 
@@ -244,7 +282,7 @@ Implementations may still keep durable local state such as auth/session state, r
 pinned snapshot ids, or inode context learned from prior responses when that improves usability,
 restart safety, or resumability.
 
-### 3.2 Sync client
+### 4.2 Sync client
 
 This client maintains durable local state and consumes the change feed over time.
 
@@ -255,7 +293,7 @@ Typical behavior:
 - may upload content and publish explicit commits;
 - preserves conflicts according to the client's conflict policy.
 
-### 3.3 Explicit-commit client
+### 4.3 Explicit-commit client
 
 This client uses the upload, commit, and change-feed surface more directly. It stages content and
 publishes explicit commits, but it does not necessarily maintain a long-lived local mirror.
@@ -266,11 +304,11 @@ Typical behavior:
 - explicit commit with preconditions and request ids;
 - change-feed reads or cursors where incremental observation is needed.
 
-### 3.4 Operator or admin tool
+### 4.4 Operator or admin tool
 
 This client uses low-level recovery or inspection surfaces that are specific to an implementation or deployment.
 
-## 4. Statefulness summary
+## 5. Statefulness summary
 
 The table below is intentionally short. It captures the core split without turning stateful transfers into the main story of the spec.
 For more detailed command-oriented guidance, see [Appendix 095: Operation Statefulness Matrix](../appendices/095-operation-statefulness-matrix.md).
@@ -284,7 +322,7 @@ For more detailed command-oriented guidance, see [Appendix 095: Operation Statef
 | `cp <file>` on one service | One request | Usually none after the request completes. |
 | `cp -r <dir>` on one service | Server-side job | A copy job may coordinate traversal and publication. |
 
-## 5. Client and server responsibilities
+## 6. Client and server responsibilities
 
 | Concern | Server | Client |
 | --- | --- | --- |
