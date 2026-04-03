@@ -54,28 +54,3 @@ A typical file edit looks like this:
 
 The file becomes visible only after step 5.
 
-## What this spec does not try to freeze
-
-This core spec does **not** define:
-
-- a repository layout
-- milestone-specific feature boundaries
-- a particular client database schema
-- one internal queue implementation
-- one platform integration strategy
-
-Those can evolve without changing the public contract, as long as the durable rules in this spec still hold.
-
-## Reading guide
-
-Start here, then read the docs in this order:
-
-1. `010-glossary`
-2. `020-architecture-overview`
-3. `030-object-store-contract`
-4. `040-filesystem-and-storage-model`
-5. `050-mutation-model`
-6. `055-http-api-binding`
-7. `060-background-work`
-8. `070-client-requirements`
-9. `080-versioning-and-conformance`

@@ -47,22 +47,3 @@ A reader starts from `head.json`. If the head advertises a verified checkpoint, 
 ## Write path in one paragraph
 
 A writer uploads any missing content, acquires or renews the namespace lease, reconstructs the latest authoritative basis from durable state, validates the request’s preconditions, writes one immutable WAL entry, and then advances the head object with compare-and-swap. Success is reported only after the head update succeeds.
-
-## What belongs in the core spec
-
-The core spec should define:
-
-- the durable objects and their meaning
-- how namespace state is reconstructed
-- how visibility, ordering, and conflict rules work
-- what a conforming client, writer, reader, and worker must preserve
-
-It should **not** define:
-
-- one package layout
-- one thread model
-- one local database schema
-- one test harness structure
-- one platform bridge
-
-Those are implementation choices as long as they preserve the same durable behavior.
