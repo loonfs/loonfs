@@ -1,92 +1,95 @@
-# Filesystem and storage model
+# Filesystem and Storage Model
 
-This document describes the logical filesystem model that LoonFS stores durably.
+## 1. Namespaces and identity
 
-## Namespace model
+A namespace is the unit of visible metadata history.
 
-A namespace is the unit of serialized metadata history. Each namespace has:
+Each namespace has:
 
-- one root inode
-- one visible commit order, numbered by `seq`
-- its own WAL, checkpoints, progress objects, and retention floor
+- a current head
+- an ordered WAL of commits
+- zero or more checkpoints
+- a retention policy
 
-The namespace root is ordinary canonical metadata. It is seeded as inode `1` at `seq = 0`.
-
-## Identity, paths, and names
+The head also carries the next monotonic inode id for that namespace. New inode ids are allocated from the head as part of commit publication.
 
 The canonical identity of an item is `(namespace_id, inode_id)`.
 
-Paths are projections built from visible directory bindings. This gives LoonFS two important properties:
+Two consequences follow:
 
-1. renames do not change identity
-2. mutation requests do not have to guess which path name was current at the moment of commit
+1. rename does not change identity;
+2. path is a view, not the identity model.
 
-Name collisions are governed by a versioned `NamePolicy`. The first policy is `nfc_casefold_v1`:
+In v1, the root inode is created as `inode_id = 1` at `seq = 0`.
 
-- preserve `display_name` exactly for presentation
-- derive `name_key` using Unicode NFC normalization and case folding
-- reject sibling names whose `name_key` collides
+## 2. Inode kinds
 
-## Supported inode kinds
+The core inode kinds are:
 
 | Kind | Meaning |
 | --- | --- |
-| `FILE` | A regular file whose content is described by file revisions and content manifests. |
-| `DIR` | A directory that contains child bindings. |
-| `SYMLINK` | A symbolic link. |
-| `MOUNT` | An entry point into another namespace or another namespace subtree. |
+| **DIR** | A directory that can own child bindings. |
+| **FILE** | A file whose history is an ordered set of revisions. |
+| **MOUNT** | A presentation point for another namespace or subtree. |
 
-## Logical metadata families
+The spec does not require a larger type taxonomy in the core model. New resource types should normally be represented through file content or resource properties rather than by introducing new inode kinds.
 
-LoonFS reconstructs visible state from a small set of logical record families:
+## 3. Directories, names, and paths
 
-| Family | What it means |
-| --- | --- |
-| **Inodes** | Which identities exist, what kind each inode is, and when it first appeared. |
-| **Direntries** | Which child inode is bound under which parent directory and name. |
-| **Revisions** | Which immutable content manifest each file revision points to. |
-| **Subtree tombstones** | Which directory roots have been recursively deleted. |
+Directories do not "contain bytes." They contain bindings from a name to a child inode.
 
-A path is obtained by walking visible direntries from a starting inode. A file’s content head is obtained by reading the highest visible revision for that inode.
+A path is produced by walking visible directory bindings from the root inode. A path can change even when the underlying item has not.
 
-## Mounts and cross-namespace access
+### 3.1 NamePolicy
 
-A `MOUNT` inode points to:
+Sibling-name comparison is governed by a versioned `NamePolicy`. A namespace has exactly one active name policy.
 
-- `target_namespace_id`
-- `target_root_inode_id`
+The v1 policy is `macos_ci_v1`, which defines a macOS-friendly, case-insensitive collision rule. Future policies may exist, but all writers for a namespace must agree on the namespace's active policy.
 
-Most mounts target another namespace root. Some mounts target a subtree inside another namespace. Mount traversal must detect and reject mount loops.
+## 4. Files and revisions
 
-Cross-namespace moves are not atomic in the core model. They are modeled as copy plus delete.
+A file is represented by one inode and a sequence of immutable revisions.
 
-## File content model
+Each revision points to exactly one immutable content manifest. The manifest, in turn, describes the ordered list of immutable content blocks that reconstruct the file bytes.
 
-A file revision points to one immutable content manifest. That manifest names the file’s size, whole-file digest, block size, and ordered list of content blocks.
+Blocks and manifests belong to the owning namespace. A file revision may reference only content that is durable under that namespace's content store.
 
-Rules:
-
-- a revision is immutable once committed
-- a new visible file state always means a new revision number
-- restore does not rewrite history; it creates a new revision that reuses older content
-- metadata may reference content only after the referenced blocks and manifest are durable
-
-## Replay model
-
-Authoritative state is reconstructed like this:
+This gives LoonFS a two-stage write model:
 
 ```text
-head.json
-   -> latest verified checkpoint at or before head.seq
-   -> WAL entries after that checkpoint
-   -> visible logical state
+make content durable  ->  then make metadata visible
 ```
 
-If no checkpoint exists, replay starts from the namespace bootstrap state and uses the full WAL.
+That separation is one of the core design decisions of the system.
 
-The durable replay rule is one of the core design choices in LoonFS:
+## 5. Tombstones and deletion
 
-- history is append-only
-- checkpoints are immutable
-- compaction means publishing a newer checkpoint and later advancing retention
-- compaction does **not** mean rewriting history into a mutable log
+Deletion is logical first.
+
+When an item is deleted, LoonFS records tombstone metadata that hides the file or subtree from visible lookups. The delete becomes visible as part of normal namespace history.
+
+Physical reclamation is separate background work. It may happen only when retention and reference-safety rules allow it.
+
+## 6. Mounts
+
+A mount presents another namespace, or a subtree of another namespace, inside the current tree.
+
+A mount carries:
+
+- a target namespace id
+- a target root inode id within that namespace
+
+This allows a composed visible tree without inventing one global namespace history underneath.
+
+Two important rules apply:
+
+1. path resolution may cross a mount;
+2. mount loops are invalid and must be rejected.
+
+A share grants access to a subtree. A mount presents that accessible subtree at a path. The two concepts are related, but they are not the same.
+
+## 7. Cross-namespace moves
+
+Identity is namespace-local. A true inode-preserving rename is therefore namespace-local as well.
+
+Across namespaces, a move is modeled as a copy plus a delete from the source namespace. Content may still be reused internally, but inode identity does not cross the namespace boundary.

@@ -1,72 +1,58 @@
-# Object-store contract
+# Object Store Contract
 
-LoonFS assumes that object storage is the only durable dependency. That makes the storage contract a first-class part of the system.
+## 1. Purpose
 
-## Required operations
+LoonFS relies on object storage as its only required durable dependency. The object-store contract is therefore part of the core spec, not an implementation detail.
 
-A conforming object-store adapter must provide only a small set of primitives:
+## 2. Required guarantees
 
-| Primitive | Purpose |
+A conforming object-store layer must provide the following behaviors.
+
+| Guarantee | Why it matters |
 | --- | --- |
-| `head` | Read object metadata, including an opaque compare token such as an ETag. |
-| `get` | Read the full object body. |
-| `put if absent` | Create an immutable object only when it does not already exist. |
-| `put if match` | Compare-and-swap update for a small mutable control object. |
-| `delete` | Remove an object. Deleting a missing key is idempotent. |
-| `list_prefix` | List objects under a prefix. The adapter must return results in sorted order. |
+| **Create-if-absent** for immutable objects | Content blocks, manifests, WAL entries, and checkpoints must never be silently overwritten. |
+| **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
+| **Strong visibility after write and delete** | A successful publish must become authoritative immediately after the guarded write succeeds. |
+| **Prefix enumeration** | WAL discovery, checkpoint discovery, repair, and cleanup need a reliable way to enumerate objects by prefix. |
+| **Deterministic key scoping** | Providers must not allow objects outside the configured namespace or tenant prefix to leak into operations. |
+| **Consistent error signaling for failed preconditions** | Higher layers need one generic way to detect stale writes and retry or fail safely. |
 
-Higher layers must not depend on provider-specific HTTP codes, headers, SDK error strings, or multipart-upload details.
+The spec deliberately avoids relying on multi-object transactions or provider-specific behavior that is not exposed through this contract.
 
-Adapters may additionally provide conditional read or cache-revalidation operations such as
-`get if-none-match`, but higher layers must not depend on them for correctness. They are optional
-optimizations, not part of the minimum portable contract.
+## 3. Durable object families
 
-## Required semantics
+At a minimum, LoonFS stores the following durable object families in object storage.
 
-| Requirement | Meaning |
-| --- | --- |
-| **Create-if-absent** | Immutable objects such as blocks, manifests, WAL entries, and checkpoint segments must never be overwritten silently. |
-| **Compare-and-swap** | Small mutable control objects such as `head.json`, `lease.json`, queue shards, and progress objects must reject stale compare tokens. |
-| **Strong visibility** | If a write or delete succeeds, later reads and prefix listings must observe the latest visible state. |
-| **Prefix isolation** | A scoped adapter must never leak keys outside its configured namespace or root prefix. |
-| **Consistent key validation** | Invalid keys and traversal attempts must be rejected consistently across read, write, delete, and list operations. |
-
-## Mutable and immutable object families
-
-| Family | Mutability | Typical key |
+| Family | Mutability | Purpose |
 | --- | --- | --- |
-| Namespace head | Mutable | `namespaces/{ns}/head.json` |
-| Namespace lease | Mutable | `namespaces/{ns}/lease.json` |
-| Content blocks | Immutable | `namespaces/{ns}/blobs/{block_digest}` |
-| Content manifests | Immutable | `namespaces/{ns}/manifests/{manifest_digest}.json` |
-| WAL entries | Immutable | `namespaces/{ns}/wal/{seq}-{commit_id}.cbor.zst` |
-| Checkpoint manifest | Immutable | `namespaces/{ns}/snapshots/{seq}/manifest.json` |
-| Checkpoint segments | Immutable | `namespaces/{ns}/snapshots/{seq}/tables/{family}-{index}.sst.zst` |
-| Derived progress | Mutable | `namespaces/{ns}/derived/{work_class}/progress.json` |
-| Queue shards | Mutable | `queue/shards/{shard_id}.json` |
-| Conflict artifacts | Immutable | `namespaces/{ns}/conflicts/{conflict_id}.json` |
-| Conflict-archive sidecars | Mutable | `namespaces/{ns}/conflict-archives/{conflict_id}.json` |
+| **Content blocks** | Immutable | Store file bytes. |
+| **Content manifests** | Immutable | Describe file size, digest, block size, and the ordered block list. |
+| **WAL entries** | Immutable | Record committed metadata changes. |
+| **Checkpoints** | Immutable | Record verified snapshots of namespace metadata. |
+| **Control objects** | Small and mutable or short-lived | Track heads, leases, sessions, jobs, and similar coordination state. |
 
-## Content object rules
+## 4. Immutable content rules
 
-For v1, file content uses these fixed rules:
+The content model has four important rules.
 
-- blocks are fixed at `16 MiB` of plaintext, except the final block may be shorter
-- canonical block identity is `sha256:<hex>` of the plaintext bytes
-- the content manifest is deterministic JSON
-- the manifest digest is `sha256:<hex>` of the canonical manifest bytes
-- deduplication is namespace-scoped
+1. Block digests are content-derived, not provider-derived.
+2. A content manifest describes one complete file revision.
+3. Immutable content objects are written with create-if-absent semantics.
+4. A metadata commit may reference a content manifest only after that manifest and all referenced blocks are already durable.
 
-If an immutable content object already exists, an implementation may reuse it only after verifying that the bytes are exactly the bytes implied by that object’s identity.
+In v1, file content is stored as fixed-size 16 MiB blocks, except for the final partial block.
 
-## Conformance rule
+## 5. Mutable control-object rules
 
-The object-store contract is not satisfied by a marketing claim such as “S3 compatible.”
+Small mutable objects such as the namespace head or a lease must use compare-and-swap semantics. These objects must remain small enough that guarded rewrite is practical.
 
-A provider profile is considered safe only after the same conformance suite passes against at least:
+Large immutable file data may use multipart upload or another provider-specific optimization. Small mutable control objects should not depend on those mechanisms.
 
-- a local filesystem adapter
-- AWS S3
-- Cloudflare R2
+## 6. Provider conformance
 
-Additional providers are welcome, but they must pass the same contract before higher layers rely on them.
+The spec standardizes the required behaviors, not a brand name such as "S3 compatible." A provider is conforming only when those behaviors are verified by conformance tests.
+
+The practical rule is simple:
+
+- higher layers may depend on the LoonFS object-store contract;
+- higher layers may not depend directly on provider headers, status codes, or SDK quirks.

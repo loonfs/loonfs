@@ -1,56 +1,92 @@
-# LoonFS overview
+# LoonFS Core Specification
 
-LoonFS is a filesystem and sync engine whose only durable dependency is object storage.
+## 1. What LoonFS is
 
-Its durable system of record is intentionally small:
+LoonFS is a filesystem built on top of object storage.
 
-- immutable file-content blocks
+Its durable truth is intentionally small:
+
+- immutable content blocks
 - immutable content manifests
-- immutable namespace write-ahead log (WAL) entries
-- immutable checkpoint objects
-- small mutable control objects such as the namespace head, leases, and progress markers
+- immutable metadata commits in a write-ahead log (WAL)
+- immutable checkpoints
+- small mutable control objects such as the namespace head and leases
 
-Everything else is cache, coordination, or a rebuildable acceleration structure.
+Everything else is cache, coordination, or rebuildable acceleration.
 
-## Design goals
+LoonFS can be exposed as:
 
-| Goal | Why it matters |
+- a direct filesystem service with commands such as `ls`, `get`, `put`, `mv`, and `cp`
+- an advanced writer surface for staged upload, explicit commit, and incremental change consumption
+- a foundation for sync clients, batch writers, and operator tooling
+
+The purpose of this spec is to standardize the durable model and the rules that make implementations interoperable. It does not standardize local client databases, queue layouts, scheduler loops, or other implementation-specific mechanics.
+
+## 2. Design goals
+
+LoonFS is designed to be:
+
+| Goal | Meaning |
 | --- | --- |
-| Simple durable model | A new reader should be able to explain where truth lives and how it becomes visible. |
-| Object-store portability | The system should run anywhere that satisfies a small storage contract. |
-| Deterministic recovery | After a crash, readers and writers should reconstruct the same state from durable objects alone. |
-| Clear concurrency rules | Races should fail explicitly rather than silently merging or overwriting. |
-| Shared semantics across modes | Local server mode, hosted server mode, mirror clients, and later on-demand clients should all use the same core model. |
+| **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content manifests, commits, and checkpoints. |
+| **Portable** | The only required durable dependency is object storage with a small set of well-defined guarantees. |
+| **Safe** | Writes are never partially visible. Metadata never points to content that is not already durable. |
+| **Readable** | A human reader should be able to understand the system from a small public spec without reading client architecture or rollout plans. |
+| **Extensible** | The core model should support direct filesystem operations, sync engines, and future clients without changing identity or visibility rules. |
 
-## The few rules that matter most
+## 3. Core decisions
 
-| Area | Rule |
+| Topic | Decision |
 | --- | --- |
+| Durable dependency | Object storage is the only required durable dependency. |
+| Unit of history | Each namespace has its own ordered metadata history. |
 | Identity | The canonical identity of an item is `(namespace_id, inode_id)`. |
-| Naming | Paths are views built from directory bindings. They are not the mutation identity model. |
-| Ordering | Each namespace has one total order of visible metadata commits, numbered by `seq`. |
-| Visibility | A metadata change becomes visible only when `head.json` advances successfully. |
-| Content safety | A file revision is visible only after its referenced content blocks and content manifest are already durable. |
-| Replay | Readers reconstruct state from a verified checkpoint plus the WAL tail after that checkpoint. |
-| Derived state | Background indices may improve performance, but correctness must not depend on them. |
+| Names | Paths are lookup views built from directory bindings. They are not the identity model. |
+| Content publication | File content becomes visible only after its blocks and content manifest are already durable. |
+| Commit visibility | A metadata change becomes visible only when the namespace head advances successfully. |
+| Delete | Delete is logical first: it creates tombstones. Physical reclamation is background garbage collection. |
+| Recovery | Readers reconstruct state from a verified checkpoint plus the WAL tail after that checkpoint. |
+| Writes | A path-oriented filesystem API and an explicit upload/commit/change-feed API are both first-class. |
+| Access control | ACLs and shares are a separate control plane keyed by namespace or subtree identity, not by path text. |
+| Long-running operations | Recursive reads, resumable uploads, and server-side copy jobs may use control-plane sessions or jobs. These do not change namespace history. |
 
-## Plain-language shape of the system
+## 4. System sketch
 
 ```text
-client uploads content  --->  object store
-client sends commit     --->  authoritative mutation service
-service writes WAL/head --->  object store
-workers build indexes   --->  object store
-readers recover state   --->  head + checkpoint + WAL
+            user-facing filesystem commands
+      ls / stat / get / put / mkdir / mv / cp / rm
+                         |
+                         v
+                authoritative LoonFS service
+          path resolution, validation, commit, reads
+             /                    |                 \
+            /                     |                  \
+           v                      v                   v
+  object-storage content   metadata history      control objects
+  blocks and manifests     WAL, head, checkpoints sessions, jobs,
+                                                shares, leases
 ```
 
-A typical file edit looks like this:
+## 5. What this spec leaves to implementations
 
-1. upload any missing content blocks
-2. upload the content manifest
-3. validate the write against the current namespace head
-4. write one immutable WAL entry
-5. advance the namespace head with compare-and-swap
+The following are intentionally outside the core spec:
 
-The file becomes visible only after step 5.
+- local client database schemas
+- job schedulers and worker topologies
+- queue shard layouts
+- platform-specific file-watcher integrations
+- exact binary encodings for large immutable metadata objects
+- whether one implementation uses a single process or several services internally
 
+Those choices matter to an implementation, but they should not change the filesystem model.
+
+## 6. Reading guide
+
+A new reader should start with:
+
+1. the glossary
+2. the architecture overview
+3. the object store contract
+4. the filesystem and storage model
+5. the mutation and visibility model
+6. the interfaces and clients section
