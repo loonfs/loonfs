@@ -1,7 +1,0 @@
-{
-  "ops_config_path": "",
-  "exposed_namespaces": [],
-  "domain_identifier": "main",
-  "domain_display_name": "Loon",
-  "app_group_identifier": "group.dev.loondb.LoonFileProviderSample"
-}
