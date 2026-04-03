@@ -35,18 +35,24 @@ Long-running transfers may additionally expose session or job resources. The exa
 
 ## 3. Client profiles
 
-### 3.1 Filesystem CLI or app
+These profiles are defined by the surface a client uses, not by whether the implementation is a
+CLI, desktop app, web app, SDK, or service. A single client may implement more than one profile.
+
+### 3.1 Path-oriented client
 
 This client uses the path-oriented surface.
 
 Typical behavior:
 
 - `ls`, `stat`, `get`, `put`, `mv`, and `cp` use user-visible paths;
-- the server resolves those paths to canonical inodes as needed;
+- the server remains authoritative for path resolution, canonical inode identity, and commit validation;
 - small commands are often sessionless;
 - large or recursive commands may use server-side sessions or jobs.
 
-This client does not need a sync database to be a first-class client.
+This client does not require a sync database or full local mirror to be a first-class client.
+Implementations may still keep durable local state such as auth/session state, retry journals,
+pinned snapshot ids, or inode context learned from prior responses when that improves usability,
+restart safety, or resumability.
 
 ### 3.2 Sync client
 
@@ -59,15 +65,16 @@ Typical behavior:
 - may upload content and publish explicit commits;
 - preserves conflicts according to the client's conflict policy.
 
-### 3.3 Service writer or batch tool
+### 3.3 Explicit-commit client
 
-This client stages content and publishes explicit commits, but it does not necessarily maintain a long-lived local mirror.
+This client uses the upload, commit, and change-feed surface more directly. It stages content and
+publishes explicit commits, but it does not necessarily maintain a long-lived local mirror.
 
 Typical behavior:
 
 - content hashing and upload;
-- explicit commit with preconditions;
-- request-id based retry.
+- explicit commit with preconditions and request ids;
+- change-feed reads or cursors where incremental observation is needed.
 
 ### 3.4 Operator or admin tool
 
