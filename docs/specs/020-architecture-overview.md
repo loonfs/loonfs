@@ -25,31 +25,24 @@ Two rules follow from this split:
 1. The metadata plane is authoritative for filesystem state.
 2. Control-plane objects may be durable, but they do not advance namespace `seq` and do not appear in the change feed.
 
-## 3. Object storage remains the durable foundation
+Control-plane state should still be durable whenever losing it on restart would violate
+correctness, restart safety, or promised resumability.
 
-A conforming implementation may keep both metadata-plane objects and control-plane objects in object storage. The spec does not require a separate transactional database.
+## 3. Client profiles
 
-The important distinction is not *where* a record is stored. The distinction is *what kind of truth it represents*:
-
-- namespace-visible filesystem truth lives in the metadata plane;
-- transfer orchestration, leases, and authorization live in the control plane.
-
-If losing a control-plane record on restart would break correctness or promised resumability, that control-plane record should be durable.
-
-## 4. Client profiles
-
-LoonFS supports more than one style of client.
+LoonFS supports more than one client profile. These profiles are defined by the protocol surface
+they use, not by whether the implementation is a CLI, desktop app, web app, or service.
 
 | Client profile | Primary surface | Typical state |
 | --- | --- | --- |
-| **Filesystem CLI or app** | Path-oriented filesystem operations | Usually little or no durable local state. |
-| **Sync client** | Change feed plus local projection, with optional writes | Durable local state and cursor management. |
-| **Service writer / batch tool** | Upload plus explicit commit | Usually request ids and upload retry state, but not a full sync database. |
-| **Operator or admin tool** | Recovery, inspection, and low-level operations | Implementation-specific. |
+| **Path-oriented client** | Filesystem operations such as `ls`, `stat`, `get`, `put`, `mv`, and `cp` | Often little or no durable local state beyond transient request context. |
+| **Explicit-commit client** | Staged upload, request ids, explicit commit, and change cursors | Durable retry state for in-flight uploads and requests, but not necessarily a full local projection. |
+| **Sync client** | Change feed plus durable local projection, with optional writes | Durable local state, cursors, and restart-safe reconciliation state. |
+| **Operator or admin client** | Recovery, inspection, repair, and low-level operations | Implementation-specific. |
 
-The spec does not assume that every client is a sync engine. Direct filesystem commands are a first-class use of the system.
+A CLI, desktop app, web app, SDK, or service may implement one or more of these profiles.
 
-## 5. Operation classes
+## 4. Operation classes
 
 Most operations fall into one of three classes.
 
