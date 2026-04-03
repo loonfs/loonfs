@@ -62,6 +62,32 @@ make content durable  ->  then make metadata visible
 
 That separation is one of the core design decisions of the system.
 
+### 4.1 Immutable content storage
+
+The stable immutable content families are:
+
+```text
+namespaces/{namespace_id}/blobs/{block_digest_sha256}
+namespaces/{namespace_id}/manifests/{content_manifest_digest}.json
+```
+
+The core rules are:
+
+- block digests use `sha256:<hex>` over plaintext block bytes;
+- blocks are fixed at `16 MiB`, except the final block may be shorter;
+- the content manifest records `namespace_id`, `file_size_bytes`, `file_digest_sha256`, `block_size_bytes`, and the ordered block digests and block sizes; and
+- `content_manifest_digest` is the digest of the canonical manifest bytes.
+
+### 4.2 Upload-before-publish
+
+Metadata may reference content only after that content is already durable.
+
+This applies to:
+
+- file create;
+- file replace; and
+- file restore, when the restore introduces a newly referenced manifest.
+
 ## 5. Tombstones and deletion
 
 Deletion is logical first.
@@ -93,3 +119,22 @@ A share grants access to a subtree. A mount presents that accessible subtree at 
 Identity is namespace-local. A true inode-preserving rename is therefore namespace-local as well.
 
 Across namespaces, a move is modeled as a copy plus a delete from the source namespace. Content may still be reused internally, but inode identity does not cross the namespace boundary.
+
+## 8. Recovery basis
+
+Readers reconstruct authoritative state from:
+
+1. the current head;
+2. the checkpoint named by the head, if any; and
+3. the contiguous WAL tail after that checkpoint through `head.seq`.
+
+The head summarizes the current visible boundary and replay hints, including at minimum:
+
+- `seq`
+- `next_inode_id`
+- `snapshot_hint_seq`
+- `retention_floor_seq`
+
+A checkpoint is authoritative only when it has been verified against its durable objects and namespace summary. If verification fails, readers must not treat that checkpoint as authoritative.
+
+The WAL preserves ordered history. Checkpoints keep replay bounded. Together they provide recovery from durable artifacts alone without requiring unbounded WAL replay as history grows.
