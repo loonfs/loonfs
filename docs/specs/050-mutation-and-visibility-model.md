@@ -39,7 +39,21 @@ In particular, the server is responsible for:
 
 Clients may assist with planning, hashing, upload, or retry, but they are not the authority for visible state.
 
-## 4. Preconditions
+## 4. Standard mutation operations
+
+The first standard lower-level mutation set includes:
+
+- `create_dir(parent_inode_id, display_name)`
+- `create_file(parent_inode_id, display_name, content_manifest_digest)`
+- `replace_file(inode_id, base_revision_no, content_manifest_digest)`
+- `rename(inode_id, new_parent_inode_id, new_display_name)`
+- `delete_subtree(root_inode_id)`
+- `restore_revision(inode_id, source_revision_no, base_revision_no)`
+
+The path-oriented filesystem surface may compile higher-level operations into these lower-level
+mutations.
+
+## 5. Preconditions
 
 A mutation may include explicit preconditions. Preconditions are how clients say, "apply this only if the namespace still looks like the state I planned against."
 
@@ -54,7 +68,7 @@ The core kinds of precondition are:
 
 The exact wire shape of preconditions may vary by transport binding, but the semantics must match these checks.
 
-## 5. Change feed and replay
+## 6. Change feed and replay
 
 A namespace exposes an ordered change feed. The feed answers the question:
 
@@ -67,7 +81,7 @@ A reader reconstructs authoritative state from:
 - a verified checkpoint, when one is available; and
 - the WAL entries after that checkpoint.
 
-## 6. Retention floor
+## 7. Retention floor
 
 A namespace may advance a retention floor to say:
 
@@ -77,7 +91,7 @@ Clients older than the retention floor must re-bootstrap from a fresh snapshot i
 
 The retention floor may advance only after the system has enough verified material to keep replay safe at or after that point.
 
-## 7. Long-running operations
+## 8. Long-running operations
 
 Some operations are not well described by one request.
 

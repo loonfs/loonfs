@@ -50,8 +50,9 @@ The change feed returns ordered committed changes after an explicit cursor. If t
 is older than the retention floor, the caller must re-bootstrap instead of expecting older
 incremental history to remain available.
 
-The path-oriented filesystem surface may compile higher-level operations into this lower-level
-model, but both surfaces preserve the same identity, content-durability, and visibility rules.
+The standard lower-level mutation set is defined in the mutation and visibility model. The
+path-oriented filesystem surface may compile higher-level operations into that lower-level model,
+but both surfaces preserve the same identity, content-durability, and visibility rules.
 
 ## 3. Representative HTTP binding
 
