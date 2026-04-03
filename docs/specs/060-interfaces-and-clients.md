@@ -71,6 +71,7 @@ A representative v0 binding is shown below.
 | Publish an explicit commit | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 
+-- I don't understand the next two lines.
 Long-running transfers may additionally expose session or job resources. The exact endpoint set is less important than the semantic rule: once a long-running operation begins, the server-issued session or job id becomes the stable in-flight identifier of that operation.
 
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.

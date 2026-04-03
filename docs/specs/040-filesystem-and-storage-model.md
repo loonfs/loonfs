@@ -1,5 +1,7 @@
 # Filesystem and Storage Model
 
+TODO: this needs a quick section on inodes -- what they are and why we use them. I realize it's in the glossary but it would help the flow.
+
 ## 1. Namespaces and identity
 
 A namespace is the unit of visible metadata history.

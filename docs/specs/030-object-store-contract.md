@@ -6,13 +6,13 @@ LoonFS relies on object storage as its only required durable dependency. The obj
 
 ## 2. Required guarantees
 
-A conforming object-store layer must provide the following behaviors.
+A conforming object-store layer must provide the following behaviors and semantics.
 
-| Guarantee | Why it matters |
+| Guarantee | Rationale |
 | --- | --- |
 | **Create-if-absent** for immutable objects | Content blocks, manifests, WAL entries, and checkpoints must never be silently overwritten. |
 | **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
-| **Strong visibility after write and delete** | A successful publish must become authoritative immediately after the guarded write succeeds. |
+| **Strong consistency** | A successful put/delete operation must become authoritative immediately after it succeeds. |
 | **Prefix enumeration** | WAL discovery, checkpoint discovery, repair, and cleanup need a reliable way to enumerate objects by prefix. |
 | **Deterministic key scoping** | Providers must not allow objects outside the configured namespace or tenant prefix to leak into operations. |
 | **Consistent error signaling for failed preconditions** | Higher layers need one generic way to detect stale writes and retry or fail safely. |
@@ -40,7 +40,7 @@ The content model has four important rules.
 3. Immutable content objects are written with create-if-absent semantics.
 4. A metadata commit may reference a content manifest only after that manifest and all referenced blocks are already durable.
 
-In v0, file content is stored as fixed-size 16 MiB blocks, except for the final partial block.
+In v0, file content is stored as fixed-size 16 MiB blocks, except for the final block which may be smaller.
 
 ## 5. Mutable control-object rules
 
