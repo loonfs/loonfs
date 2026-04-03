@@ -91,8 +91,6 @@ In those cases, the server may create control-plane objects such as read session
 
 Three rules apply:
 
-1. these objects may be stored durably in object storage;
+1. these objects may be ephemeral when no durability guarantee is required; if an operation's correctness, restart safety, or promised resumability depends on them, they must be stored durably in object storage;
 2. they do not advance namespace `seq`;
 3. they do not appear in the namespace change feed.
-
-Their job is coordination, not filesystem history.
