@@ -20,6 +20,76 @@ Two consequences follow:
 1. rename does not change identity;
 2. path is a view, not the identity model.
 
+If an item is deleted and a new item is later created at the same path, that new item receives a
+new inode identity. 
+
+An inode is the durable namespace-local identity record for one filesystem item.
+
+It answers:
+
+- what item this is;
+- what kind of item it is; and
+- when it first entered namespace history.
+
+An inode does not answer:
+
+- what path the item currently has;
+- what parent directory currently contains it; or
+- what file bytes it currently points at.
+
+Those facts live in other metadata families:
+
+- direntries say where an inode is currently bound in the tree;
+- revisions say which immutable file version is current for a file inode; and
+- paths are derived views produced by walking visible directory bindings from the root.
+
+### 1.1 Example metadata shapes
+
+The inode itself is only one part of the metadata model. A complete visible file usually involves
+multiple logical records.
+
+Illustrative inode row:
+
+```json
+{
+  "inode_id": 42,
+  "inode_kind": "FILE",
+  "created_seq": 17
+}
+```
+
+Illustrative direntry row that binds that inode into the tree:
+
+```json
+{
+  "parent_inode_id": 9,
+  "name_key": "report.txt",
+  "display_name": "Report.txt",
+  "child_inode_id": 42,
+  "bind_seq": 17
+}
+```
+
+Illustrative revision row for the current file contents:
+
+```json
+{
+  "inode_id": 42,
+  "revision_no": 7,
+  "committed_seq": 91,
+  "content_manifest_digest": "sha256:manifest..."
+}
+```
+
+Taken together, those three records mean:
+
+- inode `42` is the durable identity of the file;
+- the file is currently visible under parent directory inode `9` as `Report.txt`; and
+- the current visible file bytes come from revision `7`.
+
+If the file is renamed, the direntry changes but the inode stays `42`. If the file contents are
+replaced, the revision row changes but the inode stays `42`.
+
 In v0, the root inode is created as `inode_id = 1` at `seq = 0`.
 
 ## 2. Inode kinds
