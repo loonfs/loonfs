@@ -2,7 +2,7 @@
 
 ## 1. Write protocol
 
-A write has four phases: stage content, reconstruct and validate, commit to the WAL, and advance the head. A metadata change becomes visible only after the head advances.
+A write has four phases: durably stage content (if mutation contains content), reconstruct and validate, commit to the WAL, and advance the head. A metadata change becomes visible only after the head advances.
 
 ### 1.1 Content staging
 
@@ -48,8 +48,8 @@ A read reconstructs the visible filesystem state from durable artifacts on objec
 The reader builds an in-memory metadata state from two kinds of durable object:
 
 1. Read the namespace **head** object to learn the current `seq` and `snapshot_hint_seq`.
-2. If `snapshot_hint_seq` is set, load the **verified checkpoint** at that seq. The checkpoint materializes four append-only tables: inodes, direntries, revisions, and subtree tombstones.
-3. Load and replay every **WAL entry** contiguously from the checkpoint seq (or from genesis, if no checkpoint exists) through `head.seq`. Each WAL entry appends rows to the same four tables.
+2. If `snapshot_hint_seq` is set, load the **verified checkpoint** at that seq. The checkpoint materializes metadata state through that seq across four append-only tables: inodes, direntries, revisions, and subtree tombstones.
+3. Load and replay every **WAL entry** contiguously after the checkpoint seq (or from genesis, if no checkpoint exists) through `head.seq`. Each WAL entry appends rows to the same four tables.
 
 The result is a complete metadata state pinned to one `seq`.
 
