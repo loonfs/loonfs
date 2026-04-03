@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Canonical sibling-name comparison will use a shared, versioned `NamePolicy` rather than ambient host filesystem rules. The first policy is `nfc_casefold_v1`, which preserves `display_name` and compares names by normalized, case-folded `name_key`.
+Canonical sibling-name comparison will use a shared, versioned `NamePolicy` rather than ambient host filesystem rules. The first policy is `macos_ci_v1`, which preserves `display_name` and compares names by normalized, case-folded `name_key`.
 
 Consequences:
 - client and server agree on collision rules
