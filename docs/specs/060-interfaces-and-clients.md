@@ -99,7 +99,7 @@ For more detailed command-oriented guidance, see [Appendix 095: Operation Statef
 | Concern | Server | Client |
 | --- | --- | --- |
 | Path resolution | Authoritative | Supplies user intent by path when using the filesystem surface. |
-| Content hashing and upload | May assist or delegate | Usually responsible for reading local bytes and uploading missing content. |
+| Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. |
 | Commit validation | Authoritative | Supplies preconditions and request ids where needed. |
 | Namespace visibility | Authoritative | Observes committed results. |
 | Long-running transfer progress | Authoritative for sessions or jobs that affect correctness | Responsible for local temp files, local progress, and retry behavior. |
