@@ -83,6 +83,7 @@ This client uses low-level recovery or inspection surfaces that are specific to 
 ## 4. Statefulness summary
 
 The table below is intentionally short. It captures the core split without turning stateful transfers into the main story of the spec.
+For more detailed command-oriented guidance, see [Appendix 095: Operation Statefulness Matrix](../appendices/095-operation-statefulness-matrix.md).
 
 | Operation | Usual shape | Typical server-side state |
 | --- | --- | --- |
