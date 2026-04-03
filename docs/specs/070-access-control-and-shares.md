@@ -36,6 +36,15 @@ Implementations may add finer-grained roles, but these three capture the basic m
 
 A share grants access to a namespace or subtree.
 
+A share object includes at minimum:
+
+- `share_id`
+- `target_namespace_id`
+- optional `target_root_inode_id`
+- principal or share-link identity
+- role
+- optional presentation metadata such as display name or description
+
 A mount presents that accessible subtree somewhere in a visible tree.
 
 Example:
