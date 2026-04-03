@@ -44,7 +44,7 @@ A path is produced by walking visible directory bindings from the root inode. A 
 
 Sibling-name comparison is governed by a versioned `NamePolicy`. A namespace has exactly one active name policy.
 
-The v1 policy is `macos_ci_v1`, which defines a macOS-friendly, case-insensitive collision rule. Future policies may exist, but all writers for a namespace must agree on the namespace's active policy.
+The v1 policy is `nfc_casefold_v1`, which defines sibling-name comparison by Unicode NFC normalization plus case folding. Future policies may exist, but all writers for a namespace must agree on the namespace's active policy.
 
 ## 4. Files and revisions
 
