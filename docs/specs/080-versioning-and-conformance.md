@@ -44,16 +44,3 @@ Breaking changes to those surfaces require a spec update and an explicit version
 A change belongs in the core spec only when independent implementations must agree on it to interoperate safely.
 
 A change does **not** belong in the core spec merely because the reference implementation currently does it that way.
-
-## What should remain outside the core spec
-
-These documents are important, but they should be treated as implementation notes or product guides rather than the public core spec:
-
-- testing strategy
-- repository layout and delivery planning
-- milestone notes
-- platform spike documents
-- CLI ergonomics
-- one reference client’s internal schema evolution
-
-Keeping those out of the core spec is part of what keeps the core spec readable.
