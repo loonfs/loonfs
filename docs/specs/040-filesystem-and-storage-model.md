@@ -20,7 +20,7 @@ Two consequences follow:
 1. rename does not change identity;
 2. path is a view, not the identity model.
 
-In v1, the root inode is created as `inode_id = 1` at `seq = 0`.
+In v0, the root inode is created as `inode_id = 1` at `seq = 0`.
 
 ## 2. Inode kinds
 
@@ -44,7 +44,7 @@ A path is produced by walking visible directory bindings from the root inode. A 
 
 Sibling-name comparison is governed by a versioned `NamePolicy`. A namespace has exactly one active name policy.
 
-The v1 policy is `nfc_casefold_v1`, which defines sibling-name comparison by Unicode NFC normalization plus case folding. Future policies may exist, but all writers for a namespace must agree on the namespace's active policy.
+The v0 policy is `nfc_casefold_v0`, which defines sibling-name comparison by Unicode NFC normalization plus case folding. Future policies may exist, but all writers for a namespace must agree on the namespace's active policy.
 
 ## 4. Files and revisions
 

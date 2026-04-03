@@ -17,17 +17,17 @@ Neither surface is "more real" than the other. They share the same namespace, in
 
 HTTP is one transport binding for these abstract operations. It is not the underlying semantics.
 
-A representative v1 binding is shown below.
+A representative v0 binding is shown below.
 
 | Purpose | Representative HTTP shape |
 | --- | --- |
-| Stat a path | `GET /v1/namespaces/{ns}/fs/stat?path=/docs/report.txt` |
-| List a path | `GET /v1/namespaces/{ns}/fs/list?path=/docs` |
-| Read file content | `GET /v1/namespaces/{ns}/fs/content?path=/docs/report.txt` |
-| Apply path-oriented operations | `POST /v1/namespaces/{ns}/fs/operations` |
-| Begin or prepare upload | `POST /v1/namespaces/{ns}/uploads` |
-| Publish an explicit commit | `POST /v1/namespaces/{ns}/commits` |
-| Read committed changes | `GET /v1/namespaces/{ns}/changes?after_seq=123` |
+| Stat a path | `GET /v0/namespaces/{ns}/fs/stat?path=/docs/report.txt` |
+| List a path | `GET /v0/namespaces/{ns}/fs/list?path=/docs` |
+| Read file content | `GET /v0/namespaces/{ns}/fs/content?path=/docs/report.txt` |
+| Apply path-oriented operations | `POST /v0/namespaces/{ns}/fs/operations` |
+| Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
+| Publish an explicit commit | `POST /v0/namespaces/{ns}/commits` |
+| Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 
 Long-running transfers may additionally expose session or job resources. The exact endpoint set is less important than the semantic rule: once a long-running operation begins, the server-issued session or job id becomes the stable in-flight identifier of that operation.
 

@@ -40,7 +40,7 @@ The content model has four important rules.
 3. Immutable content objects are written with create-if-absent semantics.
 4. A metadata commit may reference a content manifest only after that manifest and all referenced blocks are already durable.
 
-In v1, file content is stored as fixed-size 16 MiB blocks, except for the final partial block.
+In v0, file content is stored as fixed-size 16 MiB blocks, except for the final partial block.
 
 ## 5. Mutable control-object rules
 

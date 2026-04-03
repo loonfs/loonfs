@@ -11,7 +11,7 @@
 | **Revision** | One immutable committed version of a file's content. Revisions are ordered by `revision_no` within an inode. |
 | **WAL** | The write-ahead log of immutable metadata commit objects. |
 | **Checkpoint** | A verified snapshot of namespace metadata at one chosen `seq`. It lets readers avoid replaying the entire WAL history. |
-| **Content block** | One immutable block of file bytes. In v1, blocks are fixed-size except for the final partial block. |
+| **Content block** | One immutable block of file bytes. In v0, blocks are fixed-size except for the final partial block. |
 | **Content manifest** | The immutable object that describes a file's size, digest, block size, and ordered list of content blocks. |
 | **NamePolicy** | The versioned rule that decides how sibling names are compared for collisions. |
 | **Tombstone** | A metadata record that hides a deleted inode or subtree without erasing history. |
