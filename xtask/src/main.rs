@@ -1,23 +1,25 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use loon_api::InodeKind;
-use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
+use serde::Deserialize;
+use serde_json::Value;
 use std::env;
 use std::fs;
-use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 
-const READY_TIMEOUT: Duration = Duration::from_secs(120);
-const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const PROFILE_NAME: &str = "smoke";
+const FORMAT_VERSION: u32 = 1;
+
 const STEP_CREATE_NAMESPACE: &str = "create_namespace";
 const STEP_LIST_NAMESPACES: &str = "list_namespaces";
 const STEP_PUT: &str = "put";
 const STEP_LS: &str = "ls";
 const STEP_STAT: &str = "stat";
+const STEP_CAT: &str = "cat";
 const STEP_GET: &str = "get";
+const STEP_CP: &str = "cp";
 const STEP_MOVE: &str = "move";
 const STEP_RM: &str = "rm";
 const STEP_VERIFY_REMOVAL: &str = "verify_removal";
@@ -30,30 +32,47 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CommandKind {
-    Smoke(SmokeArgs),
+    Smoke {
+        #[command(subcommand)]
+        command: SmokeCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SmokeCommand {
+    Local(LocalSmokeArgs),
+    Remote(RemoteSmokeArgs),
 }
 
 #[derive(Debug, Clone, Args)]
-struct SmokeArgs {
-    #[arg(long = "client-config")]
-    client_config: String,
+struct LocalSmokeArgs {
     #[arg(long = "server-config")]
-    server_config: Option<String>,
+    server_config: PathBuf,
+    #[arg(long)]
+    namespace: String,
+}
+
+#[derive(Debug, Clone, Args)]
+struct RemoteSmokeArgs {
+    #[arg(long = "server-url")]
+    server_url: String,
+    #[arg(long = "auth-token")]
+    auth_token: Option<String>,
     #[arg(long)]
     namespace: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SmokeMode {
-    External,
-    Managed,
+    Local,
+    Remote,
 }
 
 impl SmokeMode {
     fn as_str(self) -> &'static str {
         match self {
-            Self::External => "external",
-            Self::Managed => "managed",
+            Self::Local => "local",
+            Self::Remote => "remote",
         }
     }
 }
@@ -65,141 +84,222 @@ struct SmokeReport {
     steps: Vec<&'static str>,
 }
 
-trait SmokeExecutor {
-    fn run(&self, client_config: ClientConfig, namespace: &str) -> Result<Vec<&'static str>>;
+#[derive(Debug)]
+struct LoonOutput {
+    exit_code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
-trait ManagedServerHandle {
-    fn wait_until_ready(&mut self, server_url: &str, timeout: Duration) -> Result<()>;
-}
-
-trait ManagedServerLauncher {
-    fn launch(&self, server_config_path: &Path) -> Result<Box<dyn ManagedServerHandle>>;
-}
-
-struct ClientSmokeExecutor;
-
-impl SmokeExecutor for ClientSmokeExecutor {
-    fn run(&self, client_config: ClientConfig, namespace: &str) -> Result<Vec<&'static str>> {
-        let client = Client::new(client_config);
-        execute_smoke_sequence(&client, namespace)
+impl LoonOutput {
+    fn success(&self) -> bool {
+        self.exit_code == Some(0)
     }
 }
 
-struct CargoManagedServerLauncher;
+trait LoonRunner {
+    fn run(&self, args: &[String]) -> Result<LoonOutput>;
+}
 
-impl ManagedServerLauncher for CargoManagedServerLauncher {
-    fn launch(&self, server_config_path: &Path) -> Result<Box<dyn ManagedServerHandle>> {
+struct CargoLoonRunner {
+    cargo: String,
+    workspace_root: PathBuf,
+}
+
+impl CargoLoonRunner {
+    fn new() -> Result<Self> {
         let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .context("resolve workspace root from xtask manifest dir")?;
-        let child = Command::new(cargo)
+            .context("resolve workspace root from xtask manifest dir")?
+            .to_path_buf();
+        Ok(Self {
+            cargo,
+            workspace_root,
+        })
+    }
+}
+
+impl LoonRunner for CargoLoonRunner {
+    fn run(&self, args: &[String]) -> Result<LoonOutput> {
+        let output = Command::new(&self.cargo)
             .arg("run")
+            .arg("--quiet")
             .arg("-p")
-            .arg("loon-server")
-            .arg("--bin")
-            .arg("loond")
+            .arg("loon-cli")
             .arg("--")
-            .arg("--config")
-            .arg(server_config_path)
-            .current_dir(workspace_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "spawn managed loond with config {}",
-                    server_config_path.display()
-                )
-            })?;
-        Ok(Box::new(CargoManagedServer { child }))
+            .args(args)
+            .current_dir(&self.workspace_root)
+            .output()
+            .with_context(|| format!("run loon CLI with args `{}`", args.join(" ")))?;
+        Ok(LoonOutput {
+            exit_code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
     }
 }
 
-struct CargoManagedServer {
-    child: Child,
+#[derive(Debug)]
+struct SmokeSession {
+    _temp_dir: tempfile::TempDir,
+    config_path: PathBuf,
 }
 
-impl ManagedServerHandle for CargoManagedServer {
-    fn wait_until_ready(&mut self, server_url: &str, timeout: Duration) -> Result<()> {
-        wait_for_server_ready(&mut self.child, server_url, timeout)
+impl SmokeSession {
+    fn new() -> Result<Self> {
+        let temp_dir = tempdir().context("create tempdir for smoke session")?;
+        let config_path = temp_dir.path().join("loon-smoke.toml");
+        Ok(Self {
+            _temp_dir: temp_dir,
+            config_path,
+        })
     }
 }
 
-impl Drop for CargoManagedServer {
-    fn drop(&mut self) {
-        terminate_child(&mut self.child);
-    }
+#[derive(Debug, Deserialize)]
+struct JsonEnvelope {
+    kind: String,
+    format_version: u32,
+    profile: Option<String>,
+    mode: Option<String>,
+    #[serde(default)]
+    data: Option<Value>,
+    #[serde(default)]
+    error: Option<JsonError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonError {
+    code: String,
+    message: String,
+}
+
+enum JsonCommandResult {
+    Success(JsonEnvelope),
+    Failure(JsonEnvelope),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
-        CommandKind::Smoke(args) => {
-            let report = run_smoke(&args)?;
-            println!("{}", render_report(&report));
-        }
-    }
+    let runner = CargoLoonRunner::new()?;
+    let report = match cli.command {
+        CommandKind::Smoke { command } => match command {
+            SmokeCommand::Local(args) => run_local_smoke_with(&args, &runner)?,
+            SmokeCommand::Remote(args) => run_remote_smoke_with(&args, &runner)?,
+        },
+    };
+    println!("{}", render_report(&report));
     Ok(())
 }
 
-fn run_smoke(args: &SmokeArgs) -> Result<SmokeReport> {
-    run_smoke_with(args, &ClientSmokeExecutor, &CargoManagedServerLauncher)
+fn run_local_smoke_with(args: &LocalSmokeArgs, runner: &dyn LoonRunner) -> Result<SmokeReport> {
+    let smoke_id = smoke_id();
+    run_local_smoke_with_id(args, runner, &smoke_id)
 }
 
-fn run_smoke_with(
-    args: &SmokeArgs,
-    executor: &dyn SmokeExecutor,
-    launcher: &dyn ManagedServerLauncher,
+fn run_local_smoke_with_id(
+    args: &LocalSmokeArgs,
+    runner: &dyn LoonRunner,
+    smoke_id: &str,
 ) -> Result<SmokeReport> {
-    let client_config = ClientConfig::load(&args.client_config)
-        .map_err(|err| anyhow!("load client config {}: {err}", args.client_config))?;
-    let mode = match &args.server_config {
-        Some(server_config_path) => {
-            let mut server = launcher.launch(Path::new(server_config_path))?;
-            server.wait_until_ready(&client_config.server_url, READY_TIMEOUT)?;
-            let steps = executor.run(client_config, &args.namespace)?;
-            return Ok(SmokeReport {
-                mode: SmokeMode::Managed,
-                namespace: args.namespace.clone(),
-                steps,
-            });
-        }
-        None => SmokeMode::External,
+    let session = SmokeSession::new()?;
+    let mut local_started = false;
+
+    let result = (|| -> Result<SmokeReport> {
+        let add_result = run_json_command(
+            runner,
+            profile_add_local_args(&session, &args.server_config),
+        )?;
+        let _ = expect_success(add_result, "profile_add", Some(PROFILE_NAME), Some("local"))?;
+
+        let up_result = run_json_command(runner, local_control_args(&session, "up"))?;
+        let _ = expect_success(up_result, "local_up", Some(PROFILE_NAME), Some("local"))?;
+        local_started = true;
+
+        let steps = execute_smoke_sequence(
+            runner,
+            &session,
+            SmokeMode::Local,
+            &args.namespace,
+            smoke_id,
+        )?;
+        Ok(SmokeReport {
+            mode: SmokeMode::Local,
+            namespace: args.namespace.clone(),
+            steps,
+        })
+    })();
+
+    let cleanup = if local_started {
+        run_json_command(runner, local_control_args(&session, "down"))
+            .and_then(|result| {
+                expect_success(result, "local_down", Some(PROFILE_NAME), Some("local")).map(|_| ())
+            })
+            .map_err(|error| anyhow!("local down cleanup failed: {error}"))
+    } else {
+        Ok(())
     };
 
-    let steps = executor.run(client_config, &args.namespace)?;
+    match (result, cleanup) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(main_error), Ok(())) => Err(main_error),
+        (Err(main_error), Err(cleanup_error)) => {
+            Err(anyhow!("{main_error}; additionally, {cleanup_error}"))
+        }
+    }
+}
+
+fn run_remote_smoke_with(args: &RemoteSmokeArgs, runner: &dyn LoonRunner) -> Result<SmokeReport> {
+    let smoke_id = smoke_id();
+    run_remote_smoke_with_id(args, runner, &smoke_id)
+}
+
+fn run_remote_smoke_with_id(
+    args: &RemoteSmokeArgs,
+    runner: &dyn LoonRunner,
+    smoke_id: &str,
+) -> Result<SmokeReport> {
+    let session = SmokeSession::new()?;
+    let add_result = run_json_command(
+        runner,
+        profile_add_remote_args(&session, &args.server_url, args.auth_token.as_deref()),
+    )?;
+    let _ = expect_success(
+        add_result,
+        "profile_add",
+        Some(PROFILE_NAME),
+        Some("remote"),
+    )?;
+
+    let steps = execute_smoke_sequence(
+        runner,
+        &session,
+        SmokeMode::Remote,
+        &args.namespace,
+        smoke_id,
+    )?;
     Ok(SmokeReport {
-        mode,
+        mode: SmokeMode::Remote,
         namespace: args.namespace.clone(),
         steps,
     })
 }
 
-fn execute_smoke_sequence(client: &Client, namespace: &str) -> Result<Vec<&'static str>> {
-    accept_namespace_exists(client.create_namespace(namespace), namespace)?;
-
-    let namespaces = client
-        .list_namespaces()
-        .with_context(|| format!("list namespaces for smoke namespace `{namespace}`"))?;
-    if !namespaces
-        .iter()
-        .any(|summary| summary.name.as_str() == namespace)
-    {
-        bail!("namespace `{namespace}` was not returned by list namespaces");
-    }
-
-    let temp_dir = tempdir().context("create tempdir for smoke inputs")?;
-    let smoke_id = smoke_id();
+fn execute_smoke_sequence(
+    runner: &dyn LoonRunner,
+    session: &SmokeSession,
+    mode: SmokeMode,
+    namespace: &str,
+    smoke_id: &str,
+) -> Result<Vec<&'static str>> {
+    let temp_dir = tempdir().context("create tempdir for smoke payloads")?;
     let smoke_root = format!("/xtask-smoke-{smoke_id}");
-    let parent_path = NamespacePath::parse(&format!("{namespace}:{smoke_root}"))
-        .context("build smoke parent path")?;
-    let uploaded_path = NamespacePath::parse(&format!("{namespace}:{smoke_root}/input.txt"))
-        .context("build smoke upload path")?;
-    let moved_path = NamespacePath::parse(&format!("{namespace}:{smoke_root}/renamed.txt"))
-        .context("build smoke moved path")?;
+    let uploaded_path = format!("{smoke_root}/input.txt");
+    let copied_path = format!("{smoke_root}/copy.txt");
+    let moved_path = format!("{smoke_root}/moved.txt");
+    let parent_path = smoke_root.clone();
 
     let upload_file = temp_dir.path().join("input.txt");
     let downloaded_file = temp_dir.path().join("downloaded.txt");
@@ -207,92 +307,247 @@ fn execute_smoke_sequence(client: &Client, namespace: &str) -> Result<Vec<&'stat
     fs::write(&upload_file, &payload)
         .with_context(|| format!("write smoke input file {}", upload_file.display()))?;
 
-    client
-        .put_from_path(&upload_file, &uploaded_path)
-        .with_context(|| format!("put {}", uploaded_path.absolute_path))?;
+    let create_result = run_json_command(runner, namespace_create_args(session, namespace))?;
+    match create_result {
+        JsonCommandResult::Success(envelope) => {
+            let envelope = expect_envelope(
+                envelope,
+                "namespace_create",
+                Some(PROFILE_NAME),
+                Some(mode.as_str()),
+            )?;
+            let data = require_data_type(&envelope, "namespace_summary")?;
+            let name = string_field(data, "name")?;
+            if name != namespace {
+                bail!("namespace create returned `{name}`, expected `{namespace}`");
+            }
+        }
+        JsonCommandResult::Failure(envelope) => {
+            let envelope = expect_envelope(
+                envelope,
+                "namespace_create",
+                Some(PROFILE_NAME),
+                Some(mode.as_str()),
+            )?;
+            let error = envelope
+                .error
+                .as_ref()
+                .ok_or_else(|| anyhow!("namespace create failure envelope missing error"))?;
+            if error.code != "namespace_exists" {
+                bail!("create namespace `{namespace}`: {}", error.message);
+            }
+        }
+    }
 
-    let listed_entries = client
-        .list_path(&parent_path)
-        .with_context(|| format!("list {}", parent_path.absolute_path))?;
-    if !listed_entries
+    let list_envelope = expect_success(
+        run_json_command(runner, namespace_list_args(session))?,
+        "namespace_list",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let list_data = require_data_type(&list_envelope, "namespace_list")?;
+    let namespaces = array_field(list_data, "namespaces")?;
+    if !namespaces
         .iter()
-        .any(|entry| entry.absolute_path == uploaded_path.absolute_path)
+        .any(|value| value.get("name").and_then(Value::as_str) == Some(namespace))
     {
+        bail!("namespace `{namespace}` was not returned by namespace list");
+    }
+
+    let put_envelope = expect_success(
+        run_json_command(
+            runner,
+            filesystem_put_args(session, namespace, &upload_file, &uploaded_path),
+        )?,
+        "filesystem_put",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let put_data = require_data_type(&put_envelope, "file_mutation")?;
+    let expected_target = format!("{namespace}:{uploaded_path}");
+    let put_target = string_field(put_data, "target")?;
+    if put_target != expected_target {
+        bail!("put target `{put_target}` did not match `{expected_target}`");
+    }
+
+    let ls_envelope = expect_success(
+        run_json_command(runner, filesystem_ls_args(session, namespace, &parent_path))?,
+        "filesystem_ls",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let ls_data = require_data_type(&ls_envelope, "path_entries")?;
+    let ls_entries = array_field(ls_data, "entries")?;
+    if !ls_entries.iter().any(|entry| {
+        entry.get("absolute_path").and_then(Value::as_str) == Some(uploaded_path.as_str())
+    }) {
+        bail!("ls {parent_path} did not include `{uploaded_path}`");
+    }
+
+    let stat_envelope = expect_success(
+        run_json_command(
+            runner,
+            filesystem_stat_args(session, namespace, &uploaded_path),
+        )?,
+        "filesystem_stat",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let stat_data = require_data_type(&stat_envelope, "path_entry")?;
+    let source_inode = id_field(stat_data, "inode_id")?;
+    let inode_kind = string_field(stat_data, "inode_kind")?;
+    if inode_kind != "file" {
+        bail!("expected `{uploaded_path}` to be a file, got `{inode_kind}`");
+    }
+    let size_bytes = u64_field(stat_data, "size_bytes")?;
+    if size_bytes != payload.len() as u64 {
         bail!(
-            "list {} did not include uploaded file {}",
-            parent_path.absolute_path,
-            uploaded_path.absolute_path
+            "expected `{uploaded_path}` size {}, got {size_bytes}",
+            payload.len()
         );
     }
 
-    let stat_entry = client
-        .stat_path(&uploaded_path)
-        .with_context(|| format!("stat {}", uploaded_path.absolute_path))?;
-    if stat_entry.inode_kind != InodeKind::File {
-        bail!(
-            "expected {} to be a file, got {:?}",
-            uploaded_path.absolute_path,
-            stat_entry.inode_kind
-        );
-    }
-    if stat_entry.size_bytes != Some(payload.len() as u64) {
-        bail!(
-            "expected {} size {}, got {:?}",
-            uploaded_path.absolute_path,
-            payload.len(),
-            stat_entry.size_bytes
-        );
+    let cat_output = run_stream_command(
+        runner,
+        filesystem_cat_args(session, namespace, &uploaded_path),
+    )?;
+    if cat_output.stdout != payload {
+        bail!("cat bytes for `{uploaded_path}` did not match uploaded payload");
     }
 
-    client
-        .get_to_path(&uploaded_path, &downloaded_file)
-        .with_context(|| format!("get {}", uploaded_path.absolute_path))?;
+    let get_envelope = expect_success(
+        run_json_command(
+            runner,
+            filesystem_get_args(session, namespace, &uploaded_path, &downloaded_file),
+        )?,
+        "filesystem_get",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let get_data = require_data_type(&get_envelope, "file_transfer")?;
+    let bytes_written = u64_field(get_data, "bytes_written")?;
+    if bytes_written != payload.len() as u64 {
+        bail!(
+            "expected get to write {} bytes, got {bytes_written}",
+            payload.len()
+        );
+    }
     let downloaded = fs::read(&downloaded_file)
         .with_context(|| format!("read {}", downloaded_file.display()))?;
     if downloaded != payload {
-        bail!(
-            "downloaded bytes for {} did not match uploaded payload",
-            uploaded_path.absolute_path
-        );
+        bail!("downloaded bytes for `{uploaded_path}` did not match uploaded payload");
     }
 
-    client
-        .move_path(&uploaded_path, &moved_path)
-        .with_context(|| {
-            format!(
-                "move {} to {}",
-                uploaded_path.absolute_path, moved_path.absolute_path
-            )
-        })?;
+    let cp_envelope = expect_success(
+        run_json_command(
+            runner,
+            filesystem_cp_args(session, namespace, &uploaded_path, &copied_path),
+        )?,
+        "filesystem_cp",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let cp_data = require_data_type(&cp_envelope, "path_move")?;
+    let cp_from = string_field(cp_data, "from")?;
+    let cp_to = string_field(cp_data, "to")?;
+    if cp_from != expected_target {
+        bail!("copy source `{cp_from}` did not match `{expected_target}`");
+    }
+    let expected_copy_target = format!("{namespace}:{copied_path}");
+    if cp_to != expected_copy_target {
+        bail!("copy target `{cp_to}` did not match `{expected_copy_target}`");
+    }
 
-    client
-        .delete_path(&moved_path)
-        .with_context(|| format!("rm {}", moved_path.absolute_path))?;
+    let copy_stat_envelope = expect_success(
+        run_json_command(
+            runner,
+            filesystem_stat_args(session, namespace, &copied_path),
+        )?,
+        "filesystem_stat",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let copy_stat = require_data_type(&copy_stat_envelope, "path_entry")?;
+    let copied_inode = id_field(copy_stat, "inode_id")?;
+    if copied_inode == source_inode {
+        bail!("copy `{copied_path}` reused source inode `{source_inode}`");
+    }
 
-    let final_entries = client
-        .list_path(&parent_path)
-        .with_context(|| format!("list {} after delete", parent_path.absolute_path))?;
-    if final_entries
-        .iter()
-        .any(|entry| entry.absolute_path == uploaded_path.absolute_path)
-    {
+    let mv_envelope = expect_success(
+        run_json_command(
+            runner,
+            filesystem_mv_args(session, namespace, &copied_path, &moved_path),
+        )?,
+        "filesystem_mv",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let mv_data = require_data_type(&mv_envelope, "path_move")?;
+    let moved_to = string_field(mv_data, "to")?;
+    let expected_moved_target = format!("{namespace}:{moved_path}");
+    if moved_to != expected_moved_target {
+        bail!("move target `{moved_to}` did not match `{expected_moved_target}`");
+    }
+
+    let rm_envelope = expect_success(
+        run_json_command(runner, filesystem_rm_args(session, namespace, &moved_path))?,
+        "filesystem_rm",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let rm_data = require_data_type(&rm_envelope, "file_mutation")?;
+    let removed_target = string_field(rm_data, "target")?;
+    if removed_target != expected_moved_target {
+        bail!("rm target `{removed_target}` did not match `{expected_moved_target}`");
+    }
+
+    let final_ls_envelope = expect_success(
+        run_json_command(runner, filesystem_ls_args(session, namespace, &parent_path))?,
+        "filesystem_ls",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    let final_ls_data = require_data_type(&final_ls_envelope, "path_entries")?;
+    let final_entries = array_field(final_ls_data, "entries")?;
+    let source_present = final_entries.iter().any(|entry| {
+        entry.get("absolute_path").and_then(Value::as_str) == Some(uploaded_path.as_str())
+    });
+    let moved_present = final_entries.iter().any(|entry| {
+        entry.get("absolute_path").and_then(Value::as_str) == Some(moved_path.as_str())
+    });
+    if !source_present {
+        bail!("final ls {parent_path} did not include original source `{uploaded_path}`");
+    }
+    if moved_present {
+        bail!("final ls {parent_path} still included removed path `{moved_path}`");
+    }
+
+    let _ = expect_success(
+        run_json_command(
+            runner,
+            filesystem_stat_args(session, namespace, &uploaded_path),
+        )?,
+        "filesystem_stat",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+
+    let removed_stat = run_json_command(
+        runner,
+        filesystem_stat_args(session, namespace, &moved_path),
+    )?;
+    let removed_error = expect_failure(
+        removed_stat,
+        "filesystem_stat",
+        Some(PROFILE_NAME),
+        Some(mode.as_str()),
+    )?;
+    if removed_error.code != "path_not_found" {
         bail!(
-            "removed file {} still appeared in final list {}",
-            uploaded_path.absolute_path,
-            parent_path.absolute_path
+            "expected stat on `{moved_path}` to fail with path_not_found, got {}",
+            removed_error.code
         );
     }
-    if final_entries
-        .iter()
-        .any(|entry| entry.absolute_path == moved_path.absolute_path)
-    {
-        bail!(
-            "removed file {} still appeared in final list {}",
-            moved_path.absolute_path,
-            parent_path.absolute_path
-        );
-    }
-    expect_path_not_found(client.stat_path(&moved_path), &moved_path)?;
 
     Ok(vec![
         STEP_CREATE_NAMESPACE,
@@ -300,7 +555,9 @@ fn execute_smoke_sequence(client: &Client, namespace: &str) -> Result<Vec<&'stat
         STEP_PUT,
         STEP_LS,
         STEP_STAT,
+        STEP_CAT,
         STEP_GET,
+        STEP_CP,
         STEP_MOVE,
         STEP_RM,
         STEP_VERIFY_REMOVAL,
@@ -316,33 +573,376 @@ fn render_report(report: &SmokeReport) -> String {
     )
 }
 
-fn accept_namespace_exists<T>(
-    result: std::result::Result<T, ClientError>,
-    namespace: &str,
-) -> Result<()> {
-    match result {
-        Ok(_) => Ok(()),
-        Err(ClientError::Api { code, .. }) if code == "namespace_exists" => Ok(()),
-        Err(err) => Err(anyhow!("create namespace `{namespace}`: {err}")),
+fn run_json_command(runner: &dyn LoonRunner, args: Vec<String>) -> Result<JsonCommandResult> {
+    let output = runner.run(&args)?;
+    if output.success() {
+        Ok(JsonCommandResult::Success(parse_envelope(
+            &output.stdout,
+            "stdout",
+            &args,
+            &output,
+        )?))
+    } else {
+        Ok(JsonCommandResult::Failure(parse_envelope(
+            &output.stderr,
+            "stderr",
+            &args,
+            &output,
+        )?))
     }
 }
 
-fn expect_path_not_found(
-    result: std::result::Result<loon_api::AuthoritativePathEntry, ClientError>,
-    path: &NamespacePath,
-) -> Result<()> {
+fn run_stream_command(runner: &dyn LoonRunner, args: Vec<String>) -> Result<LoonOutput> {
+    let output = runner.run(&args)?;
+    if output.success() {
+        Ok(output)
+    } else {
+        bail!(
+            "command `{}` failed with exit code {:?}: {}",
+            args.join(" "),
+            output.exit_code,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+}
+
+fn parse_envelope(
+    bytes: &[u8],
+    stream_name: &str,
+    args: &[String],
+    output: &LoonOutput,
+) -> Result<JsonEnvelope> {
+    serde_json::from_slice(bytes).with_context(|| {
+        format!(
+            "parse loon JSON envelope from {stream_name} for `{}` (exit code {:?}, stdout=`{}`, stderr=`{}`)",
+            args.join(" "),
+            output.exit_code,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        )
+    })
+}
+
+fn expect_success(
+    result: JsonCommandResult,
+    expected_kind: &str,
+    expected_profile: Option<&str>,
+    expected_mode: Option<&str>,
+) -> Result<JsonEnvelope> {
     match result {
-        Ok(entry) => bail!(
-            "expected {} to be absent after delete, but stat returned inode {}",
-            path.absolute_path,
-            entry.inode_id
-        ),
-        Err(ClientError::Api { code, .. }) if code == "path_not_found" => Ok(()),
-        Err(err) => Err(anyhow!(
-            "expected stat {} to return path_not_found after delete: {err}",
-            path.absolute_path
+        JsonCommandResult::Success(envelope) => {
+            expect_envelope(envelope, expected_kind, expected_profile, expected_mode)
+        }
+        JsonCommandResult::Failure(envelope) => {
+            let envelope =
+                expect_envelope(envelope, expected_kind, expected_profile, expected_mode)?;
+            let error = envelope
+                .error
+                .ok_or_else(|| anyhow!("failure envelope missing error body"))?;
+            bail!("command failed with {}: {}", error.code, error.message);
+        }
+    }
+}
+
+fn expect_failure(
+    result: JsonCommandResult,
+    expected_kind: &str,
+    expected_profile: Option<&str>,
+    expected_mode: Option<&str>,
+) -> Result<JsonError> {
+    match result {
+        JsonCommandResult::Success(envelope) => {
+            let envelope =
+                expect_envelope(envelope, expected_kind, expected_profile, expected_mode)?;
+            bail!(
+                "expected `{expected_kind}` to fail, but it succeeded with data type `{}`",
+                data_type_name(&envelope.data)
+            );
+        }
+        JsonCommandResult::Failure(envelope) => {
+            let envelope =
+                expect_envelope(envelope, expected_kind, expected_profile, expected_mode)?;
+            envelope
+                .error
+                .ok_or_else(|| anyhow!("failure envelope missing error body"))
+        }
+    }
+}
+
+fn expect_envelope(
+    envelope: JsonEnvelope,
+    expected_kind: &str,
+    expected_profile: Option<&str>,
+    expected_mode: Option<&str>,
+) -> Result<JsonEnvelope> {
+    if envelope.kind != expected_kind {
+        bail!(
+            "expected JSON kind `{expected_kind}`, got `{}`",
+            envelope.kind
+        );
+    }
+    if envelope.format_version != FORMAT_VERSION {
+        bail!(
+            "expected format_version {}, got {}",
+            FORMAT_VERSION,
+            envelope.format_version
+        );
+    }
+    if envelope.profile.as_deref() != expected_profile {
+        bail!(
+            "expected profile {:?}, got {:?}",
+            expected_profile,
+            envelope.profile
+        );
+    }
+    if envelope.mode.as_deref() != expected_mode {
+        bail!("expected mode {:?}, got {:?}", expected_mode, envelope.mode);
+    }
+    Ok(envelope)
+}
+
+fn require_data_type<'a>(envelope: &'a JsonEnvelope, expected_type: &str) -> Result<&'a Value> {
+    let data = envelope
+        .data
+        .as_ref()
+        .ok_or_else(|| anyhow!("success envelope missing data body"))?;
+    let actual_type = data
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("success envelope data missing `type` field"))?;
+    if actual_type != expected_type {
+        bail!("expected data type `{expected_type}`, got `{actual_type}`");
+    }
+    Ok(data)
+}
+
+fn data_type_name(data: &Option<Value>) -> String {
+    data.as_ref()
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>")
+        .to_owned()
+}
+
+fn array_field<'a>(value: &'a Value, field: &str) -> Result<&'a [Value]> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| anyhow!("expected `{field}` to be an array"))
+}
+
+fn string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("expected `{field}` to be a string"))
+}
+
+fn u64_field(value: &Value, field: &str) -> Result<u64> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("expected `{field}` to be an unsigned integer"))
+}
+
+fn id_field(value: &Value, field: &str) -> Result<u64> {
+    match value.get(field) {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .ok_or_else(|| anyhow!("expected `{field}` to be an unsigned integer")),
+        Some(Value::String(text)) => text
+            .trim_start_matches("inode-")
+            .parse::<u64>()
+            .with_context(|| format!("parse `{field}` from `{text}`")),
+        _ => Err(anyhow!(
+            "expected `{field}` to be an inode id string or unsigned integer"
         )),
     }
+}
+
+fn base_args(session: &SmokeSession, profile: Option<&str>, json: bool) -> Vec<String> {
+    let mut args = vec![
+        "--config".to_owned(),
+        session.config_path.display().to_string(),
+    ];
+    if let Some(profile) = profile {
+        args.push("--profile".to_owned());
+        args.push(profile.to_owned());
+    }
+    if json {
+        args.push("--json".to_owned());
+    }
+    args.push("--no-input".to_owned());
+    args
+}
+
+fn profile_add_local_args(session: &SmokeSession, server_config: &Path) -> Vec<String> {
+    let mut args = base_args(session, None, true);
+    args.extend([
+        "profile".to_owned(),
+        "add".to_owned(),
+        "local".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--server-config".to_owned(),
+        server_config.display().to_string(),
+    ]);
+    args
+}
+
+fn profile_add_remote_args(
+    session: &SmokeSession,
+    server_url: &str,
+    auth_token: Option<&str>,
+) -> Vec<String> {
+    let mut args = base_args(session, None, true);
+    args.extend([
+        "profile".to_owned(),
+        "add".to_owned(),
+        "remote".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--server-url".to_owned(),
+        server_url.to_owned(),
+    ]);
+    if let Some(auth_token) = auth_token {
+        args.push("--auth-token".to_owned());
+        args.push(auth_token.to_owned());
+    }
+    args
+}
+
+fn local_control_args(session: &SmokeSession, command: &str) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend(["local".to_owned(), command.to_owned()]);
+    args
+}
+
+fn namespace_create_args(session: &SmokeSession, namespace: &str) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend([
+        "namespace".to_owned(),
+        "create".to_owned(),
+        namespace.to_owned(),
+    ]);
+    args
+}
+
+fn namespace_list_args(session: &SmokeSession) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend(["namespace".to_owned(), "list".to_owned()]);
+    args
+}
+
+fn filesystem_put_args(
+    session: &SmokeSession,
+    namespace: &str,
+    local_path: &Path,
+    remote_path: &str,
+) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend([
+        "filesystem".to_owned(),
+        "put".to_owned(),
+        namespace.to_owned(),
+        local_path.display().to_string(),
+        remote_path.to_owned(),
+    ]);
+    args
+}
+
+fn filesystem_ls_args(session: &SmokeSession, namespace: &str, path: &str) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend([
+        "filesystem".to_owned(),
+        "ls".to_owned(),
+        namespace.to_owned(),
+        path.to_owned(),
+    ]);
+    args
+}
+
+fn filesystem_stat_args(session: &SmokeSession, namespace: &str, path: &str) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend([
+        "filesystem".to_owned(),
+        "stat".to_owned(),
+        namespace.to_owned(),
+        path.to_owned(),
+    ]);
+    args
+}
+
+fn filesystem_cat_args(session: &SmokeSession, namespace: &str, path: &str) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), false);
+    args.extend([
+        "filesystem".to_owned(),
+        "cat".to_owned(),
+        namespace.to_owned(),
+        path.to_owned(),
+    ]);
+    args
+}
+
+fn filesystem_get_args(
+    session: &SmokeSession,
+    namespace: &str,
+    remote_path: &str,
+    destination: &Path,
+) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend([
+        "filesystem".to_owned(),
+        "get".to_owned(),
+        namespace.to_owned(),
+        remote_path.to_owned(),
+        destination.display().to_string(),
+    ]);
+    args
+}
+
+fn filesystem_cp_args(
+    session: &SmokeSession,
+    namespace: &str,
+    source_path: &str,
+    dest_path: &str,
+) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend([
+        "filesystem".to_owned(),
+        "cp".to_owned(),
+        namespace.to_owned(),
+        source_path.to_owned(),
+        dest_path.to_owned(),
+    ]);
+    args
+}
+
+fn filesystem_mv_args(
+    session: &SmokeSession,
+    namespace: &str,
+    source_path: &str,
+    dest_path: &str,
+) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend([
+        "filesystem".to_owned(),
+        "mv".to_owned(),
+        namespace.to_owned(),
+        source_path.to_owned(),
+        dest_path.to_owned(),
+    ]);
+    args
+}
+
+fn filesystem_rm_args(session: &SmokeSession, namespace: &str, path: &str) -> Vec<String> {
+    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    args.extend([
+        "filesystem".to_owned(),
+        "rm".to_owned(),
+        namespace.to_owned(),
+        path.to_owned(),
+    ]);
+    args
 }
 
 fn smoke_id() -> String {
@@ -353,59 +953,17 @@ fn smoke_id() -> String {
     format!("{}-{millis}", std::process::id())
 }
 
-fn wait_for_server_ready(child: &mut Child, server_url: &str, timeout: Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    let healthz_url = format!("{}/healthz", server_url.trim_end_matches('/'));
-    loop {
-        match ureq::get(&healthz_url)
-            .timeout(Duration::from_millis(250))
-            .call()
-        {
-            Ok(response) if response.status() == 200 => return Ok(()),
-            Ok(_) | Err(_) => {}
-        }
-
-        if let Some(status) = child
-            .try_wait()
-            .context("poll managed server child process")?
-        {
-            return Err(early_exit_error(status, &healthz_url));
-        }
-        if Instant::now() >= deadline {
-            bail!("timed out waiting for managed server readiness at {healthz_url}");
-        }
-        thread::sleep(READY_POLL_INTERVAL);
-    }
-}
-
-fn early_exit_error(status: ExitStatus, healthz_url: &str) -> anyhow::Error {
-    anyhow!(
-        "managed server exited before readiness check completed (status: {status}) while waiting for {healthz_url}"
-    )
-}
-
-fn terminate_child(child: &mut Child) {
-    match child.try_wait() {
-        Ok(Some(_)) => return,
-        Ok(None) => {}
-        Err(_) => return,
-    }
-
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loon_server::{app, ServerConfig, StoreConfig};
-    use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use serde_json::json;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
 
     #[test]
     fn smoke_report_renders_compact_summary() {
         let report = SmokeReport {
-            mode: SmokeMode::Managed,
+            mode: SmokeMode::Local,
             namespace: "demo".to_owned(),
             steps: vec![
                 STEP_CREATE_NAMESPACE,
@@ -415,172 +973,22 @@ mod tests {
         };
         assert_eq!(
             render_report(&report),
-            "mode=managed namespace=demo status=passed steps=create_namespace,list_namespaces,verify_removal"
+            "mode=local namespace=demo status=passed steps=create_namespace,list_namespaces,verify_removal"
         );
     }
 
     #[test]
-    fn external_smoke_path_uses_executor_without_launching_server() {
-        let config_path = write_client_config("http://127.0.0.1:9400", Some("dev-token"));
-        let args = SmokeArgs {
-            client_config: config_path.display().to_string(),
-            server_config: None,
+    fn local_smoke_runs_expected_cli_sequence() {
+        let server_config = PathBuf::from("/tmp/loond.toml");
+        let args = LocalSmokeArgs {
+            server_config: server_config.clone(),
             namespace: "demo".to_owned(),
         };
-        let events = Arc::new(Mutex::new(Vec::<String>::new()));
-        let executor = RecordingExecutor::new(events.clone(), false);
-        let launcher = RecordingLauncher::new(events.clone(), None, None);
+        let runner = RecordingRunner::new(local_success_outputs("demo"));
 
-        let report = run_smoke_with(&args, &executor, &launcher).expect("run smoke");
+        let report = run_local_smoke_with_id(&args, &runner, "seed").expect("local smoke");
 
-        assert_eq!(
-            report.steps,
-            vec![
-                STEP_CREATE_NAMESPACE,
-                STEP_LIST_NAMESPACES,
-                STEP_VERIFY_REMOVAL
-            ]
-        );
-        assert_eq!(report.mode, SmokeMode::External);
-        assert_eq!(
-            events.lock().expect("events").as_slice(),
-            ["execute:demo:http://127.0.0.1:9400"]
-        );
-    }
-
-    #[test]
-    fn managed_smoke_path_launches_waits_executes_and_stops() {
-        let config_path = write_client_config("http://127.0.0.1:9400", Some("dev-token"));
-        let server_path = temp_file_path("server.toml");
-        fs::write(&server_path, "bind = \"127.0.0.1:9400\"\n").expect("write server config");
-        let args = SmokeArgs {
-            client_config: config_path.display().to_string(),
-            server_config: Some(server_path.display().to_string()),
-            namespace: "demo".to_owned(),
-        };
-        let events = Arc::new(Mutex::new(Vec::<String>::new()));
-        let executor = RecordingExecutor::new(events.clone(), false);
-        let launcher = RecordingLauncher::new(events.clone(), None, None);
-
-        let report = run_smoke_with(&args, &executor, &launcher).expect("run smoke");
-
-        assert_eq!(report.mode, SmokeMode::Managed);
-        assert_eq!(
-            events.lock().expect("events").as_slice(),
-            [
-                format!("launch:{}", server_path.display()),
-                "wait:http://127.0.0.1:9400".to_owned(),
-                "execute:demo:http://127.0.0.1:9400".to_owned(),
-                "stop".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn managed_smoke_path_surfaces_readiness_timeout() {
-        let config_path = write_client_config("http://127.0.0.1:9400", Some("dev-token"));
-        let server_path = temp_file_path("server-timeout.toml");
-        fs::write(&server_path, "bind = \"127.0.0.1:9400\"\n").expect("write server config");
-        let args = SmokeArgs {
-            client_config: config_path.display().to_string(),
-            server_config: Some(server_path.display().to_string()),
-            namespace: "demo".to_owned(),
-        };
-        let events = Arc::new(Mutex::new(Vec::<String>::new()));
-        let executor = RecordingExecutor::new(events.clone(), false);
-        let launcher = RecordingLauncher::new(
-            events.clone(),
-            Some("timed out waiting for managed server readiness at http://127.0.0.1:9400/healthz"),
-            None,
-        );
-
-        let error = run_smoke_with(&args, &executor, &launcher).expect_err("timeout");
-
-        assert!(error
-            .to_string()
-            .contains("timed out waiting for managed server readiness"));
-        assert_eq!(
-            events.lock().expect("events").as_slice(),
-            [
-                format!("launch:{}", server_path.display()),
-                "wait:http://127.0.0.1:9400".to_owned(),
-                "stop".to_owned(),
-            ]
-        );
-    }
-
-    #[test]
-    fn managed_smoke_path_surfaces_child_failure() {
-        let config_path = write_client_config("http://127.0.0.1:9400", Some("dev-token"));
-        let server_path = temp_file_path("server-failure.toml");
-        fs::write(&server_path, "bind = \"127.0.0.1:9400\"\n").expect("write server config");
-        let args = SmokeArgs {
-            client_config: config_path.display().to_string(),
-            server_config: Some(server_path.display().to_string()),
-            namespace: "demo".to_owned(),
-        };
-        let events = Arc::new(Mutex::new(Vec::<String>::new()));
-        let executor = RecordingExecutor::new(events.clone(), false);
-        let launcher = RecordingLauncher::new(
-            events.clone(),
-            Some("managed server exited before readiness check completed (status: 1) while waiting for http://127.0.0.1:9400/healthz"),
-            None,
-        );
-
-        let error = run_smoke_with(&args, &executor, &launcher).expect_err("child failure");
-
-        assert!(error
-            .to_string()
-            .contains("managed server exited before readiness check completed"));
-        assert_eq!(
-            events.lock().expect("events").as_slice(),
-            [
-                format!("launch:{}", server_path.display()),
-                "wait:http://127.0.0.1:9400".to_owned(),
-                "stop".to_owned(),
-            ]
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn external_smoke_sequence_round_trips_against_real_server() {
-        let temp_dir = tempdir().expect("tempdir");
-        let config = ServerConfig {
-            bind: "127.0.0.1:0".to_owned(),
-            auth_token: Some("test-token".to_owned()),
-            writer_id: "loond-test".to_owned(),
-            writer_version: "loond-test/0.1.0".to_owned(),
-            lease_duration_ms: 60_000,
-            store: StoreConfig::LocalFs {
-                root: temp_dir.path().join("store").display().to_string(),
-                key_prefix: Some("xtask-smoke-test".to_owned()),
-            },
-        };
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("listener addr");
-        let router = app(config).expect("build app");
-        let server = tokio::spawn(async move {
-            axum::serve(listener, router).await.expect("serve app");
-        });
-
-        let client_config = write_client_config(&format!("http://{}", addr), Some("test-token"));
-        let args = SmokeArgs {
-            client_config: client_config.display().to_string(),
-            server_config: None,
-            namespace: "xtask-demo".to_owned(),
-        };
-
-        let report = tokio::task::spawn_blocking(move || {
-            run_smoke_with(&args, &ClientSmokeExecutor, &PanicLauncher)
-        })
-        .await
-        .expect("join smoke task")
-        .expect("run smoke");
-
-        assert_eq!(report.mode, SmokeMode::External);
+        assert_eq!(report.mode, SmokeMode::Local);
         assert_eq!(
             report.steps,
             vec![
@@ -589,165 +997,389 @@ mod tests {
                 STEP_PUT,
                 STEP_LS,
                 STEP_STAT,
+                STEP_CAT,
                 STEP_GET,
+                STEP_CP,
                 STEP_MOVE,
                 STEP_RM,
                 STEP_VERIFY_REMOVAL,
             ]
         );
-
-        server.abort();
+        let calls = runner.calls();
+        assert_same_config_path(&calls);
+        assert_command_suffix(
+            &calls[0],
+            &[
+                "--json",
+                "--no-input",
+                "profile",
+                "add",
+                "local",
+                "smoke",
+                "--server-config",
+                "/tmp/loond.toml",
+            ],
+        );
+        assert_command_suffix(
+            &calls[1],
+            &["--profile", "smoke", "--json", "--no-input", "local", "up"],
+        );
+        assert_command_suffix(
+            calls.last().expect("last call"),
+            &[
+                "--profile",
+                "smoke",
+                "--json",
+                "--no-input",
+                "local",
+                "down",
+            ],
+        );
     }
 
     #[test]
-    fn wait_for_server_ready_times_out_cleanly() {
-        let mut child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 5")
-            .spawn()
-            .expect("spawn sleep");
+    fn remote_smoke_runs_expected_cli_sequence() {
+        let args = RemoteSmokeArgs {
+            server_url: "http://127.0.0.1:9400".to_owned(),
+            auth_token: Some("dev-token".to_owned()),
+            namespace: "demo".to_owned(),
+        };
+        let runner = RecordingRunner::new(remote_success_outputs("demo"));
 
-        let error = wait_for_server_ready(
-            &mut child,
-            "http://127.0.0.1:65530",
-            Duration::from_millis(300),
-        )
-        .expect_err("timeout");
+        let report = run_remote_smoke_with_id(&args, &runner, "seed").expect("remote smoke");
 
-        assert!(error
-            .to_string()
-            .contains("timed out waiting for managed server readiness"));
-        terminate_child(&mut child);
+        assert_eq!(report.mode, SmokeMode::Remote);
+        let calls = runner.calls();
+        assert_same_config_path(&calls);
+        assert_command_suffix(
+            &calls[0],
+            &[
+                "--json",
+                "--no-input",
+                "profile",
+                "add",
+                "remote",
+                "smoke",
+                "--server-url",
+                "http://127.0.0.1:9400",
+                "--auth-token",
+                "dev-token",
+            ],
+        );
+        assert!(
+            !calls.iter().any(|call| {
+                call.iter()
+                    .skip_while(|arg| *arg != "local")
+                    .next()
+                    .is_some()
+            }),
+            "remote smoke should not issue local lifecycle commands"
+        );
+        assert_eq!(report.steps.first(), Some(&STEP_CREATE_NAMESPACE));
     }
 
     #[test]
-    fn wait_for_server_ready_detects_early_child_exit() {
-        let mut child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg("exit 7")
-            .spawn()
-            .expect("spawn failing shell");
+    fn local_smoke_always_runs_local_down_after_failure() {
+        let server_config = PathBuf::from("/tmp/loond.toml");
+        let args = LocalSmokeArgs {
+            server_config,
+            namespace: "demo".to_owned(),
+        };
+        let mut outputs = local_success_outputs("demo");
+        outputs[5] = json_failure(
+            "filesystem_ls",
+            Some("smoke"),
+            Some("local"),
+            "client_error",
+            "boom",
+        );
+        let runner = RecordingRunner::new(outputs);
 
-        let error =
-            wait_for_server_ready(&mut child, "http://127.0.0.1:65531", Duration::from_secs(2))
-                .expect_err("early exit");
+        let error = run_local_smoke_with_id(&args, &runner, "seed").expect_err("smoke should fail");
 
-        assert!(error
-            .to_string()
-            .contains("managed server exited before readiness check completed"));
+        assert!(error.to_string().contains("boom"));
+        let calls = runner.calls();
+        assert_command_suffix(
+            calls.last().expect("last call"),
+            &[
+                "--profile",
+                "smoke",
+                "--json",
+                "--no-input",
+                "local",
+                "down",
+            ],
+        );
     }
 
-    fn write_client_config(server_url: &str, auth_token: Option<&str>) -> PathBuf {
-        let path = temp_file_path("client.toml");
-        let mut body = format!("server_url = \"{server_url}\"\n");
-        match auth_token {
-            Some(token) => body.push_str(&format!("auth_token = \"{token}\"\n")),
-            None => body.push_str("auth_token = \"\"\n"),
+    #[test]
+    fn namespace_exists_is_non_fatal() {
+        let args = RemoteSmokeArgs {
+            server_url: "http://127.0.0.1:9400".to_owned(),
+            auth_token: None,
+            namespace: "demo".to_owned(),
+        };
+        let mut outputs = remote_success_outputs("demo");
+        outputs[1] = json_failure(
+            "namespace_create",
+            Some("smoke"),
+            Some("remote"),
+            "namespace_exists",
+            "namespace already exists",
+        );
+        let runner = RecordingRunner::new(outputs);
+
+        let report = run_remote_smoke_with_id(&args, &runner, "seed").expect("remote smoke");
+
+        assert_eq!(report.mode, SmokeMode::Remote);
+        assert_eq!(report.steps[0], STEP_CREATE_NAMESPACE);
+    }
+
+    fn assert_same_config_path(calls: &[Vec<String>]) {
+        let config_path = calls
+            .first()
+            .and_then(|call| call.get(1))
+            .expect("config path");
+        for call in calls {
+            assert_eq!(call.first().map(String::as_str), Some("--config"));
+            assert_eq!(call.get(1).map(String::as_str), Some(config_path.as_str()));
         }
-        fs::write(&path, body).expect("write client config");
-        path
     }
 
-    fn temp_file_path(name: &str) -> PathBuf {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join(name);
-        let _ = dir.keep();
-        path
+    fn assert_command_suffix(actual: &[String], suffix: &[&str]) {
+        let actual_suffix = &actual[actual.len() - suffix.len()..];
+        let expected = suffix
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(actual_suffix, expected.as_slice());
     }
 
-    struct RecordingExecutor {
-        events: Arc<Mutex<Vec<String>>>,
-        fail: bool,
+    fn local_success_outputs(namespace: &str) -> Vec<LoonOutput> {
+        let mut outputs = Vec::new();
+        outputs.push(json_success(
+            "profile_add",
+            Some(PROFILE_NAME),
+            Some("local"),
+            json!({"type":"profile","name":"smoke","mode":"local","active":true}),
+        ));
+        outputs.push(json_success(
+            "local_up",
+            Some(PROFILE_NAME),
+            Some("local"),
+            json!({
+                "type":"local_status",
+                "profile_name":"smoke",
+                "status":"running",
+                "server_url":"http://127.0.0.1:9400",
+                "server_config_path":"/tmp/loond.toml",
+                "pid":42
+            }),
+        ));
+        outputs.extend(sequence_outputs(namespace, "local"));
+        outputs.push(json_success(
+            "local_down",
+            Some(PROFILE_NAME),
+            Some("local"),
+            json!({
+                "type":"local_status",
+                "profile_name":"smoke",
+                "status":"stopped",
+                "server_url":"http://127.0.0.1:9400",
+                "server_config_path":"/tmp/loond.toml"
+            }),
+        ));
+        outputs
     }
 
-    impl RecordingExecutor {
-        fn new(events: Arc<Mutex<Vec<String>>>, fail: bool) -> Self {
-            Self { events, fail }
+    fn remote_success_outputs(namespace: &str) -> Vec<LoonOutput> {
+        let mut outputs = Vec::new();
+        outputs.push(json_success(
+            "profile_add",
+            Some(PROFILE_NAME),
+            Some("remote"),
+            json!({"type":"profile","name":"smoke","mode":"remote","active":true}),
+        ));
+        outputs.extend(sequence_outputs(namespace, "remote"));
+        outputs
+    }
+
+    fn sequence_outputs(namespace: &str, mode: &str) -> Vec<LoonOutput> {
+        let source_path = "/xtask-smoke-seed/input.txt";
+        let copy_path = "/xtask-smoke-seed/copy.txt";
+        let moved_path = "/xtask-smoke-seed/moved.txt";
+        let payload = b"xtask smoke payload demo seed\n".to_vec();
+        vec![
+            json_success(
+                "namespace_create",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"namespace_summary","name":namespace}),
+            ),
+            json_success(
+                "namespace_list",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"namespace_list","namespaces":[{"name":namespace}]}),
+            ),
+            json_success(
+                "filesystem_put",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"file_mutation","target":format!("{namespace}:{source_path}"),"committed_seq":1}),
+            ),
+            json_success(
+                "filesystem_ls",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"path_entries","entries":[{"absolute_path":source_path,"inode_id":"inode-1","inode_kind":"file","size_bytes":payload.len(),"authoritative_head_seq":1,"display_name":"input.txt","namespace_id":namespace,"parent_inode_id":"inode-0","revision_no":1,"content_manifest_digest":"digest"}]}),
+            ),
+            json_success(
+                "filesystem_stat",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"path_entry","absolute_path":source_path,"inode_id":"inode-1","inode_kind":"file","size_bytes":payload.len(),"authoritative_head_seq":1,"display_name":"input.txt","namespace_id":namespace,"parent_inode_id":"inode-0","revision_no":1,"content_manifest_digest":"digest"}),
+            ),
+            LoonOutput {
+                exit_code: Some(0),
+                stdout: payload.clone(),
+                stderr: Vec::new(),
+            },
+            json_success(
+                "filesystem_get",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"file_transfer","target":format!("{namespace}:{source_path}"),"destination":"/tmp/downloaded.txt","bytes_written":payload.len()}),
+            ),
+            json_success(
+                "filesystem_cp",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"path_move","from":format!("{namespace}:{source_path}"),"to":format!("{namespace}:{copy_path}"),"committed_seq":2}),
+            ),
+            json_success(
+                "filesystem_stat",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"path_entry","absolute_path":copy_path,"inode_id":"inode-2","inode_kind":"file","size_bytes":payload.len(),"authoritative_head_seq":2,"display_name":"copy.txt","namespace_id":namespace,"parent_inode_id":"inode-0","revision_no":1,"content_manifest_digest":"digest"}),
+            ),
+            json_success(
+                "filesystem_mv",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"path_move","from":format!("{namespace}:{copy_path}"),"to":format!("{namespace}:{moved_path}"),"committed_seq":3}),
+            ),
+            json_success(
+                "filesystem_rm",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"file_mutation","target":format!("{namespace}:{moved_path}"),"committed_seq":4}),
+            ),
+            json_success(
+                "filesystem_ls",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"path_entries","entries":[{"absolute_path":source_path,"inode_id":"inode-1","inode_kind":"file","size_bytes":payload.len(),"authoritative_head_seq":4,"display_name":"input.txt","namespace_id":namespace,"parent_inode_id":"inode-0","revision_no":1,"content_manifest_digest":"digest"}]}),
+            ),
+            json_success(
+                "filesystem_stat",
+                Some(PROFILE_NAME),
+                Some(mode),
+                json!({"type":"path_entry","absolute_path":source_path,"inode_id":"inode-1","inode_kind":"file","size_bytes":payload.len(),"authoritative_head_seq":4,"display_name":"input.txt","namespace_id":namespace,"parent_inode_id":"inode-0","revision_no":1,"content_manifest_digest":"digest"}),
+            ),
+            json_failure(
+                "filesystem_stat",
+                Some(PROFILE_NAME),
+                Some(mode),
+                "path_not_found",
+                "missing",
+            ),
+        ]
+    }
+
+    fn json_success(
+        kind: &str,
+        profile: Option<&str>,
+        mode: Option<&str>,
+        data: Value,
+    ) -> LoonOutput {
+        let body = serde_json::to_vec(&json!({
+            "kind": kind,
+            "format_version": FORMAT_VERSION,
+            "profile": profile,
+            "mode": mode,
+            "data": data
+        }))
+        .expect("encode success body");
+        LoonOutput {
+            exit_code: Some(0),
+            stdout: body,
+            stderr: Vec::new(),
         }
     }
 
-    impl SmokeExecutor for RecordingExecutor {
-        fn run(&self, client_config: ClientConfig, namespace: &str) -> Result<Vec<&'static str>> {
-            self.events
-                .lock()
-                .expect("events")
-                .push(format!("execute:{namespace}:{}", client_config.server_url));
-            if self.fail {
-                bail!("executor failure");
+    fn json_failure(
+        kind: &str,
+        profile: Option<&str>,
+        mode: Option<&str>,
+        code: &str,
+        message: &str,
+    ) -> LoonOutput {
+        let body = serde_json::to_vec(&json!({
+            "kind": kind,
+            "format_version": FORMAT_VERSION,
+            "profile": profile,
+            "mode": mode,
+            "error": {
+                "code": code,
+                "message": message
             }
-            Ok(vec![
-                STEP_CREATE_NAMESPACE,
-                STEP_LIST_NAMESPACES,
-                STEP_VERIFY_REMOVAL,
-            ])
+        }))
+        .expect("encode error body");
+        LoonOutput {
+            exit_code: Some(1),
+            stdout: Vec::new(),
+            stderr: body,
         }
     }
 
-    struct RecordingLauncher {
-        events: Arc<Mutex<Vec<String>>>,
-        ready_error: Option<String>,
-        launch_error: Option<String>,
+    struct RecordingRunner {
+        outputs: RefCell<VecDeque<LoonOutput>>,
+        calls: RefCell<Vec<Vec<String>>>,
     }
 
-    impl RecordingLauncher {
-        fn new(
-            events: Arc<Mutex<Vec<String>>>,
-            ready_error: Option<&str>,
-            launch_error: Option<&str>,
-        ) -> Self {
+    impl RecordingRunner {
+        fn new(outputs: Vec<LoonOutput>) -> Self {
             Self {
-                events,
-                ready_error: ready_error.map(ToOwned::to_owned),
-                launch_error: launch_error.map(ToOwned::to_owned),
+                outputs: RefCell::new(outputs.into()),
+                calls: RefCell::new(Vec::new()),
             }
         }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
     }
 
-    impl ManagedServerLauncher for RecordingLauncher {
-        fn launch(&self, server_config_path: &Path) -> Result<Box<dyn ManagedServerHandle>> {
-            self.events
-                .lock()
-                .expect("events")
-                .push(format!("launch:{}", server_config_path.display()));
-            if let Some(error) = &self.launch_error {
-                bail!("{error}");
+    impl LoonRunner for RecordingRunner {
+        fn run(&self, args: &[String]) -> Result<LoonOutput> {
+            self.calls.borrow_mut().push(args.to_vec());
+
+            if args
+                .windows(2)
+                .any(|window| window == ["filesystem", "get"])
+            {
+                let destination = args
+                    .last()
+                    .ok_or_else(|| anyhow!("missing get destination"))?;
+                fs::write(destination, b"xtask smoke payload demo seed\n")
+                    .with_context(|| format!("write fake download `{destination}`"))?;
             }
-            Ok(Box::new(RecordingHandle {
-                events: self.events.clone(),
-                ready_error: self.ready_error.clone(),
-            }))
-        }
-    }
 
-    struct RecordingHandle {
-        events: Arc<Mutex<Vec<String>>>,
-        ready_error: Option<String>,
-    }
-
-    impl ManagedServerHandle for RecordingHandle {
-        fn wait_until_ready(&mut self, server_url: &str, _timeout: Duration) -> Result<()> {
-            self.events
-                .lock()
-                .expect("events")
-                .push(format!("wait:{server_url}"));
-            if let Some(error) = &self.ready_error {
-                bail!("{error}");
-            }
-            Ok(())
-        }
-    }
-
-    impl Drop for RecordingHandle {
-        fn drop(&mut self) {
-            self.events.lock().expect("events").push("stop".to_owned());
-        }
-    }
-
-    struct PanicLauncher;
-
-    impl ManagedServerLauncher for PanicLauncher {
-        fn launch(&self, _server_config_path: &Path) -> Result<Box<dyn ManagedServerHandle>> {
-            panic!("launcher should not be used for external smoke")
+            self.outputs
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| anyhow!("no recorded output remaining"))
         }
     }
 }

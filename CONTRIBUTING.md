@@ -32,6 +32,8 @@ cargo run -p loon-cli -- \
   --server-config ./configs/loond.local-fs.example.toml
 cargo run -p loon-cli -- local up
 cargo run -p loon-cli -- namespace create demo
-cargo run -p xtask -- smoke --config ./configs/loon-client.local.example.toml --namespace demo
+cargo run -p xtask -- smoke local \
+  --server-config ./configs/loond.local-fs.example.toml \
+  --namespace demo
 cargo run -p loon-cli -- local down
 ```

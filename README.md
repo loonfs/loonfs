@@ -149,9 +149,17 @@ cargo test -p loon-objectstore --test objectstore_conformance \
 For single-host server acceptance with real object storage:
 
 ```bash
-cargo run -p xtask -- smoke \
+cargo run -p xtask -- smoke local \
   --server-config ./configs/loond.cloudflare-r2.local.toml \
-  --client-config ./configs/loon-client.r2.local.toml \
+  --namespace demo
+```
+
+For remote-server acceptance against an already-running `loond`:
+
+```bash
+cargo run -p xtask -- smoke remote \
+  --server-url http://127.0.0.1:9400 \
+  --auth-token dev-token \
   --namespace demo
 ```
 

@@ -28,12 +28,10 @@ server_config_path = "/tmp/loond.toml"
     let output = harness.run(&["--json", "profile", "list"]);
     assert_failure(&output);
     assert_eq!(json_error(&output)["code"], "invalid_config");
-    assert!(
-        json_error(&output)["message"]
-            .as_str()
-            .unwrap()
-            .contains("unsupported `config_version`")
-    );
+    assert!(json_error(&output)["message"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported `config_version`"));
 }
 
 #[test]
@@ -114,6 +112,36 @@ fn no_input_rejects_missing_profile_fields_and_keeps_stdout_empty() {
         json_error(&output)["code"],
         "non_interactive_input_required"
     );
+}
+
+#[test]
+fn profile_add_local_accepts_server_config_relative_to_shell_cwd() {
+    let harness = Harness::new();
+    let nested_dir = harness.temp_dir.path().join("configs");
+    fs::create_dir_all(&nested_dir).expect("nested configs dir");
+    let config_path = nested_dir.join("loon.local.toml");
+    let server_config_source = harness.write_server_config("cwd-relative", "cwd-relative");
+    let server_config = nested_dir.join("cwd-relative.loond.toml");
+    fs::copy(&server_config_source, &server_config).expect("copy server config into configs dir");
+    let relative_server_config = PathBuf::from("configs").join("cwd-relative.loond.toml");
+
+    let output = Command::new(loon_binary_path())
+        .current_dir(harness.temp_dir.path())
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .arg("profile")
+        .arg("add")
+        .arg("local")
+        .arg("local")
+        .arg("--server-config")
+        .arg(&relative_server_config)
+        .output()
+        .expect("run loon with cwd-relative config path");
+
+    assert_success(&output);
+    let stored = fs::read_to_string(&config_path).expect("read stored config");
+    assert!(stored.contains(&server_config.display().to_string()));
 }
 
 #[test]

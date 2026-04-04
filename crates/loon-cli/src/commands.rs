@@ -261,7 +261,8 @@ fn add_local(
             error,
         )
     })?;
-    let resolved_server_config = resolve_profile_path(config_path, &server_config);
+    let resolved_server_config = resolve_cli_input_path(&server_config)
+        .unwrap_or_else(|_| resolve_profile_path(config_path, &server_config));
     loon_server::load_server_config(&resolved_server_config).map_err(|error| {
         fail(
             kind,
@@ -301,6 +302,27 @@ fn add_local(
         profile: Some(view.name.clone()),
         mode: Some(ProfileMode::Local),
         data: CommandData::Profile(view),
+    })
+}
+
+fn resolve_cli_input_path(path: &Path) -> Result<PathBuf, CliError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| {
+                CliError::invalid_config(format!(
+                    "failed to resolve current working directory: {err}"
+                ))
+            })?
+            .join(path)
+    };
+
+    absolute.canonicalize().map_err(|err| {
+        CliError::invalid_config(format!(
+            "failed to resolve server config path `{}`: {err}",
+            path.display()
+        ))
     })
 }
 
