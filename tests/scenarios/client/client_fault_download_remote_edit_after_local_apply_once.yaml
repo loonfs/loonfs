@@ -1,9 +1,0 @@
-schema_version: 1
-scenario_kind: client
-name: client_fault_download_remote_edit_after_local_apply_once
-initial: {}
-actions: []
-faults:
-  - kind: crash_after_step_once
-    checkpoint_id: client.download_remote_edit.after_local_apply
-expect: {}

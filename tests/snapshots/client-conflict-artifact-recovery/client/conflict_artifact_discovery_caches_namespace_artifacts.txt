@@ -1,4 +1,0 @@
-scenario=conflict_artifact_discovery_caches_namespace_artifacts kind=client schema_version=1 seed=None actions=0 faults=0 expect_keys=1
-  1. discovered_conflict_ids=["conflict-edd576e8a94f23af8b0c0693e26ef7f3ffc05e4afc2948d03b2c5eff0acd1034", "conflict-21fd53a08f4836af075ab009aaf5256bc79b2ff0b1ef6c5093e94cf8564c2e41"]
-  2. cached_conflict_ids=["conflict-edd576e8a94f23af8b0c0693e26ef7f3ffc05e4afc2948d03b2c5eff0acd1034", "conflict-21fd53a08f4836af075ab009aaf5256bc79b2ff0b1ef6c5093e94cf8564c2e41"]
-  3. invariants[conflict-artifact-discovery] conflict_artifact_discovery_caches_namespace_artifacts=pass detail=discovered_artifact_count=2 cached_artifact_count_after=2 expected_namespace_artifact_count=2

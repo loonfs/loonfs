@@ -1,8 +1,0 @@
-scenario=restore_subtree_conflict_artifact_to_alternate_root kind=client schema_version=1 seed=None actions=0 faults=0 expect_keys=1
-  1. restored_conflict_id=conflict-b7b5fc5a933e503828fab510cc68ce73274e7a549625aa0071a0a3871d7f1d8d
-  2. restored_destination_root=recovered/reports-local canonical_root=canonical/reports
-  3. restored_tree=["dir:docs", "file:docs/report.txt=dirty local draft", "file:scratch.txt=temp note"]
-  4. invariants[subtree-conflict-artifact-restore] conflict_artifact_restore_requires_explicit_absent_destination=pass detail=destination_was_absent_before=true
-  5. invariants[subtree-conflict-artifact-restore] subtree_conflict_artifact_restore_reproduces_full_loser_tree=pass detail=destination_was_absent_before=true restored_tree_matches_loser=true
-  6. invariants[subtree-conflict-artifact-restore] subtree_conflict_artifact_restore_uses_deterministic_entry_order=pass detail=deterministic_entry_order_preserved=true
-  7. invariants[subtree-conflict-artifact-restore] subtree_conflict_artifact_restore_keeps_canonical_tree_untouched=pass detail=canonical_tree_untouched=true

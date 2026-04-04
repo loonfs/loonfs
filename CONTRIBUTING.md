@@ -1,54 +1,33 @@
-# CONTRIBUTING.md
+# Contributing
 
-## Branch and PR guidance
+## Rewrite rules
 
-- Keep branches short-lived.
-- Prefer one feature or one decision per PR.
-- Link the relevant spec and ADR in the PR description.
-- Include the scenario fixture name in the PR description when behavior changes.
+- `docs/specs/*` is sacred on this branch.
+- proposed spec changes go in `proposals/*`, never as edits to `docs/specs/*`
+- prefer deleting legacy surfaces over carrying placeholders
+- keep `loon-client` transport-only for this phase
+- keep `loon-server` stateless over object storage
 
-## Minimum PR contents
+## Expected change shape
 
-- code
-- tests
-- docs
+Prefer small, reviewable batches:
 
-At least one of the following should exist for every non-trivial change:
+- one object-store contract fix plus tests
+- one core mutation/path-resolution change plus tests
+- one CLI/client behavior change plus docs
 
-- scenario fixture
-- reference-model test
-- deterministic simulator seed
-
-## Naming
-
-Use the `loon-` crate prefix consistently.
-
-## Formatting and lints
-
-The intended baseline is:
+## Baseline commands
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
+cargo check --workspace
 cargo test --workspace
 ```
 
-## Canonical local RC path
-
-The canonical local release-candidate command is:
+## Local smoke
 
 ```bash
-cargo run -p xtask -- rc-local --config ./loondb-demo.toml --namespace demo
+cargo run -p loon-server --bin loond -- --config ./configs/loond.local-fs.example.toml
+cargo run -p loon-cli -- --config ./configs/loon-client.local.example.toml namespace create demo
+cargo run -p xtask -- smoke --config ./configs/loon-client.local.example.toml --namespace demo
 ```
-
-That path is strict: fmt check, clippy, workspace tests, local object-store conformance, and the
-existing `xtask ops smoke` path.
-
-## Documentation style
-
-When you introduce a new term:
-
-1. define it plainly
-2. explain why it exists
-3. give a concrete example
-4. mention what failure mode it prevents

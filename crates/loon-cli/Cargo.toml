@@ -11,16 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-clap = { version = "4.5", features = ["derive"] }
-clap_complete = "4.5"
-clap_mangen = "0.2"
+clap.workspace = true
+loon-api = { path = "../loon-api" }
 loon-client = { path = "../loon-client" }
-loon-server = { path = "../loon-server" }
-loon-types = { path = "../loon-types" }
-thiserror.workspace = true
-toml.workspace = true
-
-[dev-dependencies]
-loon-server = { path = "../loon-server" }
-loon-testkit = { path = "../loon-testkit" }
 serde_json.workspace = true

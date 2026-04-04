@@ -1,0 +1,200 @@
+use loon_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
+use loon_core::metadata::{InodeRecord, MetadataState as CoreMetadataState};
+use loon_model::metadata::MetadataState as ModelMetadataState;
+
+#[test]
+fn metadata_apply_matches_model_for_basic_commit_sequence() {
+    let core_state = core_bootstrap_state();
+    let model_state = model_bootstrap_state();
+
+    let create_dir = vec![WalOp::CreateDir {
+        op_index: 0,
+        inode_id: InodeId(2),
+        parent_inode: InodeId(1),
+        display_name: "docs".to_owned(),
+    }];
+    let create_file = vec![WalOp::CreateFile {
+        op_index: 0,
+        inode_id: InodeId(3),
+        parent_inode: InodeId(2),
+        display_name: "readme.txt".to_owned(),
+        content_manifest_digest: "sha256:manifest-1".to_owned(),
+    }];
+    let replace_file = vec![WalOp::ReplaceFile {
+        op_index: 0,
+        inode_id: InodeId(3),
+        base_revision: RevisionNo(1),
+        content_manifest_digest: "sha256:manifest-2".to_owned(),
+    }];
+
+    let core_state = core_state
+        .apply_committed_wal_ops(ChangeSeq(1), &create_dir)
+        .unwrap()
+        .metadata_state
+        .apply_committed_wal_ops(ChangeSeq(2), &create_file)
+        .unwrap()
+        .metadata_state
+        .apply_committed_wal_ops(ChangeSeq(3), &replace_file)
+        .unwrap()
+        .metadata_state;
+
+    let model_state = model_state
+        .apply_committed_wal_ops(ChangeSeq(1), &create_dir)
+        .unwrap()
+        .metadata_state
+        .apply_committed_wal_ops(ChangeSeq(2), &create_file)
+        .unwrap()
+        .metadata_state
+        .apply_committed_wal_ops(ChangeSeq(3), &replace_file)
+        .unwrap()
+        .metadata_state;
+
+    assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
+}
+
+fn core_bootstrap_state() -> CoreMetadataState {
+    CoreMetadataState {
+        inodes: vec![InodeRecord {
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Dir,
+            created_seq: ChangeSeq(0),
+        }],
+        direntries: Vec::new(),
+        revisions: Vec::new(),
+        subtree_tombstones: Vec::new(),
+    }
+}
+
+fn model_bootstrap_state() -> ModelMetadataState {
+    loon_model::bootstrap_basis_metadata_state()
+}
+
+fn normalize_core(
+    state: &CoreMetadataState,
+) -> (
+    Vec<(u64, &'static str, u64)>,
+    Vec<(u64, String, u64, u64, u32)>,
+    Vec<(u64, u64, u64, u32, String)>,
+    Vec<(u64, u64, u32)>,
+) {
+    (
+        state
+            .inodes
+            .iter()
+            .map(|inode| {
+                (
+                    inode.inode_id.0,
+                    match inode.inode_kind {
+                        InodeKind::Dir => "dir",
+                        InodeKind::File => "file",
+                        InodeKind::Symlink => "symlink",
+                        InodeKind::Mount => "mount",
+                    },
+                    inode.created_seq.0,
+                )
+            })
+            .collect(),
+        state
+            .direntries
+            .iter()
+            .map(|direntry| {
+                (
+                    direntry.parent_inode_id.0,
+                    direntry.display_name.clone(),
+                    direntry.child_inode_id.0,
+                    direntry.bind_seq.0,
+                    direntry.bind_op_index,
+                )
+            })
+            .collect(),
+        state
+            .revisions
+            .iter()
+            .map(|revision| {
+                (
+                    revision.inode_id.0,
+                    revision.revision_no.0,
+                    revision.committed_seq.0,
+                    revision.revision_op_index,
+                    revision.content_manifest_digest.clone(),
+                )
+            })
+            .collect(),
+        state
+            .subtree_tombstones
+            .iter()
+            .map(|tombstone| {
+                (
+                    tombstone.root_inode_id.0,
+                    tombstone.tombstone_seq.0,
+                    tombstone.tombstone_op_index,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn normalize_model(
+    state: &ModelMetadataState,
+) -> (
+    Vec<(u64, &'static str, u64)>,
+    Vec<(u64, String, u64, u64, u32)>,
+    Vec<(u64, u64, u64, u32, String)>,
+    Vec<(u64, u64, u32)>,
+) {
+    (
+        state
+            .inodes
+            .iter()
+            .map(|inode| {
+                (
+                    inode.inode_id.0,
+                    match inode.inode_kind {
+                        InodeKind::Dir => "dir",
+                        InodeKind::File => "file",
+                        InodeKind::Symlink => "symlink",
+                        InodeKind::Mount => "mount",
+                    },
+                    inode.created_seq.0,
+                )
+            })
+            .collect(),
+        state
+            .direntries
+            .iter()
+            .map(|direntry| {
+                (
+                    direntry.parent_inode_id.0,
+                    direntry.display_name.clone(),
+                    direntry.child_inode_id.0,
+                    direntry.bind_seq.0,
+                    direntry.bind_op_index,
+                )
+            })
+            .collect(),
+        state
+            .revisions
+            .iter()
+            .map(|revision| {
+                (
+                    revision.inode_id.0,
+                    revision.revision_no.0,
+                    revision.committed_seq.0,
+                    revision.revision_op_index,
+                    revision.content_manifest_digest.clone(),
+                )
+            })
+            .collect(),
+        state
+            .subtree_tombstones
+            .iter()
+            .map(|tombstone| {
+                (
+                    tombstone.root_inode_id.0,
+                    tombstone.tombstone_seq.0,
+                    tombstone.tombstone_op_index,
+                )
+            })
+            .collect(),
+    )
+}

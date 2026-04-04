@@ -1,5 +1,5 @@
 [package]
-name = "loon-client"
+name = "loon-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,11 +7,13 @@ rust-version.workspace = true
 
 [dependencies]
 loon-api = { path = "../loon-api" }
+loon-objectstore = { path = "../loon-objectstore" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-toml.workspace = true
-ureq.workspace = true
-urlencoding.workspace = true
 uuid.workspace = true
-walkdir.workspace = true
+
+[dev-dependencies]
+loon-model = { path = "../loon-model" }
+tempfile.workspace = true

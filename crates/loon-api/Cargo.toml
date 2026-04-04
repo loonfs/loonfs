@@ -1,17 +1,14 @@
 [package]
-name = "loon-client"
+name = "loon-api"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-loon-api = { path = "../loon-api" }
+ciborium.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-toml.workspace = true
-ureq.workspace = true
-urlencoding.workspace = true
-uuid.workspace = true
-walkdir.workspace = true
+zstd.workspace = true

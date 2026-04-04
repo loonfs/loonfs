@@ -1,2 +1,0 @@
-namespace=ns-xtask-conflicts discovered_count=2 cached_count_after=2
-index=1 conflict_id=conflict-5b6830a60c78a6b9f70355b8e0d7210d7ccb6aa28a5b82992363b84ec0e1ba90 artifact_kind=file conflict_class=same_inode_stale_base_edit created_at_ms=1700000000001 object_key=namespaces/ns-xtask-conflicts/conflicts/conflict-5b6830a60c78a6b9f70355b8e0d7210d7ccb6aa28a5b82992363b84ec0e1ba90.json lifecycle_state=active

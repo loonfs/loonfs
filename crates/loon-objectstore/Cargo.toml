@@ -1,17 +1,17 @@
 [package]
-name = "loon-client"
+name = "loon-objectstore"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aws-sdk-s3.workspace = true
+http.workspace = true
 loon-api = { path = "../loon-api" }
 serde.workspace = true
-serde_json.workspace = true
+tokio.workspace = true
 thiserror.workspace = true
-toml.workspace = true
-ureq.workspace = true
-urlencoding.workspace = true
-uuid.workspace = true
-walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

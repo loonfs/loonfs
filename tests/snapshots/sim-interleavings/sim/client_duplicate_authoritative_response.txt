@@ -1,9 +1,0 @@
-scenario=client_duplicate_authoritative_response kind=sim schema_version=1 seed=Some(1403) actions=2 faults=0 expect_keys=5
-  1. actor_step actor=fixture now_ms=0 initial client_state=local_only_present=false planned_local_only_present=false bound_present=true seeded_network_responses=2 seeded_observations=0
-  2. delivery_enqueued delivery_id=1 kind=client_response sender=seed recipient=client enqueued_at_ms=0 deliver_at_ms=0
-  3. delivery_enqueued delivery_id=2 kind=client_response sender=seed recipient=client enqueued_at_ms=0 deliver_at_ms=0
-  4. delivery_delivered now_ms=0 delivery_id=1 kind=client_response sender=seed recipient=client enqueued_at_ms=0 deliver_at_ms=0
-  5. actor_step actor=client now_ms=0 deliver_next_response request_id=client-req-0002 changed=false applied inode_id=42
-  6. delivery_delivered now_ms=0 delivery_id=2 kind=client_response sender=seed recipient=client enqueued_at_ms=0 deliver_at_ms=0
-  7. actor_step actor=client now_ms=0 deliver_next_response request_id=client-req-0002 changed=false applied inode_id=42
-  8. invariants[sim] duplicate_response_is_idempotent=pass detail=winner_already_durable=true second_delivery_applied_cleanly=true duplicate_winner_apply_count=0

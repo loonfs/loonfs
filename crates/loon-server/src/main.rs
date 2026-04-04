@@ -1,7 +1,15 @@
-fn main() -> std::process::ExitCode {
-    eprintln!(
-        "loond is intentionally unavailable during the semantic-core reset.\n\
-         The active server-side surface today is `loon_server::mutation`, not a runnable binary or HTTP shell."
-    );
-    std::process::ExitCode::FAILURE
+use clap::Parser;
+
+#[derive(Debug, Parser)]
+struct Args {
+    #[arg(long)]
+    config: String,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let config = loon_server::load_server_config(&args.config)?;
+    loon_server::serve(config).await?;
+    Ok(())
 }

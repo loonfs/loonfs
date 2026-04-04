@@ -1,5 +1,0 @@
-scenario=execute_next_client_action_materializes_remote_only_directory kind=client schema_version=1 seed=None actions=3 faults=0 expect_keys=9
-  1. applied=AppliedInodeMutation { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(701) }
-  2. planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(701), decision: NoOp, reason: AlreadyConverged, created_at_ms: 1700000715000 }
-  3. invariants[remote-only-dir-materialization] remote_only_directory_materialization_updates_local_state_and_sync_anchor=pass detail=local_exists_on_disk_after=true local_dirty_after=false sync_anchor_present_after=true
-  4. invariants[remote-only-dir-materialization] remote_only_directory_materialization_clears_planned_action=pass detail=planned_action_present_after=false
