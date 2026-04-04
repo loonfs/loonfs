@@ -6,13 +6,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use loon_api::{
-    ApiError, CreateNamespaceRequest, ListNamespacesResponse, MoveEntryRequest, MutationResult,
-    NamespaceId,
+    ApiError, CopyEntryRequest, CreateNamespaceRequest, ListNamespacesResponse, MoveEntryRequest,
+    MutationResult, NamespaceId,
 };
 use loon_core::{
-    bootstrap_namespace, delete_path, list_namespaces, list_path, move_path, read_file_bytes,
-    resolve_path, write_file_bytes, BootstrapNamespaceError, CoreError, CoreErrorKind,
-    MutationContext,
+    bootstrap_namespace, copy_file_path, delete_path_non_recursive, list_namespaces, list_path,
+    move_path, put_file_bytes, read_file_bytes, resolve_path, BootstrapNamespaceError, CoreError,
+    CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
@@ -31,6 +31,15 @@ struct AppState {
 #[derive(Debug, serde::Deserialize)]
 struct PathQuery {
     path: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PutContentQuery {
+    path: String,
+    #[serde(default)]
+    force: Option<bool>,
+    #[serde(default)]
+    request_id: Option<String>,
 }
 
 pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
@@ -59,6 +68,7 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
             get(get_content).put(put_content),
         )
         .route("/v1/namespaces/:namespace/move", post(move_entry))
+        .route("/v1/namespaces/:namespace/copy", post(copy_entry))
         .with_state(state)
 }
 
@@ -169,7 +179,7 @@ async fn put_content(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Query(query): Query<PathQuery>,
+    Query(query): Query<PutContentQuery>,
     body: Bytes,
 ) -> Result<Json<MutationResult>, ApiResponseError> {
     authorize(&state.config, &headers)?;
@@ -177,15 +187,22 @@ async fn put_content(
     let config = state.config.clone();
     let namespace_id = NamespaceId::from(namespace);
     let path = query.path;
+    let request_id = query.request_id;
+    let behavior = if query.force.unwrap_or(false) {
+        PutFileBehavior::ReplaceExisting
+    } else {
+        PutFileBehavior::CreateOnly
+    };
     let bytes = body.to_vec();
     let result = run_blocking(move || {
-        write_file_bytes(
+        put_file_bytes(
             store.as_ref(),
             &namespace_id,
             &path,
             &bytes,
+            behavior,
             &mutation_context(&config),
-            None,
+            request_id.as_deref(),
         )
         .map_err(ApiResponseError::core)
     })
@@ -205,7 +222,7 @@ async fn delete_entry(
     let namespace_id = NamespaceId::from(namespace);
     let path = query.path;
     let result = run_blocking(move || {
-        delete_path(
+        delete_path_non_recursive(
             store.as_ref(),
             &namespace_id,
             &path,
@@ -230,6 +247,31 @@ async fn move_entry(
     let namespace_id = NamespaceId::from(namespace);
     let result = run_blocking(move || {
         move_path(
+            store.as_ref(),
+            &namespace_id,
+            &request.from_path,
+            &request.to_path,
+            &mutation_context(&config),
+            Some(&request.request_id),
+        )
+        .map_err(ApiResponseError::core)
+    })
+    .await?;
+    Ok(Json(result))
+}
+
+async fn copy_entry(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<CopyEntryRequest>,
+) -> Result<Json<MutationResult>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let result = run_blocking(move || {
+        copy_file_path(
             store.as_ref(),
             &namespace_id,
             &request.from_path,

@@ -39,6 +39,12 @@ pub struct StoredContent {
     pub file_size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PutFileBehavior {
+    CreateOnly,
+    ReplaceExisting,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreErrorKind {
     InvalidPath,
@@ -100,6 +106,8 @@ pub enum CoreError {
     ExpectedFile { path: String, kind: InodeKind },
     #[error("expected directory at `{path}` but found `{kind:?}`")]
     ExpectedDirectory { path: String, kind: InodeKind },
+    #[error("directory not empty `{0}`")]
+    DirectoryNotEmpty(String),
     #[error("cannot mutate root path")]
     RootMutationForbidden,
     #[error("destination already exists at `{0}`")]
@@ -161,6 +169,7 @@ impl CoreError {
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
+            | CoreError::DirectoryNotEmpty(_)
             | CoreError::DestinationExists(_) => CoreErrorKind::PathConflict,
             CoreError::TombstoneConflict { .. } => CoreErrorKind::TombstoneConflict,
             CoreError::NonDirectoryPathComponent(_) => CoreErrorKind::InvalidPath,
@@ -407,6 +416,30 @@ pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     })
 }
 
+pub fn put_file_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    bytes: &[u8],
+    behavior: PutFileBehavior,
+    context: &MutationContext,
+    request_id: Option<&str>,
+) -> Result<MutationResult, CoreError> {
+    validate_path_for_mutation(absolute_path)?;
+    let stored = store_bytes_as_content(store, namespace_id, bytes)?;
+    let _validated =
+        validate_durable_content_reference(store, namespace_id, &stored.content_manifest_digest)?;
+    commit_file_manifest(
+        store,
+        namespace_id,
+        absolute_path,
+        &stored.content_manifest_digest,
+        behavior,
+        context,
+        request_id,
+    )
+}
+
 pub fn write_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -415,10 +448,27 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
+    put_file_bytes(
+        store,
+        namespace_id,
+        absolute_path,
+        bytes,
+        PutFileBehavior::ReplaceExisting,
+        context,
+        request_id,
+    )
+}
+
+fn commit_file_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    content_manifest_digest: &str,
+    behavior: PutFileBehavior,
+    context: &MutationContext,
+    request_id: Option<&str>,
+) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(absolute_path)?;
-    let stored = store_bytes_as_content(store, namespace_id, bytes)?;
-    let _validated =
-        validate_durable_content_reference(store, namespace_id, &stored.content_manifest_digest)?;
     let request_id = request_id
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
@@ -446,6 +496,9 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
 
     match target {
         Ok(existing) => {
+            if behavior == PutFileBehavior::CreateOnly {
+                return Err(CoreError::DestinationExists(absolute_path.to_owned()));
+            }
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
                     path: absolute_path.to_owned(),
@@ -459,7 +512,7 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
             ops.push(CommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision: revision.revision_no,
-                content_manifest_digest: stored.content_manifest_digest,
+                content_manifest_digest: content_manifest_digest.to_owned(),
             });
             preconditions.push(Precondition::InodeRevisionIs {
                 inode_id: existing.inode_id,
@@ -473,7 +526,7 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
             ops.push(CommitOp::CreateFile {
                 parent_inode: final_parent_inode,
                 display_name: final_name.clone(),
-                content_manifest_digest: stored.content_manifest_digest,
+                content_manifest_digest: content_manifest_digest.to_owned(),
             });
             preconditions.push(Precondition::ChildNameAbsent {
                 parent_inode: final_parent_inode,
@@ -552,6 +605,64 @@ pub fn delete_path<S: ObjectStore + ?Sized>(
     )
 }
 
+pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    context: &MutationContext,
+    request_id: Option<&str>,
+) -> Result<MutationResult, CoreError> {
+    validate_path_for_mutation(absolute_path)?;
+    acquire_or_renew_namespace_lease(store, namespace_id, context)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let resolved = basis
+        .metadata_state
+        .resolve_visible_path(absolute_path, basis.head.seq)?;
+
+    let op = match resolved.inode_kind {
+        InodeKind::File => CommitOp::DeleteFile {
+            inode_id: resolved.inode_id,
+        },
+        InodeKind::Dir => {
+            let children = basis
+                .metadata_state
+                .visible_children(resolved.inode_id, basis.head.seq);
+            if !children.is_empty() {
+                return Err(CoreError::DirectoryNotEmpty(absolute_path.to_owned()));
+            }
+            CommitOp::DeleteSubtree {
+                root_inode: resolved.inode_id,
+            }
+        }
+        kind => {
+            return Err(CoreError::ExpectedFile {
+                path: absolute_path.to_owned(),
+                kind,
+            });
+        }
+    };
+
+    let writer_fence_token = basis.head.active_fence_token;
+    let planned_head_seq = basis.head.seq;
+    execute_commit(
+        store,
+        basis,
+        context,
+        CommitRequest {
+            namespace_id: namespace_id.clone(),
+            request_id: request_id
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            writer_id: context.writer_id.clone(),
+            writer_fence_token,
+            planned_head_seq,
+            ops: vec![op],
+            preconditions: vec![Precondition::HeadSeqIs(planned_head_seq)],
+        },
+    )
+}
+
 pub fn move_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -595,6 +706,78 @@ pub fn move_path<S: ObjectStore + ?Sized>(
                 new_display_name: target_name,
             }],
             preconditions: vec![Precondition::HeadSeqIs(planned_head_seq)],
+        },
+    )
+}
+
+pub fn copy_file_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    from_path: &str,
+    to_path: &str,
+    context: &MutationContext,
+    request_id: Option<&str>,
+) -> Result<MutationResult, CoreError> {
+    validate_path_for_mutation(from_path)?;
+    validate_path_for_mutation(to_path)?;
+    acquire_or_renew_namespace_lease(store, namespace_id, context)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    reject_tombstoned_path_ancestor(&basis.metadata_state, from_path, basis.head.seq)?;
+    reject_tombstoned_path_ancestor(&basis.metadata_state, to_path, basis.head.seq)?;
+
+    let source = basis
+        .metadata_state
+        .resolve_visible_path(from_path, basis.head.seq)?;
+    if source.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            path: from_path.to_owned(),
+            kind: source.inode_kind,
+        });
+    }
+
+    if lookup_path(&basis.metadata_state, to_path, basis.head.seq).is_ok() {
+        return Err(CoreError::DestinationExists(to_path.to_owned()));
+    }
+
+    let revision = basis
+        .metadata_state
+        .latest_revision_head_at_seq(source.inode_id, basis.head.seq)
+        .ok_or_else(|| CoreError::MissingPath(from_path.to_owned()))?;
+    let _validated =
+        validate_durable_content_reference(store, namespace_id, &revision.content_manifest_digest)?;
+
+    let target_parent = resolve_parent_directory(&basis.metadata_state, to_path, basis.head.seq)?;
+    let target_name = final_component(to_path)?;
+    let writer_fence_token = basis.head.active_fence_token;
+    let planned_head_seq = basis.head.seq;
+    execute_commit(
+        store,
+        basis,
+        context,
+        CommitRequest {
+            namespace_id: namespace_id.clone(),
+            request_id: request_id
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            writer_id: context.writer_id.clone(),
+            writer_fence_token,
+            planned_head_seq,
+            ops: vec![CommitOp::CreateFile {
+                parent_inode: target_parent,
+                display_name: target_name.clone(),
+                content_manifest_digest: revision.content_manifest_digest,
+            }],
+            preconditions: vec![
+                Precondition::HeadSeqIs(planned_head_seq),
+                Precondition::ChildNameAbsent {
+                    parent_inode: target_parent,
+                    name_key: target_name,
+                },
+                Precondition::AncestorsNotSubtreeDeleted {
+                    inode_id: target_parent,
+                },
+            ],
         },
     )
 }

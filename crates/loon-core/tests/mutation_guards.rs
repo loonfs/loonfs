@@ -7,7 +7,9 @@ use loon_core::commit::{
 };
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
-    bootstrap_namespace, delete_path, move_path, write_file_bytes, CoreErrorKind, MutationContext,
+    bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, move_path,
+    put_file_bytes, resolve_path, write_file_bytes, CoreError, CoreErrorKind, MutationContext,
+    PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use tempfile::tempdir;
@@ -294,6 +296,97 @@ fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
     )
     .expect_err("move tombstone conflict");
     assert_eq!(move_error.kind(), CoreErrorKind::TombstoneConflict);
+}
+
+#[test]
+fn put_file_create_only_rejects_existing_target_without_force() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/hello.txt",
+        b"hello",
+        &context,
+        Some("seed-hello"),
+    )
+    .expect("seed file");
+
+    let error = put_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/hello.txt",
+        b"new-bytes",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-no-force"),
+    )
+    .expect_err("put without force");
+    assert_eq!(error.kind(), CoreErrorKind::PathConflict);
+}
+
+#[test]
+fn delete_path_non_recursive_rejects_non_empty_directory() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/hello.txt",
+        b"hello",
+        &context,
+        Some("seed-docs"),
+    )
+    .expect("seed file");
+
+    let error = delete_path_non_recursive(
+        &store,
+        &namespace_id(),
+        "/docs",
+        &context,
+        Some("delete-docs"),
+    )
+    .expect_err("non-recursive delete should reject non-empty dir");
+    assert!(matches!(error, CoreError::DirectoryNotEmpty(path) if path == "/docs"));
+}
+
+#[test]
+fn copy_file_path_creates_new_inode_and_reuses_content_manifest() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/source.txt",
+        b"hello",
+        &context,
+        Some("seed-source"),
+    )
+    .expect("seed source");
+
+    copy_file_path(
+        &store,
+        &namespace_id(),
+        "/docs/source.txt",
+        "/docs/copy.txt",
+        &context,
+        Some("copy-file"),
+    )
+    .expect("copy file");
+
+    let source = resolve_path(&store, &namespace_id(), "/docs/source.txt").expect("source stat");
+    let copy = resolve_path(&store, &namespace_id(), "/docs/copy.txt").expect("copy stat");
+    assert_ne!(source.inode_id, copy.inode_id);
+    assert_eq!(
+        source.content_manifest_digest, copy.content_manifest_digest,
+        "copy should reuse stored content manifest"
+    );
 }
 
 fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {

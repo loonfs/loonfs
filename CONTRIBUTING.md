@@ -27,7 +27,11 @@ cargo test --workspace
 ## Local smoke
 
 ```bash
-cargo run -p loon-server --bin loond -- --config ./configs/loond.local-fs.example.toml
-cargo run -p loon-cli -- --config ./configs/loon-client.local.example.toml namespace create demo
+cargo run -p loon-cli -- \
+  profile add local local \
+  --server-config ./configs/loond.local-fs.example.toml
+cargo run -p loon-cli -- local up
+cargo run -p loon-cli -- namespace create demo
 cargo run -p xtask -- smoke --config ./configs/loon-client.local.example.toml --namespace demo
+cargo run -p loon-cli -- local down
 ```

@@ -1,0 +1,12 @@
+---
+source: crates/loon-cli/src/render.rs
+assertion_line: 295
+expression: human_success(&output)
+---
+name = "alpha"
+mode = "remote"
+active = true
+
+[remote]
+server_url = "https://example.com"
+auth_token = "REDACTED"

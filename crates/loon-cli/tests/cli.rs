@@ -1,489 +1,389 @@
-use loon_api::{ApiError, AuthoritativePathEntry, NamespaceSummary};
-use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loon_core::{bootstrap_namespace, MutationContext};
-use loon_server::{app, ServerConfig, StoreConfig};
-use serde_json::json;
+use serde_json::Value;
 use std::env;
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Output};
+use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn json_read_commands_match_pretty_server_responses() {
-    let harness = start_harness().await;
-    harness
-        .client
-        .create_namespace("demo")
-        .expect("create namespace");
-    let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
-    harness
-        .client
-        .write_file_bytes(&target, b"hello from cli\n")
-        .expect("write file");
-
-    let namespace_output = run_loon(
-        harness.client_config_path(),
-        &["namespace", "list", "--json"],
-    );
-    assert_success(&namespace_output);
-    let expected_namespaces: Vec<NamespaceSummary> =
-        harness.client.list_namespaces().expect("list namespaces");
-    assert_pretty_stdout(&namespace_output, &expected_namespaces);
-
-    let list_output = run_loon(
-        harness.client_config_path(),
-        &["file", "ls", "demo:/docs", "--json"],
-    );
-    assert_success(&list_output);
-    let expected_entries: Vec<AuthoritativePathEntry> = harness
-        .client
-        .list_path(&NamespacePath::parse("demo:/docs").expect("docs path"))
-        .expect("list docs");
-    assert_pretty_stdout(&list_output, &expected_entries);
-
-    let stat_output = run_loon(
-        harness.client_config_path(),
-        &["file", "stat", "demo:/docs/hello.txt", "--json"],
-    );
-    assert_success(&stat_output);
-    let expected_entry = harness.client.stat_path(&target).expect("stat file");
-    assert_pretty_stdout(&stat_output, &expected_entry);
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn json_mutation_commands_emit_stable_payloads() {
-    let harness = start_harness().await;
-    let upload_path = harness.temp_dir.path().join("upload.txt");
-    let download_path = harness.temp_dir.path().join("downloaded.txt");
-    let payload = b"hello from cli\n";
-    fs::write(&upload_path, payload).expect("write upload file");
-
-    let create_output = run_loon(
-        harness.client_config_path(),
-        &["namespace", "create", "demo", "--json"],
-    );
-    assert_success(&create_output);
-    assert_pretty_stdout(
-        &create_output,
-        &NamespaceSummary {
-            name: "demo".into(),
-        },
-    );
-
-    let put_output = run_loon(
-        harness.client_config_path(),
-        &[
-            "file",
-            "put",
-            upload_path.to_str().expect("upload path"),
-            "demo:/docs/hello.txt",
-            "--json",
-        ],
-    );
-    assert_success(&put_output);
-    assert_pretty_stdout(
-        &put_output,
-        &json!({
-            "target": "demo:/docs/hello.txt",
-            "committed_seq": 1u64,
-        }),
-    );
-
-    let get_output = run_loon(
-        harness.client_config_path(),
-        &[
-            "file",
-            "get",
-            "demo:/docs/hello.txt",
-            download_path.to_str().expect("download path"),
-            "--json",
-        ],
-    );
-    assert_success(&get_output);
-    assert_pretty_stdout(
-        &get_output,
-        &json!({
-            "target": "demo:/docs/hello.txt",
-            "destination": download_path.display().to_string(),
-            "bytes_written": payload.len() as u64,
-        }),
-    );
-    assert_eq!(
-        fs::read(&download_path).expect("read downloaded file"),
-        payload
-    );
-
-    let move_output = run_loon(
-        harness.client_config_path(),
-        &[
-            "file",
-            "mv",
-            "demo:/docs/hello.txt",
-            "demo:/docs/renamed.txt",
-            "--json",
-        ],
-    );
-    assert_success(&move_output);
-    assert_pretty_stdout(
-        &move_output,
-        &json!({
-            "from": "demo:/docs/hello.txt",
-            "to": "demo:/docs/renamed.txt",
-            "committed_seq": 2u64,
-        }),
-    );
-
-    let rm_output = run_loon(
-        harness.client_config_path(),
-        &["file", "rm", "demo:/docs/renamed.txt", "--json"],
-    );
-    assert_success(&rm_output);
-    assert_pretty_stdout(
-        &rm_output,
-        &json!({
-            "target": "demo:/docs/renamed.txt",
-            "committed_seq": 3u64,
-        }),
-    );
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn write_commands_and_raw_cat_succeed_end_to_end() {
-    let harness = start_harness().await;
-    let upload_path = harness.temp_dir.path().join("upload.txt");
-    let download_path = harness.temp_dir.path().join("downloaded.txt");
-    let payload = b"hello from cli\n";
-    fs::write(&upload_path, payload).expect("write upload file");
-
-    assert_success(&run_loon(
-        harness.client_config_path(),
-        &["namespace", "create", "demo"],
-    ));
-    assert_success(&run_loon(
-        harness.client_config_path(),
-        &[
-            "file",
-            "put",
-            upload_path.to_str().expect("upload path"),
-            "demo:/docs/hello.txt",
-        ],
-    ));
-    assert_success(&run_loon(
-        harness.client_config_path(),
-        &[
-            "file",
-            "mv",
-            "demo:/docs/hello.txt",
-            "demo:/docs/renamed.txt",
-        ],
-    ));
-
-    let cat_output = run_loon(
-        harness.client_config_path(),
-        &["file", "cat", "demo:/docs/renamed.txt"],
-    );
-    assert_success(&cat_output);
-    assert_eq!(cat_output.stdout, payload);
-
-    let cat_json_output = run_loon(
-        harness.client_config_path(),
-        &["file", "cat", "demo:/docs/renamed.txt", "--json"],
-    );
-    assert_failure(&cat_json_output);
-
-    assert_success(&run_loon(
-        harness.client_config_path(),
-        &[
-            "file",
-            "get",
-            "demo:/docs/renamed.txt",
-            download_path.to_str().expect("download path"),
-        ],
-    ));
-    assert_eq!(
-        fs::read(&download_path).expect("read downloaded file"),
-        payload
-    );
-
-    assert_success(&run_loon(
-        harness.client_config_path(),
-        &["file", "rm", "demo:/docs/renamed.txt"],
-    ));
-
-    let stat_result = harness
-        .client
-        .stat_path(&NamespacePath::parse("demo:/docs/renamed.txt").expect("renamed path"));
-    match stat_result {
-        Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
-        other => panic!("expected path_not_found after rm, got {other:?}"),
-    }
-
-    harness.server.abort();
-}
-
 #[test]
-fn invalid_client_config_json_errors_use_invalid_config() {
-    let config_path = write_temp_file(
-        "invalid-client.toml",
-        r#"
-server_url = "ftp://example.com"
-auth_token = "dev-token"
-"#,
-    );
-
-    let output = run_loon(&config_path, &["namespace", "list", "--json"]);
-
-    assert_failure(&output);
-    assert_json_stderr(
-        &output,
-        &ApiError {
-            code: "invalid_config".to_owned(),
-            message: "invalid `server_url`: scheme must be http or https, got `ftp`".to_owned(),
-        },
-    );
-}
-
-#[test]
-fn invalid_namespace_path_json_errors_use_invalid_target() {
-    let config_path = write_temp_file(
-        "valid-client.toml",
-        r#"
-server_url = "http://127.0.0.1:65535"
-auth_token = "dev-token"
-"#,
-    );
-
-    let output = run_loon(
-        &config_path,
-        &["file", "stat", "not-a-namespace-path", "--json"],
-    );
-
-    assert_failure(&output);
-    assert_json_stderr(
-        &output,
-        &ApiError {
-            code: "invalid_target".to_owned(),
-            message: "invalid namespace path `not-a-namespace-path`".to_owned(),
-        },
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn local_io_failures_render_as_io_error_in_json_mode() {
-    let harness = start_harness().await;
-    harness
-        .client
-        .create_namespace("demo")
-        .expect("create namespace");
-    let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
-    harness
-        .client
-        .write_file_bytes(&target, b"hello from cli\n")
-        .expect("write file");
-
-    let blocked_parent = harness.temp_dir.path().join("blocked-parent");
-    fs::write(&blocked_parent, b"not a directory").expect("write blocked parent");
-    let blocked_destination = blocked_parent.join("out.txt");
-
-    let output = run_loon(
-        harness.client_config_path(),
-        &[
-            "file",
-            "get",
-            "demo:/docs/hello.txt",
-            blocked_destination.to_str().expect("blocked destination"),
-            "--json",
-        ],
-    );
-
-    assert_failure(&output);
-    let error = parse_json_stderr(&output);
-    assert_eq!(error.code, "io_error");
-    assert!(
-        error.message.starts_with("i/o error:"),
-        "expected io_error message, got {}",
-        error.message
-    );
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn json_remote_path_not_found_error_is_preserved() {
-    let harness = start_harness().await;
-    harness
-        .client
-        .create_namespace("demo")
-        .expect("create namespace");
-
-    let expected = match harness
-        .client
-        .stat_path(&NamespacePath::parse("demo:/missing.txt").expect("missing path"))
-    {
-        Err(ClientError::Api { code, message, .. }) => ApiError { code, message },
-        other => panic!("expected direct api error, got {other:?}"),
-    };
-
-    let output = run_loon(
-        harness.client_config_path(),
-        &["file", "stat", "demo:/missing.txt", "--json"],
-    );
-
-    assert_failure(&output);
-    assert_json_stderr(&output, &expected);
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn json_remote_lease_conflict_error_is_preserved() {
-    let harness = start_harness_with_seeded_namespace("other-writer", "server-writer").await;
-    let upload_path = harness.temp_dir.path().join("blocked-upload.txt");
-    fs::write(&upload_path, b"blocked\n").expect("write upload file");
-    let target = NamespacePath::parse("demo:/docs/blocked.txt").expect("target");
-
-    let expected = match harness.client.write_file_bytes(&target, b"blocked\n") {
-        Err(ClientError::Api { code, message, .. }) => ApiError { code, message },
-        other => panic!("expected direct api error, got {other:?}"),
-    };
-
-    let output = run_loon(
-        harness.client_config_path(),
-        &[
-            "file",
-            "put",
-            upload_path.to_str().expect("upload path"),
-            "demo:/docs/blocked.txt",
-            "--json",
-        ],
-    );
-
-    assert_failure(&output);
-    assert_json_stderr(&output, &expected);
-
-    harness.server.abort();
-}
-
-struct TestHarness {
-    temp_dir: TempDir,
-    client: Client,
-    client_config_path: PathBuf,
-    server: tokio::task::JoinHandle<()>,
-}
-
-impl TestHarness {
-    fn client_config_path(&self) -> &Path {
-        &self.client_config_path
-    }
-}
-
-async fn start_harness() -> TestHarness {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let config = test_config(
-        temp_dir.path().join("store"),
-        "loond-cli-test",
-        "cli-tests",
-        60_000,
-    );
-    start_harness_with_config(temp_dir, config).await
-}
-
-async fn start_harness_with_seeded_namespace(
-    seed_writer_id: &str,
-    server_writer_id: &str,
-) -> TestHarness {
-    let temp_dir = tempfile::tempdir().expect("tempdir");
-    let config = test_config(
-        temp_dir.path().join("store"),
-        server_writer_id,
-        "cli-tests",
-        60_000,
-    );
-    let store = config.object_store().expect("construct object store");
-    bootstrap_namespace(&store, &"demo".into(), &context(seed_writer_id), false)
-        .expect("bootstrap namespace");
-    start_harness_with_config(temp_dir, config).await
-}
-
-async fn start_harness_with_config(temp_dir: TempDir, config: ServerConfig) -> TestHarness {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = app(config).expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
-
-    let client_config_path = temp_dir.path().join("client.toml");
+fn unsupported_config_version_is_rejected() {
+    let harness = Harness::new();
     fs::write(
-        &client_config_path,
-        format!(
-            "server_url = \"http://{}\"\nauth_token = \"test-token\"\n",
-            addr
-        ),
+        harness.config_path(),
+        r#"
+config_version = 2
+
+[profiles.local]
+mode = "local"
+
+[profiles.local.local]
+server_config_path = "/tmp/loond.toml"
+"#,
     )
-    .expect("write client config");
+    .expect("write config");
 
-    TestHarness {
-        client: Client::new(ClientConfig {
-            server_url: format!("http://{}", addr),
-            auth_token: Some("test-token".to_owned()),
-        }),
-        client_config_path,
-        server,
-        temp_dir,
+    let output = harness.run(&["--json", "profile", "list"]);
+    assert_failure(&output);
+    assert_eq!(json_error(&output)["code"], "invalid_config");
+    assert!(
+        json_error(&output)["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported `config_version`")
+    );
+}
+
+#[test]
+fn profile_add_list_show_use_remove_and_config_show_work() {
+    let harness = Harness::new();
+    let local_config = harness.write_server_config("local", "profile-add-local");
+
+    let add_local = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "local",
+        "local",
+        "--server-config",
+        local_config.to_str().unwrap(),
+    ]);
+    assert_success(&add_local);
+    assert_eq!(json_data(&add_local)["name"], "local");
+    assert_eq!(json_data(&add_local)["active"], true);
+
+    let external =
+        harness.start_external_server(harness.write_server_config("remote", "profile-add-remote"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "remote",
+        "remote",
+        "--server-url",
+        &external.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+    assert_eq!(json_data(&add_remote)["name"], "remote");
+    assert_eq!(json_data(&add_remote)["active"], false);
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_success(&list);
+    let list_data = json_data(&list);
+    let profiles = list_data["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles[0]["name"], "local");
+    assert_eq!(profiles[0]["active"], true);
+    assert_eq!(profiles[1]["name"], "remote");
+    assert_eq!(profiles[1]["active"], false);
+
+    let show = harness.run(&["config", "show"]);
+    assert_success(&show);
+    let stdout = stdout_string(&show);
+    assert!(stdout.contains("mode = \"remote\""));
+    assert!(stdout.contains("REDACTED"));
+    assert!(!stdout.contains("test-token"));
+
+    let use_remote = harness.run(&["--json", "profile", "use", "remote"]);
+    assert_success(&use_remote);
+    assert_eq!(json_data(&use_remote)["name"], "remote");
+    assert_eq!(json_data(&use_remote)["active"], true);
+
+    let show_remote = harness.run(&["--json", "profile", "show"]);
+    assert_success(&show_remote);
+    assert_eq!(json_data(&show_remote)["name"], "remote");
+    assert_eq!(json_data(&show_remote)["mode"], "remote");
+
+    let remove_local = harness.run(&["--json", "profile", "remove", "local"]);
+    assert_success(&remove_local);
+    assert_eq!(json_data(&remove_local)["name"], "local");
+}
+
+#[test]
+fn no_input_rejects_missing_profile_fields_and_keeps_stdout_empty() {
+    let harness = Harness::new();
+    let output = harness.run(&["--json", "--no-input", "profile", "add", "local", "local"]);
+
+    assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        json_error(&output)["code"],
+        "non_interactive_input_required"
+    );
+}
+
+#[test]
+fn local_up_status_down_and_stale_cleanup_work() {
+    let harness = Harness::new();
+    let local_config = harness.write_server_config("alpha", "local-up-status");
+    harness.add_local_profile("alpha", &local_config);
+
+    let up = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
+    assert_success(&up);
+    let pid = json_data(&up)["pid"].as_u64().unwrap() as u32;
+
+    let status = harness.run(&["--json", "--profile", "alpha", "local", "status"]);
+    assert_success(&status);
+    assert_eq!(json_data(&status)["status"], "running");
+
+    let double_up = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
+    assert_failure(&double_up);
+    assert_eq!(
+        json_error(&double_up)["code"],
+        "local_server_already_running"
+    );
+
+    terminate_pid(pid);
+    wait_for_stale(&harness, "alpha");
+
+    let stale = harness.run(&["--json", "--profile", "alpha", "local", "status"]);
+    assert_success(&stale);
+    assert_eq!(json_data(&stale)["status"], "stale");
+
+    let up_again = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
+    assert_success(&up_again);
+    assert_eq!(json_data(&up_again)["status"], "running");
+
+    let down = harness.run(&["--json", "--profile", "alpha", "local", "down"]);
+    assert_success(&down);
+    assert_eq!(json_data(&down)["status"], "stopped");
+}
+
+#[test]
+fn managed_local_http_filesystem_flow_works_end_to_end() {
+    let harness = Harness::new();
+    let local_config = harness.write_server_config("local", "managed-local-flow");
+    harness.add_local_profile("local", &local_config);
+    assert_success(&harness.run(&["--profile", "local", "local", "up"]));
+
+    let upload_path = harness.temp_dir.path().join("upload.txt");
+    let download_path = harness.temp_dir.path().join("downloaded.txt");
+    fs::write(&upload_path, b"hello over managed loond\n").expect("upload payload");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+
+    let put = harness.run(&[
+        "--json",
+        "filesystem",
+        "put",
+        "demo",
+        upload_path.to_str().unwrap(),
+        "/docs/hello.txt",
+    ]);
+    assert_success(&put);
+    assert_eq!(json_data(&put)["target"], "demo:/docs/hello.txt");
+
+    let put_conflict = harness.run(&[
+        "--json",
+        "filesystem",
+        "put",
+        "demo",
+        upload_path.to_str().unwrap(),
+        "/docs/hello.txt",
+    ]);
+    assert_failure(&put_conflict);
+    assert_eq!(json_error(&put_conflict)["code"], "path_conflict");
+
+    let put_force = harness.run(&[
+        "--json",
+        "filesystem",
+        "put",
+        "demo",
+        upload_path.to_str().unwrap(),
+        "/docs/hello.txt",
+        "--force",
+    ]);
+    assert_success(&put_force);
+
+    let cp = harness.run(&[
+        "--json",
+        "filesystem",
+        "cp",
+        "demo",
+        "/docs/hello.txt",
+        "/docs/copy.txt",
+    ]);
+    assert_success(&cp);
+
+    let source = harness.run(&["--json", "filesystem", "stat", "demo", "/docs/hello.txt"]);
+    let copy = harness.run(&["--json", "filesystem", "stat", "demo", "/docs/copy.txt"]);
+    assert_success(&source);
+    assert_success(&copy);
+    assert_ne!(json_data(&source)["inode_id"], json_data(&copy)["inode_id"]);
+    assert_eq!(
+        json_data(&source)["content_manifest_digest"],
+        json_data(&copy)["content_manifest_digest"]
+    );
+
+    let cat = harness.run(&["filesystem", "cat", "demo", "/docs/hello.txt"]);
+    assert_success(&cat);
+    assert_eq!(cat.stdout, b"hello over managed loond\n");
+    assert!(cat.stderr.is_empty());
+
+    let get_stdout = harness.run(&["filesystem", "get", "demo", "/docs/hello.txt", "-"]);
+    assert_success(&get_stdout);
+    assert_eq!(get_stdout.stdout, b"hello over managed loond\n");
+
+    let get_file = harness.run(&[
+        "--json",
+        "filesystem",
+        "get",
+        "demo",
+        "/docs/hello.txt",
+        download_path.to_str().unwrap(),
+    ]);
+    assert_success(&get_file);
+    assert_eq!(
+        fs::read(&download_path).expect("downloaded bytes"),
+        b"hello over managed loond\n"
+    );
+
+    let mv = harness.run(&[
+        "--json",
+        "filesystem",
+        "mv",
+        "demo",
+        "/docs/copy.txt",
+        "/docs/final.txt",
+    ]);
+    assert_success(&mv);
+
+    let rm_dir = harness.run(&["--json", "filesystem", "rm", "demo", "/docs"]);
+    assert_failure(&rm_dir);
+    assert_eq!(json_error(&rm_dir)["code"], "path_conflict");
+
+    let rm = harness.run(&["--json", "filesystem", "rm", "demo", "/docs/final.txt"]);
+    assert_success(&rm);
+
+    let down = harness.run(&["--profile", "local", "local", "down"]);
+    assert_success(&down);
+}
+
+#[test]
+fn external_remote_profile_executes_through_http() {
+    let harness = Harness::new();
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "remote-exec"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "remote",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+
+    let create = harness.run(&[
+        "--json",
+        "--profile",
+        "remote",
+        "namespace",
+        "create",
+        "demo",
+    ]);
+    assert_success(&create);
+
+    let list = harness.run(&["--json", "--profile", "remote", "namespace", "list"]);
+    assert_success(&list);
+    let list_data = json_data(&list);
+    let namespaces = list_data["namespaces"].as_array().unwrap();
+    assert_eq!(namespaces.len(), 1);
+    assert_eq!(namespaces[0]["name"], "demo");
+}
+
+struct Harness {
+    temp_dir: TempDir,
+    config_path: PathBuf,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        Self {
+            config_path: temp_dir.path().join("config.toml"),
+            temp_dir,
+        }
+    }
+
+    fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        Command::new(loon_binary_path())
+            .arg("--config")
+            .arg(&self.config_path)
+            .args(args)
+            .output()
+            .expect("run loon")
+    }
+
+    fn add_local_profile(&self, name: &str, server_config_path: &Path) {
+        let output = self.run(&[
+            "--json",
+            "profile",
+            "add",
+            "local",
+            name,
+            "--server-config",
+            server_config_path.to_str().unwrap(),
+        ]);
+        assert_success(&output);
+    }
+
+    fn write_server_config(&self, name: &str, key_prefix: &str) -> PathBuf {
+        let bind = format!("127.0.0.1:{}", available_port());
+        let path = self.temp_dir.path().join(format!("{name}.loond.toml"));
+        let store_root = self.temp_dir.path().join(format!("{name}-store"));
+        let contents = format!(
+            r#"
+bind = "{bind}"
+auth_token = "test-token"
+writer_id = "{name}"
+writer_version = "{name}/0.1.0"
+lease_duration_ms = 200
+
+[store]
+kind = "local-fs"
+root = "{}"
+key_prefix = "{key_prefix}"
+"#,
+            store_root.display()
+        );
+        fs::write(&path, contents).expect("write server config");
+        path
+    }
+
+    fn start_external_server(&self, server_config_path: PathBuf) -> ExternalServer {
+        let child = Command::new(loond_binary_path())
+            .arg("--config")
+            .arg(&server_config_path)
+            .spawn()
+            .expect("spawn loond");
+        let server_url = server_url_from_config(&server_config_path);
+        wait_for_healthz(&server_url);
+        ExternalServer { child, server_url }
     }
 }
 
-fn test_config(
-    store_root: PathBuf,
-    writer_id: &str,
-    key_prefix: &str,
-    lease_duration_ms: u64,
-) -> ServerConfig {
-    ServerConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        auth_token: Some("test-token".to_owned()),
-        writer_id: writer_id.to_owned(),
-        writer_version: format!("{writer_id}/0.1.0"),
-        lease_duration_ms,
-        store: StoreConfig::LocalFs {
-            root: store_root.display().to_string(),
-            key_prefix: Some(key_prefix.to_owned()),
-        },
+struct ExternalServer {
+    child: Child,
+    server_url: String,
+}
+
+impl Drop for ExternalServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
-}
-
-fn context(writer_id: &str) -> MutationContext {
-    MutationContext {
-        writer_id: writer_id.to_owned(),
-        writer_version: format!("{writer_id}/0.1.0"),
-        now_ms: now_ms(),
-        lease_duration_ms: 60_000,
-    }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_millis() as u64
-}
-
-fn run_loon(config_path: &Path, args: &[&str]) -> Output {
-    Command::new(loon_binary_path())
-        .arg("--config")
-        .arg(config_path)
-        .args(args)
-        .output()
-        .expect("run loon")
 }
 
 fn loon_binary_path() -> PathBuf {
@@ -505,17 +405,92 @@ fn loon_binary_path() -> PathBuf {
     candidate
 }
 
-fn write_temp_file(name: &str, contents: &str) -> PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("loondb-cli-test-{}-{}", std::process::id(), name));
-    fs::write(&path, contents).expect("write temp file");
-    path
+fn loond_binary_path() -> PathBuf {
+    if let Some(path) = env::var_os("CARGO_BIN_EXE_loond") {
+        return PathBuf::from(path);
+    }
+
+    let current_exe = env::current_exe().expect("current test binary path");
+    let debug_dir = current_exe
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("target debug dir");
+    let candidate = debug_dir.join(if cfg!(windows) { "loond.exe" } else { "loond" });
+    assert!(
+        candidate.exists(),
+        "expected loond binary at {}",
+        candidate.display()
+    );
+    candidate
+}
+
+fn server_url_from_config(path: &Path) -> String {
+    let config = fs::read_to_string(path).expect("read server config");
+    let bind = config
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("bind = "))
+        .expect("bind line")
+        .trim_matches('"')
+        .to_owned();
+    format!("http://{bind}")
+}
+
+fn wait_for_healthz(server_url: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if ureq::get(&format!("{server_url}/healthz")).call().is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("timed out waiting for {server_url}/healthz");
+}
+
+fn wait_for_stale(harness: &Harness, profile: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let output = harness.run(&["--json", "--profile", profile, "local", "status"]);
+        assert_success(&output);
+        if json_data(&output)["status"] == "stale" {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("timed out waiting for stale local runtime");
+}
+
+fn terminate_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()
+            .expect("kill process");
+        assert!(status.success(), "failed to terminate pid {pid}");
+    }
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status()
+            .expect("taskkill process");
+        assert!(status.success(), "failed to terminate pid {pid}");
+    }
+}
+
+fn available_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind port")
+        .local_addr()
+        .expect("local addr")
+        .port()
 }
 
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
-        "expected success, got status {:?}\nstdout:\n{}\nstderr:\n{}",
+        "expected success, got {:?}\nstdout:\n{}\nstderr:\n{}",
         output.status.code(),
         stdout_string(output),
         stderr_string(output)
@@ -531,31 +506,22 @@ fn assert_failure(output: &Output) {
     );
 }
 
-fn assert_pretty_stdout<T>(output: &Output, expected: &T)
-where
-    T: serde::Serialize,
-{
-    assert_eq!(
-        stdout_string(output),
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(expected).expect("render expected json")
-        )
-    );
-}
-
-fn assert_json_stderr(output: &Output, expected: &ApiError) {
-    assert_eq!(parse_json_stderr(output), *expected);
-}
-
-fn parse_json_stderr(output: &Output) -> ApiError {
-    serde_json::from_slice(&output.stderr).expect("parse stderr json")
-}
-
 fn stdout_string(output: &Output) -> String {
-    String::from_utf8(output.stdout.clone()).expect("stdout utf8")
+    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn stderr_string(output: &Output) -> String {
-    String::from_utf8(output.stderr.clone()).expect("stderr utf8")
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn parse_json(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).expect("parse json")
+}
+
+fn json_data(output: &Output) -> Value {
+    parse_json(&output.stdout)["data"].clone()
+}
+
+fn json_error(output: &Output) -> Value {
+    parse_json(&output.stderr)["error"].clone()
 }

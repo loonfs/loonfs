@@ -1,93 +1,134 @@
 # LoonDB
 
-LoonDB is now a spec-locked rewrite branch focused on one narrow product shape:
+LoonDB is a spec-locked rewrite centered on a server-backed CLI.
 
-- `loon-cli -> loon-client -> loon-server -> loon-core -> loon-objectstore`
-- one stateless HTTP server
-- one thin HTTP client library
-- one CLI for namespace and file operations
-- one object-store-backed authority, starting with local-fs, AWS S3, and Cloudflare R2
+Current product shape:
 
-The first milestone is not a sync engine. It is a readable, spec-shaped core plus a usable CLI
-that can be run from two machines against the same server and bucket.
+- `loon` is the first public UI
+- every CLI operation goes through `loond`, even in local mode
+- profile `mode` is `local` or `remote`
+- `local` means the CLI points at or manages a local `loond`
+- `remote` means the CLI points at an already-running `loond`
 
 ## Spec Lock
 
 The files under [`docs/specs/`](docs/specs/) are read-only on this branch.
 
 - do not edit `docs/specs/*`
-- do not reinterpret those files silently in code
 - record clarifications, divergences, or replacements under [`proposals/`](proposals/)
 
 ## Workspace
 
 ```text
 crates/
-  loon-api/          shared ids, envelopes, and HTTP DTOs
+  loon-api/          shared ids and HTTP DTOs
   loon-objectstore/  object-store trait, providers, key builders, conformance surface
   loon-core/         authoritative metadata, lease, WAL, path resolution, mutations
   loon-model/        pure metadata replay/model helpers for differential tests
-  loon-server/       stateless HTTP shell and `loond` binary
-  loon-client/       transport-only HTTP client
-  loon-cli/          `loon` CLI
+  loon-server/       `loond` HTTP server over core + object storage
+  loon-client/       thin HTTP transport client
+  loon-cli/          profile-based `loon` CLI
   loon-testkit/      minimal shared test helpers
-
-xtask/               smoke automation
 ```
 
-## Local Demo
+## Quickstart
 
-1. Start the server with the local-fs example config.
+1. Create a local `loond` config from the example:
 
 ```bash
-cargo run -p loon-server --bin loond -- --config ./configs/loond.local-fs.example.toml
+cp ./configs/loond.local-fs.example.toml ./configs/loond.local-fs.local.toml
 ```
 
-2. In another shell, point the CLI at the client config and create a namespace.
+2. Register a local profile and start the managed server:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon-client.local.example.toml namespace create demo
+cargo run -p loon-cli -- \
+  profile add local local \
+  --server-config ./configs/loond.local-fs.local.toml
+
+cargo run -p loon-cli -- --profile local local up
 ```
 
-3. Upload, inspect, and download a file.
+3. Create a namespace and work with files:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon-client.local.example.toml \
-  file put ./README.md demo:/docs/README.md
+cargo run -p loon-cli -- namespace create demo
 
-cargo run -p loon-cli -- --config ./configs/loon-client.local.example.toml \
-  file ls demo:/docs
+cargo run -p loon-cli -- \
+  filesystem put demo ./README.md /docs/README.md
 
-cargo run -p loon-cli -- --config ./configs/loon-client.local.example.toml \
-  file get demo:/docs/README.md ./tmp-readme.md
+cargo run -p loon-cli -- filesystem ls demo /docs
+cargo run -p loon-cli -- filesystem stat demo /docs/README.md
+cargo run -p loon-cli -- filesystem get demo /docs/README.md ./tmp-readme.md
+```
+
+4. Stop the managed local server when you are done:
+
+```bash
+cargo run -p loon-cli -- --profile local local down
 ```
 
 ## Commands
 
-The current CLI surface is:
+CLI v0 surface:
 
-- `loon namespace create NAME [--json]`
-- `loon namespace list [--json]`
-- `loon file ls NAMESPACE:/path [--json]`
-- `loon file stat NAMESPACE:/path [--json]`
-- `loon file cat NAMESPACE:/path`
-- `loon file get NAMESPACE:/path LOCAL_PATH [--json]`
-- `loon file put LOCAL_PATH NAMESPACE:/path [--json]`
-- `loon file rm NAMESPACE:/path [--json]`
-- `loon file mv NAMESPACE:/from NAMESPACE:/to [--json]`
+- `loon profile add local NAME --server-config <PATH>`
+- `loon profile add remote NAME --server-url <URL> [--auth-token <TOKEN>]`
+- `loon profile list`
+- `loon profile use NAME`
+- `loon profile show [NAME]`
+- `loon profile remove NAME`
+- `loon local up`
+- `loon local status`
+- `loon local down`
+- `loon namespace create NAME`
+- `loon namespace list`
+- `loon filesystem ls NAMESPACE [PATH]`
+- `loon filesystem stat NAMESPACE PATH`
+- `loon filesystem cat NAMESPACE PATH`
+- `loon filesystem get NAMESPACE REMOTE_PATH [LOCAL_DESTINATION]`
+- `loon filesystem put NAMESPACE LOCAL_PATH [REMOTE_PATH] [--force]`
+- `loon filesystem rm NAMESPACE REMOTE_PATH`
+- `loon filesystem mv NAMESPACE SOURCE_PATH DEST_PATH`
+- `loon filesystem cp NAMESPACE SOURCE_PATH DEST_PATH`
+- `loon config path`
+- `loon config show`
+- `loon version`
+
+Global flags:
+
+- `--profile <NAME>`
+- `--json`
+- `--no-input`
+- `--config <PATH>`
 
 ## Configs
 
-Example configs live in [`configs/`](configs/):
+Example CLI configs live in [`configs/`](configs/):
 
+- [`configs/loon.local.example.toml`](configs/loon.local.example.toml)
+- [`configs/loon.remote.example.toml`](configs/loon.remote.example.toml)
 - [`configs/loond.local-fs.example.toml`](configs/loond.local-fs.example.toml)
 - [`configs/loond.aws-s3.example.toml`](configs/loond.aws-s3.example.toml)
 - [`configs/loond.cloudflare-r2.example.toml`](configs/loond.cloudflare-r2.example.toml)
-- [`configs/loon-client.local.example.toml`](configs/loon-client.local.example.toml)
-- [`configs/loon-client.r2.example.toml`](configs/loon-client.r2.example.toml)
 
-Checked-in `*.example.toml` files stay sanitized. For filled-in local credentials or machine-specific
-values, copy the example to `configs/*.local.toml`. Those local config files are ignored by Git.
+Checked-in examples stay sanitized. For filled-in local credentials or machine-specific values,
+copy an example to `configs/*.local.toml`. Those local config files are ignored by Git.
+
+The current CLI schema is `config_version = 1`.
+
+## Human And JSON Behavior
+
+- stdout is command data only
+- prompts and diagnostics go to stderr
+- `--json` wraps command data in a versioned envelope with:
+  - `kind`
+  - `format_version`
+  - `profile`
+  - `mode`
+  - `data` or `error`
+- `filesystem cat` always streams raw bytes to stdout and rejects `--json`
+- `filesystem get ... -` streams raw bytes to stdout and rejects `--json`
 
 ## Verification
 
@@ -95,49 +136,17 @@ Current local baseline:
 
 ```bash
 cargo fmt --all
-cargo check --workspace
-cargo run -p xtask -- smoke \
-  --server-config ./configs/loond.local-fs.example.toml \
-  --client-config ./configs/loon-client.local.example.toml \
-  --namespace demo
+cargo test --workspace
 ```
 
-If `loond` is already running, point `xtask` at the live server only:
-
-```bash
-cargo run -p xtask -- smoke \
-  --client-config ./configs/loon-client.local.example.toml \
-  --namespace demo
-```
-
-## R2 Acceptance
-
-The acceptance ladder for the current CLI-first milestone is:
-
-1. direct Cloudflare R2 conformance
-2. managed single-host R2 smoke
-3. manual two-host lease-handoff demo
-
-Cloudflare R2 validation stays manual and env-gated. The canonical conformance invocation is:
+The canonical live-provider object-store conformance command remains:
 
 ```bash
 cargo test -p loon-objectstore --test objectstore_conformance \
   cloudflare_r2_real_provider_conformance -- --ignored --exact
 ```
 
-The R2 conformance test reads these environment variables:
-
-- `LOON_TEST_R2_BUCKET`
-- `LOON_TEST_R2_ACCOUNT_ID`
-- `LOON_TEST_R2_ENDPOINT`
-- `LOON_TEST_R2_ACCESS_KEY_ID`
-- `LOON_TEST_R2_SECRET_ACCESS_KEY`
-- `LOON_TEST_R2_PREFIX` (optional)
-
-The example values and variable names live in
-[`crates/loon-objectstore/tests/provider-conformance.env.example`](crates/loon-objectstore/tests/provider-conformance.env.example).
-
-For a managed smoke run against an R2-backed server config:
+For single-host server acceptance with real object storage:
 
 ```bash
 cargo run -p xtask -- smoke \
@@ -146,20 +155,9 @@ cargo run -p xtask -- smoke \
   --namespace demo
 ```
 
-If the R2-backed server is already running:
+## More Reading
 
-```bash
-cargo run -p xtask -- smoke \
-  --client-config ./configs/loon-client.r2.local.toml \
-  --namespace demo
-```
-
-## Two-Machine Demo
-
-The two-host lease-handoff demo is now part of the acceptance gate after the direct conformance
-command and the managed smoke flow. Use host-specific ignored local configs so both machines share
-the same bucket, key prefix, and auth token while using distinct `bind`, `writer_id`, and
-`server_url` values.
-
-The full A/B sequence is documented in
-[`docs/runbooks/two-machine-r2-demo.md`](docs/runbooks/two-machine-r2-demo.md).
+- [`docs/adr/0019-cli-v0-server-backed-local-and-remote-profiles.md`](docs/adr/0019-cli-v0-server-backed-local-and-remote-profiles.md)
+- [`docs/runbooks/cli-v0.md`](docs/runbooks/cli-v0.md)
+- [`docs/runbooks/two-machine-r2-demo.md`](docs/runbooks/two-machine-r2-demo.md)
+- [`proposals/002-cli-v0-server-backed-correction.md`](proposals/002-cli-v0-server-backed-correction.md)

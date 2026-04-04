@@ -1,0 +1,19 @@
+---
+source: crates/loon-cli/src/render.rs
+assertion_line: 258
+expression: "serde_json::from_str::<serde_json::Value>(&json_success(&output).unwrap()).unwrap()"
+---
+{
+  "data": {
+    "pid": 42,
+    "profile_name": "alpha",
+    "server_config_path": "/tmp/loond.toml",
+    "server_url": "http://127.0.0.1:9400",
+    "status": "running",
+    "type": "local_status"
+  },
+  "format_version": 1,
+  "kind": "local_status",
+  "mode": "local",
+  "profile": "alpha"
+}

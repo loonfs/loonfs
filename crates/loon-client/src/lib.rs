@@ -2,8 +2,8 @@
 
 use http::Uri;
 use loon_api::{
-    ApiError, AuthoritativePathEntry, ChangeSeq, CreateNamespaceRequest, ListNamespacesResponse,
-    MoveEntryRequest, MutationResult, NamespaceSummary,
+    ApiError, AuthoritativePathEntry, ChangeSeq, CopyEntryRequest, CreateNamespaceRequest,
+    ListNamespacesResponse, MoveEntryRequest, MutationResult, NamespaceSummary,
 };
 use serde::Deserialize;
 use std::fs;
@@ -161,16 +161,25 @@ impl Client {
         Ok(bytes)
     }
 
-    pub fn write_file_bytes(
+    pub fn healthz(&self) -> Result<(), ClientError> {
+        let url = format!("{}/healthz", self.base_url);
+        let request = self.authenticated(self.agent.get(&url));
+        request.call().map_err(|err| self.map_error(err))?;
+        Ok(())
+    }
+
+    pub fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
+        force: bool,
     ) -> Result<MutationResult, ClientError> {
         let url = format!(
-            "{}/v1/namespaces/{}/content?path={}",
+            "{}/v1/namespaces/{}/content?path={}&force={}",
             self.base_url,
             spec.namespace,
-            urlencoding::encode(&spec.absolute_path)
+            urlencoding::encode(&spec.absolute_path),
+            if force { "true" } else { "false" }
         );
         let request = self
             .authenticated(self.agent.put(&url))
@@ -180,6 +189,14 @@ impl Client {
             .map_err(|err| self.map_error(err))?;
         serde_json::from_reader(response.into_reader())
             .map_err(|err| ClientError::Json(err.to_string()))
+    }
+
+    pub fn write_file_bytes(
+        &self,
+        spec: &NamespacePath,
+        bytes: &[u8],
+    ) -> Result<MutationResult, ClientError> {
+        self.put_file_bytes(spec, bytes, true)
     }
 
     pub fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
@@ -210,6 +227,28 @@ impl Client {
         self.request_json::<_, MutationResult>(
             self.agent.post(&url),
             Some(&MoveEntryRequest {
+                request_id: Uuid::new_v4().to_string(),
+                from_path: from.absolute_path.clone(),
+                to_path: to.absolute_path.clone(),
+            }),
+        )
+    }
+
+    pub fn copy_path(
+        &self,
+        from: &NamespacePath,
+        to: &NamespacePath,
+    ) -> Result<MutationResult, ClientError> {
+        if from.namespace != to.namespace {
+            return Err(ClientError::InvalidNamespacePath(format!(
+                "cannot copy across namespaces: {} -> {}",
+                from.namespace, to.namespace
+            )));
+        }
+        let url = format!("{}/v1/namespaces/{}/copy", self.base_url, from.namespace);
+        self.request_json::<_, MutationResult>(
+            self.agent.post(&url),
+            Some(&CopyEntryRequest {
                 request_id: Uuid::new_v4().to_string(),
                 from_path: from.absolute_path.clone(),
                 to_path: to.absolute_path.clone(),

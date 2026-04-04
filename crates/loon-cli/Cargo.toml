@@ -11,14 +11,16 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+http.workspace = true
 loon-api = { path = "../loon-api" }
 loon-client = { path = "../loon-client" }
+loon-server = { path = "../loon-server" }
 serde.workspace = true
 serde_json.workspace = true
+sysinfo.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
-axum.workspace = true
-loon-core = { path = "../loon-core" }
-loon-server = { path = "../loon-server" }
+insta = { version = "1.39", features = ["json"] }
 tempfile.workspace = true
-tokio.workspace = true
+ureq.workspace = true

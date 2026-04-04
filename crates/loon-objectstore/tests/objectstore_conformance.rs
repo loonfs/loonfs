@@ -5,6 +5,7 @@ use loon_objectstore::keys::{
     derived_progress, namespace_head, namespace_lease, queue_shard, snapshot_manifest,
     snapshot_table, wal_commit, SnapshotTableFamily,
 };
+use loon_objectstore::probes::run_contract_probes;
 use loon_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
 use loon_objectstore::r2::{R2Store, R2StoreConfig};
 use loon_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
@@ -214,6 +215,24 @@ fn local_fs_compare_and_swap_missing_object_rejects_writer() {
 }
 
 #[test]
+fn local_fs_contract_probes_match_doctor_surface() {
+    let temp_dir = TestDir::new("doctor-probes");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    let report = run_contract_probes(&store, "local-fs-doctor").expect("run doctor probes");
+    assert_eq!(
+        report.checks,
+        vec![
+            "create_if_absent",
+            "compare_and_swap",
+            "visibility_after_write",
+            "visibility_after_delete",
+            "sorted_listing",
+            "scoped_prefix_behavior",
+        ]
+    );
+}
+
+#[test]
 #[ignore = "requires real AWS S3 credentials"]
 fn aws_s3_real_provider_conformance() {
     let config = AwsS3ConformanceConfig::from_env()
@@ -252,6 +271,7 @@ fn cloudflare_r2_real_provider_conformance() {
 }
 
 fn assert_provider_conformance<S: ObjectStore>(store: &S) {
+    run_contract_probes(store, "provider-conformance").expect("run shared contract probes");
     assert_create_if_absent_is_enforced(store);
     assert_compare_and_swap_rejects_stale_writer(store);
     assert_compare_and_swap_missing_object_rejects_writer(store);

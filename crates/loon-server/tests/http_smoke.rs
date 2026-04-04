@@ -39,6 +39,63 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_create_only_and_copy_preserve_cli_semantics() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-test",
+        "http-copy-smoke",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let source = NamespacePath::parse("demo:/docs/hello.txt").expect("source");
+        harness
+            .client
+            .put_file_bytes(&source, b"hello over http\n", false)
+            .expect("initial create");
+
+        match harness.client.put_file_bytes(&source, b"conflict\n", false) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
+            other => panic!("expected path_conflict, got {other:?}"),
+        }
+
+        harness
+            .client
+            .put_file_bytes(&source, b"forced overwrite\n", true)
+            .expect("forced overwrite");
+
+        let destination = NamespacePath::parse("demo:/docs/copy.txt").expect("destination");
+        harness
+            .client
+            .copy_path(&source, &destination)
+            .expect("copy path");
+
+        let source_entry = harness.client.stat_path(&source).expect("source stat");
+        let dest_entry = harness.client.stat_path(&destination).expect("dest stat");
+        assert_ne!(source_entry.inode_id, dest_entry.inode_id);
+        assert_eq!(
+            source_entry.content_manifest_digest,
+            dest_entry.content_manifest_digest
+        );
+        let dest_bytes = harness
+            .client
+            .read_file_bytes(&destination)
+            .expect("read copied file");
+        assert_eq!(dest_bytes, b"forced overwrite\n");
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_servers_share_one_store_and_handoff_the_lease() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
