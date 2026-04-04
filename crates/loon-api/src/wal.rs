@@ -53,13 +53,6 @@ pub enum WalOp {
         op_index: u32,
         root_inode: InodeId,
     },
-    RestoreRevision {
-        #[serde(default)]
-        op_index: u32,
-        inode_id: InodeId,
-        base_revision: RevisionNo,
-        restore_from_revision: RevisionNo,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

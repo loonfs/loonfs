@@ -50,11 +50,6 @@ pub enum CommitOp {
     DeleteSubtree {
         root_inode: InodeId,
     },
-    RestoreRevision {
-        inode_id: InodeId,
-        base_revision: RevisionNo,
-        restore_from_revision: RevisionNo,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,37 +211,7 @@ pub enum CommitValidationError {
         covering_root_inode: InodeId,
         tombstone_seq: ChangeSeq,
     },
-    RestoreRevisionInodeMissing {
-        inode_id: InodeId,
-    },
-    RestoreRevisionInodeNotFile {
-        inode_id: InodeId,
-        actual_kind: InodeKind,
-    },
-    RestoreRevisionBaseRevisionMismatch {
-        inode_id: InodeId,
-        expected: RevisionNo,
-        actual: Option<RevisionNo>,
-    },
-    RestoreRevisionSourceMissing {
-        inode_id: InodeId,
-        restore_from_revision: RevisionNo,
-    },
-    RestoreRevisionSourceNotHistorical {
-        inode_id: InodeId,
-        base_revision: RevisionNo,
-        restore_from_revision: RevisionNo,
-    },
-    RestoreRevisionUnderSubtreeTombstone {
-        inode_id: InodeId,
-        root_inode: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
     ReplaceFileRevisionOverflow {
-        inode_id: InodeId,
-        base_revision: RevisionNo,
-    },
-    RestoreRevisionOverflow {
         inode_id: InodeId,
         base_revision: RevisionNo,
     },

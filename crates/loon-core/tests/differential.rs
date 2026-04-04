@@ -2,6 +2,17 @@ use loon_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
 use loon_core::metadata::{InodeRecord, MetadataState as CoreMetadataState};
 use loon_model::metadata::MetadataState as ModelMetadataState;
 
+type NormalizedInodes = Vec<(u64, &'static str, u64)>;
+type NormalizedDirentries = Vec<(u64, String, u64, u64, u32)>;
+type NormalizedRevisions = Vec<(u64, u64, u64, u32, String)>;
+type NormalizedTombstones = Vec<(u64, u64, u32)>;
+type NormalizedMetadata = (
+    NormalizedInodes,
+    NormalizedDirentries,
+    NormalizedRevisions,
+    NormalizedTombstones,
+);
+
 #[test]
 fn metadata_apply_matches_model_for_basic_commit_sequence() {
     let core_state = core_bootstrap_state();
@@ -158,27 +169,15 @@ fn assert_states_match(sequences: &[Vec<WalOp>]) {
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
 }
 
-fn normalize_core(
-    state: &CoreMetadataState,
-) -> (
-    Vec<(u64, &'static str, u64)>,
-    Vec<(u64, String, u64, u64, u32)>,
-    Vec<(u64, u64, u64, u32, String)>,
-    Vec<(u64, u64, u32)>,
-) {
+fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
     (
         state
             .inodes
             .iter()
             .map(|inode| {
-                (
+                normalize_inode(
                     inode.inode_id.0,
-                    match inode.inode_kind {
-                        InodeKind::Dir => "dir",
-                        InodeKind::File => "file",
-                        InodeKind::Symlink => "symlink",
-                        InodeKind::Mount => "mount",
-                    },
+                    inode.inode_kind.clone(),
                     inode.created_seq.0,
                 )
             })
@@ -223,27 +222,15 @@ fn normalize_core(
     )
 }
 
-fn normalize_model(
-    state: &ModelMetadataState,
-) -> (
-    Vec<(u64, &'static str, u64)>,
-    Vec<(u64, String, u64, u64, u32)>,
-    Vec<(u64, u64, u64, u32, String)>,
-    Vec<(u64, u64, u32)>,
-) {
+fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
     (
         state
             .inodes
             .iter()
             .map(|inode| {
-                (
+                normalize_inode(
                     inode.inode_id.0,
-                    match inode.inode_kind {
-                        InodeKind::Dir => "dir",
-                        InodeKind::File => "file",
-                        InodeKind::Symlink => "symlink",
-                        InodeKind::Mount => "mount",
-                    },
+                    inode.inode_kind.clone(),
                     inode.created_seq.0,
                 )
             })
@@ -285,5 +272,22 @@ fn normalize_model(
                 )
             })
             .collect(),
+    )
+}
+
+fn normalize_inode(
+    inode_id: u64,
+    inode_kind: InodeKind,
+    created_seq: u64,
+) -> (u64, &'static str, u64) {
+    (
+        inode_id,
+        match inode_kind {
+            InodeKind::Dir => "dir",
+            InodeKind::File => "file",
+            InodeKind::Symlink => "symlink",
+            InodeKind::Mount => "mount",
+        },
+        created_seq,
     )
 }

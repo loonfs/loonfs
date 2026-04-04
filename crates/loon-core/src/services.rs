@@ -958,8 +958,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         CommitValidationError::PlannedHeadSeqMismatch { .. }
         | CommitValidationError::MissingHeadSeqPrecondition { .. }
         | CommitValidationError::ConflictingHeadSeqPrecondition { .. } => CoreErrorKind::StaleHead,
-        CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
-        | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. } => {
+        CommitValidationError::ReplaceFileBaseRevisionMismatch { .. } => {
             CoreErrorKind::StaleRevision
         }
         CommitValidationError::CreateUnderSubtreeTombstone { .. }
@@ -967,8 +966,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::DeleteFileCoveredByTombstone { .. }
         | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
         | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
-        | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. }
-        | CommitValidationError::RestoreRevisionUnderSubtreeTombstone { .. } => {
+        | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. } => {
             CoreErrorKind::TombstoneConflict
         }
         CommitValidationError::CreateChildNameCollision { .. }
@@ -977,17 +975,16 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::DeleteFileInodeNotFile { .. }
         | CommitValidationError::RenameTargetParentNotDirectory { .. }
         | CommitValidationError::RenameTargetNameCollision { .. }
-        | CommitValidationError::DeleteSubtreeRootNotDirectory { .. }
-        | CommitValidationError::RestoreRevisionInodeNotFile { .. } => CoreErrorKind::PathConflict,
+        | CommitValidationError::DeleteSubtreeRootNotDirectory { .. } => {
+            CoreErrorKind::PathConflict
+        }
         CommitValidationError::CreateParentMissing { .. }
         | CommitValidationError::ReplaceFileInodeMissing { .. }
         | CommitValidationError::DeleteFileInodeMissing { .. }
         | CommitValidationError::RenameInodeMissing { .. }
         | CommitValidationError::RenameSourceBindingMissing { .. }
         | CommitValidationError::RenameTargetParentMissing { .. }
-        | CommitValidationError::DeleteSubtreeRootMissing { .. }
-        | CommitValidationError::RestoreRevisionInodeMissing { .. }
-        | CommitValidationError::RestoreRevisionSourceMissing { .. } => CoreErrorKind::PathNotFound,
+        | CommitValidationError::DeleteSubtreeRootMissing { .. } => CoreErrorKind::PathNotFound,
         CommitValidationError::RenameWouldCycleDirectory { .. } => CoreErrorKind::WouldCycle,
         CommitValidationError::StaleWriterFenceToken { .. }
         | CommitValidationError::LeaseHolderMismatch { .. }
@@ -997,8 +994,6 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::HeadLeaseNamespaceMismatch
         | CommitValidationError::HeadLeaseFenceMismatch { .. }
         | CommitValidationError::ReplaceFileRevisionOverflow { .. }
-        | CommitValidationError::RestoreRevisionSourceNotHistorical { .. }
-        | CommitValidationError::RestoreRevisionOverflow { .. }
         | CommitValidationError::SeqOverflow
         | CommitValidationError::NextInodeOverflow
         | CommitValidationError::OpIndexOverflow => CoreErrorKind::ServerError,

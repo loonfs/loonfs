@@ -90,10 +90,6 @@ pub enum MetadataApplyError {
         inode_id: InodeId,
         base_revision: RevisionNo,
     },
-    RestoreSourceRevisionMissing {
-        inode_id: InodeId,
-        restore_from_revision: RevisionNo,
-    },
 }
 
 impl MetadataState {
@@ -239,36 +235,6 @@ impl MetadataState {
                         "delete_subtree_writes_tombstone_row",
                     );
                 }
-                WalOp::RestoreRevision {
-                    op_index,
-                    inode_id,
-                    base_revision,
-                    restore_from_revision,
-                } => {
-                    let next_revision = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
-                        MetadataApplyError::RevisionOverflow {
-                            inode_id: *inode_id,
-                            base_revision: *base_revision,
-                        },
-                    )?;
-                    let source_revision = metadata_state
-                        .revision_at_seq(*inode_id, *restore_from_revision, committed_seq)
-                        .ok_or(MetadataApplyError::RestoreSourceRevisionMissing {
-                            inode_id: *inode_id,
-                            restore_from_revision: *restore_from_revision,
-                        })?;
-                    metadata_state.revisions.push(RevisionRecord {
-                        inode_id: *inode_id,
-                        revision_no: next_revision,
-                        committed_seq,
-                        revision_op_index: *op_index,
-                        content_manifest_digest: source_revision.content_manifest_digest,
-                    });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        "restore_creates_new_revision_head",
-                    );
-                }
             }
         }
 
@@ -300,23 +266,6 @@ impl MetadataState {
                     revision.revision_op_index,
                 )
             })
-            .cloned()
-    }
-
-    pub fn revision_at_seq(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        base_seq: ChangeSeq,
-    ) -> Option<RevisionRecord> {
-        self.revisions
-            .iter()
-            .filter(|revision| {
-                revision.inode_id == inode_id
-                    && revision.revision_no == revision_no
-                    && revision.committed_seq <= base_seq
-            })
-            .max_by_key(|revision| (revision.committed_seq, revision.revision_op_index))
             .cloned()
     }
 

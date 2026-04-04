@@ -232,31 +232,6 @@ fn validate_metadata_preconditions(
                     checked_invariants,
                 )?;
             }
-            CommitOp::RestoreRevision {
-                inode_id,
-                base_revision,
-                restore_from_revision,
-            } => {
-                validate_restore_revision(
-                    &ephemeral_metadata_state,
-                    *inode_id,
-                    *base_revision,
-                    *restore_from_revision,
-                    committed_seq,
-                )?;
-                if base_revision.0.checked_add(1).is_none() {
-                    return Err(CommitValidationError::RestoreRevisionOverflow {
-                        inode_id: *inode_id,
-                        base_revision: *base_revision,
-                    });
-                }
-                validate_restore_revision_not_covered(
-                    &ephemeral_metadata_state,
-                    *inode_id,
-                    committed_seq,
-                    checked_invariants,
-                )?;
-            }
         }
 
         let applied_metadata = ephemeral_metadata_state
@@ -332,16 +307,6 @@ fn materialize_simulated_wal_op(
         CommitOp::DeleteSubtree { root_inode } => WalOp::DeleteSubtree {
             op_index,
             root_inode: *root_inode,
-        },
-        CommitOp::RestoreRevision {
-            inode_id,
-            base_revision,
-            restore_from_revision,
-        } => WalOp::RestoreRevision {
-            op_index,
-            inode_id: *inode_id,
-            base_revision: *base_revision,
-            restore_from_revision: *restore_from_revision,
         },
     })
 }
@@ -609,78 +574,6 @@ fn validate_rename_target_parent_not_covered(
         return Err(
             CommitValidationError::RenameTargetParentUnderSubtreeTombstone {
                 parent_inode,
-                root_inode: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            },
-        );
-    }
-
-    push_unique_invariant(
-        checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
-    );
-    Ok(())
-}
-
-fn validate_restore_revision(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    base_revision: RevisionNo,
-    restore_from_revision: RevisionNo,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
-        .ok_or(CommitValidationError::RestoreRevisionInodeMissing { inode_id })?;
-    if inode.inode_kind != InodeKind::File {
-        return Err(CommitValidationError::RestoreRevisionInodeNotFile {
-            inode_id,
-            actual_kind: inode.inode_kind,
-        });
-    }
-
-    let actual_revision = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
-        .map(|revision| revision.revision_no);
-    if actual_revision != Some(base_revision) {
-        return Err(CommitValidationError::RestoreRevisionBaseRevisionMismatch {
-            inode_id,
-            expected: base_revision,
-            actual: actual_revision,
-        });
-    }
-
-    if metadata_state
-        .revision_at_seq(inode_id, restore_from_revision, base_seq)
-        .is_none()
-    {
-        return Err(CommitValidationError::RestoreRevisionSourceMissing {
-            inode_id,
-            restore_from_revision,
-        });
-    }
-
-    if restore_from_revision >= base_revision {
-        return Err(CommitValidationError::RestoreRevisionSourceNotHistorical {
-            inode_id,
-            base_revision,
-            restore_from_revision,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_restore_revision_not_covered(
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
-) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
-        return Err(
-            CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
-                inode_id,
                 root_inode: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
             },

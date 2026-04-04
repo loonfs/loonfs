@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 
 mod checkpoint;
-mod client;
 mod content;
 mod control;
 mod digest;
@@ -11,7 +10,6 @@ mod server;
 mod wal;
 
 pub use checkpoint::*;
-pub use client::*;
 pub use content::*;
 pub use control::*;
 pub use digest::*;
