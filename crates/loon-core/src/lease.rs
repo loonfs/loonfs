@@ -51,7 +51,7 @@ pub enum LeaseAcquireError {
     RetryExhausted { attempts: usize },
 }
 
-pub fn acquire_or_renew_namespace_lease<S: ObjectStore>(
+pub fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     params: &MutationContext,
@@ -184,7 +184,7 @@ fn desired_lease_state(
     }
 }
 
-fn compare_and_swap_head<S: ObjectStore>(
+fn compare_and_swap_head<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_etag: &str,
@@ -201,7 +201,7 @@ fn compare_and_swap_head<S: ObjectStore>(
         .map_err(map_cas_error)
 }
 
-fn compare_and_swap_lease<S: ObjectStore>(
+fn compare_and_swap_lease<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_etag: &str,

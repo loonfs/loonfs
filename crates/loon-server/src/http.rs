@@ -11,17 +11,20 @@ use loon_api::{
 };
 use loon_core::{
     bootstrap_namespace, delete_path, list_namespaces, list_path, move_path, read_file_bytes,
-    resolve_path, write_file_bytes, BootstrapNamespaceError, CoreError, MutationContext,
+    resolve_path, write_file_bytes, BootstrapNamespaceError, CoreError, CoreErrorKind,
+    MutationContext,
 };
-use loon_objectstore::ConfiguredObjectStore;
+use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+type SharedStore = Arc<dyn ObjectStore + Send + Sync>;
+
 #[derive(Clone)]
 struct AppState {
     config: Arc<ServerConfig>,
-    store: Arc<ConfiguredObjectStore>,
+    store: SharedStore,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -30,12 +33,16 @@ struct PathQuery {
 }
 
 pub fn app(config: ServerConfig) -> Result<Router, String> {
-    let store = Arc::new(config.object_store()?);
+    let store = Arc::new(config.object_store()?) as SharedStore;
+    Ok(app_with_store(config, store))
+}
+
+fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
     let state = AppState {
         config: Arc::new(config),
         store,
     };
-    Ok(Router::new()
+    Router::new()
         .route("/healthz", get(healthz))
         .route(
             "/v1/namespaces",
@@ -51,7 +58,7 @@ pub fn app(config: ServerConfig) -> Result<Router, String> {
             get(get_content).put(put_content),
         )
         .route("/v1/namespaces/:namespace/move", post(move_entry))
-        .with_state(state))
+        .with_state(state)
 }
 
 pub async fn serve(config: ServerConfig) -> Result<(), String> {
@@ -276,31 +283,396 @@ impl ApiResponseError {
     }
 
     fn core(error: CoreError) -> Self {
-        match error {
-            CoreError::InvalidPath(_)
-            | CoreError::RootMutationForbidden
-            | CoreError::NonDirectoryPathComponent(_) => {
-                Self::new(StatusCode::BAD_REQUEST, "invalid_path", &error.to_string())
+        let (status, code) = match error.kind() {
+            CoreErrorKind::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path"),
+            CoreErrorKind::NamespaceNotFound => (StatusCode::NOT_FOUND, "namespace_not_found"),
+            CoreErrorKind::PathNotFound => (StatusCode::NOT_FOUND, "path_not_found"),
+            CoreErrorKind::PathConflict => (StatusCode::CONFLICT, "path_conflict"),
+            CoreErrorKind::StaleHead => (StatusCode::CONFLICT, "stale_head"),
+            CoreErrorKind::StaleRevision => (StatusCode::CONFLICT, "stale_revision"),
+            CoreErrorKind::TombstoneConflict => (StatusCode::CONFLICT, "tombstone_conflict"),
+            CoreErrorKind::LeaseConflict => (StatusCode::CONFLICT, "lease_conflict"),
+            CoreErrorKind::WouldCycle => (StatusCode::CONFLICT, "would_cycle"),
+            CoreErrorKind::NamespaceCorrupt => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "namespace_corrupt")
             }
-            CoreError::MissingPath(_) | CoreError::VisiblePath(_) => {
-                Self::new(StatusCode::NOT_FOUND, "not_found", &error.to_string())
-            }
-            CoreError::ExpectedFile { .. }
-            | CoreError::ExpectedDirectory { .. }
-            | CoreError::DestinationExists(_) => {
-                Self::new(StatusCode::CONFLICT, "path_conflict", &error.to_string())
-            }
-            _ => Self::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                &error.to_string(),
-            ),
-        }
+            CoreErrorKind::ServerError => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+        };
+        Self::new(status, code, &error.to_string())
     }
 }
 
 impl IntoResponse for ApiResponseError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{app_with_store, SharedStore};
+    use crate::{ServerConfig, StoreConfig};
+    use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
+    use loon_core::{bootstrap_namespace, delete_path, write_file_bytes, MutationContext};
+    use loon_objectstore::fs::LocalFsStore;
+    use loon_objectstore::keys::namespace_head;
+    use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct StaleHeadOnceStore {
+        inner: LocalFsStore,
+        head_key: String,
+        armed: AtomicBool,
+    }
+
+    impl StaleHeadOnceStore {
+        fn new(root: impl AsRef<Path>, namespace: &str) -> Self {
+            Self {
+                inner: LocalFsStore::new(root.as_ref()).expect("construct local store"),
+                head_key: namespace_head(namespace),
+                armed: AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl ObjectStore for StaleHeadOnceStore {
+        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key)
+        }
+
+        fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+            self.inner.get(key, range)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            if key == self.head_key
+                && matches!(mode, PutMode::CompareAndSwap { .. })
+                && self.armed.swap(false, Ordering::SeqCst)
+            {
+                if let Some(existing) = self.inner.get(key, None)? {
+                    let _ = self.inner.put_overwrite(key, &existing)?;
+                }
+            }
+            self.inner.put(key, bytes, mode)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key)
+        }
+
+        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+            self.inner.list_prefix(prefix)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_missing_namespace_mutations_return_namespace_not_found() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let harness = start_server(store, temp_dir.path(), "server-writer").await;
+
+        tokio::task::spawn_blocking(move || {
+            let target = NamespacePath::parse("missing:/notes/hello.txt").expect("target");
+            assert_api_error(
+                harness.client.write_file_bytes(&target, b"hello"),
+                404,
+                "namespace_not_found",
+            );
+            assert_api_error(
+                harness.client.delete_path(&target),
+                404,
+                "namespace_not_found",
+            );
+            let destination = NamespacePath::parse("missing:/notes/renamed.txt").expect("target");
+            assert_api_error(
+                harness.client.move_path(&target, &destination),
+                404,
+                "namespace_not_found",
+            );
+        })
+        .await
+        .expect("join blocking task");
+
+        harness.server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_delete_missing_path_returns_path_not_found() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let now_ms = now_ms();
+        bootstrap_namespace(
+            store.as_ref(),
+            &"demo".into(),
+            &context("server-writer", now_ms),
+            false,
+        )
+        .expect("bootstrap namespace");
+
+        let harness = start_server(store, temp_dir.path(), "server-writer").await;
+        tokio::task::spawn_blocking(move || {
+            let target = NamespacePath::parse("demo:/missing.txt").expect("target");
+            assert_api_error(harness.client.delete_path(&target), 404, "path_not_found");
+        })
+        .await
+        .expect("join blocking task");
+
+        harness.server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_put_over_directory_and_move_into_existing_target_return_path_conflict() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let now_ms = now_ms();
+        let context = context("server-writer", now_ms);
+        bootstrap_namespace(store.as_ref(), &"demo".into(), &context, false)
+            .expect("bootstrap namespace");
+        write_file_bytes(
+            store.as_ref(),
+            &"demo".into(),
+            "/docs/readme.txt",
+            b"readme",
+            &context,
+            Some("seed-docs"),
+        )
+        .expect("seed docs");
+        write_file_bytes(
+            store.as_ref(),
+            &"demo".into(),
+            "/tmp/a.txt",
+            b"from tmp",
+            &context,
+            Some("seed-tmp"),
+        )
+        .expect("seed tmp");
+        write_file_bytes(
+            store.as_ref(),
+            &"demo".into(),
+            "/docs/a.txt",
+            b"in docs",
+            &context,
+            Some("seed-target"),
+        )
+        .expect("seed target");
+
+        let harness = start_server(store, temp_dir.path(), "server-writer").await;
+        tokio::task::spawn_blocking(move || {
+            let dir_target = NamespacePath::parse("demo:/docs").expect("dir target");
+            assert_api_error(
+                harness.client.write_file_bytes(&dir_target, b"not a file"),
+                409,
+                "path_conflict",
+            );
+
+            let from = NamespacePath::parse("demo:/tmp/a.txt").expect("from");
+            let to = NamespacePath::parse("demo:/docs/a.txt").expect("to");
+            assert_api_error(harness.client.move_path(&from, &to), 409, "path_conflict");
+        })
+        .await
+        .expect("join blocking task");
+
+        harness.server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_put_and_move_under_tombstoned_ancestor_return_tombstone_conflict() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let now_ms = now_ms();
+        let context = context("server-writer", now_ms);
+        bootstrap_namespace(store.as_ref(), &"demo".into(), &context, false)
+            .expect("bootstrap namespace");
+        write_file_bytes(
+            store.as_ref(),
+            &"demo".into(),
+            "/docs/old.txt",
+            b"old",
+            &context,
+            Some("seed-docs"),
+        )
+        .expect("seed docs");
+        write_file_bytes(
+            store.as_ref(),
+            &"demo".into(),
+            "/tmp/source.txt",
+            b"source",
+            &context,
+            Some("seed-source"),
+        )
+        .expect("seed source");
+        delete_path(
+            store.as_ref(),
+            &"demo".into(),
+            "/docs",
+            &context,
+            Some("delete-docs"),
+        )
+        .expect("delete docs");
+
+        let harness = start_server(store, temp_dir.path(), "server-writer").await;
+        tokio::task::spawn_blocking(move || {
+            let put_target = NamespacePath::parse("demo:/docs/new.txt").expect("put target");
+            assert_api_error(
+                harness.client.write_file_bytes(&put_target, b"new"),
+                409,
+                "tombstone_conflict",
+            );
+
+            let from = NamespacePath::parse("demo:/tmp/source.txt").expect("from");
+            let to = NamespacePath::parse("demo:/docs/source.txt").expect("to");
+            assert_api_error(
+                harness.client.move_path(&from, &to),
+                409,
+                "tombstone_conflict",
+            );
+        })
+        .await
+        .expect("join blocking task");
+
+        harness.server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_stale_head_conflict_surfaces_as_409() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(StaleHeadOnceStore::new(temp_dir.path(), "demo")) as SharedStore;
+        let now_ms = now_ms();
+        bootstrap_namespace(
+            store.as_ref(),
+            &"demo".into(),
+            &context("server-writer", now_ms),
+            false,
+        )
+        .expect("bootstrap namespace");
+
+        let harness = start_server(store, temp_dir.path(), "server-writer").await;
+        tokio::task::spawn_blocking(move || {
+            let target = NamespacePath::parse("demo:/notes/race.txt").expect("target");
+            assert_api_error(
+                harness.client.write_file_bytes(&target, b"race"),
+                409,
+                "stale_head",
+            );
+        })
+        .await
+        .expect("join blocking task");
+
+        harness.server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_active_lease_held_by_other_writer_returns_lease_conflict() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let now_ms = now_ms();
+        bootstrap_namespace(
+            store.as_ref(),
+            &"demo".into(),
+            &context("other-writer", now_ms),
+            false,
+        )
+        .expect("bootstrap namespace");
+
+        let harness = start_server(store, temp_dir.path(), "server-writer").await;
+        tokio::task::spawn_blocking(move || {
+            let target = NamespacePath::parse("demo:/notes/blocked.txt").expect("target");
+            assert_api_error(
+                harness.client.write_file_bytes(&target, b"blocked"),
+                409,
+                "lease_conflict",
+            );
+        })
+        .await
+        .expect("join blocking task");
+
+        harness.server.abort();
+    }
+
+    struct TestHarness {
+        client: Client,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    async fn start_server(store: SharedStore, root: &Path, writer_id: &str) -> TestHarness {
+        let config = test_config(root, writer_id);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let router = app_with_store(config, store);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve app");
+        });
+
+        TestHarness {
+            client: Client::new(ClientConfig {
+                server_url: format!("http://{}", addr),
+                auth_token: Some("test-token".to_owned()),
+            }),
+            server,
+        }
+    }
+
+    fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
+        ServerConfig {
+            bind: "127.0.0.1:0".to_owned(),
+            auth_token: Some("test-token".to_owned()),
+            writer_id: writer_id.to_owned(),
+            writer_version: format!("{writer_id}/0.1.0"),
+            lease_duration_ms: 60_000,
+            store: StoreConfig::LocalFs {
+                root: root.display().to_string(),
+                key_prefix: Some("http-tests".to_owned()),
+            },
+        }
+    }
+
+    fn context(writer_id: &str, now_ms: u64) -> MutationContext {
+        MutationContext {
+            writer_id: writer_id.to_owned(),
+            writer_version: format!("{writer_id}/0.1.0"),
+            now_ms,
+            lease_duration_ms: 60_000,
+        }
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis() as u64
+    }
+
+    fn assert_api_error<T: std::fmt::Debug>(
+        result: Result<T, ClientError>,
+        status: u16,
+        code: &str,
+    ) {
+        match result {
+            Err(ClientError::Api {
+                status: actual_status,
+                code: actual_code,
+                ..
+            }) => {
+                assert_eq!(actual_status, status);
+                assert_eq!(actual_code, code);
+            }
+            other => panic!("expected api error {status} {code}, got {other:?}"),
+        }
     }
 }

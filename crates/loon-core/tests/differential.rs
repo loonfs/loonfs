@@ -52,6 +52,76 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
 }
 
+#[test]
+fn metadata_apply_matches_model_for_rename() {
+    assert_states_match(&[
+        vec![WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+        vec![WalOp::Rename {
+            op_index: 0,
+            inode_id: InodeId(3),
+            new_parent_inode: InodeId(1),
+            new_display_name: "README.txt".to_owned(),
+        }],
+    ]);
+}
+
+#[test]
+fn metadata_apply_matches_model_for_delete_file() {
+    assert_states_match(&[
+        vec![WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+        vec![WalOp::DeleteFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+        }],
+    ]);
+}
+
+#[test]
+fn metadata_apply_matches_model_for_delete_subtree() {
+    assert_states_match(&[
+        vec![WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "nested".to_owned(),
+        }],
+        vec![WalOp::DeleteSubtree {
+            op_index: 0,
+            root_inode: InodeId(2),
+        }],
+    ]);
+}
+
 fn core_bootstrap_state() -> CoreMetadataState {
     CoreMetadataState {
         inodes: vec![InodeRecord {
@@ -67,6 +137,25 @@ fn core_bootstrap_state() -> CoreMetadataState {
 
 fn model_bootstrap_state() -> ModelMetadataState {
     loon_model::bootstrap_basis_metadata_state()
+}
+
+fn assert_states_match(sequences: &[Vec<WalOp>]) {
+    let mut core_state = core_bootstrap_state();
+    let mut model_state = model_bootstrap_state();
+
+    for (index, ops) in sequences.iter().enumerate() {
+        let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
+        core_state = core_state
+            .apply_committed_wal_ops(seq, ops)
+            .expect("core apply")
+            .metadata_state;
+        model_state = model_state
+            .apply_committed_wal_ops(seq, ops)
+            .expect("model apply")
+            .metadata_state;
+    }
+
+    assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
 }
 
 fn normalize_core(

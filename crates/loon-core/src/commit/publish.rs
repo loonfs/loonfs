@@ -63,7 +63,7 @@ pub fn prepare_commit_head_publish(
     })
 }
 
-pub fn publish_commit_head<S: ObjectStore>(
+pub fn publish_commit_head<S: ObjectStore + ?Sized>(
     store: &S,
     expected_head_etag: &str,
     prepared: &PreparedCommitHeadPublish,
@@ -82,5 +82,10 @@ pub fn publish_commit_head<S: ObjectStore>(
 }
 
 fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
-    CommitHeadPublishError::Store(err.to_string())
+    match err {
+        ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict => {
+            CommitHeadPublishError::StaleHead
+        }
+        other => CommitHeadPublishError::Store(other.to_string()),
+    }
 }

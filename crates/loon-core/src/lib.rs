@@ -17,5 +17,5 @@ pub use lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
 pub use services::{
     bootstrap_namespace, delete_path, list_namespaces, list_path, move_path, read_file_bytes,
     resolve_path, store_bytes_as_content, write_file_bytes, BootstrapNamespaceError, CoreError,
-    MutationContext, StoredContent,
+    CoreErrorKind, MutationContext, StoredContent,
 };

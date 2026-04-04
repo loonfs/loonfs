@@ -53,7 +53,7 @@ pub enum BasisLoadError {
     },
 }
 
-pub fn load_verified_namespace_basis<S: ObjectStore>(
+pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
@@ -107,7 +107,7 @@ fn ensure_reconstructed_head_matches(
     Ok(())
 }
 
-fn load_stored_wal_tail<S: ObjectStore>(
+fn load_stored_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
     from_seq_exclusive: loon_api::ChangeSeq,

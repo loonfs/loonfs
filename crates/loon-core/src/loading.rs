@@ -58,7 +58,7 @@ pub enum ControlObjectLoadError {
     Store(String),
 }
 
-pub(crate) fn read_head_object<S: ObjectStore>(
+pub(crate) fn read_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
@@ -89,7 +89,7 @@ pub(crate) fn read_head_object<S: ObjectStore>(
     })
 }
 
-pub(crate) fn read_lease_object<S: ObjectStore>(
+pub(crate) fn read_lease_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedLeaseObject, ControlObjectLoadError> {

@@ -81,7 +81,7 @@ pub enum DurableContentValidationError {
     Store { object_key: String, message: String },
 }
 
-pub fn validate_durable_content_reference<S: ObjectStore>(
+pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     content_manifest_digest: &str,
@@ -174,7 +174,7 @@ pub fn validate_durable_content_reference<S: ObjectStore>(
     })
 }
 
-pub fn read_durable_content_bytes<S: ObjectStore>(
+pub fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     content_manifest_digest: &str,
@@ -194,7 +194,7 @@ pub fn read_durable_content_bytes<S: ObjectStore>(
     Ok(ReadDurableContent { validated, bytes })
 }
 
-fn load_required_object<S: ObjectStore>(
+fn load_required_object<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     manifest: bool,

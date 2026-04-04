@@ -39,6 +39,21 @@ pub struct StoredContent {
     pub file_size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreErrorKind {
+    InvalidPath,
+    NamespaceNotFound,
+    PathNotFound,
+    PathConflict,
+    StaleHead,
+    StaleRevision,
+    TombstoneConflict,
+    LeaseConflict,
+    WouldCycle,
+    NamespaceCorrupt,
+    ServerError,
+}
+
 #[derive(Debug, Error)]
 pub enum BootstrapNamespaceError {
     #[error("holder id must not be empty")]
@@ -89,6 +104,14 @@ pub enum CoreError {
     RootMutationForbidden,
     #[error("destination already exists at `{0}`")]
     DestinationExists(String),
+    #[error(
+        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode}` from seq `{tombstone_seq:?}`"
+    )]
+    TombstoneConflict {
+        path: String,
+        root_inode: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
     #[error("path component `{0}` is not a directory")]
     NonDirectoryPathComponent(String),
     #[error("object store error: {0}")]
@@ -119,7 +142,33 @@ impl From<CommitHeadPublishError> for CoreError {
     }
 }
 
-pub fn bootstrap_namespace<S: ObjectStore>(
+impl CoreError {
+    pub fn kind(&self) -> CoreErrorKind {
+        match self {
+            CoreError::Basis(error) => classify_basis_load_error(error),
+            CoreError::VisiblePath(error) => classify_visible_path_error(error),
+            CoreError::DurableContent(error) => classify_durable_content_error(error),
+            CoreError::Lease(error) => classify_lease_acquire_error(error),
+            CoreError::CommitValidation(error) => classify_commit_validation_error(error),
+            CoreError::WalBuild(_)
+            | CoreError::MetadataApply(_)
+            | CoreError::WalWrite(_)
+            | CoreError::Store(_) => CoreErrorKind::ServerError,
+            CoreError::HeadPublish(error) => classify_head_publish_error(error),
+            CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
+                CoreErrorKind::InvalidPath
+            }
+            CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
+            CoreError::ExpectedFile { .. }
+            | CoreError::ExpectedDirectory { .. }
+            | CoreError::DestinationExists(_) => CoreErrorKind::PathConflict,
+            CoreError::TombstoneConflict { .. } => CoreErrorKind::TombstoneConflict,
+            CoreError::NonDirectoryPathComponent(_) => CoreErrorKind::InvalidPath,
+        }
+    }
+}
+
+pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -200,7 +249,9 @@ pub fn bootstrap_namespace<S: ObjectStore>(
     })
 }
 
-pub fn list_namespaces<S: ObjectStore>(store: &S) -> Result<Vec<NamespaceSummary>, CoreError> {
+pub fn list_namespaces<S: ObjectStore + ?Sized>(
+    store: &S,
+) -> Result<Vec<NamespaceSummary>, CoreError> {
     let keys = store
         .list_prefix("namespaces/")
         .map_err(|err| CoreError::Store(err.to_string()))?;
@@ -220,7 +271,7 @@ pub fn list_namespaces<S: ObjectStore>(store: &S) -> Result<Vec<NamespaceSummary
         .collect())
 }
 
-pub fn resolve_path<S: ObjectStore>(
+pub fn resolve_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -238,7 +289,7 @@ pub fn resolve_path<S: ObjectStore>(
     )
 }
 
-pub fn list_path<S: ObjectStore>(
+pub fn list_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -292,7 +343,7 @@ pub fn list_path<S: ObjectStore>(
         .collect()
 }
 
-pub fn read_file_bytes<S: ObjectStore>(
+pub fn read_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -315,7 +366,7 @@ pub fn read_file_bytes<S: ObjectStore>(
     })
 }
 
-pub fn store_bytes_as_content<S: ObjectStore>(
+pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     bytes: &[u8],
@@ -356,7 +407,7 @@ pub fn store_bytes_as_content<S: ObjectStore>(
     })
 }
 
-pub fn write_file_bytes<S: ObjectStore>(
+pub fn write_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -375,6 +426,7 @@ pub fn write_file_bytes<S: ObjectStore>(
 
     acquire_or_renew_namespace_lease(store, namespace_id, context)?;
     let basis = load_verified_namespace_basis(store, namespace_id)?;
+    reject_tombstoned_path_ancestor(&basis.metadata_state, absolute_path, basis.head.seq)?;
     let target = lookup_path(&basis.metadata_state, absolute_path, basis.head.seq);
 
     let mut ops = Vec::new();
@@ -452,7 +504,7 @@ pub fn write_file_bytes<S: ObjectStore>(
     )
 }
 
-pub fn delete_path<S: ObjectStore>(
+pub fn delete_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -500,7 +552,7 @@ pub fn delete_path<S: ObjectStore>(
     )
 }
 
-pub fn move_path<S: ObjectStore>(
+pub fn move_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     from_path: &str,
@@ -512,6 +564,8 @@ pub fn move_path<S: ObjectStore>(
     validate_path_for_mutation(to_path)?;
     acquire_or_renew_namespace_lease(store, namespace_id, context)?;
     let basis = load_verified_namespace_basis(store, namespace_id)?;
+    reject_tombstoned_path_ancestor(&basis.metadata_state, from_path, basis.head.seq)?;
+    reject_tombstoned_path_ancestor(&basis.metadata_state, to_path, basis.head.seq)?;
     let source = basis
         .metadata_state
         .resolve_visible_path(from_path, basis.head.seq)?;
@@ -545,7 +599,7 @@ pub fn move_path<S: ObjectStore>(
     )
 }
 
-fn execute_commit<S: ObjectStore>(
+fn execute_commit<S: ObjectStore + ?Sized>(
     store: &S,
     basis: crate::VerifiedNamespaceBasis,
     context: &MutationContext,
@@ -642,7 +696,7 @@ fn resolve_parent_directory(
     Ok(resolved.inode_id)
 }
 
-fn build_authoritative_path_entry<S: ObjectStore>(
+fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     head_seq: ChangeSeq,
@@ -680,7 +734,7 @@ fn build_authoritative_path_entry<S: ObjectStore>(
     })
 }
 
-fn write_immutable_object<S: ObjectStore>(
+fn write_immutable_object<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_bytes: &[u8],
@@ -756,5 +810,210 @@ fn join_absolute_path(base: &str, component: &str) -> String {
         format!("/{component}")
     } else {
         format!("{base}/{component}")
+    }
+}
+
+fn reject_tombstoned_path_ancestor(
+    metadata_state: &MetadataState,
+    absolute_path: &str,
+    seq: ChangeSeq,
+) -> Result<(), CoreError> {
+    let Some((path, root_inode, tombstone_seq)) =
+        tombstoned_path_ancestor(metadata_state, absolute_path, seq)?
+    else {
+        return Ok(());
+    };
+    Err(CoreError::TombstoneConflict {
+        path,
+        root_inode,
+        tombstone_seq,
+    })
+}
+
+fn tombstoned_path_ancestor(
+    metadata_state: &MetadataState,
+    absolute_path: &str,
+    seq: ChangeSeq,
+) -> Result<Option<(String, InodeId, ChangeSeq)>, CoreError> {
+    let components = path_components(absolute_path)?;
+    let mut current_inode = InodeId(1);
+    let mut current_path = "/".to_owned();
+
+    for component in components {
+        let Some(bound_child) = metadata_state.bound_child_at_seq(current_inode, &component, seq)
+        else {
+            return Ok(None);
+        };
+        let Some(latest_binding) =
+            metadata_state.current_parent_binding_for_child(bound_child.child_inode_id, seq)
+        else {
+            return Ok(None);
+        };
+        if latest_binding.parent_inode_id != bound_child.parent_inode_id
+            || latest_binding.name_key != bound_child.name_key
+            || latest_binding.bind_seq != bound_child.bind_seq
+            || latest_binding.bind_op_index != bound_child.bind_op_index
+        {
+            return Ok(None);
+        }
+
+        current_path = join_absolute_path(&current_path, &component);
+        if let Some(tombstone) =
+            metadata_state.covering_subtree_tombstone(bound_child.child_inode_id, seq)
+        {
+            return Ok(Some((
+                current_path,
+                tombstone.root_inode_id,
+                tombstone.tombstone_seq,
+            )));
+        }
+
+        if metadata_state
+            .visible_inode(bound_child.child_inode_id, seq)
+            .is_none()
+        {
+            return Ok(None);
+        }
+        current_inode = bound_child.child_inode_id;
+    }
+
+    Ok(None)
+}
+
+fn classify_control_object_load_error(error: &ControlObjectLoadError) -> CoreErrorKind {
+    match error {
+        ControlObjectLoadError::MissingObject { .. }
+        | ControlObjectLoadError::MissingObjectAfterHead { .. } => CoreErrorKind::NamespaceNotFound,
+        ControlObjectLoadError::KindMismatch { .. }
+        | ControlObjectLoadError::NamespaceMismatch { .. }
+        | ControlObjectLoadError::ChecksumMismatch { .. }
+        | ControlObjectLoadError::Codec { .. } => CoreErrorKind::NamespaceCorrupt,
+        ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
+    }
+}
+
+fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
+    match error {
+        BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => {
+            classify_control_object_load_error(error)
+        }
+        BasisLoadError::InvalidWalObjectKey { .. }
+        | BasisLoadError::DuplicateWalSeq { .. }
+        | BasisLoadError::MissingWalObject { .. }
+        | BasisLoadError::MissingWalObjectAfterList { .. }
+        | BasisLoadError::WalReplay(_)
+        | BasisLoadError::ReconstructedHeadMismatch { .. } => CoreErrorKind::NamespaceCorrupt,
+        BasisLoadError::MissingHeadEtag { .. }
+        | BasisLoadError::ListWal { .. }
+        | BasisLoadError::ReadWal { .. } => CoreErrorKind::ServerError,
+    }
+}
+
+fn classify_visible_path_error(error: &VisiblePathError) -> CoreErrorKind {
+    match error {
+        VisiblePathError::InvalidAbsolutePath { .. } => CoreErrorKind::InvalidPath,
+        VisiblePathError::RootMissing => CoreErrorKind::NamespaceCorrupt,
+        VisiblePathError::PathNotFound { .. } => CoreErrorKind::PathNotFound,
+        VisiblePathError::PathComponentNotDirectory { .. } => CoreErrorKind::PathConflict,
+    }
+}
+
+fn classify_durable_content_error(error: &DurableContentValidationError) -> CoreErrorKind {
+    match error {
+        DurableContentValidationError::MissingManifestObject { .. }
+        | DurableContentValidationError::ManifestCodec { .. }
+        | DurableContentValidationError::ManifestDigestMismatch { .. }
+        | DurableContentValidationError::ManifestNamespaceMismatch { .. }
+        | DurableContentValidationError::MissingBlockObject { .. }
+        | DurableContentValidationError::BlockLengthMismatch { .. }
+        | DurableContentValidationError::BlockDigestMismatch { .. }
+        | DurableContentValidationError::FileSizeMismatch { .. }
+        | DurableContentValidationError::FileDigestMismatch { .. } => {
+            CoreErrorKind::NamespaceCorrupt
+        }
+        DurableContentValidationError::Store { .. } => CoreErrorKind::ServerError,
+    }
+}
+
+fn classify_lease_acquire_error(error: &LeaseAcquireError) -> CoreErrorKind {
+    match error {
+        LeaseAcquireError::LoadHead(error) | LeaseAcquireError::LoadLease(error) => {
+            classify_control_object_load_error(error)
+        }
+        LeaseAcquireError::HeldByOtherWriter { .. } => CoreErrorKind::LeaseConflict,
+        LeaseAcquireError::UnexpectedControlState { .. } => CoreErrorKind::NamespaceCorrupt,
+        LeaseAcquireError::EmptyWriterId
+        | LeaseAcquireError::ZeroLeaseDuration
+        | LeaseAcquireError::MissingHeadEtag { .. }
+        | LeaseAcquireError::MissingLeaseEtag { .. }
+        | LeaseAcquireError::HeadFenceTakeover(_)
+        | LeaseAcquireError::HeadWrite(_)
+        | LeaseAcquireError::LeaseWrite(_)
+        | LeaseAcquireError::RetryExhausted { .. } => CoreErrorKind::ServerError,
+    }
+}
+
+fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorKind {
+    match error {
+        CommitValidationError::PlannedHeadSeqMismatch { .. }
+        | CommitValidationError::MissingHeadSeqPrecondition { .. }
+        | CommitValidationError::ConflictingHeadSeqPrecondition { .. } => CoreErrorKind::StaleHead,
+        CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
+        | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. } => {
+            CoreErrorKind::StaleRevision
+        }
+        CommitValidationError::CreateUnderSubtreeTombstone { .. }
+        | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }
+        | CommitValidationError::DeleteFileCoveredByTombstone { .. }
+        | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
+        | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
+        | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. }
+        | CommitValidationError::RestoreRevisionUnderSubtreeTombstone { .. } => {
+            CoreErrorKind::TombstoneConflict
+        }
+        CommitValidationError::CreateChildNameCollision { .. }
+        | CommitValidationError::CreateParentNotDirectory { .. }
+        | CommitValidationError::ReplaceFileInodeNotFile { .. }
+        | CommitValidationError::DeleteFileInodeNotFile { .. }
+        | CommitValidationError::RenameTargetParentNotDirectory { .. }
+        | CommitValidationError::RenameTargetNameCollision { .. }
+        | CommitValidationError::DeleteSubtreeRootNotDirectory { .. }
+        | CommitValidationError::RestoreRevisionInodeNotFile { .. } => CoreErrorKind::PathConflict,
+        CommitValidationError::CreateParentMissing { .. }
+        | CommitValidationError::ReplaceFileInodeMissing { .. }
+        | CommitValidationError::DeleteFileInodeMissing { .. }
+        | CommitValidationError::RenameInodeMissing { .. }
+        | CommitValidationError::RenameSourceBindingMissing { .. }
+        | CommitValidationError::RenameTargetParentMissing { .. }
+        | CommitValidationError::DeleteSubtreeRootMissing { .. }
+        | CommitValidationError::RestoreRevisionInodeMissing { .. }
+        | CommitValidationError::RestoreRevisionSourceMissing { .. } => CoreErrorKind::PathNotFound,
+        CommitValidationError::RenameWouldCycleDirectory { .. } => CoreErrorKind::WouldCycle,
+        CommitValidationError::StaleWriterFenceToken { .. }
+        | CommitValidationError::LeaseHolderMismatch { .. }
+        | CommitValidationError::LeaseExpired { .. } => CoreErrorKind::LeaseConflict,
+        CommitValidationError::EmptyCommit
+        | CommitValidationError::NamespaceMismatch
+        | CommitValidationError::HeadLeaseNamespaceMismatch
+        | CommitValidationError::HeadLeaseFenceMismatch { .. }
+        | CommitValidationError::ReplaceFileRevisionOverflow { .. }
+        | CommitValidationError::RestoreRevisionSourceNotHistorical { .. }
+        | CommitValidationError::RestoreRevisionOverflow { .. }
+        | CommitValidationError::SeqOverflow
+        | CommitValidationError::NextInodeOverflow
+        | CommitValidationError::OpIndexOverflow => CoreErrorKind::ServerError,
+    }
+}
+
+fn classify_head_publish_error(error: &CommitHeadPublishError) -> CoreErrorKind {
+    match error {
+        CommitHeadPublishError::StaleHead => CoreErrorKind::StaleHead,
+        CommitHeadPublishError::EmptyWriterVersion
+        | CommitHeadPublishError::EmptyExpectedHeadEtag
+        | CommitHeadPublishError::NamespaceMismatch { .. }
+        | CommitHeadPublishError::PlanBaseHeadSeqMismatch { .. }
+        | CommitHeadPublishError::PlanNextSeqMismatch { .. }
+        | CommitHeadPublishError::Codec(_)
+        | CommitHeadPublishError::Store(_) => CoreErrorKind::ServerError,
     }
 }

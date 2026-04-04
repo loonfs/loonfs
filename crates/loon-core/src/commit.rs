@@ -283,6 +283,7 @@ pub enum CommitHeadPublishError {
         head: ChangeSeq,
         plan: ChangeSeq,
     },
+    StaleHead,
     Codec(String),
     Store(String),
 }
