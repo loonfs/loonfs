@@ -86,6 +86,9 @@ Example configs live in [`configs/`](configs/):
 - [`configs/loon-client.local.example.toml`](configs/loon-client.local.example.toml)
 - [`configs/loon-client.r2.example.toml`](configs/loon-client.r2.example.toml)
 
+Checked-in `*.example.toml` files stay sanitized. For filled-in local credentials or machine-specific
+values, copy the example to `configs/*.local.toml`. Those local config files are ignored by Git.
+
 ## Verification
 
 Current local baseline:
@@ -132,8 +135,8 @@ For a managed smoke run against an R2-backed server config:
 
 ```bash
 cargo run -p xtask -- smoke \
-  --server-config ./configs/loond.cloudflare-r2.example.toml \
-  --client-config ./configs/loon-client.r2.example.toml \
+  --server-config ./configs/loond.cloudflare-r2.local.toml \
+  --client-config ./configs/loon-client.r2.local.toml \
   --namespace demo
 ```
 
@@ -141,11 +144,12 @@ If the R2-backed server is already running:
 
 ```bash
 cargo run -p xtask -- smoke \
-  --client-config ./configs/loon-client.r2.example.toml \
+  --client-config ./configs/loon-client.r2.local.toml \
   --namespace demo
 ```
 
 ## Two-Machine Demo
 
-The canonical manual workflow for one shared `loond` plus two CLI clients is documented in
+The current acceptance gate is the direct R2 conformance command plus the managed R2 smoke flow.
+The manual two-machine workflow is documented for the following milestone in
 [`docs/runbooks/two-machine-r2-demo.md`](docs/runbooks/two-machine-r2-demo.md).

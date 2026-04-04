@@ -15,3 +15,9 @@ clap.workspace = true
 loon-api = { path = "../loon-api" }
 loon-client = { path = "../loon-client" }
 serde_json.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+loon-server = { path = "../loon-server" }
+tempfile.workspace = true
+tokio.workspace = true

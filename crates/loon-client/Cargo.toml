@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+http.workspace = true
 loon-api = { path = "../loon-api" }
 serde.workspace = true
 serde_json.workspace = true
@@ -15,3 +16,6 @@ ureq.workspace = true
 urlencoding.workspace = true
 uuid.workspace = true
 walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,4 +1,4 @@
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, ServerConfigError};
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -33,7 +33,7 @@ struct PathQuery {
     path: String,
 }
 
-pub fn app(config: ServerConfig) -> Result<Router, String> {
+pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
     let store = Arc::new(config.object_store()?) as SharedStore;
     Ok(app_with_store(config, store))
 }
@@ -67,7 +67,7 @@ pub async fn serve(config: ServerConfig) -> Result<(), String> {
         .bind
         .parse()
         .map_err(|err: std::net::AddrParseError| err.to_string())?;
-    let app = app(config)?;
+    let app = app(config).map_err(|err| err.to_string())?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|err| err.to_string())?;

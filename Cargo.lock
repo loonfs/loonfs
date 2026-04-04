@@ -1254,19 +1254,25 @@ name = "loon-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "loon-api",
  "loon-client",
+ "loon-server",
  "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
 name = "loon-client"
 version = "0.1.0"
 dependencies = [
+ "http 0.2.12",
  "loon-api",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml",
  "ureq",
@@ -1319,6 +1325,7 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "http 0.2.12",
  "loon-api",
  "loon-client",
  "loon-core",

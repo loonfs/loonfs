@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use http::Uri;
 use loon_api::{
     ApiError, AuthoritativePathEntry, CreateNamespaceRequest, ListNamespacesResponse,
     MoveEntryRequest, MutationResult, NamespaceSummary,
@@ -37,6 +38,10 @@ pub enum ClientError {
     ConfigIo(String),
     #[error("failed to decode config: {0}")]
     ConfigDecode(String),
+    #[error("missing `{field}`")]
+    MissingConfigField { field: &'static str },
+    #[error("invalid `{field}`: {reason}")]
+    ConfigValidation { field: &'static str, reason: String },
     #[error("invalid namespace path `{0}`")]
     InvalidNamespacePath(String),
     #[error("http error: {0}")]
@@ -57,18 +62,33 @@ impl ClientConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ClientError> {
         let bytes =
             fs::read(path.as_ref()).map_err(|err| ClientError::ConfigIo(err.to_string()))?;
-        toml::from_str(
+        let config: Self = toml::from_str(
             std::str::from_utf8(&bytes)
                 .map_err(|err| ClientError::ConfigDecode(err.to_string()))?,
         )
-        .map_err(|err| ClientError::ConfigDecode(err.to_string()))
+        .map_err(|err| ClientError::ConfigDecode(err.to_string()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), ClientError> {
+        validate_absolute_http_url("server_url", &self.server_url)?;
+        if let Some(token) = &self.auth_token {
+            if token.trim().is_empty() {
+                return Err(ClientError::ConfigValidation {
+                    field: "auth_token",
+                    reason: "must not be empty".to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
 impl Client {
     pub fn new(config: ClientConfig) -> Self {
         Self {
-            base_url: config.server_url.trim_end_matches('/').to_owned(),
+            base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
             agent: ureq::AgentBuilder::new().build(),
         }
@@ -356,4 +376,112 @@ fn write_local_file(path: &Path, bytes: &[u8]) -> Result<(), ClientError> {
     let mut file = fs::File::create(path).map_err(|err| ClientError::Io(err.to_string()))?;
     file.write_all(bytes)
         .map_err(|err| ClientError::Io(err.to_string()))
+}
+
+fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), ClientError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ClientError::MissingConfigField { field });
+    }
+
+    let uri: Uri =
+        trimmed
+            .parse()
+            .map_err(|err: http::uri::InvalidUri| ClientError::ConfigValidation {
+                field,
+                reason: err.to_string(),
+            })?;
+
+    match uri.scheme_str() {
+        Some("http" | "https") => {}
+        Some(other) => {
+            return Err(ClientError::ConfigValidation {
+                field,
+                reason: format!("scheme must be http or https, got `{other}`"),
+            });
+        }
+        None => {
+            return Err(ClientError::ConfigValidation {
+                field,
+                reason: "must be an absolute http or https URL".to_owned(),
+            });
+        }
+    }
+
+    if uri.authority().is_none() {
+        return Err(ClientError::ConfigValidation {
+            field,
+            reason: "must be an absolute http or https URL".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientConfig, ClientError};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn load_rejects_invalid_server_url() {
+        let path = write_config(
+            r#"
+server_url = "ftp://example.com"
+auth_token = "dev-token"
+"#,
+        );
+
+        let error = ClientConfig::load(&path).expect_err("invalid server url");
+
+        match error {
+            ClientError::ConfigValidation { field, .. } => assert_eq!(field, "server_url"),
+            other => panic!("expected config validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_blank_auth_token() {
+        let path = write_config(
+            r#"
+server_url = "http://127.0.0.1:9400"
+auth_token = "   "
+"#,
+        );
+
+        let error = ClientConfig::load(&path).expect_err("blank auth token");
+
+        match error {
+            ClientError::ConfigValidation { field, .. } => assert_eq!(field, "auth_token"),
+            other => panic!("expected config validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_preserves_missing_file_as_config_io() {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("missing.toml");
+
+        let error = ClientConfig::load(&path).expect_err("missing config");
+
+        assert!(matches!(error, ClientError::ConfigIo(_)));
+    }
+
+    #[test]
+    fn load_preserves_decode_error() {
+        let path = write_config("server_url = [");
+
+        let error = ClientConfig::load(&path).expect_err("decode error");
+
+        assert!(matches!(error, ClientError::ConfigDecode(_)));
+    }
+
+    fn write_config(contents: &str) -> std::path::PathBuf {
+        let temp_dir = tempdir().expect("tempdir");
+        let path = temp_dir.path().join("client.toml");
+        fs::write(&path, contents).expect("write config");
+        let _ = temp_dir.keep();
+        path
+    }
 }

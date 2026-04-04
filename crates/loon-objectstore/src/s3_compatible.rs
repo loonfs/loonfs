@@ -11,6 +11,7 @@ use http::header::{IF_MATCH, IF_NONE_MATCH};
 use http::HeaderValue;
 use std::fmt;
 use std::sync::OnceLock;
+use std::thread;
 use tokio::runtime::{Builder, Runtime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +33,7 @@ pub(crate) struct S3CompatibleStore {
     key_prefix: Option<String>,
     client_config: S3CompatibleConfig,
     client: OnceLock<Client>,
-    runtime: Runtime,
+    runtime: BlockingRuntime,
 }
 
 impl fmt::Debug for S3CompatibleStore {
@@ -75,7 +76,7 @@ impl S3CompatibleStore {
             key_prefix,
             client_config: config,
             client: OnceLock::new(),
-            runtime: build_runtime()?,
+            runtime: BlockingRuntime::new()?,
         })
     }
 
@@ -194,11 +195,40 @@ impl S3CompatibleStore {
     }
 }
 
-fn build_runtime() -> Result<Runtime, ObjectStoreError> {
-    Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| ObjectStoreError::Transport(err.to_string()))
+struct BlockingRuntime(Option<Runtime>);
+
+impl BlockingRuntime {
+    fn new() -> Result<Self, ObjectStoreError> {
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(Some)
+            .map(Self)
+            .map_err(|err| ObjectStoreError::Transport(err.to_string()))
+    }
+
+    fn block_on<F, T>(&self, future: F) -> Result<T, ObjectStoreError>
+    where
+        F: std::future::Future<Output = Result<T, ObjectStoreError>>,
+    {
+        self.0
+            .as_ref()
+            .expect("blocking runtime available")
+            .block_on(future)
+    }
+}
+
+impl Drop for BlockingRuntime {
+    fn drop(&mut self) {
+        let Some(runtime) = self.0.take() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let _ = thread::spawn(move || drop(runtime)).join();
+        } else {
+            drop(runtime);
+        }
+    }
 }
 
 fn build_client(config: S3CompatibleConfig) -> Client {
@@ -488,5 +518,23 @@ mod tests {
             .expect("second block_on");
 
         assert_eq!((first, second), (1, 2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_can_drop_inside_async_context() {
+        let store = S3CompatibleStore::new(S3CompatibleConfig {
+            provider_name: "test-s3",
+            bucket: "bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint_url: Some("http://127.0.0.1:9000".to_owned()),
+            access_key_id: "access".to_owned(),
+            secret_access_key: "secret".to_owned(),
+            session_token: None,
+            key_prefix: Some("tenant-a".to_owned()),
+            force_path_style: true,
+        })
+        .expect("construct store");
+
+        drop(store);
     }
 }
