@@ -2,7 +2,7 @@
 
 use http::Uri;
 use loon_api::{
-    ApiError, AuthoritativePathEntry, CreateNamespaceRequest, ListNamespacesResponse,
+    ApiError, AuthoritativePathEntry, ChangeSeq, CreateNamespaceRequest, ListNamespacesResponse,
     MoveEntryRequest, MutationResult, NamespaceSummary,
 };
 use serde::Deserialize;
@@ -24,6 +24,17 @@ pub struct Client {
     base_url: String,
     auth_token: Option<String>,
     agent: ureq::Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetPathResult {
+    pub destination: PathBuf,
+    pub bytes_written: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PutPathResult {
+    pub committed_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,7 +221,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         destination: impl AsRef<Path>,
-    ) -> Result<(), ClientError> {
+    ) -> Result<GetPathResult, ClientError> {
         let destination = destination.as_ref();
         let entry = self.stat_path(spec)?;
         match entry.inode_kind {
@@ -221,9 +232,19 @@ impl Client {
                 } else {
                     destination.to_path_buf()
                 };
-                write_local_file(&target, &bytes)
+                let bytes_written = write_local_file(&target, &bytes)?;
+                Ok(GetPathResult {
+                    destination: target,
+                    bytes_written,
+                })
             }
-            loon_api::InodeKind::Dir => self.get_directory(spec, destination),
+            loon_api::InodeKind::Dir => {
+                let bytes_written = self.get_directory(spec, destination)?;
+                Ok(GetPathResult {
+                    destination: destination.to_path_buf(),
+                    bytes_written,
+                })
+            }
             kind => Err(ClientError::InvalidNamespacePath(format!(
                 "unsupported inode kind for get: {kind:?}"
             ))),
@@ -234,12 +255,14 @@ impl Client {
         &self,
         source: impl AsRef<Path>,
         spec: &NamespacePath,
-    ) -> Result<(), ClientError> {
+    ) -> Result<PutPathResult, ClientError> {
         let source = source.as_ref();
         if source.is_file() {
             let bytes = fs::read(source).map_err(|err| ClientError::Io(err.to_string()))?;
-            self.write_file_bytes(spec, &bytes)?;
-            return Ok(());
+            let result = self.write_file_bytes(spec, &bytes)?;
+            return Ok(PutPathResult {
+                committed_seq: result.committed_seq,
+            });
         }
         if !source.is_dir() {
             return Err(ClientError::Io(format!(
@@ -248,6 +271,7 @@ impl Client {
             )));
         }
 
+        let mut last_result = None;
         for entry in WalkDir::new(source).into_iter().filter_map(Result::ok) {
             if !entry.file_type().is_file() {
                 continue;
@@ -262,14 +286,24 @@ impl Client {
                 absolute_path: remote_path,
             };
             let bytes = fs::read(entry.path()).map_err(|err| ClientError::Io(err.to_string()))?;
-            self.write_file_bytes(&target, &bytes)?;
+            last_result = Some(self.write_file_bytes(&target, &bytes)?);
         }
 
-        Ok(())
+        let Some(result) = last_result else {
+            return Err(ClientError::Io(format!(
+                "local directory does not contain any files: {}",
+                source.display()
+            )));
+        };
+
+        Ok(PutPathResult {
+            committed_seq: result.committed_seq,
+        })
     }
 
-    fn get_directory(&self, spec: &NamespacePath, destination: &Path) -> Result<(), ClientError> {
+    fn get_directory(&self, spec: &NamespacePath, destination: &Path) -> Result<u64, ClientError> {
         fs::create_dir_all(destination).map_err(|err| ClientError::Io(err.to_string()))?;
+        let mut bytes_written = 0;
         for entry in self.list_path(spec)? {
             let child_spec = NamespacePath {
                 namespace: spec.namespace.clone(),
@@ -282,16 +316,16 @@ impl Client {
             });
             match entry.inode_kind {
                 loon_api::InodeKind::Dir => {
-                    self.get_directory(&child_spec, &child_dest)?;
+                    bytes_written += self.get_directory(&child_spec, &child_dest)?;
                 }
                 loon_api::InodeKind::File => {
                     let bytes = self.read_file_bytes(&child_spec)?;
-                    write_local_file(&child_dest, &bytes)?;
+                    bytes_written += write_local_file(&child_dest, &bytes)?;
                 }
                 _ => {}
             }
         }
-        Ok(())
+        Ok(bytes_written)
     }
 
     fn request_json<Req, Resp>(
@@ -369,13 +403,14 @@ fn join_remote_path(base: &str, relative: &Path) -> Result<String, ClientError> 
     Ok(rendered)
 }
 
-fn write_local_file(path: &Path, bytes: &[u8]) -> Result<(), ClientError> {
+fn write_local_file(path: &Path, bytes: &[u8]) -> Result<u64, ClientError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| ClientError::Io(err.to_string()))?;
     }
     let mut file = fs::File::create(path).map_err(|err| ClientError::Io(err.to_string()))?;
     file.write_all(bytes)
-        .map_err(|err| ClientError::Io(err.to_string()))
+        .map_err(|err| ClientError::Io(err.to_string()))?;
+    Ok(bytes.len() as u64)
 }
 
 fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), ClientError> {

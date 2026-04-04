@@ -10,14 +10,15 @@ name = "loon"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
 clap.workspace = true
 loon-api = { path = "../loon-api" }
 loon-client = { path = "../loon-client" }
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+loon-core = { path = "../loon-core" }
 loon-server = { path = "../loon-server" }
 tempfile.workspace = true
 tokio.workspace = true

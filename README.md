@@ -66,15 +66,15 @@ cargo run -p loon-cli -- --config ./configs/loon-client.local.example.toml \
 
 The current CLI surface is:
 
-- `loon namespace create NAME`
+- `loon namespace create NAME [--json]`
 - `loon namespace list [--json]`
 - `loon file ls NAMESPACE:/path [--json]`
 - `loon file stat NAMESPACE:/path [--json]`
 - `loon file cat NAMESPACE:/path`
-- `loon file get NAMESPACE:/path LOCAL_PATH`
-- `loon file put LOCAL_PATH NAMESPACE:/path`
-- `loon file rm NAMESPACE:/path`
-- `loon file mv NAMESPACE:/from NAMESPACE:/to`
+- `loon file get NAMESPACE:/path LOCAL_PATH [--json]`
+- `loon file put LOCAL_PATH NAMESPACE:/path [--json]`
+- `loon file rm NAMESPACE:/path [--json]`
+- `loon file mv NAMESPACE:/from NAMESPACE:/to [--json]`
 
 ## Configs
 
@@ -111,6 +111,12 @@ cargo run -p xtask -- smoke \
 ```
 
 ## R2 Acceptance
+
+The acceptance ladder for the current CLI-first milestone is:
+
+1. direct Cloudflare R2 conformance
+2. managed single-host R2 smoke
+3. manual two-host lease-handoff demo
 
 Cloudflare R2 validation stays manual and env-gated. The canonical conformance invocation is:
 
@@ -150,6 +156,10 @@ cargo run -p xtask -- smoke \
 
 ## Two-Machine Demo
 
-The current acceptance gate is the direct R2 conformance command plus the managed R2 smoke flow.
-The manual two-machine workflow is documented for the following milestone in
+The two-host lease-handoff demo is now part of the acceptance gate after the direct conformance
+command and the managed smoke flow. Use host-specific ignored local configs so both machines share
+the same bucket, key prefix, and auth token while using distinct `bind`, `writer_id`, and
+`server_url` values.
+
+The full A/B sequence is documented in
 [`docs/runbooks/two-machine-r2-demo.md`](docs/runbooks/two-machine-r2-demo.md).
