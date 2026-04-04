@@ -10,3 +10,10 @@ anyhow.workspace = true
 clap.workspace = true
 loon-api = { path = "../crates/loon-api" }
 loon-client = { path = "../crates/loon-client" }
+tempfile.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+loon-server = { path = "../crates/loon-server" }
+tokio.workspace = true

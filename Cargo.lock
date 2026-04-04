@@ -2646,9 +2646,14 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "loon-api",
  "loon-client",
+ "loon-server",
+ "tempfile",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]

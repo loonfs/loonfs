@@ -84,6 +84,7 @@ Example configs live in [`configs/`](configs/):
 - [`configs/loond.aws-s3.example.toml`](configs/loond.aws-s3.example.toml)
 - [`configs/loond.cloudflare-r2.example.toml`](configs/loond.cloudflare-r2.example.toml)
 - [`configs/loon-client.local.example.toml`](configs/loon-client.local.example.toml)
+- [`configs/loon-client.r2.example.toml`](configs/loon-client.r2.example.toml)
 
 ## Verification
 
@@ -92,5 +93,59 @@ Current local baseline:
 ```bash
 cargo fmt --all
 cargo check --workspace
-cargo run -p xtask -- smoke --config ./configs/loon-client.local.example.toml --namespace demo
+cargo run -p xtask -- smoke \
+  --server-config ./configs/loond.local-fs.example.toml \
+  --client-config ./configs/loon-client.local.example.toml \
+  --namespace demo
 ```
+
+If `loond` is already running, point `xtask` at the live server only:
+
+```bash
+cargo run -p xtask -- smoke \
+  --client-config ./configs/loon-client.local.example.toml \
+  --namespace demo
+```
+
+## R2 Acceptance
+
+Cloudflare R2 validation stays manual and env-gated. The canonical conformance invocation is:
+
+```bash
+cargo test -p loon-objectstore --test objectstore_conformance \
+  cloudflare_r2_real_provider_conformance -- --ignored --exact
+```
+
+The R2 conformance test reads these environment variables:
+
+- `LOON_TEST_R2_BUCKET`
+- `LOON_TEST_R2_ACCOUNT_ID`
+- `LOON_TEST_R2_ENDPOINT`
+- `LOON_TEST_R2_ACCESS_KEY_ID`
+- `LOON_TEST_R2_SECRET_ACCESS_KEY`
+- `LOON_TEST_R2_PREFIX` (optional)
+
+The example values and variable names live in
+[`crates/loon-objectstore/tests/provider-conformance.env.example`](crates/loon-objectstore/tests/provider-conformance.env.example).
+
+For a managed smoke run against an R2-backed server config:
+
+```bash
+cargo run -p xtask -- smoke \
+  --server-config ./configs/loond.cloudflare-r2.example.toml \
+  --client-config ./configs/loon-client.r2.example.toml \
+  --namespace demo
+```
+
+If the R2-backed server is already running:
+
+```bash
+cargo run -p xtask -- smoke \
+  --client-config ./configs/loon-client.r2.example.toml \
+  --namespace demo
+```
+
+## Two-Machine Demo
+
+The canonical manual workflow for one shared `loond` plus two CLI clients is documented in
+[`docs/runbooks/two-machine-r2-demo.md`](docs/runbooks/two-machine-r2-demo.md).

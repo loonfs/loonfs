@@ -1,6 +1,7 @@
 /target/
 crates/loon-objectstore/tests/provider-conformance.env.local
 /.loondb-demo/
+configs/*.local.toml
 
 # macOS Finder metadata
 .DS_Store

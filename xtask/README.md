@@ -1,13 +1,28 @@
 # xtask
 
-Build automation entrypoints for the LoonDB workspace.
+Repository automation entrypoints for the spec-locked rewrite.
 
-This crate is not intended for external use. It provides repository-level automation commands
-following the [cargo-xtask](https://github.com/matklad/cargo-xtask) convention.
+`xtask` is intentionally small in this branch. It owns smoke acceptance only.
 
 ## Commands
 
-- `rc-local` — canonical local release-candidate path (fmt, clippy, tests, conformance, smoke)
-- `render-case` — render a YAML scenario fixture into human-readable form
-- `replay-seed` — replay a deterministic simulation seed
-- `ops` — run operability commands (parallel to `loon-cli ops`)
+- `smoke --client-config <path> --namespace <id>`
+  - run the full v0 acceptance path against an already running `loond`
+- `smoke --server-config <path> --client-config <path> --namespace <id>`
+  - start `loond`, wait for `GET /healthz`, run the smoke path, then stop the child process
+
+## Smoke Sequence
+
+The smoke command proves the current product surface end to end:
+
+- create namespace
+- list namespaces
+- put one local file
+- ls the parent path
+- stat the uploaded file
+- get the file and verify bytes
+- move the file
+- rm the moved file
+- verify removal with final `ls` and `stat`
+
+The command prints a compact success line with the mode, namespace, and completed steps.

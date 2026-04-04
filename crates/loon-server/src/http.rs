@@ -18,6 +18,7 @@ use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::task;
 
 type SharedStore = Arc<dyn ObjectStore + Send + Sync>;
 
@@ -85,14 +86,19 @@ async fn create_namespace(
     Json(request): Json<CreateNamespaceRequest>,
 ) -> Result<Json<loon_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
     let namespace_id = NamespaceId::from(request.name);
-    let summary = bootstrap_namespace(
-        state.store.as_ref(),
-        &namespace_id,
-        &mutation_context(&state.config),
-        false,
-    )
-    .map_err(ApiResponseError::bootstrap)?;
+    let summary = run_blocking(move || {
+        bootstrap_namespace(
+            store.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .map_err(ApiResponseError::bootstrap)
+    })
+    .await?;
     Ok(Json(summary))
 }
 
@@ -101,7 +107,10 @@ async fn list_namespaces_handler(
     headers: HeaderMap,
 ) -> Result<Json<ListNamespacesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let namespaces = list_namespaces(state.store.as_ref()).map_err(ApiResponseError::core)?;
+    let store = state.store.clone();
+    let namespaces =
+        run_blocking(move || list_namespaces(store.as_ref()).map_err(ApiResponseError::core))
+            .await?;
     Ok(Json(ListNamespacesResponse { namespaces }))
 }
 
@@ -112,12 +121,13 @@ async fn list_entries(
     Query(query): Query<PathQuery>,
 ) -> Result<Json<Vec<loon_api::AuthoritativePathEntry>>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let entries = list_path(
-        state.store.as_ref(),
-        &NamespaceId::from(namespace),
-        &query.path,
-    )
-    .map_err(ApiResponseError::core)?;
+    let store = state.store.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let path = query.path;
+    let entries = run_blocking(move || {
+        list_path(store.as_ref(), &namespace_id, &path).map_err(ApiResponseError::core)
+    })
+    .await?;
     Ok(Json(entries))
 }
 
@@ -128,12 +138,13 @@ async fn stat_entry(
     Query(query): Query<PathQuery>,
 ) -> Result<Json<loon_api::AuthoritativePathEntry>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let entry = resolve_path(
-        state.store.as_ref(),
-        &NamespaceId::from(namespace),
-        &query.path,
-    )
-    .map_err(ApiResponseError::core)?;
+    let store = state.store.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let path = query.path;
+    let entry = run_blocking(move || {
+        resolve_path(store.as_ref(), &namespace_id, &path).map_err(ApiResponseError::core)
+    })
+    .await?;
     Ok(Json(entry))
 }
 
@@ -144,12 +155,13 @@ async fn get_content(
     Query(query): Query<PathQuery>,
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let file = read_file_bytes(
-        state.store.as_ref(),
-        &NamespaceId::from(namespace),
-        &query.path,
-    )
-    .map_err(ApiResponseError::core)?;
+    let store = state.store.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let path = query.path;
+    let file = run_blocking(move || {
+        read_file_bytes(store.as_ref(), &namespace_id, &path).map_err(ApiResponseError::core)
+    })
+    .await?;
     Ok((StatusCode::OK, file.bytes).into_response())
 }
 
@@ -161,15 +173,23 @@ async fn put_content(
     body: Bytes,
 ) -> Result<Json<MutationResult>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let result = write_file_bytes(
-        state.store.as_ref(),
-        &NamespaceId::from(namespace),
-        &query.path,
-        &body,
-        &mutation_context(&state.config),
-        None,
-    )
-    .map_err(ApiResponseError::core)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let path = query.path;
+    let bytes = body.to_vec();
+    let result = run_blocking(move || {
+        write_file_bytes(
+            store.as_ref(),
+            &namespace_id,
+            &path,
+            &bytes,
+            &mutation_context(&config),
+            None,
+        )
+        .map_err(ApiResponseError::core)
+    })
+    .await?;
     Ok(Json(result))
 }
 
@@ -180,14 +200,21 @@ async fn delete_entry(
     Query(query): Query<PathQuery>,
 ) -> Result<Json<MutationResult>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let result = delete_path(
-        state.store.as_ref(),
-        &NamespaceId::from(namespace),
-        &query.path,
-        &mutation_context(&state.config),
-        None,
-    )
-    .map_err(ApiResponseError::core)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let path = query.path;
+    let result = run_blocking(move || {
+        delete_path(
+            store.as_ref(),
+            &namespace_id,
+            &path,
+            &mutation_context(&config),
+            None,
+        )
+        .map_err(ApiResponseError::core)
+    })
+    .await?;
     Ok(Json(result))
 }
 
@@ -198,15 +225,21 @@ async fn move_entry(
     Json(request): Json<MoveEntryRequest>,
 ) -> Result<Json<MutationResult>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let result = move_path(
-        state.store.as_ref(),
-        &NamespaceId::from(namespace),
-        &request.from_path,
-        &request.to_path,
-        &mutation_context(&state.config),
-        Some(&request.request_id),
-    )
-    .map_err(ApiResponseError::core)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let result = run_blocking(move || {
+        move_path(
+            store.as_ref(),
+            &namespace_id,
+            &request.from_path,
+            &request.to_path,
+            &mutation_context(&config),
+            Some(&request.request_id),
+        )
+        .map_err(ApiResponseError::core)
+    })
+    .await?;
     Ok(Json(result))
 }
 
@@ -240,6 +273,20 @@ fn mutation_context(config: &ServerConfig) -> MutationContext {
         now_ms,
         lease_duration_ms: config.lease_duration_ms,
     }
+}
+
+async fn run_blocking<T, F>(operation: F) -> Result<T, ApiResponseError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiResponseError> + Send + 'static,
+{
+    task::spawn_blocking(operation).await.map_err(|err| {
+        ApiResponseError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            &format!("blocking operation failed: {err}"),
+        )
+    })?
 }
 
 struct ApiResponseError {
