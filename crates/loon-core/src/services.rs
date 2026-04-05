@@ -13,6 +13,7 @@ use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, Vi
 use crate::wal::{prepare_wal_commit, WalBuildError};
 use loon_api::{
     content_manifest_digest_sha256, encode_content_manifest_json, name_key_for_display_name,
+    v0::{CommitOpResult, CommitResponse as V0CommitResponse},
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentBlockDescriptor,
     ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, HeadState,
     HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, MutationResult,
@@ -56,6 +57,12 @@ pub enum CoreErrorKind {
     TombstoneConflict,
     LeaseConflict,
     WouldCycle,
+    RequestIdConflict,
+    UploadNotFound,
+    UploadAlreadyCompleted,
+    UploadBlockConflict,
+    InvalidUploadBlock,
+    RebootstrapRequired,
     NamespaceCorrupt,
     ServerError,
 }
@@ -112,6 +119,23 @@ pub enum CoreError {
     RootMutationForbidden,
     #[error("destination already exists at `{0}`")]
     DestinationExists(String),
+    #[error("request id conflict for `{0}`")]
+    RequestIdConflict(String),
+    #[error("upload session `{upload_id}` was not found")]
+    UploadNotFound { upload_id: String },
+    #[error("upload session `{upload_id}` is already completed")]
+    UploadAlreadyCompleted { upload_id: String },
+    #[error("upload session `{upload_id}` block `{block_index}` conflicts with prior content")]
+    UploadBlockConflict { upload_id: String, block_index: u32 },
+    #[error("invalid upload block: {0}")]
+    InvalidUploadBlock(String),
+    #[error(
+        "change feed cursor `{after_seq:?}` is older than retention floor `{retention_floor_seq:?}`"
+    )]
+    RebootstrapRequired {
+        after_seq: ChangeSeq,
+        retention_floor_seq: ChangeSeq,
+    },
     #[error(
         "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode}` from seq `{tombstone_seq:?}`"
     )]
@@ -167,6 +191,12 @@ impl CoreError {
                 CoreErrorKind::InvalidPath
             }
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
+            CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
+            CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
+            CoreError::UploadAlreadyCompleted { .. } => CoreErrorKind::UploadAlreadyCompleted,
+            CoreError::UploadBlockConflict { .. } => CoreErrorKind::UploadBlockConflict,
+            CoreError::InvalidUploadBlock(_) => CoreErrorKind::InvalidUploadBlock,
+            CoreError::RebootstrapRequired { .. } => CoreErrorKind::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DirectoryNotEmpty(_)
@@ -553,8 +583,11 @@ fn commit_file_manifest<S: ObjectStore + ?Sized>(
             planned_head_seq,
             ops,
             preconditions,
+            message: None,
+            annotations: None,
         },
     )
+    .map(mutation_result_from_commit_response)
 }
 
 pub fn delete_path<S: ObjectStore + ?Sized>(
@@ -601,8 +634,11 @@ pub fn delete_path<S: ObjectStore + ?Sized>(
             planned_head_seq,
             ops: vec![op],
             preconditions: vec![Precondition::HeadSeqIs(planned_head_seq)],
+            message: None,
+            annotations: None,
         },
     )
+    .map(mutation_result_from_commit_response)
 }
 
 pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
@@ -659,8 +695,11 @@ pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
             planned_head_seq,
             ops: vec![op],
             preconditions: vec![Precondition::HeadSeqIs(planned_head_seq)],
+            message: None,
+            annotations: None,
         },
     )
+    .map(mutation_result_from_commit_response)
 }
 
 pub fn move_path<S: ObjectStore + ?Sized>(
@@ -706,8 +745,11 @@ pub fn move_path<S: ObjectStore + ?Sized>(
                 new_display_name: target_name,
             }],
             preconditions: vec![Precondition::HeadSeqIs(planned_head_seq)],
+            message: None,
+            annotations: None,
         },
     )
+    .map(mutation_result_from_commit_response)
 }
 
 pub fn copy_file_path<S: ObjectStore + ?Sized>(
@@ -779,16 +821,19 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
                     inode_id: target_parent,
                 },
             ],
+            message: None,
+            annotations: None,
         },
     )
+    .map(mutation_result_from_commit_response)
 }
 
-fn execute_commit<S: ObjectStore + ?Sized>(
+pub(crate) fn execute_commit<S: ObjectStore + ?Sized>(
     store: &S,
     basis: crate::VerifiedNamespaceBasis,
     context: &MutationContext,
     request: CommitRequest,
-) -> Result<MutationResult, CoreError> {
+) -> Result<V0CommitResponse, CoreError> {
     let validation = CommitValidationContext {
         head: basis.head.clone(),
         lease: basis.lease.clone(),
@@ -796,7 +841,8 @@ fn execute_commit<S: ObjectStore + ?Sized>(
         metadata_state: basis.metadata_state.clone(),
     };
     let plan = build_commit_plan(&request, &validation)?;
-    let wal = prepare_wal_commit(&request, &plan, &context.writer_version)?;
+    let results = derive_commit_results(&request.ops, &plan.allocated_inode_ids);
+    let wal = prepare_wal_commit(&request, &plan, results.clone(), &context.writer_version)?;
     let applied = basis
         .metadata_state
         .apply_committed_wal_ops(plan.next_seq, &wal.envelope.payload.ops)?;
@@ -806,10 +852,78 @@ fn execute_commit<S: ObjectStore + ?Sized>(
         .map_err(|err| CoreError::WalWrite(err.to_string()))?;
     publish_commit_head(store, &basis.head_etag, &head_publish)?;
     let _ = applied;
-    Ok(MutationResult {
+    Ok(V0CommitResponse {
         namespace_id: request.namespace_id,
+        commit_id: request.request_id,
         committed_seq: head_publish.resulting_head.seq,
+        results,
     })
+}
+
+fn mutation_result_from_commit_response(response: V0CommitResponse) -> MutationResult {
+    MutationResult {
+        namespace_id: response.namespace_id,
+        committed_seq: response.committed_seq,
+    }
+}
+
+pub(crate) fn derive_commit_results(
+    ops: &[CommitOp],
+    allocated_inode_ids: &[InodeId],
+) -> Vec<CommitOpResult> {
+    let mut allocated = allocated_inode_ids.iter().copied();
+    ops.iter()
+        .enumerate()
+        .map(|(index, op)| {
+            let op_index = u32::try_from(index).expect("commit op index should fit in u32");
+            match op {
+                CommitOp::CreateDir { .. } => CommitOpResult::CreateDir {
+                    op_index,
+                    inode_id: allocated
+                        .next()
+                        .expect("allocated inode ids should cover create ops"),
+                },
+                CommitOp::CreateFile {
+                    content_manifest_digest,
+                    ..
+                } => CommitOpResult::CreateFile {
+                    op_index,
+                    inode_id: allocated
+                        .next()
+                        .expect("allocated inode ids should cover create ops"),
+                    revision_no: loon_api::RevisionNo(1),
+                    content_manifest_digest: content_manifest_digest.clone(),
+                },
+                CommitOp::ReplaceFile {
+                    inode_id,
+                    base_revision,
+                    content_manifest_digest,
+                } => CommitOpResult::ReplaceFile {
+                    op_index,
+                    inode_id: *inode_id,
+                    revision_no: loon_api::RevisionNo(
+                        base_revision
+                            .0
+                            .checked_add(1)
+                            .expect("replace_file revision increment validated"),
+                    ),
+                    content_manifest_digest: content_manifest_digest.clone(),
+                },
+                CommitOp::DeleteFile { inode_id } => CommitOpResult::DeleteFile {
+                    op_index,
+                    inode_id: *inode_id,
+                },
+                CommitOp::Rename { inode_id, .. } => CommitOpResult::Rename {
+                    op_index,
+                    inode_id: *inode_id,
+                },
+                CommitOp::DeleteSubtree { root_inode } => CommitOpResult::DeleteSubtree {
+                    op_index,
+                    root_inode: *root_inode,
+                },
+            }
+        })
+        .collect()
 }
 
 fn ensure_parent_directories(
@@ -918,7 +1032,7 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
     })
 }
 
-fn write_immutable_object<S: ObjectStore + ?Sized>(
+pub(crate) fn write_immutable_object<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
     expected_bytes: &[u8],

@@ -42,6 +42,8 @@ fn stale_head_precondition_is_rejected() {
             inode_id: InodeId(3),
         }],
         preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
+        message: None,
+        annotations: None,
     };
 
     let error = build_commit_plan(&request, &context).expect_err("stale head");
@@ -90,6 +92,8 @@ fn stale_revision_precondition_is_rejected() {
             content_manifest_digest: "sha256:manifest-3".to_owned(),
         }],
         preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+        message: None,
+        annotations: None,
     };
 
     let error = build_commit_plan(&request, &context).expect_err("stale revision");
@@ -139,6 +143,8 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
                 content_manifest_digest: "sha256:manifest-2".to_owned(),
             }],
             preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            message: None,
+            annotations: None,
         },
         &context,
     )
@@ -164,6 +170,8 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
                 content_manifest_digest: "sha256:manifest-2".to_owned(),
             }],
             preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            message: None,
+            annotations: None,
         },
         &context,
     )

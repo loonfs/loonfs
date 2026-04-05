@@ -2,6 +2,11 @@
 
 use http::Uri;
 use loon_api::{
+    v0::{
+        BeginUploadResponse, ChangesResponse, CommitRequest as V0CommitRequest,
+        CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
+        UploadBlockResponse,
+    },
     ApiError, AuthoritativePathEntry, ChangeSeq, CopyEntryRequest, CreateNamespaceRequest,
     ListNamespacesResponse, MoveEntryRequest, MutationResult, NamespaceSummary,
 };
@@ -166,6 +171,66 @@ impl Client {
         let request = self.authenticated(self.agent.get(&url));
         request.call().map_err(|err| self.map_error(err))?;
         Ok(())
+    }
+
+    pub fn begin_upload(&self, namespace: &str) -> Result<BeginUploadResponse, ClientError> {
+        let url = format!("{}/v0/namespaces/{namespace}/uploads", self.base_url);
+        self.request_json::<(), BeginUploadResponse>(self.agent.post(&url), None)
+    }
+
+    pub fn upload_block(
+        &self,
+        namespace: &str,
+        upload_id: &str,
+        block_index: u32,
+        bytes: &[u8],
+    ) -> Result<UploadBlockResponse, ClientError> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace}/uploads/{upload_id}/blocks/{block_index}",
+            self.base_url
+        );
+        let request = self
+            .authenticated(self.agent.put(&url))
+            .set("content-type", "application/octet-stream");
+        let response = request
+            .send_bytes(bytes)
+            .map_err(|err| self.map_error(err))?;
+        serde_json::from_reader(response.into_reader())
+            .map_err(|err| ClientError::Json(err.to_string()))
+    }
+
+    pub fn complete_upload(
+        &self,
+        namespace: &str,
+        upload_id: &str,
+        request: &CompleteUploadRequest,
+    ) -> Result<CompleteUploadResponse, ClientError> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
+            self.base_url
+        );
+        self.request_json::<_, CompleteUploadResponse>(self.agent.post(&url), Some(request))
+    }
+
+    pub fn commit_operations(
+        &self,
+        namespace: &str,
+        request: &V0CommitRequest,
+    ) -> Result<V0CommitResponse, ClientError> {
+        let url = format!("{}/v0/namespaces/{namespace}/commits", self.base_url);
+        self.request_json::<_, V0CommitResponse>(self.agent.post(&url), Some(request))
+    }
+
+    pub fn list_changes(
+        &self,
+        namespace: &str,
+        after_seq: ChangeSeq,
+    ) -> Result<ChangesResponse, ClientError> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace}/changes?after_seq={}",
+            self.base_url, after_seq.0
+        );
+        self.request_json::<(), ChangesResponse>(self.agent.get(&url), None)
     }
 
     pub fn put_file_bytes(

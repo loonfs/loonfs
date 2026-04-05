@@ -1,5 +1,15 @@
+use loon_api::{
+    sha256_digest,
+    v0::{
+        CommitAnnotations, CommitOp, CommitOpResult, CommitPrecondition,
+        CommitRequest as V0CommitRequest, CompleteUploadRequest,
+    },
+    ChangeSeq, InodeId,
+};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_server::{app, ServerConfig, StoreConfig};
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -88,6 +98,200 @@ async fn http_put_create_only_and_copy_preserve_cli_semantics() {
             .read_file_bytes(&destination)
             .expect("read copied file");
         assert_eq!(dest_bytes, b"forced overwrite\n");
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v0_upload_commit_and_change_feed_are_idempotent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-v0",
+        "http-v0-smoke",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        let file_bytes = b"phase-2a over http\n";
+        let target = NamespacePath::parse("demo:/uploaded.txt").expect("target");
+        harness
+            .client
+            .create_namespace(namespace)
+            .expect("create namespace");
+
+        let begin = harness
+            .client
+            .begin_upload(namespace)
+            .expect("begin upload");
+        let first_block = harness
+            .client
+            .upload_block(namespace, &begin.upload_id, 0, file_bytes)
+            .expect("upload block");
+        let repeated_block = harness
+            .client
+            .upload_block(namespace, &begin.upload_id, 0, file_bytes)
+            .expect("repeat upload block");
+        assert_eq!(first_block, repeated_block);
+        match harness
+            .client
+            .upload_block(namespace, &begin.upload_id, 0, b"different bytes")
+        {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_block_conflict"),
+            other => panic!("expected upload_block_conflict, got {other:?}"),
+        }
+        let manifest_digest = stage_uploaded_manifest(&harness.client, namespace, file_bytes);
+
+        let mut annotations = CommitAnnotations::new();
+        annotations.insert("source".to_owned(), json!("http-smoke"));
+        annotations.insert("kind".to_owned(), json!("service-proxied"));
+        let commit_request = V0CommitRequest {
+            request_id: "req-phase-2a-create-file".to_owned(),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(0),
+            }],
+            ops: vec![CommitOp::CreateFile {
+                parent_inode: InodeId(1),
+                display_name: "uploaded.txt".to_owned(),
+                content_manifest_digest: manifest_digest.clone(),
+            }],
+            message: Some("upload over http".to_owned()),
+            annotations: Some(annotations.clone()),
+        };
+        let commit = harness
+            .client
+            .commit_operations(namespace, &commit_request)
+            .expect("commit uploaded file");
+        assert_eq!(commit.commit_id, "req-phase-2a-create-file");
+        assert_eq!(commit.committed_seq, ChangeSeq(1));
+        assert_eq!(
+            commit.results,
+            vec![CommitOpResult::CreateFile {
+                op_index: 0,
+                inode_id: InodeId(2),
+                revision_no: loon_api::RevisionNo(1),
+                content_manifest_digest: manifest_digest.clone(),
+            }]
+        );
+
+        let repeated_commit = harness
+            .client
+            .commit_operations(namespace, &commit_request)
+            .expect("repeat commit");
+        assert_eq!(repeated_commit, commit);
+
+        let stat = harness
+            .client
+            .stat_path(&target)
+            .expect("stat committed file");
+        assert_eq!(stat.inode_id, InodeId(2));
+        assert_eq!(
+            stat.content_manifest_digest.as_deref(),
+            Some(manifest_digest.as_str())
+        );
+        let read_back = harness
+            .client
+            .read_file_bytes(&target)
+            .expect("read committed file");
+        assert_eq!(read_back, file_bytes);
+
+        let changes = harness
+            .client
+            .list_changes(namespace, ChangeSeq(0))
+            .expect("list changes");
+        assert_eq!(changes.namespace_id.as_str(), namespace);
+        assert_eq!(changes.from_exclusive_seq, ChangeSeq(0));
+        assert_eq!(changes.through_seq, commit.committed_seq);
+        assert_eq!(changes.changes.len(), 1);
+        let change = &changes.changes[0];
+        assert_eq!(change.seq, commit.committed_seq);
+        assert_eq!(change.commit_id, commit.commit_id);
+        assert_eq!(change.request_id, commit_request.request_id);
+        assert_eq!(change.message.as_deref(), Some("upload over http"));
+        assert_eq!(change.annotations, Some(annotations));
+        assert_eq!(change.ops, commit.results);
+
+        let empty = harness
+            .client
+            .list_changes(namespace, commit.committed_seq)
+            .expect("list changes after head");
+        assert_eq!(empty.changes, Vec::new());
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v0_commit_rejects_same_request_id_with_different_payload() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-v0-conflict",
+        "http-v0-conflict",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        harness
+            .client
+            .create_namespace(namespace)
+            .expect("create namespace");
+
+        let first_manifest =
+            stage_uploaded_manifest(&harness.client, namespace, b"first payload\n");
+        let first_request = V0CommitRequest {
+            request_id: "req-phase-2a-conflict".to_owned(),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(0),
+            }],
+            ops: vec![CommitOp::CreateFile {
+                parent_inode: InodeId(1),
+                display_name: "first.txt".to_owned(),
+                content_manifest_digest: first_manifest,
+            }],
+            message: Some("first commit".to_owned()),
+            annotations: None,
+        };
+        harness
+            .client
+            .commit_operations(namespace, &first_request)
+            .expect("first commit");
+
+        let second_manifest =
+            stage_uploaded_manifest(&harness.client, namespace, b"second payload\n");
+        let mut changed_annotations = BTreeMap::new();
+        changed_annotations.insert("source".to_owned(), json!("changed"));
+        let conflicting_request = V0CommitRequest {
+            request_id: first_request.request_id.clone(),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: first_request.preconditions.clone(),
+            ops: vec![CommitOp::CreateFile {
+                parent_inode: InodeId(1),
+                display_name: "second.txt".to_owned(),
+                content_manifest_digest: second_manifest,
+            }],
+            message: Some("second commit".to_owned()),
+            annotations: Some(changed_annotations),
+        };
+
+        match harness
+            .client
+            .commit_operations(namespace, &conflicting_request)
+        {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "request_id_conflict"),
+            other => panic!("expected request_id_conflict, got {other:?}"),
+        }
     })
     .await
     .expect("join blocking task");
@@ -200,4 +404,23 @@ fn retry_until_lease_handoff(client: &Client, target: &NamespacePath) -> u64 {
     }
 
     panic!("timed out waiting for lease handoff");
+}
+
+fn stage_uploaded_manifest(client: &Client, namespace: &str, file_bytes: &[u8]) -> String {
+    let begin = client.begin_upload(namespace).expect("begin upload");
+    client
+        .upload_block(namespace, &begin.upload_id, 0, file_bytes)
+        .expect("upload single block");
+    let complete_request = CompleteUploadRequest {
+        file_size_bytes: file_bytes.len() as u64,
+        file_digest_sha256: sha256_digest(file_bytes),
+    };
+    let complete = client
+        .complete_upload(namespace, &begin.upload_id, &complete_request)
+        .expect("complete upload");
+    let repeated = client
+        .complete_upload(namespace, &begin.upload_id, &complete_request)
+        .expect("repeat complete upload");
+    assert_eq!(repeated, complete);
+    complete.content_manifest_digest
 }

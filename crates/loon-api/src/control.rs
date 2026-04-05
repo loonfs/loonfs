@@ -10,6 +10,7 @@ pub enum ControlObjectKind {
     NamespaceHead,
     NamespaceLease,
     NamespaceProgress,
+    UploadSession,
     QueueShard,
 }
 
@@ -61,6 +62,32 @@ pub struct ProgressState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadedBlock {
+    pub block_index: u32,
+    pub content_digest_sha256: String,
+    pub plaintext_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedUpload {
+    pub file_size_bytes: u64,
+    pub file_digest_sha256: String,
+    pub content_manifest_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadSessionState {
+    pub namespace_id: NamespaceId,
+    pub upload_id: String,
+    pub block_size_bytes: u64,
+    #[serde(default)]
+    pub uploaded_blocks: Vec<UploadedBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed: Option<CompletedUpload>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObjectEnvelope<T> {
     pub kind: ControlObjectKind,
     pub format_version: u32,
@@ -95,6 +122,7 @@ where
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 pub type LeaseStateEnvelope = ControlObjectEnvelope<LeaseState>;
 pub type ProgressStateEnvelope = ControlObjectEnvelope<ProgressState>;
+pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 
 pub fn payload_checksum_sha256<T>(value: &T) -> Result<String, serde_json::Error>
 where

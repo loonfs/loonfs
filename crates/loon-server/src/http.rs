@@ -3,16 +3,22 @@ use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use loon_api::{
+    v0::{
+        BeginUploadResponse, ChangesResponse, CommitRequest as V0CommitRequest,
+        CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
+        UploadBlockResponse,
+    },
     ApiError, CopyEntryRequest, CreateNamespaceRequest, ListNamespacesResponse, MoveEntryRequest,
     MutationResult, NamespaceId,
 };
 use loon_core::{
-    bootstrap_namespace, copy_file_path, delete_path_non_recursive, list_namespaces, list_path,
-    move_path, put_file_bytes, read_file_bytes, resolve_path, BootstrapNamespaceError, CoreError,
-    CoreErrorKind, MutationContext, PutFileBehavior,
+    begin_upload, bootstrap_namespace, commit_operations, complete_upload, copy_file_path,
+    delete_path_non_recursive, list_changes_after, list_namespaces, list_path, move_path,
+    put_file_bytes, read_file_bytes, resolve_path, upload_block, BootstrapNamespaceError,
+    CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
@@ -42,6 +48,11 @@ struct PutContentQuery {
     request_id: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct ChangesQuery {
+    after_seq: u64,
+}
+
 pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
     let store = Arc::new(config.object_store()?) as SharedStore;
     Ok(app_with_store(config, store))
@@ -69,6 +80,26 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
         )
         .route("/v1/namespaces/:namespace/move", post(move_entry))
         .route("/v1/namespaces/:namespace/copy", post(copy_entry))
+        .route(
+            "/v0/namespaces/:namespace/uploads",
+            post(begin_upload_handler),
+        )
+        .route(
+            "/v0/namespaces/:namespace/uploads/:upload_id/blocks/:block_index",
+            put(upload_block_handler),
+        )
+        .route(
+            "/v0/namespaces/:namespace/uploads/:upload_id/complete",
+            post(complete_upload_handler),
+        )
+        .route(
+            "/v0/namespaces/:namespace/commits",
+            post(commit_operations_handler),
+        )
+        .route(
+            "/v0/namespaces/:namespace/changes",
+            get(list_changes_handler),
+        )
         .with_state(state)
 }
 
@@ -285,6 +316,113 @@ async fn copy_entry(
     Ok(Json(result))
 }
 
+async fn begin_upload_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let response = run_blocking(move || {
+        begin_upload(store.as_ref(), &namespace_id, &mutation_context(&config))
+            .map_err(ApiResponseError::core)
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+async fn upload_block_handler(
+    State(state): State<AppState>,
+    AxumPath((namespace, upload_id, block_index)): AxumPath<(String, String, u32)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<UploadBlockResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let bytes = body.to_vec();
+    let response = run_blocking(move || {
+        upload_block(
+            store.as_ref(),
+            &namespace_id,
+            &upload_id,
+            block_index,
+            &bytes,
+            &mutation_context(&config),
+        )
+        .map_err(ApiResponseError::core)
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+async fn complete_upload_handler(
+    State(state): State<AppState>,
+    AxumPath((namespace, upload_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<CompleteUploadRequest>,
+) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let response = run_blocking(move || {
+        complete_upload(
+            store.as_ref(),
+            &namespace_id,
+            &upload_id,
+            &request,
+            &mutation_context(&config),
+        )
+        .map_err(ApiResponseError::core)
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+async fn commit_operations_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<V0CommitRequest>,
+) -> Result<Json<V0CommitResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let response = run_blocking(move || {
+        commit_operations(
+            store.as_ref(),
+            &namespace_id,
+            request,
+            &mutation_context(&config),
+        )
+        .map_err(ApiResponseError::core)
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+async fn list_changes_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+    Query(query): Query<ChangesQuery>,
+) -> Result<Json<ChangesResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let after_seq = loon_api::ChangeSeq(query.after_seq);
+    let response = run_blocking(move || {
+        list_changes_after(store.as_ref(), &namespace_id, after_seq).map_err(ApiResponseError::core)
+    })
+    .await?;
+    Ok(Json(response))
+}
+
 fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiResponseError> {
     let Some(expected) = &config.auth_token else {
         return Ok(());
@@ -382,6 +520,14 @@ impl ApiResponseError {
             CoreErrorKind::TombstoneConflict => (StatusCode::CONFLICT, "tombstone_conflict"),
             CoreErrorKind::LeaseConflict => (StatusCode::CONFLICT, "lease_conflict"),
             CoreErrorKind::WouldCycle => (StatusCode::CONFLICT, "would_cycle"),
+            CoreErrorKind::RequestIdConflict => (StatusCode::CONFLICT, "request_id_conflict"),
+            CoreErrorKind::UploadNotFound => (StatusCode::NOT_FOUND, "upload_not_found"),
+            CoreErrorKind::UploadAlreadyCompleted => {
+                (StatusCode::CONFLICT, "upload_already_completed")
+            }
+            CoreErrorKind::UploadBlockConflict => (StatusCode::CONFLICT, "upload_block_conflict"),
+            CoreErrorKind::InvalidUploadBlock => (StatusCode::BAD_REQUEST, "invalid_upload_block"),
+            CoreErrorKind::RebootstrapRequired => (StatusCode::CONFLICT, "rebootstrap_required"),
             CoreErrorKind::NamespaceCorrupt => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "namespace_corrupt")
             }

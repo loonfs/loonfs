@@ -1,8 +1,9 @@
 use crate::commit::{CommitOp, CommitPlan, CommitRequest, Precondition};
 use crate::metadata::{MetadataApplyError, MetadataState};
 use loon_api::{
-    decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, ChangeSeq, HeadState,
-    InodeId, NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp, WalPrecondition,
+    decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, v0::CommitOpResult,
+    ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp,
+    WalPrecondition,
 };
 use loon_objectstore::keys::wal_commit;
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,7 @@ pub enum WalReplayError {
 pub fn prepare_wal_commit(
     request: &CommitRequest,
     plan: &CommitPlan,
+    results: Vec<CommitOpResult>,
     writer_version: &str,
 ) -> Result<PreparedWalCommit, WalBuildError> {
     if writer_version.trim().is_empty() {
@@ -121,14 +123,20 @@ pub fn prepare_wal_commit(
         base_head_seq: plan.base_head_seq,
         commit_id: plan.commit_id.clone(),
         request_id: request.request_id.clone(),
+        request_checksum_sha256: request
+            .request_checksum_sha256()
+            .map_err(|err| WalBuildError::Codec(err.to_string()))?,
         writer_id: request.writer_id.clone(),
         writer_fence_token: request.writer_fence_token,
+        message: request.message.clone(),
+        annotations: request.annotations.clone(),
         ops: build_wal_ops(request, plan)?,
         preconditions: request
             .preconditions
             .iter()
             .map(WalPrecondition::from)
             .collect(),
+        results,
     };
     let envelope = WalCommitEnvelope::from_payload(writer_version, payload)
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;

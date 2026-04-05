@@ -8,6 +8,7 @@ mod http;
 mod ids;
 mod name_policy;
 mod server;
+pub mod v0;
 mod wal;
 
 pub use checkpoint::*;

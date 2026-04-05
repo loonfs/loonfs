@@ -1,7 +1,7 @@
 use crate::metadata::MetadataState;
 use loon_api::{
-    ChangeSeq, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState,
-    NamespaceId, RevisionNo,
+    v0::CommitAnnotations, ChangeSeq, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
+    LeaseState, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,10 @@ pub struct CommitRequest {
     pub planned_head_seq: ChangeSeq,
     pub ops: Vec<CommitOp>,
     pub preconditions: Vec<Precondition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<CommitAnnotations>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,5 +260,12 @@ pub enum CommitHeadPublishError {
 pub(crate) fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
     if !invariants.iter().any(|existing| existing == name) {
         invariants.push(name.to_owned());
+    }
+}
+
+impl CommitRequest {
+    pub fn request_checksum_sha256(&self) -> Result<String, serde_json::Error> {
+        let bytes = serde_json::to_vec(self)?;
+        Ok(loon_api::sha256_digest(&bytes))
     }
 }
