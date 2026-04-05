@@ -15,7 +15,7 @@ Run it after:
 ## Prerequisites
 
 - one Cloudflare R2 bucket
-- two reachable hosts with the repository checked out and Rust installed
+- two reachable hosts with `loon` and `loond` installed on `PATH`
 - one shared `key_prefix`
 - one shared bearer token
 - enough time to let one lease window expire between the first blocked write and the retry
@@ -37,49 +37,43 @@ Each host must have its own values for:
 - `bind`
 - `writer_id`
 - local CLI profile name
-- local CLI config path
 
-Create ignored local config files like this:
+Create local configs like this:
 
 1. On host A, copy
-   [`configs/loond.cloudflare-r2.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.cloudflare-r2.example.toml)
-   to `configs/loond.cloudflare-r2.host-a.local.toml`, fill in the shared R2 values, and set a
-   unique `bind` and `writer_id`.
-2. On host B, copy the same example to `configs/loond.cloudflare-r2.host-b.local.toml` and use
-   the same shared R2 values but a different `bind` and `writer_id`.
+   `~/.config/loonfs/loond/examples/loond.cloudflare-r2.example.toml`
+   to `~/.config/loonfs/loond/host-a.toml`, fill in the shared R2 values, and set a unique
+   `bind` and `writer_id`.
+2. On host B, copy the same example to `~/.config/loonfs/loond/host-b.toml` and use the same
+   shared R2 values but a different `bind` and `writer_id`.
 3. On host A, create the CLI-managed profile state by running:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
-  profile add local host-a \
-  --server-config ./configs/loond.cloudflare-r2.host-a.local.toml
+loon profile add local host-a \
+  --server-config ~/.config/loonfs/loond/host-a.toml
 ```
 
 4. On host B, do the same with a distinct profile name and host B’s server config:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml \
-  profile add local host-b \
-  --server-config ./configs/loond.cloudflare-r2.host-b.local.toml
+loon profile add local host-b \
+  --server-config ~/.config/loonfs/loond/host-b.toml
 ```
 
-Checked-in `*.example.toml` files stay sanitized. The `*.local.toml` files above are ignored by
-Git.
+`loon` will create `~/.config/loonfs/loon/config.toml` on first profile write.
 
 ## Start Both Servers
 
 On host A:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
-  --profile host-a local up
+loon --profile host-a local up
 ```
 
 On host B:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml \
-  --profile host-b local up
+loon --profile host-b local up
 ```
 
 Wait for both `local up` commands to succeed, then confirm with `local status`.
@@ -89,13 +83,9 @@ Wait for both `local up` commands to succeed, then confirm with `local status`.
 Create the namespace and upload a file through host A’s local server:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
-  --profile host-a \
-  namespace create demo
+loon --profile host-a namespace create demo
 
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
-  --profile host-a \
-  filesystem put demo ./README.md /docs/README.md
+loon --profile host-a filesystem put demo ./README.md /docs/README.md
 ```
 
 ## Host B: Prove Initial Lease Conflict
@@ -103,8 +93,7 @@ cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
 Immediately try to write through host B’s local server:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml --json \
-  --profile host-b \
+loon --json --profile host-b \
   filesystem mv demo /docs/README.md /docs/README-host-b.md
 ```
 
@@ -115,8 +104,7 @@ The command should fail with a JSON API error whose `code` is `lease_conflict`.
 Wait for the configured lease window to elapse, then retry the move through host B’s local server:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml --json \
-  --profile host-b \
+loon --json --profile host-b \
   filesystem mv demo /docs/README.md /docs/README-host-b.md
 ```
 
@@ -127,16 +115,11 @@ The retry should succeed.
 Use host A’s CLI against host A’s local server to verify the change that host B published:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
-  --profile host-a \
-  filesystem ls demo /docs
+loon --json --profile host-a filesystem ls demo /docs
 
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
-  --profile host-a \
-  filesystem stat demo /docs/README-host-b.md
+loon --json --profile host-a filesystem stat demo /docs/README-host-b.md
 
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
-  --profile host-a \
+loon --json --profile host-a \
   filesystem get demo /docs/README-host-b.md ./tmp-readme.md
 ```
 
@@ -147,9 +130,7 @@ Verify that `./tmp-readme.md` matches the expected bytes.
 Delete the file through host A’s local server:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
-  --profile host-a \
-  filesystem rm demo /docs/README-host-b.md
+loon --json --profile host-a filesystem rm demo /docs/README-host-b.md
 ```
 
 ## Host B: Verify Deletion
@@ -157,13 +138,9 @@ cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
 Confirm from host B that the file is gone:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml --json \
-  --profile host-b \
-  filesystem ls demo /docs
+loon --json --profile host-b filesystem ls demo /docs
 
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml --json \
-  --profile host-b \
-  filesystem stat demo /docs/README-host-b.md
+loon --json --profile host-b filesystem stat demo /docs/README-host-b.md
 ```
 
 The final `filesystem stat` should fail with `path_not_found`.
@@ -173,8 +150,6 @@ The final `filesystem stat` should fail with `path_not_found`.
 On both hosts:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
-  --profile host-a local down
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml \
-  --profile host-b local down
+loon --profile host-a local down
+loon --profile host-b local down
 ```

@@ -1,6 +1,7 @@
 use clap::Parser;
 
 #[derive(Debug, Parser)]
+#[command(name = "loond", version)]
 struct Args {
     #[arg(long)]
     config: String,

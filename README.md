@@ -20,7 +20,7 @@ Current implementation shape:
 
 Not implemented yet relative to the imported core spec:
 
- - long-running protocol state such as `ReadSession`, `CopyJob`, and `ImportJob`
+- long-running protocol state such as `ReadSession`, `CopyJob`, and `ImportJob`
 - ACLs, shares, and mounts as public product behavior
 
 ## Spec Lock
@@ -44,45 +44,55 @@ crates/
   loon-testkit/      minimal shared test helpers
 ```
 
+## Install
+
+```bash
+curl https://install.loonfs.com | sh
+export PATH="$HOME/.loonfs/bin:$PATH"
+```
+
 ## Quickstart
 
 This quickstart uses the current path-oriented CLI surface. The lower-level `/v0` upload,
 explicit-commit, and ordered change-feed surface is available through `loond` and `loon-client`,
 but the CLI does not expose first-class commands for it yet.
 
-1. Create a local `loond` config from the example:
+1. Create a local `loond` config from the installed example and fill in your real object-store
+   settings:
 
 ```bash
-cp ./configs/loond.local-fs.example.toml ./configs/loond.local-fs.local.toml
+cp ~/.config/loonfs/loond/examples/loond.cloudflare-r2.example.toml \
+  ~/.config/loonfs/loond/home.toml
+
+$EDITOR ~/.config/loonfs/loond/home.toml
 ```
 
 2. Register a local profile and start the managed server:
 
 ```bash
-cargo run -p loon-cli -- \
-  profile add local local \
-  --server-config ./configs/loond.local-fs.local.toml
+loon profile add local home \
+  --server-config ~/.config/loonfs/loond/home.toml
 
-cargo run -p loon-cli -- --profile local local up
+loon --profile home local up
 ```
 
 3. Create a namespace and work with files:
 
 ```bash
-cargo run -p loon-cli -- namespace create demo
+printf 'hello from loonfs\n' > ./hello.txt
 
-cargo run -p loon-cli -- \
-  filesystem put demo ./README.md /docs/README.md
+loon namespace create demo
 
-cargo run -p loon-cli -- filesystem ls demo /docs
-cargo run -p loon-cli -- filesystem stat demo /docs/README.md
-cargo run -p loon-cli -- filesystem get demo /docs/README.md ./tmp-readme.md
+loon filesystem put demo ./hello.txt /docs/hello.txt
+loon filesystem ls demo /docs
+loon filesystem stat demo /docs/hello.txt
+loon filesystem get demo /docs/hello.txt ./hello-downloaded.txt
 ```
 
 4. Stop the managed local server when you are done:
 
 ```bash
-cargo run -p loon-cli -- --profile local local down
+loon --profile home local down
 ```
 
 ## Commands
@@ -121,7 +131,13 @@ Global flags:
 
 ## Configs
 
-Example CLI configs live in [`configs/`](configs/):
+Installed binaries use:
+
+- `~/.config/loonfs/loon/config.toml` for CLI-managed profile state
+- `~/.config/loonfs/loond/` for user-authored `loond` configs
+- `~/.config/loonfs/loond/examples/` for sanitized installed `loond` examples
+
+Repository source examples remain in [`configs/`](configs/):
 
 - [`configs/loon.local.example.toml`](configs/loon.local.example.toml)
 - [`configs/loon.remote.example.toml`](configs/loon.remote.example.toml)
@@ -160,7 +176,7 @@ Current transport layering:
 
 ## Verification
 
-Current local baseline:
+Repository-development baseline:
 
 ```bash
 cargo fmt --all
@@ -200,4 +216,5 @@ cargo run -p xtask -- smoke remote \
 - [`docs/adr/0020-name-policy-follows-core-spec.md`](docs/adr/0020-name-policy-follows-core-spec.md)
 - [`docs/runbooks/cli.md`](docs/runbooks/cli.md)
 - [`docs/runbooks/two-machine-r2-demo.md`](docs/runbooks/two-machine-r2-demo.md)
+- [`docs/runbooks/macos-installer-plan.md`](docs/runbooks/macos-installer-plan.md)
 - [`proposals/003-core-spec-family-alignment.md`](proposals/003-core-spec-family-alignment.md)

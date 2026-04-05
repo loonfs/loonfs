@@ -206,22 +206,24 @@ impl RemoteProfileConfig {
 
 pub fn default_config_path() -> Result<PathBuf, CliError> {
     #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
+    let path = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))?
-        .join("Library")
-        .join("Application Support");
+        .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))
+        .map(|home| macos_default_config_path(&home))?;
     #[cfg(all(unix, not(target_os = "macos")))]
-    let base = std::env::var_os("HOME")
+    let path = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))?
         .join(".config");
     #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA")
+    let path = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .ok_or_else(|| CliError::invalid_config("unable to determine the config directory"))?;
 
-    Ok(base.join("loon").join("config.toml"))
+    #[cfg(not(target_os = "macos"))]
+    let path = path.join("loon").join("config.toml");
+
+    Ok(path)
 }
 
 pub fn load_config(path: &Path) -> Result<CliConfig, CliError> {
@@ -349,4 +351,27 @@ fn validate_http_url(field: &str, value: &str) -> Result<(), CliError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_default_config_path(home: &Path) -> PathBuf {
+    home.join(".config")
+        .join("loonfs")
+        .join("loon")
+        .join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_config_path_uses_loonfs_config_root() {
+        let path = macos_default_config_path(Path::new("/Users/tester"));
+        assert_eq!(
+            path,
+            PathBuf::from("/Users/tester/.config/loonfs/loon/config.toml")
+        );
+    }
 }

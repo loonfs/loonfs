@@ -9,6 +9,17 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[test]
+fn loon_supports_dash_dash_version() {
+    let output = Command::new(loon_binary_path())
+        .arg("--version")
+        .output()
+        .expect("run loon --version");
+
+    assert!(output.status.success(), "unexpected status: {output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn unsupported_config_version_is_rejected() {
     let harness = Harness::new();
     fs::write(

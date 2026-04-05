@@ -48,3 +48,71 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-test-
       - run: cargo test --all
+
+  installer:
+    name: installer
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-installer-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-installer-
+      - run: chmod +x scripts/package-release.sh scripts/install.sh
+      - run: cargo test -p loon-cli
+      - shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$RUNNER_TEMP/release"
+          HOME_DIR="$RUNNER_TEMP/installer-home"
+          CUSTOM_BIN="$RUNNER_TEMP/custom-bin"
+          PORT=18765
+
+          mkdir -p "$HOME_DIR"
+          # Build the exact release-shaped tarball that the installer consumes in production.
+          ./scripts/package-release.sh "$ARTIFACT_DIR"
+
+          # Serve staged artifacts over HTTP so the installer exercises its real download path.
+          python3 -m http.server "$PORT" --directory "$ARTIFACT_DIR" >"$RUNNER_TEMP/install-http.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID"' EXIT
+
+          # Wait for the local artifact server before invoking curl in the installer.
+          for _ in $(seq 1 50); do
+            if curl -s "http://127.0.0.1:$PORT/SHA256SUMS" >/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          curl -s "http://127.0.0.1:$PORT/SHA256SUMS" >/dev/null
+
+          HOME="$HOME_DIR" LOONFS_RELEASE_BASE_URL="http://127.0.0.1:$PORT" sh ./scripts/install.sh
+
+          # The installer should only lay down binaries and example configs.
+          test -x "$HOME_DIR/.loonfs/bin/loon"
+          test -x "$HOME_DIR/.loonfs/bin/loond"
+          test -f "$HOME_DIR/.config/loonfs/loond/examples/loond.local-fs.example.toml"
+          test -f "$HOME_DIR/.config/loonfs/loond/examples/loond.aws-s3.example.toml"
+          test -f "$HOME_DIR/.config/loonfs/loond/examples/loond.cloudflare-r2.example.toml"
+          test ! -e "$HOME_DIR/.config/loonfs/loon/config.toml"
+          test ! -e "$HOME_DIR/.config/loonfs/loond/home.toml"
+          test ! -e "$HOME_DIR/.config/loonfs/loond/local.toml"
+
+          "$HOME_DIR/.loonfs/bin/loon" --version >/dev/null
+          "$HOME_DIR/.loonfs/bin/loond" --version >/dev/null
+
+          # Reinstall over the default bin dir, then into an override dir, to prove idempotence.
+          HOME="$HOME_DIR" LOONFS_RELEASE_BASE_URL="http://127.0.0.1:$PORT" sh ./scripts/install.sh
+          HOME="$HOME_DIR" LOONFS_RELEASE_BASE_URL="http://127.0.0.1:$PORT" sh ./scripts/install.sh --bin-dir "$CUSTOM_BIN"
+
+          test -x "$CUSTOM_BIN/loon"
+          test -x "$CUSTOM_BIN/loond"
+
+          if find "$HOME_DIR/.config/loonfs/loond" -maxdepth 1 -type f -name '*.toml' | grep -q .; then
+            echo "unexpected working loond configs created during install" >&2
+            exit 1
+          fi

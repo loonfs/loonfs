@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "loon")]
+#[command(name = "loon", version)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub profile: Option<String>,

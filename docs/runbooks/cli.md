@@ -9,34 +9,46 @@ path-oriented operations. It also does not provide session/job control-plane com
 
 ## Quickstart
 
-Create a local profile that points at a `loond` config:
+Install the current macOS arm64 binaries:
 
 ```bash
-cargo run -p loon-cli -- \
-  profile add local local \
-  --server-config ./configs/loond.local-fs.example.toml
+curl https://install.loonfs.com | sh
+export PATH="$HOME/.loonfs/bin:$PATH"
+```
+
+Create a local profile that points at a user-authored `loond` config:
+
+```bash
+cp ~/.config/loonfs/loond/examples/loond.cloudflare-r2.example.toml \
+  ~/.config/loonfs/loond/home.toml
+
+$EDITOR ~/.config/loonfs/loond/home.toml
+
+loon profile add local home \
+  --server-config ~/.config/loonfs/loond/home.toml
 ```
 
 Start the managed local server and inspect the active profile:
 
 ```bash
-cargo run -p loon-cli -- local up
-cargo run -p loon-cli -- profile show
-cargo run -p loon-cli -- local status
+loon --profile home local up
+loon --profile home profile show
+loon --profile home local status
 ```
 
 Create a namespace and upload a file:
 
 ```bash
-cargo run -p loon-cli -- namespace create demo
-cargo run -p loon-cli -- \
-  filesystem put demo ./README.md /docs/README.md
+printf 'hello from loonfs\n' > ./hello.txt
+
+loon namespace create demo
+loon filesystem put demo ./hello.txt /docs/hello.txt
 ```
 
 Stop the managed local server when finished:
 
 ```bash
-cargo run -p loon-cli -- local down
+loon --profile home local down
 ```
 
 ## Profile Setup
@@ -51,11 +63,13 @@ Profile `mode` is `local` or `remote`.
 
 Examples:
 
-- [`configs/loon.local.example.toml`](/Users/conormccarter/Code/loondb/configs/loon.local.example.toml)
-- [`configs/loon.remote.example.toml`](/Users/conormccarter/Code/loondb/configs/loon.remote.example.toml)
-- [`configs/loond.local-fs.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.local-fs.example.toml)
-- [`configs/loond.aws-s3.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.aws-s3.example.toml)
-- [`configs/loond.cloudflare-r2.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.cloudflare-r2.example.toml)
+- installed examples live under `~/.config/loonfs/loond/examples/`
+- repository source examples remain in:
+  - [`configs/loon.local.example.toml`](/Users/conormccarter/Code/loondb/configs/loon.local.example.toml)
+  - [`configs/loon.remote.example.toml`](/Users/conormccarter/Code/loondb/configs/loon.remote.example.toml)
+  - [`configs/loond.local-fs.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.local-fs.example.toml)
+  - [`configs/loond.aws-s3.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.aws-s3.example.toml)
+  - [`configs/loond.cloudflare-r2.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.cloudflare-r2.example.toml)
 
 Current rules:
 
@@ -63,6 +77,7 @@ Current rules:
 - remote auth is just an optional bearer token in the CLI profile
 - profiles do not carry a default namespace
 - the current CLI schema uses `config_version = 1`
+- the default installed CLI config path on macOS is `~/.config/loonfs/loon/config.toml`
 - staged upload / explicit commit / change-feed CLI commands are not implemented yet
 - programmatic callers can use `loon-client` advanced path mutation methods with caller-supplied
   `request_id` values for deterministic retries
@@ -96,6 +111,16 @@ Current filesystem limitations in this client profile:
 - `filesystem cp` is file-only
 - `filesystem get` rejects directories
 - there is no first-class recursive/session/job surface in the current CLI
+
+## Repository Development
+
+If you are working from a checkout instead of installed binaries, keep using:
+
+```bash
+cargo run -p loon-cli -- ...
+```
+
+Repository source examples live under [`configs/`](/Users/conormccarter/Code/loondb/configs).
 
 ## JSON Contract
 
