@@ -1,59 +1,92 @@
-# Spec 000: LoonDB overview
+# LoonFS Core Specification
 
-## What LoonDB is
+## 1. What LoonFS is
 
-LoonDB is a Dropbox-like sync engine with an object-storage-only durable backend.
+LoonFS is a filesystem built on top of object storage.
 
-The durable system of record is made of:
+Its durable truth is intentionally small:
 
 - immutable content blocks
 - immutable content manifests
-- immutable namespace WAL entries
-- small mutable head / lease / queue control objects
+- immutable metadata commits in a write-ahead log (WAL)
+- immutable checkpoints
+- small mutable control objects such as the namespace head and leases
 
-Everything else is cache or rebuildable acceleration.
+Everything else is cache, coordination, or rebuildable acceleration.
 
-## Why the design looks like this
+LoonFS can be exposed as:
 
-We want a system that is:
+- a direct filesystem service with commands such as `ls`, `get`, `put`, `mv`, and `cp`
+- an advanced writer surface for staged upload, explicit commit, and incremental change consumption
+- a foundation for sync clients, batch writers, and operator tooling
 
-- simpler to reason about than a multi-service metadata stack
-- easy to run in local-server mode and remote-server mode
-- naturally portable across S3-class object stores
-- compatible with deterministic testing
-- scalable where object storage is naturally scalable, without adding coordination layers
+The purpose of this spec is to standardize the durable model and the rules that make implementations interoperable. It does not standardize local client databases, queue layouts, scheduler loops, or other implementation-specific mechanics.
 
-## Plain-language shape of the product
+## 2. Design goals
 
-There are four client buckets:
+LoonFS is designed to be:
 
-1. stateless readers
-2. continuous sync clients (with on-demand or eager content fetching)
-3. deterministic batch sync CLIs
-4. later streamed / mounted-drive clients
+| Goal | Meaning |
+| --- | --- |
+| **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content manifests, commits, and checkpoints. |
+| **Portable** | The only required durable dependency is object storage with a small set of well-defined guarantees. |
+| **Safe** | Writes are never partially visible. Metadata never points to content that is not already durable. |
+| **Readable** | A human reader should be able to understand the system from a small public spec without reading client architecture or rollout plans. |
+| **Extensible** | The core model should support direct filesystem operations, sync engines, and future clients without changing identity or visibility rules. |
 
-The first server milestone is not “every sync feature.” It is a small, correct metadata engine with strong invariants.
+## 3. Core decisions
 
-## Most important invariants
+| Topic | Decision |
+| --- | --- |
+| Durable dependency | Object storage is the only required durable dependency. |
+| Unit of history | Each namespace has its own ordered metadata history. |
+| Identity | The canonical identity of an item is `(namespace_id, inode_id)`. |
+| Names | Paths are lookup views built from directory bindings. They are not the identity model. |
+| Content publication | File content becomes visible only after its blocks and content manifest are already durable. |
+| Commit visibility | A metadata change becomes visible only when the namespace head advances successfully. |
+| Delete | Delete is logical first: it creates tombstones. Physical reclamation is background garbage collection. |
+| Recovery | Readers reconstruct state from a verified checkpoint plus the WAL tail after that checkpoint. |
+| Writes | A path-oriented filesystem API and an explicit upload/commit/change-feed API are both first-class. |
+| Access control | ACLs and shares are a separate control plane keyed by namespace or subtree identity, not by path text. |
+| Long-running operations | Recursive reads, resumable uploads, and server-side copy jobs may use control-plane sessions or jobs. These do not change namespace history. |
 
-- identity is `(namespace_id, inode_id)`
-- paths are lookup views
-- a namespace has a total order of visible metadata commits
-- a revision is visible only after its content is durable
-- derived indices are disposable
+## 4. System sketch
 
-## Example
+```text
+            user-facing filesystem commands
+      ls / stat / get / put / mkdir / mv / cp / rm
+                         |
+                         v
+                authoritative LoonFS service
+          path resolution, validation, commit, reads
+             /                    |                 \
+            /                     |                  \
+           v                      v                   v
+  object-storage content   metadata history      control objects
+  blocks and manifests     WAL, head, checkpoints sessions, jobs,
+                                                shares, leases
+```
 
-A file edit should look like this:
+## 5. What this spec leaves to implementations
 
-1. upload any missing blocks
-2. upload the file manifest
-3. validate preconditions against the current namespace head
-4. write an immutable WAL commit object
-5. advance the namespace head with CAS
+The following are intentionally outside the core spec:
 
-The file becomes visible only after step 5.
+- local client database schemas
+- job schedulers and worker topologies
+- queue shard layouts
+- platform-specific file-watcher integrations
+- exact binary encodings for large immutable metadata objects
+- whether one implementation uses a single process or several services internally
 
-## Failure mode this prevents
+Those choices matter to an implementation, but they should not change the filesystem model.
 
-This prevents “dangling revisions,” where metadata points to content that is not actually durable.
+## 6. Reading guide
+
+A new reader should start with:
+
+1. the glossary
+2. the architecture overview
+3. the object store contract
+4. the filesystem and storage model
+5. the mutation and visibility model
+6. the interfaces and clients section

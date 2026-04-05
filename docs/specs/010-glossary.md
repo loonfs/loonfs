@@ -1,78 +1,26 @@
-# Spec 010: glossary
+# Glossary
 
-This file defines project terms in plain language.
-
-## Seq
-
-A seq is a namespace-local sequence number.
-
-Why it exists:
-it gives a single answer to “what order did visible metadata commits happen in?”
-
-Example:
-a rename might become seq 418.
-
-Failure mode prevented:
-ambiguous ordering between concurrent changes.
-
-## Cursor
-
-A cursor is a client bookmark.
-
-Why it exists:
-it lets a client ask for “everything after what I already saw.”
-
-Example:
-`changes(after_seq=418)`.
-
-Failure mode prevented:
-expensive full rescans and uncertain incremental replay.
-
-## Derived index
-
-A derived index is rebuildable helper state.
-
-Why it exists:
-it makes hot reads fast without becoming part of the durable truth.
-
-Example:
-a paged directory listing cache.
-
-Failure mode prevented:
-conflating convenience structures with canonical history.
-
-## Retention floor
-
-The retention floor is the oldest point from which the system still promises incremental replay.
-
-Why it exists:
-old WAL history cannot be kept forever.
-
-Example:
-“clients may resume incrementally from any seq at or above the retention floor.”
-
-Failure mode prevented:
-promising infinite incremental history.
-
-## retention_floor_seq
-
-This is the concrete sequence number for the current retention floor.
-
-Example:
-if `retention_floor_seq = 950`, a client that only has state through seq 900 must re-bootstrap.
-
-Failure mode prevented:
-vague retention behavior.
-
-## Fencing token
-
-A fencing token is a writer generation number.
-
-Why it exists:
-when lease ownership changes, the new writer must be able to prove it is newer than any old writer.
-
-Example:
-writer A holds token 41. It stalls. Writer B takes over with token 42. Even if A wakes up later, it must not be able to publish.
-
-Failure mode prevented:
-stale writers overwriting newer state.
+| Term | Meaning |
+| --- | --- |
+| **Namespace** | The unit of ordered metadata history. Each namespace has its own head, WAL, checkpoints, and retention policy. |
+| **Head** | A small mutable object that names the current visible sequence number (`seq`), the next inode id, and replay hints such as the latest checkpoint and retention floor. |
+| **Seq** | The namespace-local number that gives the visible order of committed metadata changes. |
+| **Inode** | The durable identity of a filesystem item within one namespace. An inode stays the same when its path changes. |
+| **Direntry** | A directory binding that places one inode under one parent directory and one name. |
+| **Path** | A human-friendly name built by walking visible directory bindings. Paths can change; inode identity does not. |
+| **Revision** | One immutable committed version of a file's content. Revisions are ordered by `revision_no` within an inode. |
+| **WAL** | The write-ahead log of immutable metadata commit objects. |
+| **Checkpoint** | A verified snapshot of namespace metadata at one chosen `seq`. It lets readers avoid replaying the entire WAL history. |
+| **Content block** | One immutable block of file bytes. In v0, blocks are fixed-size except for the final partial block. |
+| **Content manifest** | The immutable object that describes a file's size, digest, block size, and ordered list of content blocks. |
+| **NamePolicy** | The versioned rule that decides how sibling names are compared for collisions. |
+| **Tombstone** | A metadata record that hides a deleted inode or subtree without erasing history. |
+| **Retention floor** | The oldest sequence number from which the system still promises incremental replay. Older clients must re-bootstrap. |
+| **Change feed** | The ordered stream of committed metadata changes after a chosen `seq`. |
+| **Cursor** | A bookmark such as `after_seq` used to resume incremental reads. |
+| **Mount** | A special inode that exposes another namespace, or a subtree of another namespace, inside the current tree. |
+| **ACL** | An access-control rule granting a principal a role over a namespace or subtree. ACLs are not part of namespace metadata history. |
+| **Share** | An access grant to a namespace or subtree. A share may later be presented through a mount in another tree. |
+| **Precondition** | A rule that must still hold at an explicit namespace history point before a commit is accepted. |
+| **Request id** | A stable client-generated id used for idempotent retries. |
+| **Session / job** | A server-side control object used for long-running operations such as recursive reads, resumable uploads, and server-side copies. |
