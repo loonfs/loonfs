@@ -152,9 +152,9 @@ They are not the full public surface described by the imported core specs.
 
 Current transport layering:
 
-- `/v1` path-oriented filesystem mutations are convenience operations that compile onto the
-  explicit commit engine
-- `/v0` exposes staged upload, explicit commit, and ordered change-feed APIs directly
+- `/v0` exposes both:
+  - path-oriented filesystem list/stat/content and filesystem operations
+  - staged upload, explicit commit, and ordered change-feed APIs
 - `loon-client` includes advanced path-oriented methods that accept caller-supplied `request_id`
   values for deterministic retries
 
@@ -197,8 +197,7 @@ cargo run -p xtask -- smoke remote \
 - [`docs/specs/040-filesystem-and-storage-model.md`](docs/specs/040-filesystem-and-storage-model.md)
 - [`docs/specs/050-write-read-protocol.md`](docs/specs/050-write-read-protocol.md)
 - [`docs/specs/060-interfaces-and-clients.md`](docs/specs/060-interfaces-and-clients.md)
-- [`docs/adr/0019-cli-v0-server-backed-local-and-remote-profiles.md`](docs/adr/0019-cli-v0-server-backed-local-and-remote-profiles.md)
 - [`docs/adr/0020-name-policy-follows-core-spec.md`](docs/adr/0020-name-policy-follows-core-spec.md)
-- [`docs/runbooks/cli-v0.md`](docs/runbooks/cli-v0.md)
+- [`docs/runbooks/cli.md`](docs/runbooks/cli.md)
 - [`docs/runbooks/two-machine-r2-demo.md`](docs/runbooks/two-machine-r2-demo.md)
 - [`proposals/003-core-spec-family-alignment.md`](proposals/003-core-spec-family-alignment.md)

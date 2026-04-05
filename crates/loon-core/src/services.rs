@@ -514,7 +514,7 @@ pub fn put_file_bytes<S: ObjectStore + ?Sized>(
     let stored = store_bytes_as_content(store, namespace_id, bytes)?;
     let _validated =
         validate_durable_content_reference(store, namespace_id, &stored.content_manifest_digest)?;
-    commit_file_manifest(
+    put_file_manifest(
         store,
         namespace_id,
         absolute_path,
@@ -539,6 +539,28 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
         absolute_path,
         bytes,
         PutFileBehavior::ReplaceExisting,
+        context,
+        request_id,
+    )
+}
+
+pub fn put_file_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    content_manifest_digest: &str,
+    behavior: PutFileBehavior,
+    context: &MutationContext,
+    request_id: Option<&str>,
+) -> Result<MutationResult, CoreError> {
+    let _validated =
+        validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
+    commit_file_manifest(
+        store,
+        namespace_id,
+        absolute_path,
+        content_manifest_digest,
+        behavior,
         context,
         request_id,
     )

@@ -2,13 +2,15 @@
 
 use http::Uri;
 use loon_api::{
+    sha256_digest,
     v0::{
         BeginUploadResponse, ChangesResponse, CommitRequest as V0CommitRequest,
         CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         UploadBlockResponse,
     },
-    ApiError, AuthoritativePathEntry, ChangeSeq, CopyEntryRequest, CreateNamespaceRequest,
-    ListNamespacesResponse, MoveEntryRequest, MutationResult, NamespaceSummary,
+    ApiError, AuthoritativePathEntry, ChangeSeq, CreateNamespaceRequest, FilesystemOperation,
+    FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
+    ListNamespacesResponse, MutationResult, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::Deserialize;
 use std::fs;
@@ -111,7 +113,7 @@ impl Client {
     }
 
     pub fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, ClientError> {
-        let url = format!("{}/v1/namespaces", self.base_url);
+        let url = format!("{}/v0/namespaces", self.base_url);
         self.request_json::<_, NamespaceSummary>(
             self.agent.post(&url),
             Some(&CreateNamespaceRequest {
@@ -121,7 +123,7 @@ impl Client {
     }
 
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, ClientError> {
-        let url = format!("{}/v1/namespaces", self.base_url);
+        let url = format!("{}/v0/namespaces", self.base_url);
         Ok(self
             .request_json::<(), ListNamespacesResponse>(self.agent.get(&url), None)?
             .namespaces)
@@ -132,7 +134,7 @@ impl Client {
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, ClientError> {
         let url = format!(
-            "{}/v1/namespaces/{}/entries?path={}",
+            "{}/v0/namespaces/{}/filesystem/list?path={}",
             self.base_url,
             spec.namespace,
             urlencoding::encode(&spec.absolute_path)
@@ -142,7 +144,7 @@ impl Client {
 
     pub fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, ClientError> {
         let url = format!(
-            "{}/v1/namespaces/{}/stat?path={}",
+            "{}/v0/namespaces/{}/filesystem/stat?path={}",
             self.base_url,
             spec.namespace,
             urlencoding::encode(&spec.absolute_path)
@@ -152,7 +154,7 @@ impl Client {
 
     pub fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, ClientError> {
         let url = format!(
-            "{}/v1/namespaces/{}/content?path={}",
+            "{}/v0/namespaces/{}/filesystem/content?path={}",
             self.base_url,
             spec.namespace,
             urlencoding::encode(&spec.absolute_path)
@@ -233,6 +235,38 @@ impl Client {
         self.request_json::<(), ChangesResponse>(self.agent.get(&url), None)
     }
 
+    fn apply_filesystem_operation(
+        &self,
+        namespace: &str,
+        request: &FilesystemOperationRequest,
+    ) -> Result<FilesystemOperationResponse, ClientError> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace}/filesystem/operations",
+            self.base_url
+        );
+        self.request_json::<_, FilesystemOperationResponse>(self.agent.post(&url), Some(request))
+    }
+
+    fn stage_bytes_as_manifest(
+        &self,
+        namespace: &str,
+        bytes: &[u8],
+    ) -> Result<String, ClientError> {
+        let upload = self.begin_upload(namespace)?;
+        for (index, chunk) in bytes.chunks(CONTENT_BLOCK_SIZE_BYTES as usize).enumerate() {
+            self.upload_block(namespace, &upload.upload_id, index as u32, chunk)?;
+        }
+        let response = self.complete_upload(
+            namespace,
+            &upload.upload_id,
+            &CompleteUploadRequest {
+                file_size_bytes: bytes.len() as u64,
+                file_digest_sha256: sha256_digest(bytes),
+            },
+        )?;
+        Ok(response.content_manifest_digest)
+    }
+
     pub fn put_file_bytes(
         &self,
         spec: &NamespacePath,
@@ -249,22 +283,23 @@ impl Client {
         force: bool,
         request_id: &str,
     ) -> Result<MutationResult, ClientError> {
-        let url = format!(
-            "{}/v1/namespaces/{}/content?path={}&force={}&request_id={}",
-            self.base_url,
-            spec.namespace,
-            urlencoding::encode(&spec.absolute_path),
-            if force { "true" } else { "false" },
-            urlencoding::encode(request_id)
-        );
-        let request = self
-            .authenticated(self.agent.put(&url))
-            .set("content-type", "application/octet-stream");
-        let response = request
-            .send_bytes(bytes)
-            .map_err(|err| self.map_error(err))?;
-        serde_json::from_reader(response.into_reader())
-            .map_err(|err| ClientError::Json(err.to_string()))
+        let content_manifest_digest = self.stage_bytes_as_manifest(&spec.namespace, bytes)?;
+        let response = self.apply_filesystem_operation(
+            &spec.namespace,
+            &FilesystemOperationRequest {
+                request_id: request_id.to_owned(),
+                operation: FilesystemOperation::PutFile {
+                    path: spec.absolute_path.clone(),
+                    content_manifest_digest,
+                    behavior: if force {
+                        FilesystemPutBehavior::ReplaceExisting
+                    } else {
+                        FilesystemPutBehavior::CreateOnly
+                    },
+                },
+            },
+        )?;
+        Ok(response.into())
     }
 
     pub fn write_file_bytes(
@@ -293,17 +328,16 @@ impl Client {
         spec: &NamespacePath,
         request_id: &str,
     ) -> Result<MutationResult, ClientError> {
-        let url = format!(
-            "{}/v1/namespaces/{}/entries?path={}&request_id={}",
-            self.base_url,
-            spec.namespace,
-            urlencoding::encode(&spec.absolute_path),
-            urlencoding::encode(request_id)
-        );
-        let request = self.authenticated(self.agent.delete(&url));
-        let response = request.call().map_err(|err| self.map_error(err))?;
-        serde_json::from_reader(response.into_reader())
-            .map_err(|err| ClientError::Json(err.to_string()))
+        let response = self.apply_filesystem_operation(
+            &spec.namespace,
+            &FilesystemOperationRequest {
+                request_id: request_id.to_owned(),
+                operation: FilesystemOperation::DeletePath {
+                    path: spec.absolute_path.clone(),
+                },
+            },
+        )?;
+        Ok(response.into())
     }
 
     pub fn move_path(
@@ -326,15 +360,17 @@ impl Client {
                 from.namespace, to.namespace
             )));
         }
-        let url = format!("{}/v1/namespaces/{}/move", self.base_url, from.namespace);
-        self.request_json::<_, MutationResult>(
-            self.agent.post(&url),
-            Some(&MoveEntryRequest {
+        let response = self.apply_filesystem_operation(
+            &from.namespace,
+            &FilesystemOperationRequest {
                 request_id: request_id.to_owned(),
-                from_path: from.absolute_path.clone(),
-                to_path: to.absolute_path.clone(),
-            }),
-        )
+                operation: FilesystemOperation::MovePath {
+                    from_path: from.absolute_path.clone(),
+                    to_path: to.absolute_path.clone(),
+                },
+            },
+        )?;
+        Ok(response.into())
     }
 
     pub fn copy_path(
@@ -357,15 +393,17 @@ impl Client {
                 from.namespace, to.namespace
             )));
         }
-        let url = format!("{}/v1/namespaces/{}/copy", self.base_url, from.namespace);
-        self.request_json::<_, MutationResult>(
-            self.agent.post(&url),
-            Some(&CopyEntryRequest {
+        let response = self.apply_filesystem_operation(
+            &from.namespace,
+            &FilesystemOperationRequest {
                 request_id: request_id.to_owned(),
-                from_path: from.absolute_path.clone(),
-                to_path: to.absolute_path.clone(),
-            }),
-        )
+                operation: FilesystemOperation::CopyPath {
+                    from_path: from.absolute_path.clone(),
+                    to_path: to.absolute_path.clone(),
+                },
+            },
+        )?;
+        Ok(response.into())
     }
 
     pub fn get_to_path(

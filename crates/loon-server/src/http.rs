@@ -11,13 +11,13 @@ use loon_api::{
         CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         UploadBlockResponse,
     },
-    ApiError, CopyEntryRequest, CreateNamespaceRequest, ListNamespacesResponse, MoveEntryRequest,
-    MutationResult, NamespaceId,
+    ApiError, CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, FilesystemPutBehavior, ListNamespacesResponse, NamespaceId,
 };
 use loon_core::{
     begin_upload, bootstrap_namespace, commit_operations, complete_upload, copy_file_path,
     delete_path_non_recursive, list_changes_after, list_namespaces, list_path, move_path,
-    put_file_bytes, read_file_bytes, resolve_path, upload_block, BootstrapNamespaceError,
+    put_file_manifest, read_file_bytes, resolve_path, upload_block, BootstrapNamespaceError,
     CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::ObjectStore;
@@ -40,22 +40,6 @@ struct PathQuery {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct DeleteEntryQuery {
-    path: String,
-    #[serde(default)]
-    request_id: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct PutContentQuery {
-    path: String,
-    #[serde(default)]
-    force: Option<bool>,
-    #[serde(default)]
-    request_id: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
 struct ChangesQuery {
     after_seq: u64,
 }
@@ -73,20 +57,22 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route(
-            "/v1/namespaces",
+            "/v0/namespaces",
             post(create_namespace).get(list_namespaces_handler),
         )
         .route(
-            "/v1/namespaces/:namespace/entries",
-            get(list_entries).delete(delete_entry),
+            "/v0/namespaces/:namespace/filesystem/list",
+            get(list_entries),
         )
-        .route("/v1/namespaces/:namespace/stat", get(stat_entry))
+        .route("/v0/namespaces/:namespace/filesystem/stat", get(stat_entry))
         .route(
-            "/v1/namespaces/:namespace/content",
-            get(get_content).put(put_content),
+            "/v0/namespaces/:namespace/filesystem/content",
+            get(get_content),
         )
-        .route("/v1/namespaces/:namespace/move", post(move_entry))
-        .route("/v1/namespaces/:namespace/copy", post(copy_entry))
+        .route(
+            "/v0/namespaces/:namespace/filesystem/operations",
+            post(filesystem_operation),
+        )
         .route(
             "/v0/namespaces/:namespace/uploads",
             post(begin_upload_handler),
@@ -213,112 +199,57 @@ async fn get_content(
     Ok((StatusCode::OK, file.bytes).into_response())
 }
 
-async fn put_content(
+async fn filesystem_operation(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Query(query): Query<PutContentQuery>,
-    body: Bytes,
-) -> Result<Json<MutationResult>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
-    let path = query.path;
-    let request_id = query.request_id;
-    let behavior = if query.force.unwrap_or(false) {
-        PutFileBehavior::ReplaceExisting
-    } else {
-        PutFileBehavior::CreateOnly
-    };
-    let bytes = body.to_vec();
-    let result = run_blocking(move || {
-        put_file_bytes(
-            store.as_ref(),
-            &namespace_id,
-            &path,
-            &bytes,
-            behavior,
-            &mutation_context(&config),
-            request_id.as_deref(),
-        )
-        .map_err(ApiResponseError::core)
-    })
-    .await?;
-    Ok(Json(result))
-}
-
-async fn delete_entry(
-    State(state): State<AppState>,
-    AxumPath(namespace): AxumPath<String>,
-    headers: HeaderMap,
-    Query(query): Query<DeleteEntryQuery>,
-) -> Result<Json<MutationResult>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
-    let path = query.path;
-    let request_id = query.request_id;
-    let result = run_blocking(move || {
-        delete_path_non_recursive(
-            store.as_ref(),
-            &namespace_id,
-            &path,
-            &mutation_context(&config),
-            request_id.as_deref(),
-        )
-        .map_err(ApiResponseError::core)
-    })
-    .await?;
-    Ok(Json(result))
-}
-
-async fn move_entry(
-    State(state): State<AppState>,
-    AxumPath(namespace): AxumPath<String>,
-    headers: HeaderMap,
-    Json(request): Json<MoveEntryRequest>,
-) -> Result<Json<MutationResult>, ApiResponseError> {
+    Json(request): Json<FilesystemOperationRequest>,
+) -> Result<Json<FilesystemOperationResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
     let namespace_id = NamespaceId::from(namespace);
     let result = run_blocking(move || {
-        move_path(
-            store.as_ref(),
-            &namespace_id,
-            &request.from_path,
-            &request.to_path,
-            &mutation_context(&config),
-            Some(&request.request_id),
-        )
-        .map_err(ApiResponseError::core)
-    })
-    .await?;
-    Ok(Json(result))
-}
-
-async fn copy_entry(
-    State(state): State<AppState>,
-    AxumPath(namespace): AxumPath<String>,
-    headers: HeaderMap,
-    Json(request): Json<CopyEntryRequest>,
-) -> Result<Json<MutationResult>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
-    let result = run_blocking(move || {
-        copy_file_path(
-            store.as_ref(),
-            &namespace_id,
-            &request.from_path,
-            &request.to_path,
-            &mutation_context(&config),
-            Some(&request.request_id),
-        )
-        .map_err(ApiResponseError::core)
+        let result = match request.operation {
+            FilesystemOperation::PutFile {
+                path,
+                content_manifest_digest,
+                behavior,
+            } => put_file_manifest(
+                store.as_ref(),
+                &namespace_id,
+                &path,
+                &content_manifest_digest,
+                map_filesystem_put_behavior(behavior),
+                &mutation_context(&config),
+                Some(&request.request_id),
+            ),
+            FilesystemOperation::DeletePath { path } => delete_path_non_recursive(
+                store.as_ref(),
+                &namespace_id,
+                &path,
+                &mutation_context(&config),
+                Some(&request.request_id),
+            ),
+            FilesystemOperation::MovePath { from_path, to_path } => move_path(
+                store.as_ref(),
+                &namespace_id,
+                &from_path,
+                &to_path,
+                &mutation_context(&config),
+                Some(&request.request_id),
+            ),
+            FilesystemOperation::CopyPath { from_path, to_path } => copy_file_path(
+                store.as_ref(),
+                &namespace_id,
+                &from_path,
+                &to_path,
+                &mutation_context(&config),
+                Some(&request.request_id),
+            ),
+        }
+        .map_err(ApiResponseError::core)?;
+        Ok(FilesystemOperationResponse::from(result))
     })
     .await?;
     Ok(Json(result))
@@ -460,6 +391,13 @@ fn mutation_context(config: &ServerConfig) -> MutationContext {
         writer_version: config.writer_version.clone(),
         now_ms,
         lease_duration_ms: config.lease_duration_ms,
+    }
+}
+
+fn map_filesystem_put_behavior(value: FilesystemPutBehavior) -> PutFileBehavior {
+    match value {
+        FilesystemPutBehavior::CreateOnly => PutFileBehavior::CreateOnly,
+        FilesystemPutBehavior::ReplaceExisting => PutFileBehavior::ReplaceExisting,
     }
 }
 

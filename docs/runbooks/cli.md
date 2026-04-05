@@ -1,4 +1,4 @@
-# CLI v0
+# CLI
 
 This runbook describes the current path-oriented `loon` / `loond` implementation layer.
 
@@ -47,7 +47,7 @@ Profile `mode` is `local` or `remote`.
 - `remote` stores a `server_url` and optional bearer token
 - both modes execute through `loond`
 - the current CLI is one path-oriented client profile over the broader LoonFS core model
-- current `/v1` path mutations compile onto the explicit commit engine underneath
+- current `/v0` filesystem operations compile onto the explicit commit engine underneath
 
 Examples:
 
@@ -57,7 +57,7 @@ Examples:
 - [`configs/loond.aws-s3.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.aws-s3.example.toml)
 - [`configs/loond.cloudflare-r2.example.toml`](/Users/conormccarter/Code/loondb/configs/loond.cloudflare-r2.example.toml)
 
-v0 rules:
+Current rules:
 
 - local object-store credentials live only in `loond` config
 - remote auth is just an optional bearer token in the CLI profile

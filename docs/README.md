@@ -18,7 +18,6 @@
 7. `specs/060-interfaces-and-clients.md`
 8. `specs/080-background-jobs.md`
 9. `specs/090-versioning-conformance-and-extensions.md`
-10. `adr/0019-cli-v0-server-backed-local-and-remote-profiles.md`
-11. `adr/0020-name-policy-follows-core-spec.md`
-12. `../proposals/003-core-spec-family-alignment.md`
-13. `runbooks/cli-v0.md`
+10. `adr/0020-name-policy-follows-core-spec.md`
+11. `../proposals/003-core-spec-family-alignment.md`
+12. `runbooks/cli.md`

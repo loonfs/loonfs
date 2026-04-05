@@ -29,23 +29,59 @@ pub struct MutationResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MoveEntryRequest {
-    pub request_id: String,
-    pub from_path: String,
-    pub to_path: String,
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemPutBehavior {
+    CreateOnly,
+    ReplaceExisting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PutContentOptions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub force: Option<bool>,
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum FilesystemOperation {
+    PutFile {
+        path: String,
+        content_manifest_digest: String,
+        behavior: FilesystemPutBehavior,
+    },
+    DeletePath {
+        path: String,
+    },
+    MovePath {
+        from_path: String,
+        to_path: String,
+    },
+    CopyPath {
+        from_path: String,
+        to_path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CopyEntryRequest {
+pub struct FilesystemOperationRequest {
     pub request_id: String,
-    pub from_path: String,
-    pub to_path: String,
+    pub operation: FilesystemOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesystemOperationResponse {
+    pub namespace_id: NamespaceId,
+    pub committed_seq: ChangeSeq,
+}
+
+impl From<MutationResult> for FilesystemOperationResponse {
+    fn from(value: MutationResult) -> Self {
+        Self {
+            namespace_id: value.namespace_id,
+            committed_seq: value.committed_seq,
+        }
+    }
+}
+
+impl From<FilesystemOperationResponse> for MutationResult {
+    fn from(value: FilesystemOperationResponse) -> Self {
+        Self {
+            namespace_id: value.namespace_id,
+            committed_seq: value.committed_seq,
+        }
+    }
 }

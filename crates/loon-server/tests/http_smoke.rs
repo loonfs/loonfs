@@ -106,12 +106,12 @@ async fn http_put_create_only_and_copy_preserve_cli_semantics() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn v0_upload_commit_and_change_feed_are_idempotent() {
+async fn http_upload_commit_and_change_feed_are_idempotent() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-v0",
-        "http-v0-smoke",
+        "loond-current",
+        "http-current-smoke",
         60_000,
     ))
     .await;
@@ -230,12 +230,12 @@ async fn v0_upload_commit_and_change_feed_are_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn v0_commit_rejects_same_request_id_with_different_payload() {
+async fn http_commit_rejects_same_request_id_with_different_payload() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-v0-conflict",
-        "http-v0-conflict",
+        "loond-current-conflict",
+        "http-current-conflict",
         60_000,
     ))
     .await;
@@ -300,12 +300,12 @@ async fn v0_commit_rejects_same_request_id_with_different_payload() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn v1_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
+async fn http_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-v1-put",
-        "http-v1-put",
+        "loond-put",
+        "http-put",
         60_000,
     ))
     .await;
@@ -352,12 +352,12 @@ async fn v1_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn v1_delete_move_and_copy_request_ids_are_idempotent() {
+async fn http_delete_move_and_copy_request_ids_are_idempotent() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-v1-ops",
-        "http-v1-ops",
+        "loond-ops",
+        "http-ops",
         60_000,
     ))
     .await;
@@ -451,12 +451,12 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
             .expect("host a write");
 
         let host_b_target = NamespacePath::parse("demo:/docs/host-b.txt").expect("host b target");
-        match client_b.write_file_bytes(&host_b_target, b"host b\n") {
+        match client_b.move_path(&host_a_target, &host_b_target) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "lease_conflict"),
             other => panic!("expected lease_conflict, got {other:?}"),
         }
 
-        let committed_seq = retry_until_lease_handoff(&client_b, &host_b_target);
+        let committed_seq = retry_until_lease_handoff(&client_b, &host_a_target, &host_b_target);
         assert!(
             committed_seq >= 2,
             "expected later commit seq, got {committed_seq}"
@@ -469,7 +469,7 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
         let host_b_bytes = client_a
             .read_file_bytes(&host_b_target)
             .expect("read host b file");
-        assert_eq!(host_b_bytes, b"host b\n");
+        assert_eq!(host_b_bytes, b"host a\n");
     })
     .await
     .expect("join blocking task");
@@ -521,9 +521,9 @@ fn test_config(
     }
 }
 
-fn retry_until_lease_handoff(client: &Client, target: &NamespacePath) -> u64 {
+fn retry_until_lease_handoff(client: &Client, from: &NamespacePath, to: &NamespacePath) -> u64 {
     for _attempt in 0..20 {
-        match client.write_file_bytes(target, b"host b\n") {
+        match client.move_path(from, to) {
             Ok(result) => return result.committed_seq.0,
             Err(ClientError::Api { code, .. }) if code == "lease_conflict" => {
                 thread::sleep(Duration::from_millis(50));

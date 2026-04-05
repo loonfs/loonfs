@@ -20,7 +20,7 @@ pub use protocol::{
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, list_namespaces,
-    list_path, move_path, put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content,
-    write_file_bytes, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
-    PutFileBehavior, StoredContent,
+    list_path, move_path, put_file_bytes, put_file_manifest, read_file_bytes, resolve_path,
+    store_bytes_as_content, write_file_bytes, BootstrapNamespaceError, CoreError, CoreErrorKind,
+    MutationContext, PutFileBehavior, StoredContent,
 };

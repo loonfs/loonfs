@@ -1,4 +1,4 @@
-# macOS arm64 Installer v0 Plan
+# macOS arm64 Installer Plan
 
 This document captures the current install and packaging plan for LoonFS so it can be revisited
 later without treating it as an accepted spec.
@@ -119,7 +119,7 @@ The tarball should contain:
 - `loond.aws-s3.example.toml`
 - `loond.cloudflare-r2.example.toml`
 
-GitHub Releases is the artifact backend in v0. `install.loonfs.com` only needs to host the shell
+GitHub Releases is the artifact backend for the initial installer. `install.loonfs.com` only needs to host the shell
 installer.
 
 ## Installer Script
@@ -127,7 +127,7 @@ installer.
 Add a checked-in shell installer at `scripts/install.sh` intended to be served by
 `install.loonfs.com`.
 
-Supported flags for v0:
+Supported installer flags:
 
 - `--version <tag>` to install a specific release
 - `--bin-dir <path>` to override `~/.loonfs/bin`
@@ -145,7 +145,7 @@ The installer should be idempotent for binaries and example templates:
 When this work is implemented, update:
 
 - `README.md` to make installed binaries the default path
-- `docs/runbooks/cli-v0.md` to use installed binaries first
+- `docs/runbooks/cli.md` to use installed binaries first
 - `docs/runbooks/two-machine-r2-demo.md` to assume installed `loon` and `loond`
 
 `cargo run` should remain documented only as a repository-development workflow.
