@@ -80,6 +80,8 @@ pub struct WalCommitPayload {
     pub commit_id: String,
     pub request_id: String,
     pub request_checksum_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_request_checksum_sha256: Option<String>,
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     #[serde(default, skip_serializing_if = "Option::is_none")]

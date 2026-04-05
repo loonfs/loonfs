@@ -19,6 +19,8 @@ pub struct CommitRequest {
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     pub planned_head_seq: ChangeSeq,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_request_checksum_sha256: Option<String>,
     pub ops: Vec<CommitOp>,
     pub preconditions: Vec<Precondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

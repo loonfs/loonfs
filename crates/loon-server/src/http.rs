@@ -40,6 +40,13 @@ struct PathQuery {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct DeleteEntryQuery {
+    path: String,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct PutContentQuery {
     path: String,
     #[serde(default)]
@@ -245,20 +252,21 @@ async fn delete_entry(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Query(query): Query<PathQuery>,
+    Query(query): Query<DeleteEntryQuery>,
 ) -> Result<Json<MutationResult>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
     let namespace_id = NamespaceId::from(namespace);
     let path = query.path;
+    let request_id = query.request_id;
     let result = run_blocking(move || {
         delete_path_non_recursive(
             store.as_ref(),
             &namespace_id,
             &path,
             &mutation_context(&config),
-            None,
+            request_id.as_deref(),
         )
         .map_err(ApiResponseError::core)
     })

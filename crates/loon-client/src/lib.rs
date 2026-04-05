@@ -239,12 +239,23 @@ impl Client {
         bytes: &[u8],
         force: bool,
     ) -> Result<MutationResult, ClientError> {
+        self.put_file_bytes_with_request_id(spec, bytes, force, &Uuid::new_v4().to_string())
+    }
+
+    pub fn put_file_bytes_with_request_id(
+        &self,
+        spec: &NamespacePath,
+        bytes: &[u8],
+        force: bool,
+        request_id: &str,
+    ) -> Result<MutationResult, ClientError> {
         let url = format!(
-            "{}/v1/namespaces/{}/content?path={}&force={}",
+            "{}/v1/namespaces/{}/content?path={}&force={}&request_id={}",
             self.base_url,
             spec.namespace,
             urlencoding::encode(&spec.absolute_path),
-            if force { "true" } else { "false" }
+            if force { "true" } else { "false" },
+            urlencoding::encode(request_id)
         );
         let request = self
             .authenticated(self.agent.put(&url))
@@ -261,15 +272,33 @@ impl Client {
         spec: &NamespacePath,
         bytes: &[u8],
     ) -> Result<MutationResult, ClientError> {
-        self.put_file_bytes(spec, bytes, true)
+        self.write_file_bytes_with_request_id(spec, bytes, &Uuid::new_v4().to_string())
+    }
+
+    pub fn write_file_bytes_with_request_id(
+        &self,
+        spec: &NamespacePath,
+        bytes: &[u8],
+        request_id: &str,
+    ) -> Result<MutationResult, ClientError> {
+        self.put_file_bytes_with_request_id(spec, bytes, true, request_id)
     }
 
     pub fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
+        self.delete_path_with_request_id(spec, &Uuid::new_v4().to_string())
+    }
+
+    pub fn delete_path_with_request_id(
+        &self,
+        spec: &NamespacePath,
+        request_id: &str,
+    ) -> Result<MutationResult, ClientError> {
         let url = format!(
-            "{}/v1/namespaces/{}/entries?path={}",
+            "{}/v1/namespaces/{}/entries?path={}&request_id={}",
             self.base_url,
             spec.namespace,
-            urlencoding::encode(&spec.absolute_path)
+            urlencoding::encode(&spec.absolute_path),
+            urlencoding::encode(request_id)
         );
         let request = self.authenticated(self.agent.delete(&url));
         let response = request.call().map_err(|err| self.map_error(err))?;
@@ -282,6 +311,15 @@ impl Client {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, ClientError> {
+        self.move_path_with_request_id(from, to, &Uuid::new_v4().to_string())
+    }
+
+    pub fn move_path_with_request_id(
+        &self,
+        from: &NamespacePath,
+        to: &NamespacePath,
+        request_id: &str,
+    ) -> Result<MutationResult, ClientError> {
         if from.namespace != to.namespace {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot move across namespaces: {} -> {}",
@@ -292,7 +330,7 @@ impl Client {
         self.request_json::<_, MutationResult>(
             self.agent.post(&url),
             Some(&MoveEntryRequest {
-                request_id: Uuid::new_v4().to_string(),
+                request_id: request_id.to_owned(),
                 from_path: from.absolute_path.clone(),
                 to_path: to.absolute_path.clone(),
             }),
@@ -304,6 +342,15 @@ impl Client {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, ClientError> {
+        self.copy_path_with_request_id(from, to, &Uuid::new_v4().to_string())
+    }
+
+    pub fn copy_path_with_request_id(
+        &self,
+        from: &NamespacePath,
+        to: &NamespacePath,
+        request_id: &str,
+    ) -> Result<MutationResult, ClientError> {
         if from.namespace != to.namespace {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot copy across namespaces: {} -> {}",
@@ -314,7 +361,7 @@ impl Client {
         self.request_json::<_, MutationResult>(
             self.agent.post(&url),
             Some(&CopyEntryRequest {
-                request_id: Uuid::new_v4().to_string(),
+                request_id: request_id.to_owned(),
                 from_path: from.absolute_path.clone(),
                 to_path: to.absolute_path.clone(),
             }),

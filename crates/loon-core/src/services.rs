@@ -1,19 +1,20 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
-use crate::commit::{
-    build_commit_plan, prepare_commit_head_publish, publish_commit_head, CommitHeadPublishError,
-    CommitOp, CommitRequest, CommitValidationContext, CommitValidationError, Precondition,
-};
+use crate::commit::{CommitHeadPublishError, CommitOp, CommitValidationError};
 use crate::content::{
     read_durable_content_bytes, validate_durable_content_reference, DurableContentValidationError,
 };
 use crate::genesis::bootstrap_basis_metadata_state;
-use crate::lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
+use crate::lease::LeaseAcquireError;
 use crate::loading::ControlObjectLoadError;
 use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, VisiblePathError};
-use crate::wal::{prepare_wal_commit, WalBuildError};
+use crate::wal::WalBuildError;
 use loon_api::{
     content_manifest_digest_sha256, encode_content_manifest_json, name_key_for_display_name,
-    v0::{CommitOpResult, CommitResponse as V0CommitResponse},
+    payload_checksum_sha256,
+    v0::{
+        CommitOp as V0CommitOp, CommitOpResult, CommitPrecondition as V0CommitPrecondition,
+        CommitRequest as V0CommitRequest, CommitResponse as V0CommitResponse,
+    },
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentBlockDescriptor,
     ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, HeadState,
     HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, MutationResult,
@@ -446,6 +447,60 @@ pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PathRequestIdentity {
+    PutFile {
+        namespace_id: NamespaceId,
+        absolute_path: String,
+        behavior: PutFileBehavior,
+        content_manifest_digest: String,
+    },
+    DeletePath {
+        namespace_id: NamespaceId,
+        absolute_path: String,
+        recursive: bool,
+    },
+    MovePath {
+        namespace_id: NamespaceId,
+        from_path: String,
+        to_path: String,
+    },
+    CopyFilePath {
+        namespace_id: NamespaceId,
+        from_path: String,
+        to_path: String,
+    },
+}
+
+fn normalized_request_id(request_id: Option<&str>) -> String {
+    request_id
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
+fn source_request_checksum_sha256(identity: &PathRequestIdentity) -> Result<String, CoreError> {
+    payload_checksum_sha256(identity).map_err(|err| CoreError::Store(err.to_string()))
+}
+
+fn maybe_retry_existing_path_request<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request_id: &str,
+    source_request_checksum_sha256: &str,
+    context: &MutationContext,
+) -> Result<Option<MutationResult>, CoreError> {
+    crate::protocol::retry_existing_path_request(
+        store,
+        namespace_id,
+        request_id,
+        source_request_checksum_sha256,
+        context,
+    )
+    .map(|response| response.map(mutation_result_from_commit_response))
+}
+
 pub fn put_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -499,12 +554,23 @@ fn commit_file_manifest<S: ObjectStore + ?Sized>(
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(absolute_path)?;
-    let request_id = request_id
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let request_id = normalized_request_id(request_id);
+    let source_request_checksum = source_request_checksum_sha256(&PathRequestIdentity::PutFile {
+        namespace_id: namespace_id.clone(),
+        absolute_path: absolute_path.to_owned(),
+        behavior,
+        content_manifest_digest: content_manifest_digest.to_owned(),
+    })?;
+    if let Some(existing) = maybe_retry_existing_path_request(
+        store,
+        namespace_id,
+        &request_id,
+        &source_request_checksum,
+        context,
+    )? {
+        return Ok(existing);
+    }
 
-    acquire_or_renew_namespace_lease(store, namespace_id, context)?;
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     reject_tombstoned_path_ancestor(&basis.metadata_state, absolute_path, basis.head.seq)?;
     let target = lookup_path(&basis.metadata_state, absolute_path, basis.head.seq);
@@ -522,7 +588,9 @@ fn commit_file_manifest<S: ObjectStore + ?Sized>(
         &mut op_index,
     )?;
     let final_name = final_component(absolute_path)?;
-    let mut preconditions = vec![Precondition::HeadSeqIs(basis.head.seq)];
+    let mut preconditions = vec![V0CommitPrecondition::HeadSeqIs {
+        expected_seq: basis.head.seq,
+    }];
 
     match target {
         Ok(existing) => {
@@ -539,53 +607,49 @@ fn commit_file_manifest<S: ObjectStore + ?Sized>(
                 .metadata_state
                 .latest_revision_head_at_seq(existing.inode_id, basis.head.seq)
                 .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-            ops.push(CommitOp::ReplaceFile {
+            ops.push(V0CommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
-                base_revision: revision.revision_no,
+                base_revision_no: revision.revision_no,
                 content_manifest_digest: content_manifest_digest.to_owned(),
             });
-            preconditions.push(Precondition::InodeRevisionIs {
+            preconditions.push(V0CommitPrecondition::InodeRevisionIs {
                 inode_id: existing.inode_id,
-                revision: revision.revision_no,
+                revision_no: revision.revision_no,
             });
-            preconditions.push(Precondition::AncestorsNotSubtreeDeleted {
+            preconditions.push(V0CommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: existing.inode_id,
             });
         }
         Err(VisiblePathError::PathNotFound { .. }) => {
-            ops.push(CommitOp::CreateFile {
+            ops.push(V0CommitOp::CreateFile {
                 parent_inode: final_parent_inode,
                 display_name: final_name.clone(),
                 content_manifest_digest: content_manifest_digest.to_owned(),
             });
-            preconditions.push(Precondition::ChildNameAbsent {
+            preconditions.push(V0CommitPrecondition::ChildNameAbsent {
                 parent_inode: final_parent_inode,
                 name_key: name_key_for_display_name(basis.head.name_policy, &final_name),
             });
-            preconditions.push(Precondition::AncestorsNotSubtreeDeleted {
+            preconditions.push(V0CommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: final_parent_inode,
             });
         }
         Err(other) => return Err(other.into()),
     }
 
-    let writer_fence_token = basis.head.active_fence_token;
-    let planned_head_seq = basis.head.seq;
-    execute_commit(
+    crate::protocol::commit_path_operations(
         store,
-        basis,
-        context,
-        CommitRequest {
-            namespace_id: namespace_id.clone(),
+        namespace_id,
+        V0CommitRequest {
             request_id,
-            writer_id: context.writer_id.clone(),
-            writer_fence_token,
-            planned_head_seq,
+            planned_head_seq: basis.head.seq,
             ops,
             preconditions,
             message: None,
             annotations: None,
         },
+        source_request_checksum,
+        context,
     )
     .map(mutation_result_from_commit_response)
 }
@@ -598,16 +662,32 @@ pub fn delete_path<S: ObjectStore + ?Sized>(
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(absolute_path)?;
-    acquire_or_renew_namespace_lease(store, namespace_id, context)?;
+    let request_id = normalized_request_id(request_id);
+    let source_request_checksum =
+        source_request_checksum_sha256(&PathRequestIdentity::DeletePath {
+            namespace_id: namespace_id.clone(),
+            absolute_path: absolute_path.to_owned(),
+            recursive: true,
+        })?;
+    if let Some(existing) = maybe_retry_existing_path_request(
+        store,
+        namespace_id,
+        &request_id,
+        &source_request_checksum,
+        context,
+    )? {
+        return Ok(existing);
+    }
+
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     let resolved = basis
         .metadata_state
         .resolve_visible_path(absolute_path, basis.head.seq)?;
     let op = match resolved.inode_kind {
-        InodeKind::File => CommitOp::DeleteFile {
+        InodeKind::File => V0CommitOp::DeleteFile {
             inode_id: resolved.inode_id,
         },
-        InodeKind::Dir => CommitOp::DeleteSubtree {
+        InodeKind::Dir => V0CommitOp::DeleteSubtree {
             root_inode: resolved.inode_id,
         },
         kind => {
@@ -617,26 +697,21 @@ pub fn delete_path<S: ObjectStore + ?Sized>(
             });
         }
     };
-    let writer_fence_token = basis.head.active_fence_token;
-    let planned_head_seq = basis.head.seq;
-    execute_commit(
+    crate::protocol::commit_path_operations(
         store,
-        basis,
-        context,
-        CommitRequest {
-            namespace_id: namespace_id.clone(),
-            request_id: request_id
-                .filter(|value| !value.trim().is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            writer_id: context.writer_id.clone(),
-            writer_fence_token,
-            planned_head_seq,
+        namespace_id,
+        V0CommitRequest {
+            request_id,
+            planned_head_seq: basis.head.seq,
             ops: vec![op],
-            preconditions: vec![Precondition::HeadSeqIs(planned_head_seq)],
+            preconditions: vec![V0CommitPrecondition::HeadSeqIs {
+                expected_seq: basis.head.seq,
+            }],
             message: None,
             annotations: None,
         },
+        source_request_checksum,
+        context,
     )
     .map(mutation_result_from_commit_response)
 }
@@ -649,14 +724,30 @@ pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(absolute_path)?;
-    acquire_or_renew_namespace_lease(store, namespace_id, context)?;
+    let request_id = normalized_request_id(request_id);
+    let source_request_checksum =
+        source_request_checksum_sha256(&PathRequestIdentity::DeletePath {
+            namespace_id: namespace_id.clone(),
+            absolute_path: absolute_path.to_owned(),
+            recursive: false,
+        })?;
+    if let Some(existing) = maybe_retry_existing_path_request(
+        store,
+        namespace_id,
+        &request_id,
+        &source_request_checksum,
+        context,
+    )? {
+        return Ok(existing);
+    }
+
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     let resolved = basis
         .metadata_state
         .resolve_visible_path(absolute_path, basis.head.seq)?;
 
     let op = match resolved.inode_kind {
-        InodeKind::File => CommitOp::DeleteFile {
+        InodeKind::File => V0CommitOp::DeleteFile {
             inode_id: resolved.inode_id,
         },
         InodeKind::Dir => {
@@ -666,7 +757,7 @@ pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
             if !children.is_empty() {
                 return Err(CoreError::DirectoryNotEmpty(absolute_path.to_owned()));
             }
-            CommitOp::DeleteSubtree {
+            V0CommitOp::DeleteSubtree {
                 root_inode: resolved.inode_id,
             }
         }
@@ -677,27 +768,21 @@ pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
             });
         }
     };
-
-    let writer_fence_token = basis.head.active_fence_token;
-    let planned_head_seq = basis.head.seq;
-    execute_commit(
+    crate::protocol::commit_path_operations(
         store,
-        basis,
-        context,
-        CommitRequest {
-            namespace_id: namespace_id.clone(),
-            request_id: request_id
-                .filter(|value| !value.trim().is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            writer_id: context.writer_id.clone(),
-            writer_fence_token,
-            planned_head_seq,
+        namespace_id,
+        V0CommitRequest {
+            request_id,
+            planned_head_seq: basis.head.seq,
             ops: vec![op],
-            preconditions: vec![Precondition::HeadSeqIs(planned_head_seq)],
+            preconditions: vec![V0CommitPrecondition::HeadSeqIs {
+                expected_seq: basis.head.seq,
+            }],
             message: None,
             annotations: None,
         },
+        source_request_checksum,
+        context,
     )
     .map(mutation_result_from_commit_response)
 }
@@ -712,7 +797,22 @@ pub fn move_path<S: ObjectStore + ?Sized>(
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(from_path)?;
     validate_path_for_mutation(to_path)?;
-    acquire_or_renew_namespace_lease(store, namespace_id, context)?;
+    let request_id = normalized_request_id(request_id);
+    let source_request_checksum = source_request_checksum_sha256(&PathRequestIdentity::MovePath {
+        namespace_id: namespace_id.clone(),
+        from_path: from_path.to_owned(),
+        to_path: to_path.to_owned(),
+    })?;
+    if let Some(existing) = maybe_retry_existing_path_request(
+        store,
+        namespace_id,
+        &request_id,
+        &source_request_checksum,
+        context,
+    )? {
+        return Ok(existing);
+    }
+
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     reject_tombstoned_path_ancestor(&basis.metadata_state, from_path, basis.head.seq)?;
     reject_tombstoned_path_ancestor(&basis.metadata_state, to_path, basis.head.seq)?;
@@ -724,30 +824,25 @@ pub fn move_path<S: ObjectStore + ?Sized>(
     if lookup_path(&basis.metadata_state, to_path, basis.head.seq).is_ok() {
         return Err(CoreError::DestinationExists(to_path.to_owned()));
     }
-    let writer_fence_token = basis.head.active_fence_token;
-    let planned_head_seq = basis.head.seq;
-    execute_commit(
+    crate::protocol::commit_path_operations(
         store,
-        basis,
-        context,
-        CommitRequest {
-            namespace_id: namespace_id.clone(),
-            request_id: request_id
-                .filter(|value| !value.trim().is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            writer_id: context.writer_id.clone(),
-            writer_fence_token,
-            planned_head_seq,
-            ops: vec![CommitOp::Rename {
+        namespace_id,
+        V0CommitRequest {
+            request_id,
+            planned_head_seq: basis.head.seq,
+            ops: vec![V0CommitOp::Rename {
                 inode_id: source.inode_id,
                 new_parent_inode: target_parent,
                 new_display_name: target_name,
             }],
-            preconditions: vec![Precondition::HeadSeqIs(planned_head_seq)],
+            preconditions: vec![V0CommitPrecondition::HeadSeqIs {
+                expected_seq: basis.head.seq,
+            }],
             message: None,
             annotations: None,
         },
+        source_request_checksum,
+        context,
     )
     .map(mutation_result_from_commit_response)
 }
@@ -762,7 +857,23 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(from_path)?;
     validate_path_for_mutation(to_path)?;
-    acquire_or_renew_namespace_lease(store, namespace_id, context)?;
+    let request_id = normalized_request_id(request_id);
+    let source_request_checksum =
+        source_request_checksum_sha256(&PathRequestIdentity::CopyFilePath {
+            namespace_id: namespace_id.clone(),
+            from_path: from_path.to_owned(),
+            to_path: to_path.to_owned(),
+        })?;
+    if let Some(existing) = maybe_retry_existing_path_request(
+        store,
+        namespace_id,
+        &request_id,
+        &source_request_checksum,
+        context,
+    )? {
+        return Ok(existing);
+    }
+
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     reject_tombstoned_path_ancestor(&basis.metadata_state, from_path, basis.head.seq)?;
     reject_tombstoned_path_ancestor(&basis.metadata_state, to_path, basis.head.seq)?;
@@ -791,73 +902,36 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
     let target_parent = resolve_parent_directory(&basis.metadata_state, to_path, basis.head.seq)?;
     let target_name = final_component(to_path)?;
     let target_name_key = name_key_for_display_name(basis.head.name_policy, &target_name);
-    let writer_fence_token = basis.head.active_fence_token;
-    let planned_head_seq = basis.head.seq;
-    execute_commit(
+    crate::protocol::commit_path_operations(
         store,
-        basis,
-        context,
-        CommitRequest {
-            namespace_id: namespace_id.clone(),
-            request_id: request_id
-                .filter(|value| !value.trim().is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| Uuid::new_v4().to_string()),
-            writer_id: context.writer_id.clone(),
-            writer_fence_token,
-            planned_head_seq,
-            ops: vec![CommitOp::CreateFile {
+        namespace_id,
+        V0CommitRequest {
+            request_id,
+            planned_head_seq: basis.head.seq,
+            ops: vec![V0CommitOp::CreateFile {
                 parent_inode: target_parent,
                 display_name: target_name.clone(),
                 content_manifest_digest: revision.content_manifest_digest,
             }],
             preconditions: vec![
-                Precondition::HeadSeqIs(planned_head_seq),
-                Precondition::ChildNameAbsent {
+                V0CommitPrecondition::HeadSeqIs {
+                    expected_seq: basis.head.seq,
+                },
+                V0CommitPrecondition::ChildNameAbsent {
                     parent_inode: target_parent,
                     name_key: target_name_key,
                 },
-                Precondition::AncestorsNotSubtreeDeleted {
+                V0CommitPrecondition::AncestorsNotSubtreeDeleted {
                     inode_id: target_parent,
                 },
             ],
             message: None,
             annotations: None,
         },
+        source_request_checksum,
+        context,
     )
     .map(mutation_result_from_commit_response)
-}
-
-pub(crate) fn execute_commit<S: ObjectStore + ?Sized>(
-    store: &S,
-    basis: crate::VerifiedNamespaceBasis,
-    context: &MutationContext,
-    request: CommitRequest,
-) -> Result<V0CommitResponse, CoreError> {
-    let validation = CommitValidationContext {
-        head: basis.head.clone(),
-        lease: basis.lease.clone(),
-        now_ms: context.now_ms,
-        metadata_state: basis.metadata_state.clone(),
-    };
-    let plan = build_commit_plan(&request, &validation)?;
-    let results = derive_commit_results(&request.ops, &plan.allocated_inode_ids);
-    let wal = prepare_wal_commit(&request, &plan, results.clone(), &context.writer_version)?;
-    let applied = basis
-        .metadata_state
-        .apply_committed_wal_ops(plan.next_seq, &wal.envelope.payload.ops)?;
-    let head_publish = prepare_commit_head_publish(&basis.head, &plan, &context.writer_version)?;
-    store
-        .put_if_absent(&wal.object_key, &wal.encoded_bytes)
-        .map_err(|err| CoreError::WalWrite(err.to_string()))?;
-    publish_commit_head(store, &basis.head_etag, &head_publish)?;
-    let _ = applied;
-    Ok(V0CommitResponse {
-        namespace_id: request.namespace_id,
-        commit_id: request.request_id,
-        committed_seq: head_publish.resulting_head.seq,
-        results,
-    })
 }
 
 fn mutation_result_from_commit_response(response: V0CommitResponse) -> MutationResult {
@@ -930,7 +1004,7 @@ fn ensure_parent_directories(
     absolute_path: &str,
     committed_seq: ChangeSeq,
     working: &mut MetadataState,
-    ops: &mut Vec<CommitOp>,
+    ops: &mut Vec<V0CommitOp>,
     next_inode_id: &mut InodeId,
     op_index: &mut u32,
 ) -> Result<InodeId, CoreError> {
@@ -952,7 +1026,7 @@ fn ensure_parent_directories(
             continue;
         }
 
-        ops.push(CommitOp::CreateDir {
+        ops.push(V0CommitOp::CreateDir {
             parent_inode: current_inode,
             display_name: component.clone(),
         });

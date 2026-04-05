@@ -11,6 +11,7 @@ Current implementation shape:
 
 - the imported `docs/specs/*` core spec family is authoritative
 - the current repo implements one path-oriented client profile on top of that model
+- `loond` also exposes a lower-level `/v0` upload / explicit commit / ordered change-feed surface
 - `loon` is the current operator-facing CLI
 - every CLI operation goes through `loond`, even in local mode
 - profile `mode` is `local` or `remote`
@@ -19,8 +20,7 @@ Current implementation shape:
 
 Not implemented yet relative to the imported core spec:
 
-- the lower-level staged upload / explicit commit / ordered change-feed public surface
-- long-running protocol state such as `ReadSession`, `UploadSession`, `CopyJob`, and `ImportJob`
+ - long-running protocol state such as `ReadSession`, `CopyJob`, and `ImportJob`
 - ACLs, shares, and mounts as public product behavior
 
 ## Spec Lock
@@ -46,8 +46,9 @@ crates/
 
 ## Quickstart
 
-This quickstart uses the current path-oriented CLI surface. It does not exercise the not-yet-
-implemented lower-level upload/commit/change-feed surface described in the imported specs.
+This quickstart uses the current path-oriented CLI surface. The lower-level `/v0` upload,
+explicit-commit, and ordered change-feed surface is available through `loond` and `loon-client`,
+but the CLI does not expose first-class commands for it yet.
 
 1. Create a local `loond` config from the example:
 
@@ -148,6 +149,14 @@ The current CLI schema is `config_version = 1`.
 
 The JSON envelope and CLI commands above describe the current path-oriented client profile only.
 They are not the full public surface described by the imported core specs.
+
+Current transport layering:
+
+- `/v1` path-oriented filesystem mutations are convenience operations that compile onto the
+  explicit commit engine
+- `/v0` exposes staged upload, explicit commit, and ordered change-feed APIs directly
+- `loon-client` includes advanced path-oriented methods that accept caller-supplied `request_id`
+  values for deterministic retries
 
 ## Verification
 

@@ -2,9 +2,10 @@
 
 This runbook describes the current path-oriented `loon` / `loond` implementation layer.
 
-It does not cover the lower-level staged upload, explicit commit, or ordered change-feed public
-surface described in the imported core specs. It also does not provide first-class session/job
-control-plane commands. The current CLI only exposes direct path-oriented operations.
+It does not cover first-class CLI commands for the lower-level staged upload, explicit commit, or
+ordered change-feed public surface described in the imported core specs. Those `/v0` APIs now
+exist programmatically through `loond` and `loon-client`, but the current CLI only exposes direct
+path-oriented operations. It also does not provide session/job control-plane commands.
 
 ## Quickstart
 
@@ -46,6 +47,7 @@ Profile `mode` is `local` or `remote`.
 - `remote` stores a `server_url` and optional bearer token
 - both modes execute through `loond`
 - the current CLI is one path-oriented client profile over the broader LoonFS core model
+- current `/v1` path mutations compile onto the explicit commit engine underneath
 
 Examples:
 
@@ -61,7 +63,9 @@ v0 rules:
 - remote auth is just an optional bearer token in the CLI profile
 - profiles do not carry a default namespace
 - the current CLI schema uses `config_version = 1`
-- staged upload / explicit commit / change-feed commands are not implemented yet
+- staged upload / explicit commit / change-feed CLI commands are not implemented yet
+- programmatic callers can use `loon-client` advanced path mutation methods with caller-supplied
+  `request_id` values for deterministic retries
 
 ## Local Runtime
 

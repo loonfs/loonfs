@@ -126,6 +126,7 @@ pub fn prepare_wal_commit(
         request_checksum_sha256: request
             .request_checksum_sha256()
             .map_err(|err| WalBuildError::Codec(err.to_string()))?,
+        source_request_checksum_sha256: request.source_request_checksum_sha256.clone(),
         writer_id: request.writer_id.clone(),
         writer_fence_token: request.writer_fence_token,
         message: request.message.clone(),

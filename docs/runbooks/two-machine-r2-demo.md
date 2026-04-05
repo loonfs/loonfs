@@ -3,9 +3,9 @@
 This runbook proves the current CLI shape against two hosts, each running its own `loond` and
 `loon`, with both servers pointed at the same Cloudflare R2 bucket and the same `key_prefix`.
 
-It validates the current path-oriented client profile only. It does not exercise the not-yet-
-implemented staged upload / explicit commit / ordered change-feed public surface from the imported
-core specs.
+It validates the current path-oriented client profile only. It does not exercise the lower-level
+staged upload / explicit commit / ordered change-feed surface directly, even though that `/v0`
+surface now exists underneath `loond`.
 
 Run it after:
 

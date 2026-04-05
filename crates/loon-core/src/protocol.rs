@@ -261,9 +261,69 @@ pub fn commit_operations<S: ObjectStore + ?Sized>(
     request: V0CommitRequest,
     context: &MutationContext,
 ) -> Result<V0CommitResponse, CoreError> {
+    commit_operations_with_source_checksum(store, namespace_id, request, None, context)
+}
+
+pub(crate) fn commit_path_operations<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request: V0CommitRequest,
+    source_request_checksum_sha256: String,
+    context: &MutationContext,
+) -> Result<V0CommitResponse, CoreError> {
+    commit_operations_with_source_checksum(
+        store,
+        namespace_id,
+        request,
+        Some(source_request_checksum_sha256),
+        context,
+    )
+}
+
+pub(crate) fn retry_existing_path_request<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request_id: &str,
+    source_request_checksum_sha256: &str,
+    context: &MutationContext,
+) -> Result<Option<V0CommitResponse>, CoreError> {
+    let Some(existing) =
+        find_existing_commit_payload_by_request_id(store, namespace_id, request_id)?
+    else {
+        return Ok(None);
+    };
+
+    if existing.source_request_checksum_sha256.as_deref() != Some(source_request_checksum_sha256) {
+        return Err(CoreError::RequestIdConflict(request_id.to_owned()));
+    }
+
+    let request = request_from_payload(&existing);
+    commit_operations_with_source_checksum(
+        store,
+        namespace_id,
+        request,
+        existing.source_request_checksum_sha256.clone(),
+        context,
+    )
+    .map(Some)
+}
+
+fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request: V0CommitRequest,
+    source_request_checksum_sha256: Option<String>,
+    context: &MutationContext,
+) -> Result<V0CommitResponse, CoreError> {
     crate::acquire_or_renew_namespace_lease(store, namespace_id, context)?;
     let basis = load_verified_namespace_basis(store, namespace_id)?;
-    let request = map_commit_request(namespace_id, &basis, request, context);
+    let request = map_commit_request(
+        namespace_id,
+        &basis,
+        request,
+        source_request_checksum_sha256,
+        context,
+    );
     let next_seq = request
         .planned_head_seq
         .0
@@ -375,6 +435,7 @@ fn map_commit_request(
     namespace_id: &NamespaceId,
     basis: &crate::VerifiedNamespaceBasis,
     request: V0CommitRequest,
+    source_request_checksum_sha256: Option<String>,
     context: &MutationContext,
 ) -> CoreCommitRequest {
     CoreCommitRequest {
@@ -383,6 +444,7 @@ fn map_commit_request(
         writer_id: context.writer_id.clone(),
         writer_fence_token: basis.head.active_fence_token,
         planned_head_seq: request.planned_head_seq,
+        source_request_checksum_sha256,
         ops: request.ops.into_iter().map(map_commit_op).collect(),
         preconditions: request
             .preconditions
@@ -391,6 +453,22 @@ fn map_commit_request(
             .collect(),
         message: request.message,
         annotations: request.annotations,
+    }
+}
+
+fn request_from_payload(payload: &loon_api::WalCommitPayload) -> V0CommitRequest {
+    V0CommitRequest {
+        request_id: payload.request_id.clone(),
+        planned_head_seq: payload.base_head_seq,
+        preconditions: payload
+            .preconditions
+            .iter()
+            .cloned()
+            .map(map_wal_precondition)
+            .collect(),
+        ops: payload.ops.iter().cloned().map(map_wal_op).collect(),
+        message: payload.message.clone(),
+        annotations: payload.annotations.clone(),
     }
 }
 
@@ -452,6 +530,77 @@ fn map_commit_precondition(precondition: V0CommitPrecondition) -> Precondition {
             parent_inode,
             name_key,
         } => Precondition::ChildNameAbsent {
+            parent_inode,
+            name_key,
+        },
+    }
+}
+
+fn map_wal_op(op: loon_api::WalOp) -> V0CommitOp {
+    match op {
+        loon_api::WalOp::CreateDir {
+            parent_inode,
+            display_name,
+            ..
+        } => V0CommitOp::CreateDir {
+            parent_inode,
+            display_name,
+        },
+        loon_api::WalOp::CreateFile {
+            parent_inode,
+            display_name,
+            content_manifest_digest,
+            ..
+        } => V0CommitOp::CreateFile {
+            parent_inode,
+            display_name,
+            content_manifest_digest,
+        },
+        loon_api::WalOp::ReplaceFile {
+            inode_id,
+            base_revision,
+            content_manifest_digest,
+            ..
+        } => V0CommitOp::ReplaceFile {
+            inode_id,
+            base_revision_no: base_revision,
+            content_manifest_digest,
+        },
+        loon_api::WalOp::DeleteFile { inode_id, .. } => V0CommitOp::DeleteFile { inode_id },
+        loon_api::WalOp::Rename {
+            inode_id,
+            new_parent_inode,
+            new_display_name,
+            ..
+        } => V0CommitOp::Rename {
+            inode_id,
+            new_parent_inode,
+            new_display_name,
+        },
+        loon_api::WalOp::DeleteSubtree { root_inode, .. } => {
+            V0CommitOp::DeleteSubtree { root_inode }
+        }
+    }
+}
+
+fn map_wal_precondition(precondition: loon_api::WalPrecondition) -> V0CommitPrecondition {
+    match precondition {
+        loon_api::WalPrecondition::HeadSeqIs(expected_seq) => {
+            V0CommitPrecondition::HeadSeqIs { expected_seq }
+        }
+        loon_api::WalPrecondition::InodeRevisionIs { inode_id, revision } => {
+            V0CommitPrecondition::InodeRevisionIs {
+                inode_id,
+                revision_no: revision,
+            }
+        }
+        loon_api::WalPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
+            V0CommitPrecondition::AncestorsNotSubtreeDeleted { inode_id }
+        }
+        loon_api::WalPrecondition::ChildNameAbsent {
+            parent_inode,
+            name_key,
+        } => V0CommitPrecondition::ChildNameAbsent {
             parent_inode,
             name_key,
         },
@@ -646,6 +795,29 @@ fn load_existing_commit_payload<S: ObjectStore + ?Sized>(
     Ok(Some(envelope.payload))
 }
 
+fn find_existing_commit_payload_by_request_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request_id: &str,
+) -> Result<Option<loon_api::WalCommitPayload>, CoreError> {
+    let prefix = format!("namespaces/{}/wal/", namespace_id.as_str());
+    let mut matching_keys: Vec<String> = store
+        .list_prefix(&prefix)
+        .map_err(|err| CoreError::Store(err.to_string()))?
+        .into_iter()
+        .filter(|key| wal_request_id_from_key(&prefix, key) == Some(request_id))
+        .collect();
+    matching_keys.sort();
+
+    match matching_keys.as_slice() {
+        [] => Ok(None),
+        [only] => load_existing_commit_payload(store, only),
+        _ => Err(CoreError::Store(format!(
+            "multiple WAL commits found for request id `{request_id}`"
+        ))),
+    }
+}
+
 fn commit_response_from_payload(payload: &loon_api::WalCommitPayload) -> V0CommitResponse {
     V0CommitResponse {
         namespace_id: payload.namespace_id.clone(),
@@ -722,4 +894,11 @@ fn wal_seq_from_key(prefix: &str, object_key: &str) -> Option<ChangeSeq> {
     let (seq_part, _) = suffix.split_once('-')?;
     let seq = seq_part.parse::<u64>().ok()?;
     Some(ChangeSeq(seq))
+}
+
+fn wal_request_id_from_key<'a>(prefix: &str, object_key: &'a str) -> Option<&'a str> {
+    let suffix = object_key.strip_prefix(prefix)?;
+    let suffix = suffix.strip_suffix(".cbor.zst")?;
+    let (_, request_id) = suffix.split_once('-')?;
+    Some(request_id)
 }

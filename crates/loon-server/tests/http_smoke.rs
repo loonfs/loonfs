@@ -300,6 +300,135 @@ async fn v0_commit_rejects_same_request_id_with_different_payload() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v1_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-v1-put",
+        "http-v1-put",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let target = NamespacePath::parse("demo:/docs/retry.txt").expect("target");
+        let request_id = "req-v1-put";
+
+        let first = harness
+            .client
+            .put_file_bytes_with_request_id(&target, b"stable bytes\n", false, request_id)
+            .expect("first put");
+        assert!(first.committed_seq.0 >= 1);
+
+        let repeated = harness
+            .client
+            .put_file_bytes_with_request_id(&target, b"stable bytes\n", false, request_id)
+            .expect("repeat put");
+        assert_eq!(repeated, first);
+
+        let entry = harness.client.stat_path(&target).expect("stat path");
+        assert_eq!(entry.authoritative_head_seq, first.committed_seq);
+        let bytes = harness.client.read_file_bytes(&target).expect("read file");
+        assert_eq!(bytes, b"stable bytes\n");
+
+        match harness.client.put_file_bytes_with_request_id(
+            &target,
+            b"different bytes\n",
+            false,
+            request_id,
+        ) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "request_id_conflict"),
+            other => panic!("expected request_id_conflict, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v1_delete_move_and_copy_request_ids_are_idempotent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-v1-ops",
+        "http-v1-ops",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let source = NamespacePath::parse("demo:/docs/source.txt").expect("source");
+        harness
+            .client
+            .write_file_bytes(&source, b"source bytes\n")
+            .expect("seed source");
+
+        let copied = NamespacePath::parse("demo:/docs/copied.txt").expect("copied");
+        let copy_first = harness
+            .client
+            .copy_path_with_request_id(&source, &copied, "req-v1-copy")
+            .expect("copy first");
+        let copy_repeated = harness
+            .client
+            .copy_path_with_request_id(&source, &copied, "req-v1-copy")
+            .expect("copy repeat");
+        assert_eq!(copy_repeated, copy_first);
+        let source_entry = harness.client.stat_path(&source).expect("source stat");
+        let copied_entry = harness.client.stat_path(&copied).expect("copied stat");
+        assert_ne!(source_entry.inode_id, copied_entry.inode_id);
+        assert_eq!(
+            source_entry.content_manifest_digest,
+            copied_entry.content_manifest_digest
+        );
+
+        let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
+        let move_first = harness
+            .client
+            .move_path_with_request_id(&copied, &moved, "req-v1-move")
+            .expect("move first");
+        let move_repeated = harness
+            .client
+            .move_path_with_request_id(&copied, &moved, "req-v1-move")
+            .expect("move repeat");
+        assert_eq!(move_repeated, move_first);
+        match harness.client.stat_path(&copied) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+            other => panic!("expected path_not_found for moved-from path, got {other:?}"),
+        }
+        let moved_entry = harness.client.stat_path(&moved).expect("moved stat");
+        assert_eq!(moved_entry.inode_id, copied_entry.inode_id);
+
+        let delete_first = harness
+            .client
+            .delete_path_with_request_id(&moved, "req-v1-delete")
+            .expect("delete first");
+        let delete_repeated = harness
+            .client
+            .delete_path_with_request_id(&moved, "req-v1-delete")
+            .expect("delete repeat");
+        assert_eq!(delete_repeated, delete_first);
+        match harness.client.stat_path(&moved) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+            other => panic!("expected path_not_found for deleted path, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_servers_share_one_store_and_handoff_the_lease() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");

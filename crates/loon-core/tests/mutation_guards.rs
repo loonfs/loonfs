@@ -38,6 +38,7 @@ fn stale_head_precondition_is_rejected() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(2),
+        source_request_checksum_sha256: None,
         ops: vec![CommitOp::DeleteFile {
             inode_id: InodeId(3),
         }],
@@ -86,6 +87,7 @@ fn stale_revision_precondition_is_rejected() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(3),
+        source_request_checksum_sha256: None,
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
@@ -137,6 +139,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
+            source_request_checksum_sha256: None,
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(2),
                 display_name: "new.txt".to_owned(),
@@ -164,6 +167,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
+            source_request_checksum_sha256: None,
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
                 base_revision: RevisionNo(1),
