@@ -96,6 +96,7 @@ fn ensure_reconstructed_head_matches(
     if current_head.namespace_id != reconstructed.namespace_id
         || current_head.seq != reconstructed.seq
         || current_head.next_inode_id != reconstructed.next_inode_id
+        || current_head.name_policy != reconstructed.name_policy
         || current_head.snapshot_hint_seq != reconstructed.snapshot_hint_seq
         || current_head.retention_floor_seq != reconstructed.retention_floor_seq
     {

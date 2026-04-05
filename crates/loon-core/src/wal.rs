@@ -162,6 +162,7 @@ pub fn replay_wal_commit(
             seq: envelope.payload.seq,
             active_fence_token: envelope.payload.writer_fence_token,
             next_inode_id: replay_next_inode_id(current_head.next_inode_id, &envelope.payload.ops),
+            name_policy: current_head.name_policy,
             snapshot_hint_seq: current_head.snapshot_hint_seq,
             retention_floor_seq: current_head.retention_floor_seq,
         },

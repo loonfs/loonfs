@@ -5,7 +5,9 @@ use super::{
 };
 use crate::invariants::INVARIANTS;
 use crate::metadata::MetadataState;
-use loon_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
+use loon_api::{
+    name_key_for_display_name, ChangeSeq, InodeId, InodeKind, NamePolicy, RevisionNo, WalOp,
+};
 
 pub fn build_commit_plan(
     request: &CommitRequest,
@@ -330,7 +332,7 @@ fn validate_child_name_absent(
     if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
         return Err(CommitValidationError::CreateChildNameCollision {
             parent_inode,
-            name_key: display_name.to_owned(),
+            name_key: name_key_for_display_name(NamePolicy::default(), display_name),
             child_inode: existing.child_inode_id,
         });
     }
@@ -513,7 +515,7 @@ fn validate_rename_target_name_absent(
     if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
         return Err(CommitValidationError::RenameTargetNameCollision {
             parent_inode,
-            name_key: display_name.to_owned(),
+            name_key: name_key_for_display_name(NamePolicy::default(), display_name),
             child_inode: existing.child_inode_id,
         });
     }

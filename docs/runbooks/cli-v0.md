@@ -1,5 +1,11 @@
 # CLI v0
 
+This runbook describes the current path-oriented `loon` / `loond` implementation layer.
+
+It does not cover the lower-level staged upload, explicit commit, or ordered change-feed public
+surface described in the imported core specs. It also does not provide first-class session/job
+control-plane commands. The current CLI only exposes direct path-oriented operations.
+
 ## Quickstart
 
 Create a local profile that points at a `loond` config:
@@ -39,6 +45,7 @@ Profile `mode` is `local` or `remote`.
 - `local` stores only a `loond` config path
 - `remote` stores a `server_url` and optional bearer token
 - both modes execute through `loond`
+- the current CLI is one path-oriented client profile over the broader LoonFS core model
 
 Examples:
 
@@ -54,6 +61,7 @@ v0 rules:
 - remote auth is just an optional bearer token in the CLI profile
 - profiles do not carry a default namespace
 - the current CLI schema uses `config_version = 1`
+- staged upload / explicit commit / change-feed commands are not implemented yet
 
 ## Local Runtime
 
@@ -77,6 +85,13 @@ Streaming commands:
 
 - `filesystem cat` writes raw bytes to stdout and rejects `--json`
 - `filesystem get ... -` writes raw bytes to stdout and rejects `--json`
+
+Current filesystem limitations in this client profile:
+
+- `filesystem put` is file-only
+- `filesystem cp` is file-only
+- `filesystem get` rejects directories
+- there is no first-class recursive/session/job surface in the current CLI
 
 ## JSON Contract
 

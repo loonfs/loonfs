@@ -1,14 +1,27 @@
-# LoonDB
+# LoonFS
 
-LoonDB is a spec-locked rewrite centered on a server-backed CLI.
+LoonFS is an object-storage-backed filesystem and sync core where correctness, determinism, and
+rebuildability are primary product features.
 
-Current product shape:
+The durable source of truth is object storage. Paths are derived views over inode-keyed metadata.
+Head, lease, WAL, content manifests, and snapshots are the durable basis for rebuilding visible
+namespace state.
 
-- `loon` is the first public UI
+Current implementation shape:
+
+- the imported `docs/specs/*` core spec family is authoritative
+- the current repo implements one path-oriented client profile on top of that model
+- `loon` is the current operator-facing CLI
 - every CLI operation goes through `loond`, even in local mode
 - profile `mode` is `local` or `remote`
 - `local` means the CLI points at or manages a local `loond`
 - `remote` means the CLI points at an already-running `loond`
+
+Not implemented yet relative to the imported core spec:
+
+- the lower-level staged upload / explicit commit / ordered change-feed public surface
+- long-running protocol state such as `ReadSession`, `UploadSession`, `CopyJob`, and `ImportJob`
+- ACLs, shares, and mounts as public product behavior
 
 ## Spec Lock
 
@@ -32,6 +45,9 @@ crates/
 ```
 
 ## Quickstart
+
+This quickstart uses the current path-oriented CLI surface. It does not exercise the not-yet-
+implemented lower-level upload/commit/change-feed surface described in the imported specs.
 
 1. Create a local `loond` config from the example:
 
@@ -70,7 +86,7 @@ cargo run -p loon-cli -- --profile local local down
 
 ## Commands
 
-CLI v0 surface:
+Current path-oriented CLI surface:
 
 - `loon profile add local NAME --server-config <PATH>`
 - `loon profile add remote NAME --server-url <URL> [--auth-token <TOKEN>]`
@@ -130,6 +146,9 @@ The current CLI schema is `config_version = 1`.
 - `filesystem cat` always streams raw bytes to stdout and rejects `--json`
 - `filesystem get ... -` streams raw bytes to stdout and rejects `--json`
 
+The JSON envelope and CLI commands above describe the current path-oriented client profile only.
+They are not the full public surface described by the imported core specs.
+
 ## Verification
 
 Current local baseline:
@@ -165,7 +184,12 @@ cargo run -p xtask -- smoke remote \
 
 ## More Reading
 
+- [`docs/specs/000-overview.md`](docs/specs/000-overview.md)
+- [`docs/specs/040-filesystem-and-storage-model.md`](docs/specs/040-filesystem-and-storage-model.md)
+- [`docs/specs/050-write-read-protocol.md`](docs/specs/050-write-read-protocol.md)
+- [`docs/specs/060-interfaces-and-clients.md`](docs/specs/060-interfaces-and-clients.md)
 - [`docs/adr/0019-cli-v0-server-backed-local-and-remote-profiles.md`](docs/adr/0019-cli-v0-server-backed-local-and-remote-profiles.md)
+- [`docs/adr/0020-name-policy-follows-core-spec.md`](docs/adr/0020-name-policy-follows-core-spec.md)
 - [`docs/runbooks/cli-v0.md`](docs/runbooks/cli-v0.md)
 - [`docs/runbooks/two-machine-r2-demo.md`](docs/runbooks/two-machine-r2-demo.md)
-- [`proposals/002-cli-v0-server-backed-correction.md`](proposals/002-cli-v0-server-backed-correction.md)
+- [`proposals/003-core-spec-family-alignment.md`](proposals/003-core-spec-family-alignment.md)

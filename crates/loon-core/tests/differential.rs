@@ -285,7 +285,6 @@ fn normalize_inode(
         match inode_kind {
             InodeKind::Dir => "dir",
             InodeKind::File => "file",
-            InodeKind::Symlink => "symlink",
             InodeKind::Mount => "mount",
         },
         created_seq,

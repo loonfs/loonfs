@@ -1,4 +1,6 @@
-use loon_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
+use loon_api::{
+    name_key_for_display_name, ChangeSeq, InodeId, InodeKind, NamePolicy, RevisionNo, WalOp,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -116,7 +118,7 @@ impl MetadataState {
                     });
                     metadata_state.direntries.push(DirentryRecord {
                         parent_inode_id: *parent_inode,
-                        name_key: display_name.clone(),
+                        name_key: name_key_for_display_name(NamePolicy::default(), display_name),
                         display_name: display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
@@ -141,7 +143,7 @@ impl MetadataState {
                     });
                     metadata_state.direntries.push(DirentryRecord {
                         parent_inode_id: *parent_inode,
-                        name_key: display_name.clone(),
+                        name_key: name_key_for_display_name(NamePolicy::default(), display_name),
                         display_name: display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
@@ -204,7 +206,10 @@ impl MetadataState {
                 } => {
                     metadata_state.direntries.push(DirentryRecord {
                         parent_inode_id: *new_parent_inode,
-                        name_key: new_display_name.clone(),
+                        name_key: name_key_for_display_name(
+                            NamePolicy::default(),
+                            new_display_name,
+                        ),
                         display_name: new_display_name.clone(),
                         child_inode_id: *inode_id,
                         bind_seq: committed_seq,
@@ -275,11 +280,12 @@ impl MetadataState {
         name_key: &str,
         base_seq: ChangeSeq,
     ) -> Option<DirentryRecord> {
+        let canonical_name_key = name_key_for_display_name(NamePolicy::default(), name_key);
         self.direntries
             .iter()
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
-                    && direntry.name_key == name_key
+                    && direntry.name_key == canonical_name_key
                     && direntry.bind_seq <= base_seq
             })
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_op_index))
@@ -450,16 +456,17 @@ impl MetadataState {
                 });
             }
 
-            let next_absolute_path = join_absolute_path(&current_absolute_path, &component);
+            let requested_absolute_path = join_absolute_path(&current_absolute_path, &component);
             let direntry = self
                 .visible_child(current_inode_id, &component, base_seq)
                 .ok_or_else(|| VisiblePathError::PathNotFound {
-                    absolute_path: next_absolute_path.clone(),
+                    absolute_path: requested_absolute_path,
                 })?;
             current_inode_id = direntry.child_inode_id;
             current_parent_inode_id = Some(direntry.parent_inode_id);
             current_display_name = direntry.display_name.clone();
-            current_absolute_path = next_absolute_path;
+            current_absolute_path =
+                join_absolute_path(&current_absolute_path, &direntry.display_name);
         }
 
         let inode = self

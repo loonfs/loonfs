@@ -1,6 +1,6 @@
-# Proposal: CLI v0 narrowing for the spec-locked rewrite
+# Proposal: historical CLI v0 narrowing note
 
-Superseded by proposal 002.
+Superseded by proposals 002 and 003.
 
 ## Type
 
@@ -8,34 +8,22 @@ Superseded by proposal 002.
 
 ## Affected specs
 
-- `docs/specs/070-cli-definition.md`
-- `docs/specs/080-repo-and-delivery-plan.md`
+- `docs/specs/060-interfaces-and-clients.md`
 
 ## Problem
 
-The locked CLI spec still describes a broader surface than the current rewrite can support without
-reintroducing premature complexity. The active rewrite is using the CLI as a thin direct-to-store
-product surface, not as a sync client or a server-backed control plane.
+This proposal records an earlier branch-local narrowing that treated the CLI as a direct-to-store
+product surface. That approach no longer matches the imported core spec family.
 
 ## Proposed change
 
-For CLI v0:
-
-- execute only direct-to-store `store` profiles
-- reserve `server` mode in the config schema and reject it deterministically at runtime
-- keep namespace operations to `create` and `list`
-- defer namespace rename/delete
-- keep filesystem operations non-recursive
-- keep `cp` file-only and same-namespace
-- require JSON versioned envelopes on CLI machine output
+This proposal is retained only as historical context for the rewrite branch.
 
 ## Rewrite decision
 
-The rewrite is following this proposal now.
+The rewrite is not following this proposal.
 
 ## Consequences
 
-- code stays centered on shared direct-to-store semantics in `loon-core`
-- tests focus on local-fs CI coverage plus provider conformance, not server-mode behavior
-- future server-mode work can add transport/auth on top of the existing profile model without a
-  schema reset
+- the earlier direct-to-store branch work is historical only
+- current implementation direction is defined by proposal 003 and ADR 0019

@@ -6,11 +6,7 @@ clarifying
 
 ## Affected specs
 
-- `docs/specs/020-objectstore-contract.md`
-- `docs/specs/040-namespace-commit.md`
-- `docs/specs/070-cli-definition.md`
-- `docs/specs/080-repo-and-delivery-plan.md`
-- `docs/specs/090-major-implementation-decisions.md`
+- `docs/specs/*`
 
 ## Problem
 

@@ -3,6 +3,10 @@
 This runbook proves the current CLI shape against two hosts, each running its own `loond` and
 `loon`, with both servers pointed at the same Cloudflare R2 bucket and the same `key_prefix`.
 
+It validates the current path-oriented client profile only. It does not exercise the not-yet-
+implemented staged upload / explicit commit / ordered change-feed public surface from the imported
+core specs.
+
 Run it after:
 
 1. direct Cloudflare R2 object-store conformance
@@ -32,6 +36,7 @@ Each host must have its own values for:
 
 - `bind`
 - `writer_id`
+- local CLI profile name
 - local CLI config path
 
 Create ignored local config files like this:
@@ -42,21 +47,21 @@ Create ignored local config files like this:
    unique `bind` and `writer_id`.
 2. On host B, copy the same example to `configs/loond.cloudflare-r2.host-b.local.toml` and use
    the same shared R2 values but a different `bind` and `writer_id`.
-3. On host A, create `configs/loon.host-a.local.toml`:
+3. On host A, create the CLI-managed profile state by running:
 
-```toml
-config_version = 1
-active_profile = "local"
-
-[profiles.local]
-mode = "local"
-
-[profiles.local.local]
-server_config_path = "./configs/loond.cloudflare-r2.host-a.local.toml"
+```bash
+cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
+  profile add local host-a \
+  --server-config ./configs/loond.cloudflare-r2.host-a.local.toml
 ```
 
-4. On host B, create `configs/loon.host-b.local.toml` the same way, but point
-   `server_config_path` at host B’s `loond` config.
+4. On host B, do the same with a distinct profile name and host B’s server config:
+
+```bash
+cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml \
+  profile add local host-b \
+  --server-config ./configs/loond.cloudflare-r2.host-b.local.toml
+```
 
 Checked-in `*.example.toml` files stay sanitized. The `*.local.toml` files above are ignored by
 Git.
@@ -66,13 +71,15 @@ Git.
 On host A:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml local up
+cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
+  --profile host-a local up
 ```
 
 On host B:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml local up
+cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml \
+  --profile host-b local up
 ```
 
 Wait for both `local up` commands to succeed, then confirm with `local status`.
@@ -83,9 +90,11 @@ Create the namespace and upload a file through host A’s local server:
 
 ```bash
 cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
+  --profile host-a \
   namespace create demo
 
 cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
+  --profile host-a \
   filesystem put demo ./README.md /docs/README.md
 ```
 
@@ -95,6 +104,7 @@ Immediately try to write through host B’s local server:
 
 ```bash
 cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml --json \
+  --profile host-b \
   filesystem mv demo /docs/README.md /docs/README-host-b.md
 ```
 
@@ -106,6 +116,7 @@ Wait for the configured lease window to elapse, then retry the move through host
 
 ```bash
 cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml --json \
+  --profile host-b \
   filesystem mv demo /docs/README.md /docs/README-host-b.md
 ```
 
@@ -117,12 +128,15 @@ Use host A’s CLI against host A’s local server to verify the change that hos
 
 ```bash
 cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
+  --profile host-a \
   filesystem ls demo /docs
 
 cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
+  --profile host-a \
   filesystem stat demo /docs/README-host-b.md
 
 cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
+  --profile host-a \
   filesystem get demo /docs/README-host-b.md ./tmp-readme.md
 ```
 
@@ -134,6 +148,7 @@ Delete the file through host A’s local server:
 
 ```bash
 cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml --json \
+  --profile host-a \
   filesystem rm demo /docs/README-host-b.md
 ```
 
@@ -143,9 +158,11 @@ Confirm from host B that the file is gone:
 
 ```bash
 cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml --json \
+  --profile host-b \
   filesystem ls demo /docs
 
 cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml --json \
+  --profile host-b \
   filesystem stat demo /docs/README-host-b.md
 ```
 
@@ -156,6 +173,8 @@ The final `filesystem stat` should fail with `path_not_found`.
 On both hosts:
 
 ```bash
-cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml local down
-cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml local down
+cargo run -p loon-cli -- --config ./configs/loon.host-a.local.toml \
+  --profile host-a local down
+cargo run -p loon-cli -- --config ./configs/loon.host-b.local.toml \
+  --profile host-b local down
 ```

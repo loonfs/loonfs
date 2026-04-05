@@ -8,6 +8,9 @@ Supersedes: ADR 0018
 
 CLI v0 is a server-backed product surface.
 
+This ADR describes the current path-oriented CLI implementation layer. It does not replace the
+broader public surface defined by the imported LoonFS core spec family.
+
 Rules:
 
 - the public context noun is `profile`
@@ -30,6 +33,7 @@ Rules:
 
 - the runtime path for both local and remote execution is:
   `loon-cli -> loon-client -> loon-server -> loon-core -> loon-objectstore`
+- this ADR defines one path-oriented client profile implementation, not the full public protocol
 - `loon-core` remains the owner of overwrite policy, non-recursive delete checks, and file copy semantics
 - `loon-server` and `loon-client` must expose the full CLI v0 mutation surface, including copy and create-only vs replace semantics for put
 - CLI config uses `config_version = 1` for the current local/remote schema

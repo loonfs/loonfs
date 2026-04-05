@@ -1,23 +1,25 @@
 # Proposal: Correct CLI v0 from direct-store to server-backed local and remote profiles
 
+Superseded by proposal 003.
+
 ## Type
 
 `superseding correction`
 
 ## Affected specs
 
-- `docs/specs/070-cli-definition.md`
-- `docs/specs/080-repo-and-delivery-plan.md`
+- `docs/specs/060-interfaces-and-clients.md`
 
 ## Problem
 
 The direct-store CLI v0 narrowed the implementation too far. It bypassed the intended server
 boundary in local operation and made the CLI own object-store construction and core mutation
-execution directly.
+execution directly. The imported core spec family now makes the broader public surface explicit,
+so this proposal is historical rather than current.
 
 ## Proposed change
 
-For CLI v0:
+For the historical CLI correction:
 
 - replace `store` and `server` profile modes with `local` and `remote`
 - route both modes through `loond`
@@ -28,11 +30,10 @@ For CLI v0:
 
 ## Rewrite decision
 
-The rewrite is following this proposal now.
+The rewrite is no longer following this proposal directly. Proposal 003 now describes how the
+current branch relates the local/remote CLI model to the imported core spec family.
 
 ## Consequences
 
-- the CLI/runtime boundary matches remote and local operation
-- `loon-client` and `loon-server` become required for all CLI execution
-- the old pre-release direct-store CLI config is intentionally rejected instead of migrated
-- direct-store docs, tests, and config examples are removed or superseded
+- the server-backed local/remote CLI path remains useful implementation history
+- it is not the full public-contract story under the imported core spec family

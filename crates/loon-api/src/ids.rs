@@ -45,7 +45,7 @@ impl<'de> Deserialize<'de> for NamespaceId {
     }
 }
 
-/// Numeric identity of a file, directory, symlink, or mount within a namespace.
+/// Numeric identity of a file, directory, or mount within a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InodeId(pub u64);
 
@@ -61,7 +61,7 @@ pub struct ChangeSeq(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FenceToken(pub u64);
 
-/// Case-normalized directory entry name used as a lookup key.
+/// Name-policy-derived directory entry name used as a lookup key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NameKey(pub String);
 
@@ -70,7 +70,6 @@ pub struct NameKey(pub String);
 pub enum InodeKind {
     File,
     Dir,
-    Symlink,
     Mount,
 }
 

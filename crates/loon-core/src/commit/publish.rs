@@ -39,6 +39,7 @@ pub fn prepare_commit_head_publish(
         seq: plan.next_seq,
         active_fence_token: current_head.active_fence_token,
         next_inode_id: plan.resulting_next_inode_id,
+        name_policy: current_head.name_policy,
         snapshot_hint_seq: current_head.snapshot_hint_seq,
         retention_floor_seq: current_head.retention_floor_seq,
     };

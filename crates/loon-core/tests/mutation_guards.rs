@@ -389,6 +389,58 @@ fn copy_file_path_creates_new_inode_and_reuses_content_manifest() {
     );
 }
 
+#[test]
+fn resolve_path_uses_nfc_casefold_name_policy() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let stored_path = "/Cafe\u{0301}.txt";
+    let lookup_path = "/CAF\u{00c9}.TXT";
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        stored_path,
+        b"hello",
+        &context,
+        Some("seed-unicode-name"),
+    )
+    .expect("seed unicode name");
+
+    let resolved = resolve_path(&store, &namespace_id(), lookup_path).expect("resolve path");
+    assert_eq!(resolved.absolute_path, stored_path);
+    assert_eq!(resolved.display_name, "Cafe\u{0301}.txt");
+}
+
+#[test]
+fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/Cafe\u{0301}.txt",
+        b"hello",
+        &context,
+        Some("seed-unicode-name"),
+    )
+    .expect("seed unicode name");
+
+    let error = put_file_bytes(
+        &store,
+        &namespace_id(),
+        "/CAF\u{00c9}.TXT",
+        b"new-bytes",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("create-only-conflict"),
+    )
+    .expect_err("create-only conflict");
+    assert_eq!(error.kind(), CoreErrorKind::PathConflict);
+}
+
 fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {
     let mut state = MetadataState {
         inodes: vec![InodeRecord {
@@ -422,6 +474,7 @@ fn validation_context(
         seq,
         active_fence_token: FenceToken(1),
         next_inode_id,
+        name_policy: loon_api::NamePolicy::default(),
         snapshot_hint_seq: Some(ChangeSeq(0)),
         retention_floor_seq: ChangeSeq(0),
     };

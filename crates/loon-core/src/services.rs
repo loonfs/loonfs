@@ -12,11 +12,11 @@ use crate::loading::ControlObjectLoadError;
 use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, VisiblePathError};
 use crate::wal::{prepare_wal_commit, WalBuildError};
 use loon_api::{
-    content_manifest_digest_sha256, encode_content_manifest_json, AuthoritativeFileBytes,
-    AuthoritativePathEntry, ChangeSeq, ContentBlockDescriptor, ContentManifestEnvelope,
-    ContentManifestPayload, ControlObjectKind, HeadState, HeadStateEnvelope, InodeId, InodeKind,
-    LeaseState, LeaseStateEnvelope, MutationResult, NamespaceId, NamespaceSummary,
-    CONTENT_BLOCK_SIZE_BYTES,
+    content_manifest_digest_sha256, encode_content_manifest_json, name_key_for_display_name,
+    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentBlockDescriptor,
+    ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, HeadState,
+    HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, MutationResult,
+    NamespaceId, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
 };
 use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
 use loon_objectstore::{ObjectStore, ObjectStoreError};
@@ -530,7 +530,7 @@ fn commit_file_manifest<S: ObjectStore + ?Sized>(
             });
             preconditions.push(Precondition::ChildNameAbsent {
                 parent_inode: final_parent_inode,
-                name_key: final_name,
+                name_key: name_key_for_display_name(basis.head.name_policy, &final_name),
             });
             preconditions.push(Precondition::AncestorsNotSubtreeDeleted {
                 inode_id: final_parent_inode,
@@ -748,6 +748,7 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
 
     let target_parent = resolve_parent_directory(&basis.metadata_state, to_path, basis.head.seq)?;
     let target_name = final_component(to_path)?;
+    let target_name_key = name_key_for_display_name(basis.head.name_policy, &target_name);
     let writer_fence_token = basis.head.active_fence_token;
     let planned_head_seq = basis.head.seq;
     execute_commit(
@@ -772,7 +773,7 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
                 Precondition::HeadSeqIs(planned_head_seq),
                 Precondition::ChildNameAbsent {
                     parent_inode: target_parent,
-                    name_key: target_name,
+                    name_key: target_name_key,
                 },
                 Precondition::AncestorsNotSubtreeDeleted {
                     inode_id: target_parent,
@@ -1040,12 +1041,11 @@ fn tombstoned_path_ancestor(
             return Ok(None);
         }
 
-        current_path = join_absolute_path(&current_path, &component);
         if let Some(tombstone) =
             metadata_state.covering_subtree_tombstone(bound_child.child_inode_id, seq)
         {
             return Ok(Some((
-                current_path,
+                join_absolute_path(&current_path, &bound_child.display_name),
                 tombstone.root_inode_id,
                 tombstone.tombstone_seq,
             )));
@@ -1057,6 +1057,7 @@ fn tombstoned_path_ancestor(
         {
             return Ok(None);
         }
+        current_path = join_absolute_path(&current_path, &bound_child.display_name);
         current_inode = bound_child.child_inode_id;
     }
 

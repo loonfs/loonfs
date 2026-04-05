@@ -1,8 +1,11 @@
 # ADR 0013: names use an explicit versioned policy
 
-Status: accepted
+Status: superseded by ADR 0020
 
-Canonical sibling-name comparison will use a shared, versioned `NamePolicy` rather than ambient host filesystem rules. The first policy is `macos_ci_v1`, which preserves `display_name` and compares names by normalized, case-folded `name_key`.
+This ADR introduced the idea that canonical sibling-name comparison must use a shared, versioned
+`NamePolicy` rather than ambient host filesystem rules.
+
+The active v0 policy selection now follows the imported core spec family instead. See ADR 0020.
 
 Consequences:
 - client and server agree on collision rules

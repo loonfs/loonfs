@@ -41,6 +41,8 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 toml = "0.8"
 ureq = { version = "2.10", features = ["json"] }
 urlencoding = "2"
+unicode-casefold = "0.2"
+unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 zstd = "0.13"
