@@ -369,6 +369,35 @@ root = "{}"
 }
 
 #[test]
+fn invalid_store_field_messages_use_flattened_paths() {
+    let harness = Harness::new();
+    fs::write(
+        &harness.config_path,
+        r#"
+config_version = 1
+default_profile = "default"
+
+[default]
+mode = "local"
+
+[default.store]
+kind = "local-fs"
+root = ""
+"#,
+    )
+    .expect("write invalid config");
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_failure(&list);
+    let error = json_error(&list);
+    assert_eq!(error["code"], "invalid_config");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("default.store.root"));
+}
+
+#[test]
 fn invalid_remote_urls_are_rejected() {
     let harness = Harness::new();
 
@@ -383,6 +412,10 @@ fn invalid_remote_urls_are_rejected() {
     ]);
     assert_failure(&missing_host_http);
     assert_eq!(json_error(&missing_host_http)["code"], "invalid_config");
+    assert!(json_error(&missing_host_http)["message"]
+        .as_str()
+        .unwrap()
+        .contains("default.server_url"));
 
     let missing_host_https = harness.run(&[
         "--json",

@@ -142,9 +142,9 @@ impl ProfileConfig {
                 auth_token,
                 ..
             } => {
-                validate_http_url(&format!("profiles.{name}.server_url"), server_url)?;
+                validate_http_url(&profile_field(name, "server_url"), server_url)?;
                 if let Some(token) = auth_token {
-                    require_non_empty(&format!("profiles.{name}.auth_token"), token)?;
+                    require_non_empty(&profile_field(name, "auth_token"), token)?;
                 }
                 Ok(())
             }
@@ -232,7 +232,7 @@ impl StoreConfig {
     fn validate(&self, profile_name: &str) -> Result<(), CliError> {
         match self {
             StoreConfig::LocalFs { root, .. } => {
-                require_non_empty(&format!("profiles.{profile_name}.store.root"), root)
+                require_non_empty(&store_field(profile_name, "root"), root)
             }
             StoreConfig::AwsS3 {
                 bucket,
@@ -241,14 +241,11 @@ impl StoreConfig {
                 secret_access_key,
                 ..
             } => {
-                require_non_empty(&format!("profiles.{profile_name}.store.bucket"), bucket)?;
-                require_non_empty(&format!("profiles.{profile_name}.store.region"), region)?;
+                require_non_empty(&store_field(profile_name, "bucket"), bucket)?;
+                require_non_empty(&store_field(profile_name, "region"), region)?;
+                require_non_empty(&store_field(profile_name, "access_key_id"), access_key_id)?;
                 require_non_empty(
-                    &format!("profiles.{profile_name}.store.access_key_id"),
-                    access_key_id,
-                )?;
-                require_non_empty(
-                    &format!("profiles.{profile_name}.store.secret_access_key"),
+                    &store_field(profile_name, "secret_access_key"),
                     secret_access_key,
                 )
             }
@@ -260,21 +257,12 @@ impl StoreConfig {
                 secret_access_key,
                 ..
             } => {
-                require_non_empty(&format!("profiles.{profile_name}.store.bucket"), bucket)?;
+                require_non_empty(&store_field(profile_name, "bucket"), bucket)?;
+                require_non_empty(&store_field(profile_name, "account_id"), account_id)?;
+                require_non_empty(&store_field(profile_name, "endpoint_url"), endpoint_url)?;
+                require_non_empty(&store_field(profile_name, "access_key_id"), access_key_id)?;
                 require_non_empty(
-                    &format!("profiles.{profile_name}.store.account_id"),
-                    account_id,
-                )?;
-                require_non_empty(
-                    &format!("profiles.{profile_name}.store.endpoint_url"),
-                    endpoint_url,
-                )?;
-                require_non_empty(
-                    &format!("profiles.{profile_name}.store.access_key_id"),
-                    access_key_id,
-                )?;
-                require_non_empty(
-                    &format!("profiles.{profile_name}.store.secret_access_key"),
+                    &store_field(profile_name, "secret_access_key"),
                     secret_access_key,
                 )
             }
@@ -338,6 +326,14 @@ pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
 
 fn is_reserved_profile_name(name: &str) -> bool {
     matches!(name, "config_version" | "default_profile")
+}
+
+fn profile_field(name: &str, field: &str) -> String {
+    format!("{name}.{field}")
+}
+
+fn store_field(profile_name: &str, field: &str) -> String {
+    format!("{profile_name}.store.{field}")
 }
 
 pub fn load_config(path: &Path) -> Result<CliConfig, CliError> {
