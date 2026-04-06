@@ -23,10 +23,6 @@ pub enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
-    Local {
-        #[command(subcommand)]
-        command: LocalCommand,
-    },
     Namespace {
         #[command(subcommand)]
         command: NamespaceCommand,
@@ -80,13 +76,6 @@ pub struct ProfileAddRemoteArgs {
     pub server_url: Option<String>,
     #[arg(long)]
     pub auth_token: Option<String>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum LocalCommand {
-    Up,
-    Status,
-    Down,
 }
 
 #[derive(Debug, Subcommand)]
@@ -171,9 +160,6 @@ pub enum CommandKind {
     ProfileUse,
     ProfileShow,
     ProfileRemove,
-    LocalUp,
-    LocalStatus,
-    LocalDown,
     NamespaceCreate,
     NamespaceList,
     FilesystemLs,
@@ -197,9 +183,6 @@ impl CommandKind {
             CommandKind::ProfileUse => "profile_use",
             CommandKind::ProfileShow => "profile_show",
             CommandKind::ProfileRemove => "profile_remove",
-            CommandKind::LocalUp => "local_up",
-            CommandKind::LocalStatus => "local_status",
-            CommandKind::LocalDown => "local_down",
             CommandKind::NamespaceCreate => "namespace_create",
             CommandKind::NamespaceList => "namespace_list",
             CommandKind::FilesystemLs => "filesystem_ls",
@@ -230,11 +213,6 @@ impl Cli {
                 ProfileCommand::Use { .. } => CommandKind::ProfileUse,
                 ProfileCommand::Show { .. } => CommandKind::ProfileShow,
                 ProfileCommand::Remove { .. } => CommandKind::ProfileRemove,
-            },
-            Command::Local { command } => match command {
-                LocalCommand::Up => CommandKind::LocalUp,
-                LocalCommand::Status => CommandKind::LocalStatus,
-                LocalCommand::Down => CommandKind::LocalDown,
             },
             Command::Namespace { command } => match command {
                 NamespaceCommand::Create { .. } => CommandKind::NamespaceCreate,

@@ -1,5 +1,5 @@
 use crate::args::{
-    Cli, Command, CommandKind, ConfigCommand, FilesystemCommand, LocalCommand, NamespaceCommand,
+    Cli, Command, CommandKind, ConfigCommand, FilesystemCommand, NamespaceCommand,
     ProfileAddCommand, ProfileAddLocalArgs, ProfileAddRemoteArgs, ProfileCommand, RuntimeBehavior,
 };
 use crate::config::{
@@ -7,16 +7,13 @@ use crate::config::{
     LocalProfileConfig, ProfileMode, RemoteProfileConfig,
 };
 use crate::error::CliError;
-use crate::local_runtime::{
-    inspect_local_server, start_local_server, stop_local_server, LocalServerStatus,
-};
 use crate::profiles::{
     add_local_profile, add_remote_profile, list_profiles, remove_profile, show_profile,
     use_profile, ProfileSummary, ProfileView,
 };
 use crate::resolve::{resolve_target_profile, resolved_config_path};
 use loon_api::{AuthoritativePathEntry, NamespaceSummary};
-use loon_client::{ClientError, NamespacePath};
+use loon_client::NamespacePath;
 use serde::Serialize;
 use std::fs;
 use std::io::{self, Write};
@@ -44,7 +41,6 @@ pub enum CommandData {
     ProfileList {
         profiles: Vec<ProfileSummary>,
     },
-    LocalStatus(LocalServerStatus),
     NamespaceSummary(NamespaceSummary),
     NamespaceList {
         namespaces: Vec<NamespaceSummary>,
@@ -107,9 +103,6 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
         Command::Config { command } => run_config_command(kind, cli.config.as_deref(), command),
         Command::Profile { command } => {
             run_profile_command(kind, cli.config.as_deref(), command, runtime)
-        }
-        Command::Local { command } => {
-            run_local_command(kind, cli.config.as_deref(), cli.profile.as_deref(), command)
         }
         Command::Namespace { command } => {
             run_namespace_command(kind, cli.config.as_deref(), cli.profile.as_deref(), command)
@@ -394,64 +387,6 @@ fn add_remote(
     })
 }
 
-fn run_local_command(
-    kind: CommandKind,
-    explicit_config: Option<&Path>,
-    global_profile: Option<&str>,
-    command: LocalCommand,
-) -> Result<CommandOutput, CommandFailure> {
-    let resolved = resolve_target_profile(explicit_config, global_profile)
-        .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
-    let Some(local) = resolved.target.as_local() else {
-        return Err(fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(resolved.target.mode()),
-            CliError::invalid_profile_mode(
-                &resolved.profile_name,
-                "local",
-                profile_mode_str(resolved.target.mode()),
-            ),
-        ));
-    };
-
-    let status = match command {
-        LocalCommand::Up => start_local_server(
-            &resolved.config_path,
-            &resolved.profile_name,
-            &local.server_url,
-            &local.server_config_path,
-        ),
-        LocalCommand::Status => inspect_local_server(
-            &resolved.config_path,
-            &resolved.profile_name,
-            &local.server_url,
-            &local.server_config_path,
-        ),
-        LocalCommand::Down => stop_local_server(
-            &resolved.config_path,
-            &resolved.profile_name,
-            &local.server_url,
-            &local.server_config_path,
-        ),
-    }
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(ProfileMode::Local),
-        data: CommandData::LocalStatus(status),
-    })
-}
-
 fn run_namespace_command(
     kind: CommandKind,
     explicit_config: Option<&Path>,
@@ -461,30 +396,20 @@ fn run_namespace_command(
     let resolved = resolve_target_profile(explicit_config, global_profile)
         .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode();
-    let client = resolved.target.client();
+    let backend = resolved.target.backend();
     let output = match command {
         NamespaceCommand::Create { name } => {
             validate_namespace_name(&name).map_err(|error| {
                 fail(kind, Some(resolved.profile_name.clone()), Some(mode), error)
             })?;
-            let namespace = client.create_namespace(&name).map_err(|error| {
-                fail(
-                    kind,
-                    Some(resolved.profile_name.clone()),
-                    Some(mode),
-                    map_client_error(error),
-                )
+            let namespace = backend.create_namespace(&name).map_err(|error| {
+                fail(kind, Some(resolved.profile_name.clone()), Some(mode), error)
             })?;
             CommandData::NamespaceSummary(namespace)
         }
         NamespaceCommand::List => {
-            let namespaces = client.list_namespaces().map_err(|error| {
-                fail(
-                    kind,
-                    Some(resolved.profile_name.clone()),
-                    Some(mode),
-                    map_client_error(error),
-                )
+            let namespaces = backend.list_namespaces().map_err(|error| {
+                fail(kind, Some(resolved.profile_name.clone()), Some(mode), error)
             })?;
             CommandData::NamespaceList { namespaces }
         }
@@ -508,24 +433,24 @@ fn run_filesystem_command(
     let resolved = resolve_target_profile(explicit_config, global_profile)
         .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode();
-    let client = resolved.target.client();
+    let backend = resolved.target.backend();
     let profile_name = resolved.profile_name.clone();
 
     let output = (|| -> Result<CommandData, CliError> {
         match command {
             FilesystemCommand::Ls { namespace, path } => {
                 let spec = namespace_path(&namespace, path.as_deref().unwrap_or("/"), true)?;
-                let entries = client.list_path(&spec).map_err(map_client_error)?;
+                let entries = backend.list_path(&spec)?;
                 Ok(CommandData::PathEntries { entries })
             }
             FilesystemCommand::Stat { namespace, path } => {
                 let spec = namespace_path(&namespace, &path, true)?;
-                let entry = client.stat_path(&spec).map_err(map_client_error)?;
+                let entry = backend.stat_path(&spec)?;
                 Ok(CommandData::PathEntry(entry))
             }
             FilesystemCommand::Cat { namespace, path } => {
                 let spec = namespace_path(&namespace, &path, false)?;
-                let bytes = client.read_file_bytes(&spec).map_err(map_client_error)?;
+                let bytes = backend.read_file_bytes(&spec)?;
                 Ok(CommandData::StreamBytes(bytes))
             }
             FilesystemCommand::Get {
@@ -537,14 +462,14 @@ fn run_filesystem_command(
                     return Err(CliError::json_not_supported_for_streaming());
                 }
                 let spec = namespace_path(&namespace, &remote_path, false)?;
-                let entry = client.stat_path(&spec).map_err(map_client_error)?;
+                let entry = backend.stat_path(&spec)?;
                 if entry.inode_kind == loon_api::InodeKind::Dir {
                     return Err(CliError::invalid_input(format!(
                         "directory operations are not available for `{}`",
                         spec.absolute_path
                     )));
                 }
-                let bytes = client.read_file_bytes(&spec).map_err(map_client_error)?;
+                let bytes = backend.read_file_bytes(&spec)?;
                 match local_destination.as_deref() {
                     Some("-") => Ok(CommandData::StreamBytes(bytes)),
                     other => {
@@ -583,9 +508,7 @@ fn run_filesystem_command(
                 };
                 let spec = namespace_path(&namespace, &remote_path, false)?;
                 let bytes = fs::read(&local_path).map_err(CliError::io)?;
-                let result = client
-                    .put_file_bytes(&spec, &bytes, force)
-                    .map_err(map_client_error)?;
+                let result = backend.put_file_bytes(&spec, &bytes, force)?;
                 Ok(CommandData::FileMutation {
                     target: render_target(&namespace, &spec.absolute_path),
                     committed_seq: result.committed_seq.0,
@@ -596,7 +519,7 @@ fn run_filesystem_command(
                 remote_path,
             } => {
                 let spec = namespace_path(&namespace, &remote_path, false)?;
-                let result = client.delete_path(&spec).map_err(map_client_error)?;
+                let result = backend.delete_path(&spec)?;
                 Ok(CommandData::FileMutation {
                     target: render_target(&namespace, &spec.absolute_path),
                     committed_seq: result.committed_seq.0,
@@ -609,7 +532,7 @@ fn run_filesystem_command(
             } => {
                 let from = namespace_path(&namespace, &source_path, false)?;
                 let to = namespace_path(&namespace, &dest_path, false)?;
-                let result = client.move_path(&from, &to).map_err(map_client_error)?;
+                let result = backend.move_path(&from, &to)?;
                 Ok(CommandData::PathMove {
                     from: render_target(&namespace, &from.absolute_path),
                     to: render_target(&namespace, &to.absolute_path),
@@ -622,7 +545,7 @@ fn run_filesystem_command(
                 dest_path,
             } => {
                 let from = namespace_path(&namespace, &source_path, false)?;
-                let entry = client.stat_path(&from).map_err(map_client_error)?;
+                let entry = backend.stat_path(&from)?;
                 if entry.inode_kind == loon_api::InodeKind::Dir {
                     return Err(CliError::invalid_input(format!(
                         "directory operations are not available for `{}`",
@@ -630,7 +553,7 @@ fn run_filesystem_command(
                     )));
                 }
                 let to = namespace_path(&namespace, &dest_path, false)?;
-                let result = client.copy_path(&from, &to).map_err(map_client_error)?;
+                let result = backend.copy_path(&from, &to)?;
                 Ok(CommandData::PathMove {
                     from: render_target(&namespace, &from.absolute_path),
                     to: render_target(&namespace, &to.absolute_path),
@@ -695,24 +618,6 @@ fn required_path(
         return Err(CliError::invalid_input(format!("missing `{field}`")));
     }
     Ok(PathBuf::from(value))
-}
-
-fn map_client_error(error: ClientError) -> CliError {
-    match error {
-        ClientError::ConfigIo(message) | ClientError::ConfigDecode(message) => {
-            CliError::invalid_config(message)
-        }
-        ClientError::MissingConfigField { field } => {
-            CliError::invalid_config(format!("missing `{field}`"))
-        }
-        ClientError::ConfigValidation { field, reason } => {
-            CliError::invalid_config(format!("invalid `{field}`: {reason}"))
-        }
-        ClientError::InvalidNamespacePath(message) => CliError::invalid_input(message),
-        ClientError::Http(message) | ClientError::Json(message) => CliError::client_error(message),
-        ClientError::Api { code, message, .. } => CliError::new(code, message),
-        ClientError::Io(message) => CliError::new("io_error", format!("i/o error: {message}")),
-    }
 }
 
 fn validate_namespace_name(namespace: &str) -> Result<(), CliError> {
@@ -787,13 +692,6 @@ fn destination_path_for_get(
             })?;
             Ok(PathBuf::from(file_name))
         }
-    }
-}
-
-fn profile_mode_str(mode: ProfileMode) -> &'static str {
-    match mode {
-        ProfileMode::Local => "local",
-        ProfileMode::Remote => "remote",
     }
 }
 

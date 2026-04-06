@@ -5,7 +5,6 @@ use crate::profiles::resolve_profile;
 use std::path::{Path, PathBuf};
 
 pub struct ResolvedProfile {
-    pub config_path: PathBuf,
     pub profile_name: String,
     pub target: ResolvedTarget,
 }
@@ -29,7 +28,6 @@ pub fn resolve_target_profile(
         (profile_name.to_owned(), target)
     };
     Ok(ResolvedProfile {
-        config_path,
         profile_name,
         target,
     })

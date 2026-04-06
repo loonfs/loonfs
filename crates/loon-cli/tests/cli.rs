@@ -145,48 +145,10 @@ fn profile_add_local_accepts_server_config_relative_to_shell_cwd() {
 }
 
 #[test]
-fn local_up_status_down_and_stale_cleanup_work() {
-    let harness = Harness::new();
-    let local_config = harness.write_server_config("alpha", "local-up-status");
-    harness.add_local_profile("alpha", &local_config);
-
-    let up = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
-    assert_success(&up);
-    let pid = json_data(&up)["pid"].as_u64().unwrap() as u32;
-
-    let status = harness.run(&["--json", "--profile", "alpha", "local", "status"]);
-    assert_success(&status);
-    assert_eq!(json_data(&status)["status"], "running");
-
-    let double_up = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
-    assert_failure(&double_up);
-    assert_eq!(
-        json_error(&double_up)["code"],
-        "local_server_already_running"
-    );
-
-    terminate_pid(pid);
-    wait_for_stale(&harness, "alpha");
-
-    let stale = harness.run(&["--json", "--profile", "alpha", "local", "status"]);
-    assert_success(&stale);
-    assert_eq!(json_data(&stale)["status"], "stale");
-
-    let up_again = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
-    assert_success(&up_again);
-    assert_eq!(json_data(&up_again)["status"], "running");
-
-    let down = harness.run(&["--json", "--profile", "alpha", "local", "down"]);
-    assert_success(&down);
-    assert_eq!(json_data(&down)["status"], "stopped");
-}
-
-#[test]
-fn managed_local_http_filesystem_flow_works_end_to_end() {
+fn local_profile_filesystem_flow_works_end_to_end() {
     let harness = Harness::new();
     let local_config = harness.write_server_config("local", "managed-local-flow");
     harness.add_local_profile("local", &local_config);
-    assert_success(&harness.run(&["--profile", "local", "local", "up"]));
 
     let upload_path = harness.temp_dir.path().join("upload.txt");
     let download_path = harness.temp_dir.path().join("downloaded.txt");
@@ -286,9 +248,6 @@ fn managed_local_http_filesystem_flow_works_end_to_end() {
 
     let rm = harness.run(&["--json", "filesystem", "rm", "demo", "/docs/final.txt"]);
     assert_success(&rm);
-
-    let down = harness.run(&["--profile", "local", "local", "down"]);
-    assert_success(&down);
 }
 
 #[test]
@@ -472,39 +431,6 @@ fn wait_for_healthz(server_url: &str) {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("timed out waiting for {server_url}/healthz");
-}
-
-fn wait_for_stale(harness: &Harness, profile: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let output = harness.run(&["--json", "--profile", profile, "local", "status"]);
-        assert_success(&output);
-        if json_data(&output)["status"] == "stale" {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("timed out waiting for stale local runtime");
-}
-
-fn terminate_pid(pid: u32) {
-    #[cfg(unix)]
-    {
-        let status = Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status()
-            .expect("kill process");
-        assert!(status.success(), "failed to terminate pid {pid}");
-    }
-    #[cfg(windows)]
-    {
-        let status = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .status()
-            .expect("taskkill process");
-        assert!(status.success(), "failed to terminate pid {pid}");
-    }
 }
 
 fn available_port() -> u16 {

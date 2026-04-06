@@ -14,10 +14,11 @@ clap.workspace = true
 http.workspace = true
 loon-api = { path = "../loon-api" }
 loon-client = { path = "../loon-client" }
+loon-core = { path = "../loon-core" }
+loon-objectstore = { path = "../loon-objectstore" }
 loon-server = { path = "../loon-server" }
 serde.workspace = true
 serde_json.workspace = true
-sysinfo.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

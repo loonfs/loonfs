@@ -51,20 +51,6 @@ impl CliError {
         )
     }
 
-    pub fn local_server_already_running(profile: &str) -> Self {
-        Self::new(
-            "local_server_already_running",
-            format!("managed local server for profile `{profile}` is already running"),
-        )
-    }
-
-    pub fn invalid_profile_mode(profile: &str, expected: &str, actual: &str) -> Self {
-        Self::new(
-            "invalid_profile_mode",
-            format!("profile `{profile}` uses `{actual}` mode; expected `{expected}`"),
-        )
-    }
-
     pub fn client_error(message: impl Into<String>) -> Self {
         Self::new("client_error", message)
     }

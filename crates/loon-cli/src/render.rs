@@ -116,18 +116,6 @@ pub fn human_success(output: &CommandOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        CommandData::LocalStatus(status) => {
-            let mut lines = vec![
-                format!("profile: {}", status.profile_name),
-                format!("status: {}", local_status_str(status.status)),
-                format!("server_url: {}", status.server_url),
-                format!("server_config_path: {}", status.server_config_path),
-            ];
-            if let Some(pid) = status.pid {
-                lines.push(format!("pid: {pid}"));
-            }
-            lines.join("\n")
-        }
         CommandData::NamespaceSummary(namespace) => namespace.name.to_string(),
         CommandData::NamespaceList { namespaces } => namespaces
             .iter()
@@ -139,7 +127,7 @@ pub fn human_success(output: &CommandOutput) -> String {
             .map(|entry| {
                 let size = entry
                     .size_bytes
-                    .map(|value| value.to_string())
+                    .map(|value: u64| value.to_string())
                     .unwrap_or_else(|| "-".to_owned());
                 format!("{:?}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
             })
@@ -201,22 +189,13 @@ fn profile_mode_str(mode: ProfileMode) -> &'static str {
     }
 }
 
-fn local_status_str(status: crate::local_runtime::LocalServerStatusKind) -> &'static str {
-    match status {
-        crate::local_runtime::LocalServerStatusKind::Running => "running",
-        crate::local_runtime::LocalServerStatusKind::Stale => "stale",
-        crate::local_runtime::LocalServerStatusKind::Stopped => "stopped",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{human_success, json_error, json_success};
+    use super::{human_success, json_error};
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
     use crate::config::{ProfileMode, RedactedCliConfig};
     use crate::error::CliError;
-    use crate::local_runtime::{LocalServerStatus, LocalServerStatusKind};
     use crate::profiles::{ProfileSummary, ProfileView};
     use insta::{assert_json_snapshot, assert_snapshot};
     use std::collections::BTreeMap;
@@ -243,26 +222,6 @@ mod tests {
             },
         };
         assert_snapshot!(human_success(&output));
-    }
-
-    #[test]
-    fn json_local_status_snapshot() {
-        let output = CommandOutput {
-            kind: CommandKind::LocalStatus,
-            profile: Some("alpha".to_owned()),
-            mode: Some(ProfileMode::Local),
-            data: CommandData::LocalStatus(LocalServerStatus {
-                profile_name: "alpha".to_owned(),
-                status: LocalServerStatusKind::Running,
-                server_url: "http://127.0.0.1:9400".to_owned(),
-                server_config_path: "/tmp/loond.toml".to_owned(),
-                pid: Some(42),
-            }),
-        };
-        assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
-            &json_success(&output).unwrap()
-        )
-        .unwrap());
     }
 
     #[test]
