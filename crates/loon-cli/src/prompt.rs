@@ -1,5 +1,5 @@
 use crate::error::CliError;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, FuzzySelect, Input, Select};
 
 pub fn prompt_line(label: &str) -> Result<String, CliError> {
     Input::new()
@@ -50,6 +50,26 @@ pub fn prompt_choice_default(
         .interact()
         .map_err(|err| CliError::io(std::io::Error::other(err)))?;
     Ok(options[selection].to_owned())
+}
+
+pub fn prompt_fuzzy_choice(
+    label: &str,
+    options: &[&str],
+    default: usize,
+) -> Result<String, CliError> {
+    let mut items: Vec<String> = options.iter().map(|s| s.to_string()).collect();
+    items.push("(other)".to_string());
+    let selection = FuzzySelect::new()
+        .with_prompt(label)
+        .items(&items)
+        .default(default)
+        .interact()
+        .map_err(|err| CliError::io(std::io::Error::other(err)))?;
+    if selection == options.len() {
+        prompt_line(label)
+    } else {
+        Ok(options[selection].to_owned())
+    }
 }
 
 pub fn prompt_confirm(label: &str) -> Result<bool, CliError> {

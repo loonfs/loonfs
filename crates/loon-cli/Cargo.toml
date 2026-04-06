@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-dialoguer = "0.11"
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 hostname = "0.4"
 loon-api = { path = "../loon-api" }
 loon-client = { path = "../loon-client" }

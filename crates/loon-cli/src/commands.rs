@@ -276,7 +276,7 @@ fn require_or_prompt_region(
 ) -> Result<String, CliError> {
     match value {
         Some(v) if !v.trim().is_empty() => Ok(v.clone()),
-        _ if runtime.interactive => prompt::prompt_choice("region", AWS_REGIONS),
+        _ if runtime.interactive => prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0),
         _ => Err(CliError::non_interactive_input_required("region")),
     }
 }
@@ -473,7 +473,7 @@ fn build_profile_interactive(
                 },
                 "aws-s3" => StoreConfig::AwsS3 {
                     bucket: prompt::prompt_line("bucket")?,
-                    region: prompt::prompt_choice("region", AWS_REGIONS)?,
+                    region: prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0)?,
                     access_key_id: prompt::prompt_line("access key id")?,
                     secret_access_key: prompt::prompt_line("secret access key")?,
                     endpoint_url: prompt::prompt_optional("endpoint url", None)?,
@@ -667,7 +667,7 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
                     bucket: prompt::prompt_line_default("bucket", &bucket)?,
                     region: {
                         let default_idx = AWS_REGIONS.iter().position(|r| *r == region).unwrap_or(0);
-                        prompt::prompt_choice_default("region", AWS_REGIONS, default_idx)?
+                        prompt::prompt_fuzzy_choice("region", AWS_REGIONS, default_idx)?
                     },
                     access_key_id: prompt::prompt_line_default("access key id", &access_key_id)?,
                     secret_access_key: prompt::prompt_line_default(
