@@ -23,6 +23,7 @@ The durable source of truth is object storage. Everything else is either compute
 
 Before touching `loon-server`, `loon-core`, `loon-objectstore`, or `loon-client`, read:
 
+- `README.md`
 - `docs/specs/020-architecture-overview.md`
 - `docs/specs/030-object-store-contract.md`
 - `docs/specs/040-filesystem-and-storage-model.md`
@@ -30,7 +31,6 @@ Before touching `loon-server`, `loon-core`, `loon-objectstore`, or `loon-client`
 - `docs/specs/060-interfaces-and-clients.md`
 - `docs/specs/080-background-jobs.md`
 - `docs/specs/090-versioning-conformance-and-extensions.md`
-- ADRs 0009 through 0015
 
 These documents lock the high-leverage choices that are easiest to get wrong in a way that cascades through the codebase.
 
@@ -38,12 +38,11 @@ These documents lock the high-leverage choices that are easiest to get wrong in 
 
 For normal feature work, follow this order:
 
-1. Confirm the relevant behavior in `docs/specs/`.
-2. If the work changes or narrows that behavior, record it under `proposals/`.
-3. Add or update an ADR if the decision is architectural or hard to reverse.
-4. Update the reference model in `crates/loon-model/` when metadata semantics change.
-5. Implement the production code.
-6. Add or update deterministic tests after the behavior is documented.
+1. Confirm the relevant behavior in `docs/specs/` and `README.md`.
+2. Update the reference model in `crates/loon-model/` when metadata semantics change.
+3. Implement the production code to the current spec.
+4. Add or update deterministic tests after the behavior is understood.
+5. If the required behavior cannot fit the current spec, stop and escalate to the core team rather than inventing a local contract.
 
 The point is simple: **the behavior should be explained before it is encoded**.
 
@@ -66,9 +65,9 @@ Every randomized failure must print:
 
 ## 5. What belongs where
 
-- `docs/specs/`: readable contracts and examples
-- `docs/adr/`: decisions that are hard to reverse
-- `docs/runbooks/`: “how to debug X” guides
+- `README.md`: active product and operator guide
+- `docs/specs/`: authoritative contracts and examples
+- `docs/appendices/`: supporting matrices and reference material
 - `crates/loon-model/`: pure reference model for metadata replay and semantic comparison
 - `crates/loon-core/`: canonical implementation of metadata rules and replay
 - `crates/loon-objectstore/`: provider contract, keys, and conformance behavior
@@ -80,7 +79,7 @@ Suppose you add a new mutation, such as “restore revision.”
 
 You must do all of the following:
 
-1. Describe the mutation in `docs/specs/050-write-read-protocol.md`, and update `docs/specs/040-filesystem-and-storage-model.md` if it changes visible resource semantics.
+1. Confirm the mutation in `docs/specs/050-write-read-protocol.md`, and update `docs/specs/040-filesystem-and-storage-model.md` if it changes visible resource semantics.
 2. Document preconditions and failure modes.
 3. Add or update the model behavior in `crates/loon-model/`.
 4. Add or update invariants in `crates/loon-core/src/invariants.rs`.
@@ -96,7 +95,7 @@ Required steps:
 1. Add the capability to `crates/loon-objectstore/`.
 2. Add a conformance test case.
 3. Mark the provider expectation for S3 and R2.
-4. Update the object-store contract proposal or accepted docs if the contract itself changes.
+4. If the contract itself must change, stop and escalate to the core team so the spec can be reoriented before code diverges.
 
 Do not smuggle provider-specific behavior into `loon-core`.
 
