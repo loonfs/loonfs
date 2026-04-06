@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod error;
 mod profiles;
+mod prompt;
 mod render;
 mod resolve;
 

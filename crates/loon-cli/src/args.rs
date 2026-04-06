@@ -19,6 +19,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Set up a new local profile (interactive or via flags)
+    Init(InitArgs),
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -38,17 +40,55 @@ pub enum Command {
     Version,
 }
 
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Profile name
+    pub name: Option<String>,
+    #[arg(long)]
+    pub store_kind: Option<String>,
+    // local-fs
+    #[arg(long)]
+    pub root: Option<String>,
+    // aws-s3
+    #[arg(long)]
+    pub bucket: Option<String>,
+    #[arg(long)]
+    pub region: Option<String>,
+    #[arg(long)]
+    pub access_key_id: Option<String>,
+    #[arg(long)]
+    pub secret_access_key: Option<String>,
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
+    // cloudflare-r2
+    #[arg(long)]
+    pub account_id: Option<String>,
+    // shared optional
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ProfileCommand {
+    /// Add a new profile
     Add {
         #[command(subcommand)]
-        command: ProfileAddCommand,
+        command: Option<ProfileAddCommand>,
     },
+    /// List all profiles
     List,
+    /// Show profile details
     Show {
         name: Option<String>,
     },
+    /// Update an existing profile
+    Update(ProfileUpdateArgs),
+    /// Remove a profile
     Remove {
+        name: String,
+    },
+    /// Set the default profile
+    MakeDefault {
         name: String,
     },
 }
@@ -113,6 +153,34 @@ pub struct ProfileAddRemoteArgs {
     pub name: String,
     #[arg(long)]
     pub server_url: String,
+    #[arg(long)]
+    pub auth_token: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileUpdateArgs {
+    pub name: String,
+    // Fields that can be updated (all optional)
+    #[arg(long)]
+    pub root: Option<String>,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    #[arg(long)]
+    pub bucket: Option<String>,
+    #[arg(long)]
+    pub region: Option<String>,
+    #[arg(long)]
+    pub access_key_id: Option<String>,
+    #[arg(long)]
+    pub secret_access_key: Option<String>,
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
+    #[arg(long)]
+    pub session_token: Option<String>,
+    #[arg(long)]
+    pub account_id: Option<String>,
+    #[arg(long)]
+    pub server_url: Option<String>,
     #[arg(long)]
     pub auth_token: Option<String>,
 }
@@ -194,10 +262,13 @@ impl RuntimeBehavior {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
+    Init,
     ProfileAdd,
     ProfileList,
     ProfileShow,
+    ProfileUpdate,
     ProfileRemove,
+    ProfileMakeDefault,
     NamespaceCreate,
     NamespaceList,
     FilesystemLs,
@@ -216,10 +287,13 @@ pub enum CommandKind {
 impl CommandKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            CommandKind::Init => "init",
             CommandKind::ProfileAdd => "profile_add",
             CommandKind::ProfileList => "profile_list",
             CommandKind::ProfileShow => "profile_show",
+            CommandKind::ProfileUpdate => "profile_update",
             CommandKind::ProfileRemove => "profile_remove",
+            CommandKind::ProfileMakeDefault => "profile_make_default",
             CommandKind::NamespaceCreate => "namespace_create",
             CommandKind::NamespaceList => "namespace_list",
             CommandKind::FilesystemLs => "filesystem_ls",
@@ -244,11 +318,14 @@ impl CommandKind {
 impl Cli {
     pub fn kind(&self) -> CommandKind {
         match &self.command {
+            Command::Init(_) => CommandKind::Init,
             Command::Profile { command } => match command {
                 ProfileCommand::Add { .. } => CommandKind::ProfileAdd,
                 ProfileCommand::List => CommandKind::ProfileList,
                 ProfileCommand::Show { .. } => CommandKind::ProfileShow,
+                ProfileCommand::Update { .. } => CommandKind::ProfileUpdate,
                 ProfileCommand::Remove { .. } => CommandKind::ProfileRemove,
+                ProfileCommand::MakeDefault { .. } => CommandKind::ProfileMakeDefault,
             },
             Command::Namespace { command } => match command {
                 NamespaceCommand::Create { .. } => CommandKind::NamespaceCreate,

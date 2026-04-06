@@ -118,6 +118,7 @@ pub fn human_success(output: &CommandOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
+        CommandData::DefaultProfile { name } => format!("default profile set to `{name}`"),
         CommandData::NamespaceSummary(namespace) => namespace.name.to_string(),
         CommandData::NamespaceList { namespaces } => namespaces
             .iter()

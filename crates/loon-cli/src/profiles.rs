@@ -54,6 +54,19 @@ pub fn add_profile(
     Ok((name.to_owned(), redacted))
 }
 
+pub fn update_profile(
+    config: &mut CliConfig,
+    name: &str,
+    profile: ProfileConfig,
+) -> Result<(String, ProfileConfig), CliError> {
+    if !config.profiles.contains_key(name) {
+        return Err(CliError::profile_not_found(name));
+    }
+    let redacted = profile.redacted();
+    config.profiles.insert(name.to_owned(), profile);
+    Ok((name.to_owned(), redacted))
+}
+
 pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSummary, CliError> {
     let removed = config
         .profiles
@@ -72,6 +85,14 @@ pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSumma
         mode: removed.mode_str().to_owned(),
         store_kind: removed.store_kind_str().map(ToOwned::to_owned),
     })
+}
+
+pub fn make_default_profile(config: &mut CliConfig, name: &str) -> Result<(), CliError> {
+    if !config.profiles.contains_key(name) {
+        return Err(CliError::profile_not_found(name));
+    }
+    config.default_profile = name.to_owned();
+    Ok(())
 }
 
 pub fn resolve_profile<'a>(

@@ -172,6 +172,82 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 }
 
 #[test]
+fn init_creates_local_profile_and_sets_default() {
+    let harness = Harness::new();
+
+    let init = harness.run(&[
+        "--json",
+        "init",
+        "mystore",
+        "--store-kind",
+        "local-fs",
+        "--root",
+        harness.store_root("mystore").to_str().unwrap(),
+    ]);
+    assert_success(&init);
+    assert_eq!(json_data(&init)["mode"], "local");
+
+    // verify it's the default profile
+    let show = harness.run(&["--json", "profile", "show"]);
+    assert_success(&show);
+    assert_eq!(json_data(&show)["mode"], "local");
+
+    // verify filesystem operations work
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    let list = harness.run(&["--json", "namespace", "list"]);
+    assert_success(&list);
+    let namespaces = json_data(&list)["namespaces"].as_array().unwrap().to_owned();
+    assert_eq!(namespaces.len(), 1);
+}
+
+#[test]
+fn profile_update_changes_fields() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let new_root = harness.store_root("updated");
+    let update = harness.run(&[
+        "--json",
+        "profile",
+        "update",
+        "default",
+        "--root",
+        new_root.to_str().unwrap(),
+    ]);
+    assert_success(&update);
+
+    let show = harness.run(&["--json", "profile", "show", "default"]);
+    assert_success(&show);
+    let store = &json_data(&show)["store"];
+    assert_eq!(store["root"], new_root.to_str().unwrap());
+}
+
+#[test]
+fn profile_make_default_switches_default() {
+    let harness = Harness::new();
+    harness.add_local_profile("alpha");
+    harness.add_local_profile("beta");
+
+    let make_default = harness.run(&["--json", "profile", "make-default", "beta"]);
+    assert_success(&make_default);
+    assert_eq!(json_data(&make_default)["name"], "beta");
+
+    let show = harness.run(&["--json", "profile", "show"]);
+    assert_success(&show);
+    // default is now beta, so show without name returns beta's config
+}
+
+#[test]
+fn profile_make_default_rejects_missing_profile() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let result = harness.run(&["--json", "profile", "make-default", "nonexistent"]);
+    assert_failure(&result);
+    assert_eq!(json_error(&result)["code"], "profile_not_found");
+}
+
+#[test]
 fn external_remote_profile_executes_through_http() {
     let harness = Harness::new();
     let remote_server =
