@@ -78,19 +78,13 @@ pub enum ProfileCommand {
     /// List all profiles
     List,
     /// Show profile details
-    Show {
-        name: Option<String>,
-    },
+    Show { name: Option<String> },
     /// Update an existing profile
     Update(ProfileUpdateArgs),
     /// Remove a profile
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
     /// Set the default profile
-    MakeDefault {
-        name: String,
-    },
+    MakeDefault { name: String },
 }
 
 #[derive(Debug, Subcommand)]

@@ -73,12 +73,7 @@ pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSumma
         .remove(name)
         .ok_or_else(|| CliError::profile_not_found(name))?;
     if config.default_profile == name {
-        config.default_profile = config
-            .profiles
-            .keys()
-            .next()
-            .cloned()
-            .unwrap_or_default();
+        config.default_profile = config.profiles.keys().next().cloned().unwrap_or_default();
     }
     Ok(ProfileSummary {
         name: name.to_owned(),

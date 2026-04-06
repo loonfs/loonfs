@@ -137,7 +137,11 @@ impl ProfileConfig {
     pub(crate) fn validate(&self, name: &str) -> Result<(), CliError> {
         match self {
             ProfileConfig::Local { store, .. } => store.validate(name),
-            ProfileConfig::Remote { server_url, auth_token, .. } => {
+            ProfileConfig::Remote {
+                server_url,
+                auth_token,
+                ..
+            } => {
                 validate_http_url(&format!("profiles.{name}.server_url"), server_url)?;
                 if let Some(token) = auth_token {
                     require_non_empty(&format!("profiles.{name}.auth_token"), token)?;
@@ -149,15 +153,21 @@ impl ProfileConfig {
 
     pub fn redacted(&self) -> Self {
         match self {
-            ProfileConfig::Local { store, writer_id, writer_version, lease_duration_ms } => {
-                ProfileConfig::Local {
-                    store: store.redacted(),
-                    writer_id: writer_id.clone(),
-                    writer_version: writer_version.clone(),
-                    lease_duration_ms: *lease_duration_ms,
-                }
-            }
-            ProfileConfig::Remote { server_url, auth_token } => ProfileConfig::Remote {
+            ProfileConfig::Local {
+                store,
+                writer_id,
+                writer_version,
+                lease_duration_ms,
+            } => ProfileConfig::Local {
+                store: store.redacted(),
+                writer_id: writer_id.clone(),
+                writer_version: writer_version.clone(),
+                lease_duration_ms: *lease_duration_ms,
+            },
+            ProfileConfig::Remote {
+                server_url,
+                auth_token,
+            } => ProfileConfig::Remote {
                 server_url: server_url.clone(),
                 auth_token: auth_token.as_ref().map(|_| "REDACTED".to_owned()),
             },
@@ -181,8 +191,14 @@ impl StoreConfig {
                     .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))
             }
             StoreConfig::AwsS3 {
-                bucket, region, endpoint_url, access_key_id, secret_access_key,
-                session_token, key_prefix, force_path_style,
+                bucket,
+                region,
+                endpoint_url,
+                access_key_id,
+                secret_access_key,
+                session_token,
+                key_prefix,
+                force_path_style,
             } => ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
                 bucket: bucket.clone(),
                 region: region.clone(),
@@ -195,7 +211,12 @@ impl StoreConfig {
             })
             .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
             StoreConfig::CloudflareR2 {
-                bucket, account_id, endpoint_url, access_key_id, secret_access_key, key_prefix,
+                bucket,
+                account_id,
+                endpoint_url,
+                access_key_id,
+                secret_access_key,
+                key_prefix,
             } => ConfiguredObjectStore::cloudflare_r2(R2StoreConfig {
                 bucket: bucket.clone(),
                 account_id: account_id.clone(),
@@ -213,18 +234,49 @@ impl StoreConfig {
             StoreConfig::LocalFs { root, .. } => {
                 require_non_empty(&format!("profiles.{profile_name}.store.root"), root)
             }
-            StoreConfig::AwsS3 { bucket, region, access_key_id, secret_access_key, .. } => {
+            StoreConfig::AwsS3 {
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+                ..
+            } => {
                 require_non_empty(&format!("profiles.{profile_name}.store.bucket"), bucket)?;
                 require_non_empty(&format!("profiles.{profile_name}.store.region"), region)?;
-                require_non_empty(&format!("profiles.{profile_name}.store.access_key_id"), access_key_id)?;
-                require_non_empty(&format!("profiles.{profile_name}.store.secret_access_key"), secret_access_key)
+                require_non_empty(
+                    &format!("profiles.{profile_name}.store.access_key_id"),
+                    access_key_id,
+                )?;
+                require_non_empty(
+                    &format!("profiles.{profile_name}.store.secret_access_key"),
+                    secret_access_key,
+                )
             }
-            StoreConfig::CloudflareR2 { bucket, account_id, endpoint_url, access_key_id, secret_access_key, .. } => {
+            StoreConfig::CloudflareR2 {
+                bucket,
+                account_id,
+                endpoint_url,
+                access_key_id,
+                secret_access_key,
+                ..
+            } => {
                 require_non_empty(&format!("profiles.{profile_name}.store.bucket"), bucket)?;
-                require_non_empty(&format!("profiles.{profile_name}.store.account_id"), account_id)?;
-                require_non_empty(&format!("profiles.{profile_name}.store.endpoint_url"), endpoint_url)?;
-                require_non_empty(&format!("profiles.{profile_name}.store.access_key_id"), access_key_id)?;
-                require_non_empty(&format!("profiles.{profile_name}.store.secret_access_key"), secret_access_key)
+                require_non_empty(
+                    &format!("profiles.{profile_name}.store.account_id"),
+                    account_id,
+                )?;
+                require_non_empty(
+                    &format!("profiles.{profile_name}.store.endpoint_url"),
+                    endpoint_url,
+                )?;
+                require_non_empty(
+                    &format!("profiles.{profile_name}.store.access_key_id"),
+                    access_key_id,
+                )?;
+                require_non_empty(
+                    &format!("profiles.{profile_name}.store.secret_access_key"),
+                    secret_access_key,
+                )
             }
         }
     }
@@ -233,7 +285,12 @@ impl StoreConfig {
         match self {
             StoreConfig::LocalFs { .. } => self.clone(),
             StoreConfig::AwsS3 {
-                bucket, region, endpoint_url, key_prefix, force_path_style, ..
+                bucket,
+                region,
+                endpoint_url,
+                key_prefix,
+                force_path_style,
+                ..
             } => StoreConfig::AwsS3 {
                 bucket: bucket.clone(),
                 region: region.clone(),
@@ -245,7 +302,11 @@ impl StoreConfig {
                 force_path_style: *force_path_style,
             },
             StoreConfig::CloudflareR2 {
-                bucket, account_id, endpoint_url, key_prefix, ..
+                bucket,
+                account_id,
+                endpoint_url,
+                key_prefix,
+                ..
             } => StoreConfig::CloudflareR2 {
                 bucket: bucket.clone(),
                 account_id: account_id.clone(),

@@ -92,9 +92,8 @@ pub fn json_error(failure: &CommandFailure) -> io::Result<String> {
 
 pub fn human_success(output: &CommandOutput) -> String {
     match &output.data {
-        CommandData::Profile(profile) => {
-            toml::to_string_pretty(profile).unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode_str()))
-        }
+        CommandData::Profile(profile) => toml::to_string_pretty(profile)
+            .unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode_str())),
         CommandData::ProfileSummary(profile) => match output.kind {
             CommandKind::ProfileRemove => format!("removed profile {}", profile.name),
             _ => {
@@ -106,14 +105,22 @@ pub fn human_success(output: &CommandOutput) -> String {
                 format!("{} {}{store}", profile.mode, profile.name)
             }
         },
-        CommandData::ProfileList { profiles } => {
-            let mut lines = vec!["NAME\tMODE\tSTORE".to_owned()];
+        CommandData::ProfileList {
+            default_profile,
+            profiles,
+        } => {
+            let mut lines = vec!["NAME\tMODE\tSTORE\tDEFAULT".to_owned()];
             for profile in profiles {
-                let store = profile
-                    .store_kind
-                    .as_deref()
-                    .unwrap_or("-");
-                lines.push(format!("{}\t{}\t{store}", profile.name, profile.mode));
+                let store = profile.store_kind.as_deref().unwrap_or("-");
+                let default = if profile.name == *default_profile {
+                    "*"
+                } else {
+                    ""
+                };
+                lines.push(format!(
+                    "{}\t{}\t{store}\t{default}",
+                    profile.name, profile.mode
+                ));
             }
             lines.join("\n")
         }
@@ -200,6 +207,7 @@ mod tests {
             profile: None,
             mode: None,
             data: CommandData::ProfileList {
+                default_profile: "default".to_owned(),
                 profiles: vec![
                     ProfileSummary {
                         name: "default".to_owned(),

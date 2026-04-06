@@ -8,8 +8,8 @@ use crate::config::{
 };
 use crate::error::CliError;
 use crate::profiles::{
-    add_profile, list_profiles, make_default_profile, remove_profile, show_profile,
-    update_profile, ProfileSummary,
+    add_profile, list_profiles, make_default_profile, remove_profile, show_profile, update_profile,
+    ProfileSummary,
 };
 use crate::prompt;
 use crate::resolve::{resolve_target_profile, resolved_config_path};
@@ -70,6 +70,7 @@ pub enum CommandData {
     Profile(ProfileConfig),
     ProfileSummary(ProfileSummary),
     ProfileList {
+        default_profile: String,
         profiles: Vec<ProfileSummary>,
     },
     DefaultProfile {
@@ -219,8 +220,7 @@ fn build_local_store_interactive(
         "aws-s3" => {
             let bucket = require_or_prompt(&args.bucket, "bucket name", runtime)?;
             let region = require_or_prompt_region(&args.region, runtime)?;
-            let access_key_id =
-                require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
+            let access_key_id = require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
             let secret_access_key =
                 require_or_prompt(&args.secret_access_key, "secret-access-key", runtime)?;
             Ok(StoreConfig::AwsS3 {
@@ -237,10 +237,8 @@ fn build_local_store_interactive(
         "cloudflare-r2" => {
             let bucket = require_or_prompt(&args.bucket, "bucket name", runtime)?;
             let account_id = require_or_prompt(&args.account_id, "account-id", runtime)?;
-            let endpoint_url =
-                require_or_prompt(&args.endpoint_url, "endpoint-url", runtime)?;
-            let access_key_id =
-                require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
+            let endpoint_url = require_or_prompt(&args.endpoint_url, "endpoint-url", runtime)?;
+            let access_key_id = require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
             let secret_access_key =
                 require_or_prompt(&args.secret_access_key, "secret-access-key", runtime)?;
             Ok(StoreConfig::CloudflareR2 {
@@ -325,9 +323,7 @@ fn run_profile_command(
     let config_path =
         resolved_config_path(explicit_config).map_err(|error| fail(kind, None, None, error))?;
     match command {
-        ProfileCommand::Add { command } => {
-            run_profile_add(kind, &config_path, command, runtime)
-        }
+        ProfileCommand::Add { command } => run_profile_add(kind, &config_path, command, runtime),
         ProfileCommand::List => {
             let config = load_config_if_exists(&config_path)
                 .map_err(|error| fail(kind, None, None, error))?;
@@ -336,6 +332,10 @@ fn run_profile_command(
                 profile: None,
                 mode: None,
                 data: CommandData::ProfileList {
+                    default_profile: config
+                        .as_ref()
+                        .map(|c| c.default_profile.clone())
+                        .unwrap_or_default(),
                     profiles: list_profiles(config.as_ref()),
                 },
             })
@@ -353,15 +353,9 @@ fn run_profile_command(
                 data: CommandData::Profile(redacted),
             })
         }
-        ProfileCommand::Update(args) => {
-            run_profile_update(kind, &config_path, args, runtime)
-        }
-        ProfileCommand::Remove { name } => {
-            run_profile_remove(kind, &config_path, &name, runtime)
-        }
-        ProfileCommand::MakeDefault { name } => {
-            run_profile_make_default(kind, &config_path, &name)
-        }
+        ProfileCommand::Update(args) => run_profile_update(kind, &config_path, args, runtime),
+        ProfileCommand::Remove { name } => run_profile_remove(kind, &config_path, &name, runtime),
+        ProfileCommand::MakeDefault { name } => run_profile_make_default(kind, &config_path, &name),
     }
 }
 
@@ -373,8 +367,9 @@ fn run_profile_add(
 ) -> Result<CommandOutput, CommandFailure> {
     let (name, profile) = match command {
         Some(cmd) => build_profile_from_add_command(cmd),
-        None => build_profile_interactive(runtime)
-            .map_err(|error| fail(kind, None, None, error))?,
+        None => {
+            build_profile_interactive(runtime).map_err(|error| fail(kind, None, None, error))?
+        }
     };
 
     let mode = profile.mode_str().to_owned();
@@ -416,7 +411,11 @@ fn build_profile_from_add_command(command: ProfileAddCommand) -> (String, Profil
                     secret_access_key: args.secret_access_key,
                     session_token: args.session_token,
                     key_prefix: args.key_prefix,
-                    force_path_style: if args.force_path_style { Some(true) } else { None },
+                    force_path_style: if args.force_path_style {
+                        Some(true)
+                    } else {
+                        None
+                    },
                 },
                 writer_id: None,
                 writer_version: None,
@@ -636,10 +635,7 @@ fn apply_update_flags(
                     region: args.region.clone().unwrap_or(region),
                     endpoint_url: args.endpoint_url.clone().or(endpoint_url),
                     access_key_id: args.access_key_id.clone().unwrap_or(access_key_id),
-                    secret_access_key: args
-                        .secret_access_key
-                        .clone()
-                        .unwrap_or(secret_access_key),
+                    secret_access_key: args.secret_access_key.clone().unwrap_or(secret_access_key),
                     session_token: args.session_token.clone().or(session_token),
                     key_prefix: args.key_prefix.clone().or(key_prefix),
                     force_path_style,
@@ -656,10 +652,7 @@ fn apply_update_flags(
                     account_id: args.account_id.clone().unwrap_or(account_id),
                     endpoint_url: args.endpoint_url.clone().unwrap_or(endpoint_url),
                     access_key_id: args.access_key_id.clone().unwrap_or(access_key_id),
-                    secret_access_key: args
-                        .secret_access_key
-                        .clone()
-                        .unwrap_or(secret_access_key),
+                    secret_access_key: args.secret_access_key.clone().unwrap_or(secret_access_key),
                     key_prefix: args.key_prefix.clone().or(key_prefix),
                 },
             };
@@ -714,7 +707,8 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
                 } => StoreConfig::AwsS3 {
                     bucket: prompt::prompt_line_default("bucket name", &bucket)?,
                     region: {
-                        let default_idx = AWS_REGIONS.iter().position(|r| *r == region).unwrap_or(0);
+                        let default_idx =
+                            AWS_REGIONS.iter().position(|r| *r == region).unwrap_or(0);
                         prompt::prompt_fuzzy_choice("region", AWS_REGIONS, default_idx)?
                     },
                     access_key_id: prompt::prompt_line_default("access key id", &access_key_id)?,
@@ -722,10 +716,7 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
                         "secret access key",
                         &secret_access_key,
                     )?,
-                    endpoint_url: prompt::prompt_optional(
-                        "endpoint url",
-                        endpoint_url.as_deref(),
-                    )?,
+                    endpoint_url: prompt::prompt_optional("endpoint url", endpoint_url.as_deref())?,
                     session_token: prompt::prompt_optional(
                         "session token",
                         session_token.as_deref(),
@@ -776,9 +767,8 @@ fn run_profile_remove(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     if runtime.interactive {
-        let confirmed =
-            prompt::prompt_confirm(&format!("remove profile `{name}`?"))
-                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+        let confirmed = prompt::prompt_confirm(&format!("remove profile `{name}`?"))
+            .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
         if !confirmed {
             return Err(fail(
                 kind,
@@ -789,8 +779,8 @@ fn run_profile_remove(
         }
     }
 
-    let mut config = load_config(config_path)
-        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    let mut config =
+        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
     let removed = remove_profile(&mut config, name)
         .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
     let mode = removed.mode.clone();
@@ -809,8 +799,8 @@ fn run_profile_make_default(
     config_path: &Path,
     name: &str,
 ) -> Result<CommandOutput, CommandFailure> {
-    let mut config = load_config(config_path)
-        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    let mut config =
+        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
     make_default_profile(&mut config, name)
         .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
     save_config(config_path, &config)

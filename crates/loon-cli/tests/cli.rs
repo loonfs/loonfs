@@ -196,7 +196,10 @@ fn init_creates_local_profile_and_sets_default() {
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     let list = harness.run(&["--json", "namespace", "list"]);
     assert_success(&list);
-    let namespaces = json_data(&list)["namespaces"].as_array().unwrap().to_owned();
+    let namespaces = json_data(&list)["namespaces"]
+        .as_array()
+        .unwrap()
+        .to_owned();
     assert_eq!(namespaces.len(), 1);
 }
 
