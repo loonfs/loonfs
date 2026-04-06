@@ -106,18 +106,17 @@ pub fn human_success(output: &CommandOutput) -> String {
                 format!("{} {}{store}", profile.mode, profile.name)
             }
         },
-        CommandData::ProfileList { profiles } => profiles
-            .iter()
-            .map(|profile| {
+        CommandData::ProfileList { profiles } => {
+            let mut lines = vec!["NAME\tMODE\tSTORE".to_owned()];
+            for profile in profiles {
                 let store = profile
                     .store_kind
                     .as_deref()
-                    .map(|s| format!(" ({s})"))
-                    .unwrap_or_default();
-                format!("{}\t{}{store}", profile.name, profile.mode)
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+                    .unwrap_or("-");
+                lines.push(format!("{}\t{}\t{store}", profile.name, profile.mode));
+            }
+            lines.join("\n")
+        }
         CommandData::DefaultProfile { name } => format!("default profile set to `{name}`"),
         CommandData::NamespaceSummary(namespace) => namespace.name.to_string(),
         CommandData::NamespaceList { namespaces } => namespaces

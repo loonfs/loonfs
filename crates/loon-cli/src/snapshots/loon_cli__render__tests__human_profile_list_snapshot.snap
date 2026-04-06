@@ -3,5 +3,6 @@ source: crates/loon-cli/src/render.rs
 assertion_line: 217
 expression: human_success(&output)
 ---
-default	local (local-fs)
-prod	remote
+NAME	MODE	STORE
+default	local	local-fs
+prod	remote	-
