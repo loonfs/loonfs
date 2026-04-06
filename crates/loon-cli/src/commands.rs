@@ -217,7 +217,7 @@ fn build_local_store_interactive(
             })
         }
         "aws-s3" => {
-            let bucket = require_or_prompt(&args.bucket, "bucket", runtime)?;
+            let bucket = require_or_prompt(&args.bucket, "bucket name", runtime)?;
             let region = require_or_prompt_region(&args.region, runtime)?;
             let access_key_id =
                 require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
@@ -235,7 +235,7 @@ fn build_local_store_interactive(
             })
         }
         "cloudflare-r2" => {
-            let bucket = require_or_prompt(&args.bucket, "bucket", runtime)?;
+            let bucket = require_or_prompt(&args.bucket, "bucket name", runtime)?;
             let account_id = require_or_prompt(&args.account_id, "account-id", runtime)?;
             let endpoint_url =
                 require_or_prompt(&args.endpoint_url, "endpoint-url", runtime)?;
@@ -472,7 +472,7 @@ fn build_profile_interactive(
                     key_prefix: prompt::prompt_optional("key prefix", None)?,
                 },
                 "aws-s3" => StoreConfig::AwsS3 {
-                    bucket: prompt::prompt_line("bucket")?,
+                    bucket: prompt::prompt_line("bucket name")?,
                     region: prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0)?,
                     access_key_id: prompt::prompt_line("access key id")?,
                     secret_access_key: prompt::prompt_line("secret access key")?,
@@ -482,7 +482,7 @@ fn build_profile_interactive(
                     force_path_style: None,
                 },
                 "cloudflare-r2" => StoreConfig::CloudflareR2 {
-                    bucket: prompt::prompt_line("bucket")?,
+                    bucket: prompt::prompt_line("bucket name")?,
                     account_id: prompt::prompt_line("account id")?,
                     endpoint_url: prompt::prompt_line("endpoint url")?,
                     access_key_id: prompt::prompt_line("access key id")?,
@@ -664,7 +664,7 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
                     key_prefix,
                     force_path_style,
                 } => StoreConfig::AwsS3 {
-                    bucket: prompt::prompt_line_default("bucket", &bucket)?,
+                    bucket: prompt::prompt_line_default("bucket name", &bucket)?,
                     region: {
                         let default_idx = AWS_REGIONS.iter().position(|r| *r == region).unwrap_or(0);
                         prompt::prompt_fuzzy_choice("region", AWS_REGIONS, default_idx)?
@@ -693,7 +693,7 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
                     secret_access_key,
                     key_prefix,
                 } => StoreConfig::CloudflareR2 {
-                    bucket: prompt::prompt_line_default("bucket", &bucket)?,
+                    bucket: prompt::prompt_line_default("bucket name", &bucket)?,
                     account_id: prompt::prompt_line_default("account id", &account_id)?,
                     endpoint_url: prompt::prompt_line_default("endpoint url", &endpoint_url)?,
                     access_key_id: prompt::prompt_line_default("access key id", &access_key_id)?,
