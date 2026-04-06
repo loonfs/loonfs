@@ -348,7 +348,7 @@ fn reserved_profile_names_are_rejected() {
 #[test]
 fn init_rejects_existing_config_file() {
     let harness = Harness::new();
-    harness.write_cli_config(&format!(
+    harness.write_cli_config(format!(
         r#"
 config_version = 1
 default_profile = "default"
