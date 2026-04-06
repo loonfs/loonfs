@@ -14,6 +14,37 @@ use crate::profiles::{
 use crate::prompt;
 use crate::resolve::{resolve_target_profile, resolved_config_path};
 use loon_api::{AuthoritativePathEntry, NamespaceSummary};
+
+const AWS_REGIONS: &[&str] = &[
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "eu-central-1",
+    "eu-central-2",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-east-1",
+    "ca-central-1",
+    "ca-west-1",
+    "sa-east-1",
+    "me-south-1",
+    "me-central-1",
+    "af-south-1",
+    "il-central-1",
+];
 use loon_client::NamespacePath;
 use serde::Serialize;
 use std::fs;
@@ -187,7 +218,7 @@ fn build_local_store_interactive(
         }
         "aws-s3" => {
             let bucket = require_or_prompt(&args.bucket, "bucket", runtime)?;
-            let region = require_or_prompt(&args.region, "region", runtime)?;
+            let region = require_or_prompt_region(&args.region, runtime)?;
             let access_key_id =
                 require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
             let secret_access_key =
@@ -236,6 +267,17 @@ fn require_or_prompt(
         Some(v) if !v.trim().is_empty() => Ok(v.clone()),
         _ if runtime.interactive => prompt::prompt_line(field),
         _ => Err(CliError::non_interactive_input_required(field)),
+    }
+}
+
+fn require_or_prompt_region(
+    value: &Option<String>,
+    runtime: RuntimeBehavior,
+) -> Result<String, CliError> {
+    match value {
+        Some(v) if !v.trim().is_empty() => Ok(v.clone()),
+        _ if runtime.interactive => prompt::prompt_choice("region", AWS_REGIONS),
+        _ => Err(CliError::non_interactive_input_required("region")),
     }
 }
 
@@ -431,7 +473,7 @@ fn build_profile_interactive(
                 },
                 "aws-s3" => StoreConfig::AwsS3 {
                     bucket: prompt::prompt_line("bucket")?,
-                    region: prompt::prompt_line("region")?,
+                    region: prompt::prompt_choice("region", AWS_REGIONS)?,
                     access_key_id: prompt::prompt_line("access key id")?,
                     secret_access_key: prompt::prompt_line("secret access key")?,
                     endpoint_url: prompt::prompt_optional("endpoint url", None)?,
@@ -623,7 +665,10 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
                     force_path_style,
                 } => StoreConfig::AwsS3 {
                     bucket: prompt::prompt_line_default("bucket", &bucket)?,
-                    region: prompt::prompt_line_default("region", &region)?,
+                    region: {
+                        let default_idx = AWS_REGIONS.iter().position(|r| *r == region).unwrap_or(0);
+                        prompt::prompt_choice_default("region", AWS_REGIONS, default_idx)?
+                    },
                     access_key_id: prompt::prompt_line_default("access key id", &access_key_id)?,
                     secret_access_key: prompt::prompt_line_default(
                         "secret access key",

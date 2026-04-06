@@ -35,10 +35,18 @@ pub fn prompt_optional(label: &str, current: Option<&str>) -> Result<Option<Stri
 }
 
 pub fn prompt_choice(label: &str, options: &[&str]) -> Result<String, CliError> {
+    prompt_choice_default(label, options, 0)
+}
+
+pub fn prompt_choice_default(
+    label: &str,
+    options: &[&str],
+    default: usize,
+) -> Result<String, CliError> {
     let selection = Select::new()
         .with_prompt(label)
         .items(options)
-        .default(0)
+        .default(default)
         .interact()
         .map_err(|err| CliError::io(std::io::Error::other(err)))?;
     Ok(options[selection].to_owned())
