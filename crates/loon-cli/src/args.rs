@@ -172,6 +172,7 @@ pub struct ProfileUpdateArgs {
 #[derive(Debug, Subcommand)]
 pub enum NamespaceCommand {
     Create { name: String },
+    Rename { selector: String, new_name: String },
     List,
 }
 
@@ -254,6 +255,7 @@ pub enum CommandKind {
     ProfileRemove,
     ProfileMakeDefault,
     NamespaceCreate,
+    NamespaceRename,
     NamespaceList,
     FilesystemLs,
     FilesystemStat,
@@ -279,6 +281,7 @@ impl CommandKind {
             CommandKind::ProfileRemove => "profile_remove",
             CommandKind::ProfileMakeDefault => "profile_make_default",
             CommandKind::NamespaceCreate => "namespace_create",
+            CommandKind::NamespaceRename => "namespace_rename",
             CommandKind::NamespaceList => "namespace_list",
             CommandKind::FilesystemLs => "filesystem_ls",
             CommandKind::FilesystemStat => "filesystem_stat",
@@ -313,6 +316,7 @@ impl Cli {
             },
             Command::Namespace { command } => match command {
                 NamespaceCommand::Create { .. } => CommandKind::NamespaceCreate,
+                NamespaceCommand::Rename { .. } => CommandKind::NamespaceRename,
                 NamespaceCommand::List => CommandKind::NamespaceList,
             },
             Command::Filesystem { command } => match command {

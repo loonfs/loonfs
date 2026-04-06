@@ -13,6 +13,17 @@ impl NamespaceId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn looks_generated(value: &str) -> bool {
+        let Some(rest) = value.strip_prefix("ns_") else {
+            return false;
+        };
+        rest.len() == 32
+            && rest
+                .as_bytes()
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    }
 }
 
 impl From<&str> for NamespaceId {
@@ -48,6 +59,16 @@ impl<'de> Deserialize<'de> for NamespaceId {
 /// Numeric identity of a file, directory, or mount within a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InodeId(pub u64);
+
+/// Normalized lookup key for one namespace name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NamespaceNameKey(pub String);
+
+impl NamespaceNameKey {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Monotonically increasing file revision counter within an inode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -92,8 +113,59 @@ impl fmt::Display for NamespaceId {
     }
 }
 
+impl fmt::Display for NamespaceNameKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl fmt::Display for InodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "inode-{}", self.0)
+    }
+}
+
+pub fn normalize_namespace_name(value: &str) -> Result<(String, NamespaceNameKey), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("namespace name must not be empty".to_owned());
+    }
+    if trimmed.contains('/') {
+        return Err("namespace name must not contain `/`".to_owned());
+    }
+    if trimmed.contains(':') {
+        return Err("namespace name must not contain `:`".to_owned());
+    }
+
+    let name_key = NamespaceNameKey(trimmed.to_ascii_lowercase());
+    if name_key.as_str().starts_with("ns_") {
+        return Err("namespace name must not use the reserved `ns_` prefix".to_owned());
+    }
+
+    Ok((trimmed.to_owned(), name_key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_namespace_name, NamespaceId};
+
+    #[test]
+    fn generated_namespace_ids_still_use_exact_shape_matching() {
+        assert!(NamespaceId::looks_generated(
+            "ns_0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!NamespaceId::looks_generated("ns_demo"));
+        assert!(!NamespaceId::looks_generated("demo"));
+    }
+
+    #[test]
+    fn namespace_names_reserve_full_ns_prefix() {
+        assert!(normalize_namespace_name("ns_demo").is_err());
+        assert!(normalize_namespace_name("NS_demo").is_err());
+        assert!(normalize_namespace_name("ns_0123456789abcdef0123456789abcdef").is_err());
+
+        let (name, key) = normalize_namespace_name("demo").expect("valid namespace name");
+        assert_eq!(name, "demo");
+        assert_eq!(key.as_str(), "demo");
     }
 }

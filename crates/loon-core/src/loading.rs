@@ -1,7 +1,8 @@
 use loon_api::{
-    payload_checksum_sha256, ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope, NamespaceId,
+    payload_checksum_sha256, ControlObjectKind, HeadStateEnvelope, LeaseStateEnvelope,
+    NamespaceCatalogEnvelope, NamespaceId,
 };
-use loon_objectstore::keys::{namespace_head, namespace_lease};
+use loon_objectstore::keys::{namespace_catalog, namespace_head, namespace_lease};
 use loon_objectstore::ObjectStoreError;
 use loon_objectstore::{ObjectMetadata, ObjectStore};
 use serde::Serialize;
@@ -20,6 +21,13 @@ pub(crate) struct LoadedLeaseObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: LeaseStateEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+pub(crate) struct LoadedNamespaceCatalogObject {
+    pub(crate) object_key: String,
+    pub(crate) metadata: ObjectMetadata,
+    pub(crate) envelope: NamespaceCatalogEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize, Error)]
@@ -120,6 +128,33 @@ pub(crate) fn read_lease_object<S: ObjectStore + ?Sized>(
     })
 }
 
+pub(crate) fn read_namespace_catalog_object<S: ObjectStore + ?Sized>(
+    store: &S,
+) -> Result<Option<LoadedNamespaceCatalogObject>, ControlObjectLoadError> {
+    let object_key = namespace_catalog();
+    let Some(metadata) = store.head(&object_key).map_err(map_store_load_error)? else {
+        return Ok(None);
+    };
+    let encoded_bytes = store
+        .get(&object_key, None)
+        .map_err(map_store_load_error)?
+        .ok_or_else(|| ControlObjectLoadError::MissingObjectAfterHead {
+            object_key: object_key.clone(),
+        })?;
+    let envelope: NamespaceCatalogEnvelope =
+        serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
+            object_key: object_key.clone(),
+            message: err.to_string(),
+        })?;
+    validate_namespace_catalog_envelope(&object_key, &envelope)?;
+
+    Ok(Some(LoadedNamespaceCatalogObject {
+        object_key,
+        metadata,
+        envelope,
+    }))
+}
+
 fn validate_head_envelope(
     expected_namespace: &NamespaceId,
     object_key: &str,
@@ -178,6 +213,25 @@ fn validate_lease_envelope(
     }
 
     Ok(())
+}
+
+fn validate_namespace_catalog_envelope(
+    object_key: &str,
+    envelope: &NamespaceCatalogEnvelope,
+) -> Result<(), ControlObjectLoadError> {
+    if envelope.kind != ControlObjectKind::NamespaceCatalog {
+        return Err(ControlObjectLoadError::KindMismatch {
+            object_key: object_key.to_owned(),
+            expected: ControlObjectKind::NamespaceCatalog,
+            actual: envelope.kind,
+        });
+    }
+
+    validate_control_checksum(
+        object_key,
+        &envelope.payload_checksum_sha256,
+        &envelope.state,
+    )
 }
 
 fn validate_control_checksum<T: Serialize>(

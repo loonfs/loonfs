@@ -21,6 +21,10 @@ pub fn namespace_head(namespace: &str) -> String {
     format!("namespaces/{namespace}/head.json")
 }
 
+pub fn namespace_catalog() -> String {
+    "control/namespaces/catalog.json".to_owned()
+}
+
 pub fn namespace_lease(namespace: &str) -> String {
     format!("namespaces/{namespace}/lease.json")
 }
@@ -81,12 +85,13 @@ pub fn queue_shard(shard_index: u32) -> String {
 mod tests {
     use super::{
         blob, conflict_artifact, conflict_artifact_prefix, content_manifest, derived_progress,
-        namespace_head, namespace_lease, queue_shard, snapshot_manifest, snapshot_table,
-        upload_session, upload_session_prefix, wal_commit, SnapshotTableFamily,
+        namespace_catalog, namespace_head, namespace_lease, queue_shard, snapshot_manifest,
+        snapshot_table, upload_session, upload_session_prefix, wal_commit, SnapshotTableFamily,
     };
 
     #[test]
     fn key_builders_match_spec_examples() {
+        assert_eq!(namespace_catalog(), "control/namespaces/catalog.json");
         assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/head.json");
         assert_eq!(namespace_lease("ns-1"), "namespaces/ns-1/lease.json");
         assert_eq!(

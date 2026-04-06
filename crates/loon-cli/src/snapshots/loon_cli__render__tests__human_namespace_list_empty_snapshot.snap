@@ -2,4 +2,3 @@
 source: crates/loon-cli/src/render.rs
 expression: human_success(&output)
 ---
-NAME

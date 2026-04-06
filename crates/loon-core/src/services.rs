@@ -5,12 +5,12 @@ use crate::content::{
 };
 use crate::genesis::bootstrap_basis_metadata_state;
 use crate::lease::LeaseAcquireError;
-use crate::loading::ControlObjectLoadError;
+use crate::loading::{read_namespace_catalog_object, ControlObjectLoadError};
 use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, VisiblePathError};
 use crate::wal::WalBuildError;
 use loon_api::{
     content_manifest_digest_sha256, encode_content_manifest_json, name_key_for_display_name,
-    payload_checksum_sha256,
+    normalize_namespace_name, payload_checksum_sha256,
     v0::{
         CommitOp as V0CommitOp, CommitOpResult, CommitPrecondition as V0CommitPrecondition,
         CommitRequest as V0CommitRequest, CommitResponse as V0CommitResponse,
@@ -18,13 +18,18 @@ use loon_api::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentBlockDescriptor,
     ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, HeadState,
     HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, MutationResult,
-    NamespaceId, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
+    NamespaceCatalogEntry, NamespaceCatalogEnvelope, NamespaceCatalogState, NamespaceId,
+    NamespaceNameKey, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
 };
-use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
+use loon_objectstore::keys::{
+    blob, content_manifest, namespace_catalog, namespace_head, namespace_lease,
+};
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+const NAMESPACE_CATALOG_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationContext {
@@ -50,6 +55,7 @@ pub enum PutFileBehavior {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreErrorKind {
     InvalidPath,
+    NamespaceNameConflict,
     NamespaceNotFound,
     PathNotFound,
     RevisionNotFound,
@@ -76,8 +82,12 @@ pub enum BootstrapNamespaceError {
     EmptyHolderId,
     #[error("writer version must not be empty")]
     EmptyWriterVersion,
+    #[error("{0}")]
+    InvalidNamespaceName(String),
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceAlreadyExists { namespace_id: NamespaceId },
+    #[error("namespace name `{name}` already exists")]
+    NamespaceNameExists { name: String },
     #[error("namespace `{namespace_id}` is partially initialized")]
     NamespacePartiallyInitialized { namespace_id: NamespaceId },
     #[error(transparent)]
@@ -86,6 +96,8 @@ pub enum BootstrapNamespaceError {
     HeadWrite(String),
     #[error("failed to write lease object: {0}")]
     LeaseWrite(String),
+    #[error("failed to update namespace catalog: {0}")]
+    CatalogWrite(String),
 }
 
 #[derive(Debug, Error)]
@@ -112,6 +124,8 @@ pub enum CoreError {
     InvalidPath(String),
     #[error("path not found `{0}`")]
     MissingPath(String),
+    #[error("namespace selector not found `{0}`")]
+    MissingNamespace(String),
     #[error("expected file at `{path}` but found `{kind:?}`")]
     ExpectedFile { path: String, kind: InodeKind },
     #[error("expected directory at `{path}` but found `{kind:?}`")]
@@ -153,6 +167,10 @@ pub enum CoreError {
     NonDirectoryPathComponent(String),
     #[error("object store error: {0}")]
     Store(String),
+    #[error("{0}")]
+    InvalidNamespaceName(String),
+    #[error("namespace name `{0}` already exists")]
+    NamespaceNameExists(String),
 }
 
 impl From<CommitValidationError> for CoreError {
@@ -179,6 +197,12 @@ impl From<CommitHeadPublishError> for CoreError {
     }
 }
 
+impl From<ControlObjectLoadError> for CoreError {
+    fn from(value: ControlObjectLoadError) -> Self {
+        Self::Store(value.to_string())
+    }
+}
+
 impl CoreError {
     pub fn kind(&self) -> CoreErrorKind {
         match self {
@@ -195,7 +219,10 @@ impl CoreError {
             CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
                 CoreErrorKind::InvalidPath
             }
+            CoreError::InvalidNamespaceName(_) => CoreErrorKind::InvalidPath,
+            CoreError::NamespaceNameExists(_) => CoreErrorKind::NamespaceNameConflict,
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
+            CoreError::MissingNamespace(_) => CoreErrorKind::NamespaceNotFound,
             CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
             CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
@@ -213,19 +240,183 @@ impl CoreError {
     }
 }
 
+pub fn create_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    name: &str,
+    context: &MutationContext,
+) -> Result<NamespaceSummary, BootstrapNamespaceError> {
+    let (normalized_name, _) =
+        normalize_namespace_name(name).map_err(BootstrapNamespaceError::InvalidNamespaceName)?;
+
+    for _attempt in 0..NAMESPACE_CATALOG_RETRY_LIMIT {
+        let namespace_id = NamespaceId::from(format!("ns_{}", Uuid::new_v4().simple()));
+        match bootstrap_namespace(store, &namespace_id, &normalized_name, context, false) {
+            Ok(summary) => return Ok(summary),
+            Err(BootstrapNamespaceError::NamespaceAlreadyExists { .. }) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(BootstrapNamespaceError::CatalogWrite(
+        "namespace id generation retry exhausted".to_owned(),
+    ))
+}
+
 pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    name: &str,
     context: &MutationContext,
     allow_existing: bool,
 ) -> Result<NamespaceSummary, BootstrapNamespaceError> {
+    validate_bootstrap_context(context)?;
+    let (name, name_key) =
+        normalize_namespace_name(name).map_err(BootstrapNamespaceError::InvalidNamespaceName)?;
+
+    let bootstrap_outcome =
+        bootstrap_namespace_storage(store, namespace_id, context, allow_existing)?;
+    match register_namespace_name(
+        store,
+        namespace_id,
+        &name,
+        &name_key,
+        context,
+        allow_existing,
+    ) {
+        Ok(summary) => Ok(summary),
+        Err(error) => {
+            if matches!(bootstrap_outcome, NamespaceBootstrapStorageOutcome::Created) {
+                best_effort_delete_namespace_storage(store, namespace_id);
+            }
+            Err(error)
+        }
+    }
+}
+
+pub fn rename_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_selector: &str,
+    new_name: &str,
+    context: &MutationContext,
+) -> Result<NamespaceSummary, CoreError> {
+    let (name, name_key) =
+        normalize_namespace_name(new_name).map_err(CoreError::InvalidNamespaceName)?;
+
+    for _attempt in 0..NAMESPACE_CATALOG_RETRY_LIMIT {
+        let Some(loaded) = read_namespace_catalog_object(store)? else {
+            return Err(CoreError::MissingNamespace(namespace_selector.to_owned()));
+        };
+        let mut state = loaded.envelope.state.clone();
+        let namespace_id = resolve_namespace_selector_in_catalog(&state, namespace_selector)?;
+        let entry = state
+            .namespaces_by_id
+            .get(&namespace_id)
+            .cloned()
+            .ok_or_else(|| CoreError::MissingNamespace(namespace_selector.to_owned()))?;
+
+        if entry.name_key == name_key && entry.name == name {
+            return Ok(NamespaceSummary { namespace_id, name });
+        }
+
+        if let Some(existing_id) = state.name_index.get(&name_key) {
+            if existing_id != &namespace_id {
+                return Err(CoreError::NamespaceNameExists(name));
+            }
+        }
+
+        state.name_index.remove(&entry.name_key);
+        state
+            .name_index
+            .insert(name_key.clone(), namespace_id.clone());
+        state.namespaces_by_id.insert(
+            namespace_id.clone(),
+            NamespaceCatalogEntry {
+                namespace_id: namespace_id.clone(),
+                name: name.clone(),
+                name_key: name_key.clone(),
+                created_at_ms: entry.created_at_ms,
+                updated_at_ms: context.now_ms,
+            },
+        );
+
+        match write_namespace_catalog(
+            store,
+            Some(loaded.metadata.etag.as_deref()),
+            &state,
+            context,
+        ) {
+            Ok(()) => return Ok(NamespaceSummary { namespace_id, name }),
+            Err(CatalogWriteOutcome::Retry) => continue,
+            Err(CatalogWriteOutcome::Error(message)) => return Err(CoreError::Store(message)),
+        }
+    }
+
+    Err(CoreError::Store(
+        "namespace catalog compare-and-swap retry exhausted".to_owned(),
+    ))
+}
+
+pub fn list_namespaces<S: ObjectStore + ?Sized>(
+    store: &S,
+) -> Result<Vec<NamespaceSummary>, CoreError> {
+    let Some(loaded) = read_namespace_catalog_object(store)? else {
+        return Ok(Vec::new());
+    };
+    let mut namespaces = loaded
+        .envelope
+        .state
+        .namespaces_by_id
+        .into_values()
+        .map(|entry| NamespaceSummary {
+            namespace_id: entry.namespace_id,
+            name: entry.name,
+        })
+        .collect::<Vec<_>>();
+    namespaces.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.namespace_id.cmp(&right.namespace_id))
+    });
+    Ok(namespaces)
+}
+
+pub fn resolve_namespace_selector<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_selector: &str,
+) -> Result<NamespaceId, CoreError> {
+    let Some(loaded) = read_namespace_catalog_object(store)? else {
+        return Err(CoreError::MissingNamespace(namespace_selector.to_owned()));
+    };
+    resolve_namespace_selector_in_catalog(&loaded.envelope.state, namespace_selector)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamespaceBootstrapStorageOutcome {
+    Existing,
+    Created,
+}
+
+enum CatalogWriteOutcome {
+    Retry,
+    Error(String),
+}
+
+fn validate_bootstrap_context(context: &MutationContext) -> Result<(), BootstrapNamespaceError> {
     if context.writer_id.trim().is_empty() {
         return Err(BootstrapNamespaceError::EmptyHolderId);
     }
     if context.writer_version.trim().is_empty() {
         return Err(BootstrapNamespaceError::EmptyWriterVersion);
     }
+    Ok(())
+}
 
+fn bootstrap_namespace_storage<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    allow_existing: bool,
+) -> Result<NamespaceBootstrapStorageOutcome, BootstrapNamespaceError> {
     let head_key = namespace_head(namespace_id.as_str());
     let lease_key = namespace_lease(namespace_id.as_str());
     let existing_head = store
@@ -238,20 +429,16 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         .is_some();
 
     match (existing_head, existing_lease) {
-        (true, true) if allow_existing => {
-            return Ok(NamespaceSummary {
-                name: namespace_id.clone(),
-            });
-        }
+        (true, true) if allow_existing => return Ok(NamespaceBootstrapStorageOutcome::Existing),
         (true, true) => {
             return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
                 namespace_id: namespace_id.clone(),
-            });
+            })
         }
         (true, false) | (false, true) => {
             return Err(BootstrapNamespaceError::NamespacePartiallyInitialized {
                 namespace_id: namespace_id.clone(),
-            });
+            })
         }
         (false, false) => {}
     }
@@ -289,31 +476,154 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 
     let _ = bootstrap_basis_metadata_state();
 
-    Ok(NamespaceSummary {
-        name: namespace_id.clone(),
-    })
+    Ok(NamespaceBootstrapStorageOutcome::Created)
 }
 
-pub fn list_namespaces<S: ObjectStore + ?Sized>(
+fn best_effort_delete_namespace_storage<S: ObjectStore + ?Sized>(
     store: &S,
-) -> Result<Vec<NamespaceSummary>, CoreError> {
-    let keys = store
-        .list_prefix("namespaces/")
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-    let mut names = std::collections::BTreeSet::new();
-    for key in keys {
-        let Some(rest) = key.strip_prefix("namespaces/") else {
-            continue;
-        };
-        let Some((namespace, _)) = rest.split_once('/') else {
-            continue;
-        };
-        names.insert(NamespaceId::from(namespace.to_owned()));
+    namespace_id: &NamespaceId,
+) {
+    let _ = store.delete(&namespace_head(namespace_id.as_str()));
+    let _ = store.delete(&namespace_lease(namespace_id.as_str()));
+}
+
+fn register_namespace_name<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    name: &str,
+    name_key: &NamespaceNameKey,
+    context: &MutationContext,
+    allow_existing: bool,
+) -> Result<NamespaceSummary, BootstrapNamespaceError> {
+    for _attempt in 0..NAMESPACE_CATALOG_RETRY_LIMIT {
+        let loaded = read_namespace_catalog_object(store)
+            .map_err(|err| BootstrapNamespaceError::CatalogWrite(err.to_string()))?;
+        let mut state = loaded
+            .as_ref()
+            .map(|loaded| loaded.envelope.state.clone())
+            .unwrap_or_else(NamespaceCatalogState::default);
+
+        if let Some(existing_id) = state.name_index.get(name_key) {
+            if existing_id != namespace_id {
+                return Err(BootstrapNamespaceError::NamespaceNameExists {
+                    name: name.to_owned(),
+                });
+            }
+        }
+
+        if let Some(existing_entry) = state.namespaces_by_id.get(namespace_id) {
+            if allow_existing && existing_entry.name_key == *name_key && existing_entry.name == name
+            {
+                return Ok(namespace_summary(
+                    existing_entry.namespace_id.clone(),
+                    existing_entry.name.clone(),
+                ));
+            }
+            return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
+                namespace_id: namespace_id.clone(),
+            });
+        }
+
+        state
+            .name_index
+            .insert(name_key.clone(), namespace_id.clone());
+        state.namespaces_by_id.insert(
+            namespace_id.clone(),
+            NamespaceCatalogEntry {
+                namespace_id: namespace_id.clone(),
+                name: name.to_owned(),
+                name_key: name_key.clone(),
+                created_at_ms: context.now_ms,
+                updated_at_ms: context.now_ms,
+            },
+        );
+
+        let expected_etag = loaded
+            .as_ref()
+            .map(|loaded| loaded.metadata.etag.as_deref());
+        match write_namespace_catalog(store, expected_etag, &state, context) {
+            Ok(()) => return Ok(namespace_summary(namespace_id.clone(), name.to_owned())),
+            Err(CatalogWriteOutcome::Retry) => continue,
+            Err(CatalogWriteOutcome::Error(message)) => {
+                return Err(BootstrapNamespaceError::CatalogWrite(message))
+            }
+        }
     }
-    Ok(names
-        .into_iter()
-        .map(|name| NamespaceSummary { name })
-        .collect())
+
+    Err(BootstrapNamespaceError::CatalogWrite(
+        "namespace catalog compare-and-swap retry exhausted".to_owned(),
+    ))
+}
+
+fn write_namespace_catalog<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_etag: Option<Option<&str>>,
+    state: &NamespaceCatalogState,
+    context: &MutationContext,
+) -> Result<(), CatalogWriteOutcome> {
+    let object_key = namespace_catalog();
+    let envelope = NamespaceCatalogEnvelope::from_state(
+        ControlObjectKind::NamespaceCatalog,
+        &context.writer_version,
+        state.clone(),
+    )
+    .map_err(|err| CatalogWriteOutcome::Error(err.to_string()))?;
+    let encoded =
+        serde_json::to_vec(&envelope).map_err(|err| CatalogWriteOutcome::Error(err.to_string()))?;
+
+    match expected_etag {
+        None => match store.put_if_absent(&object_key, &encoded) {
+            Ok(_) => Ok(()),
+            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+                Err(CatalogWriteOutcome::Retry)
+            }
+            Err(err) => Err(CatalogWriteOutcome::Error(err.to_string())),
+        },
+        Some(Some(expected_etag)) => {
+            match store.compare_and_swap(&object_key, expected_etag, &encoded) {
+                Ok(_) => Ok(()),
+                Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+                    Err(CatalogWriteOutcome::Retry)
+                }
+                Err(err) => Err(CatalogWriteOutcome::Error(err.to_string())),
+            }
+        }
+        Some(None) => Err(CatalogWriteOutcome::Error(
+            "missing namespace catalog etag".to_owned(),
+        )),
+    }
+}
+
+fn resolve_namespace_selector_in_catalog(
+    state: &NamespaceCatalogState,
+    namespace_selector: &str,
+) -> Result<NamespaceId, CoreError> {
+    let selector = namespace_selector.trim();
+    if selector.is_empty() {
+        return Err(CoreError::InvalidPath(
+            "namespace selector must not be empty".to_owned(),
+        ));
+    }
+
+    if NamespaceId::looks_generated(selector) {
+        return state
+            .namespaces_by_id
+            .contains_key(&NamespaceId::from(selector.to_owned()))
+            .then(|| NamespaceId::from(selector.to_owned()))
+            .ok_or_else(|| CoreError::MissingNamespace(selector.to_owned()));
+    }
+
+    let (_, name_key) =
+        normalize_namespace_name(selector).map_err(CoreError::InvalidNamespaceName)?;
+    state
+        .name_index
+        .get(&name_key)
+        .cloned()
+        .ok_or_else(|| CoreError::MissingNamespace(selector.to_owned()))
+}
+
+fn namespace_summary(namespace_id: NamespaceId, name: String) -> NamespaceSummary {
+    NamespaceSummary { namespace_id, name }
 }
 
 pub fn resolve_path<S: ObjectStore + ?Sized>(

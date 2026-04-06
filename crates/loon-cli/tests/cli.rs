@@ -529,13 +529,33 @@ fn external_remote_profile_executes_through_http() {
 
     let create = harness.run(&["--json", "namespace", "create", "demo"]);
     assert_success(&create);
+    assert_eq!(json_data(&create)["name"], "demo");
+    assert_generated_namespace_id(&json_data(&create)["namespace_id"]);
+    let created_namespace_id = json_data(&create)["namespace_id"]
+        .as_str()
+        .expect("namespace id")
+        .to_owned();
+
+    let rename = harness.run(&[
+        "--json",
+        "--profile",
+        "remote",
+        "namespace",
+        "rename",
+        "demo",
+        "docs",
+    ]);
+    assert_success(&rename);
+    assert_eq!(json_data(&rename)["name"], "docs");
+    assert_eq!(json_data(&rename)["namespace_id"], created_namespace_id);
 
     let list = harness.run(&["--json", "namespace", "list"]);
     assert_success(&list);
     let list_data = json_data(&list);
     let namespaces = list_data["namespaces"].as_array().unwrap();
     assert_eq!(namespaces.len(), 1);
-    assert_eq!(namespaces[0]["name"], "demo");
+    assert_eq!(namespaces[0]["name"], "docs");
+    assert_eq!(namespaces[0]["namespace_id"], created_namespace_id);
 }
 
 #[test]
@@ -788,4 +808,16 @@ fn json_data(output: &Output) -> Value {
 
 fn json_error(output: &Output) -> Value {
     parse_json(&output.stderr)["error"].clone()
+}
+
+fn assert_generated_namespace_id(value: &Value) {
+    let namespace_id = value.as_str().expect("namespace id string");
+    assert!(
+        namespace_id.starts_with("ns_")
+            && namespace_id.len() == 35
+            && namespace_id[3..]
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+        "expected generated namespace id, got {namespace_id}"
+    );
 }

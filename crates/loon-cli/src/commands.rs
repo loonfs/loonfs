@@ -13,7 +13,7 @@ use crate::profiles::{
 };
 use crate::prompt;
 use crate::resolve::resolve_target_profile;
-use loon_api::{AuthoritativePathEntry, NamespaceSummary};
+use loon_api::{normalize_namespace_name, AuthoritativePathEntry, NamespaceSummary};
 
 const AWS_REGIONS: &[&str] = &[
     "us-east-1",
@@ -836,6 +836,35 @@ fn run_namespace_command(
             })?;
             CommandData::NamespaceSummary(namespace)
         }
+        NamespaceCommand::Rename { selector, new_name } => {
+            validate_namespace_selector(&selector).map_err(|error| {
+                fail(
+                    kind,
+                    Some(resolved.profile_name.clone()),
+                    Some(mode.clone()),
+                    error,
+                )
+            })?;
+            validate_namespace_name(&new_name).map_err(|error| {
+                fail(
+                    kind,
+                    Some(resolved.profile_name.clone()),
+                    Some(mode.clone()),
+                    error,
+                )
+            })?;
+            let namespace = backend
+                .rename_namespace(&selector, &new_name)
+                .map_err(|error| {
+                    fail(
+                        kind,
+                        Some(resolved.profile_name.clone()),
+                        Some(mode.clone()),
+                        error,
+                    )
+                })?;
+            CommandData::NamespaceSummary(namespace)
+        }
         NamespaceCommand::List => {
             let namespaces = backend.list_namespaces().map_err(|error| {
                 fail(
@@ -1010,8 +1039,16 @@ fn run_filesystem_command(
 // --- helpers ---
 
 fn validate_namespace_name(namespace: &str) -> Result<(), CliError> {
+    normalize_namespace_name(namespace)
+        .map(|_| ())
+        .map_err(CliError::invalid_input)
+}
+
+fn validate_namespace_selector(namespace: &str) -> Result<(), CliError> {
     if namespace.trim().is_empty() {
-        return Err(CliError::invalid_input("namespace name must not be empty"));
+        return Err(CliError::invalid_input(
+            "namespace selector must not be empty",
+        ));
     }
     Ok(())
 }
@@ -1021,7 +1058,7 @@ fn namespace_path(
     path: &str,
     allow_root: bool,
 ) -> Result<NamespacePath, CliError> {
-    validate_namespace_name(namespace)?;
+    validate_namespace_selector(namespace)?;
     Ok(NamespacePath {
         namespace: namespace.to_owned(),
         absolute_path: normalize_absolute_path(path, allow_root)?,

@@ -125,14 +125,14 @@ pub fn human_success(output: &CommandOutput) -> String {
             lines.join("\n")
         }
         CommandData::DefaultProfile { name } => format!("default profile set to `{name}`"),
-        CommandData::NamespaceSummary(namespace) => namespace.name.to_string(),
-        CommandData::NamespaceList { namespaces } => {
-            let mut lines = vec!["NAME".to_owned()];
-            for namespace in namespaces {
-                lines.push(namespace.name.to_string());
-            }
-            lines.join("\n")
+        CommandData::NamespaceSummary(namespace) => {
+            format!("{}\t{}", namespace.name, namespace.namespace_id)
         }
+        CommandData::NamespaceList { namespaces } => namespaces
+            .iter()
+            .map(|namespace| format!("{}\t{}", namespace.name, namespace.namespace_id))
+            .collect::<Vec<_>>()
+            .join("\n"),
         CommandData::PathEntries { entries } => entries
             .iter()
             .map(|entry| {
@@ -237,9 +237,11 @@ mod tests {
             data: CommandData::NamespaceList {
                 namespaces: vec![
                     NamespaceSummary {
+                        namespace_id: "ns_00000000000000000000000000000001".into(),
                         name: "alpha".into(),
                     },
                     NamespaceSummary {
+                        namespace_id: "ns_00000000000000000000000000000002".into(),
                         name: "prod".into(),
                     },
                 ],

@@ -4,6 +4,25 @@
 
 A namespace is the unit of visible metadata history.
 
+### 1.1 Namespace identity
+
+Each namespace has two externally relevant identifiers:
+
+- a stable generated `namespace_id`, which is the canonical durable identity; and
+- one current mutable human-facing `name`, which is resolved through the namespace catalog.
+
+`namespace_id` is always the stable generated identifier stored in object keys and metadata.
+Changing namespace `name` is control-plane metadata only and does not move any
+namespace-scoped durable objects.
+
+Namespace lookup by human-facing name is a control-plane concern. The catalog at
+`control/namespaces/catalog.json` resolves a current namespace name to its stable
+`namespace_id`. All authoritative metadata, content, and cross-namespace references continue to
+use `namespace_id`.
+
+Namespace names reserve the `ns_` prefix so selector resolution can continue to treat that prefix
+as the namespace-id space without ambiguity.
+
 Each namespace has:
 
 - a current head
@@ -13,11 +32,13 @@ Each namespace has:
 
 The head also carries the next monotonic inode id for that namespace. New inode ids are allocated from the head as part of commit publication.
 
+### 1.2 Item identity
+
 The canonical identity of an item is `(namespace_id, inode_id)`.
 
 Two consequences follow:
 
-1. rename does not change identity;
+1. renaming an item does not change identity;
 2. path is a view, not the identity model.
 
 If an item is deleted and a new item is later created at the same path, that new item receives a
@@ -43,7 +64,7 @@ Those facts live in other metadata families:
 - revisions say which immutable file version is current for a file inode; and
 - paths are derived views produced by walking visible directory bindings from the root.
 
-### 1.1 Example metadata shapes
+### 1.3 Example metadata shapes
 
 The inode itself is only one part of the metadata model. A complete visible file usually involves
 multiple logical records.

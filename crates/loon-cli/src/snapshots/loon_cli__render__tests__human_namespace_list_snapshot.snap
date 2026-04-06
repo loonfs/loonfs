@@ -2,6 +2,5 @@
 source: crates/loon-cli/src/render.rs
 expression: human_success(&output)
 ---
-NAME
-alpha
-prod
+alpha	ns_00000000000000000000000000000001
+prod	ns_00000000000000000000000000000002

@@ -1,6 +1,7 @@
 use crate::digest::sha256_hex;
-use crate::{ChangeSeq, FenceToken, InodeId, NamePolicy, NamespaceId};
+use crate::{ChangeSeq, FenceToken, InodeId, NamePolicy, NamespaceId, NamespaceNameKey};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
 
@@ -9,6 +10,7 @@ pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
 pub enum ControlObjectKind {
     NamespaceHead,
     NamespaceLease,
+    NamespaceCatalog,
     NamespaceProgress,
     UploadSession,
     QueueShard,
@@ -59,6 +61,23 @@ pub struct ProgressState {
     pub namespace_id: NamespaceId,
     pub work_class: String,
     pub through_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceCatalogEntry {
+    pub namespace_id: NamespaceId,
+    pub name: String,
+    pub name_key: NamespaceNameKey,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct NamespaceCatalogState {
+    #[serde(default)]
+    pub namespaces_by_id: BTreeMap<NamespaceId, NamespaceCatalogEntry>,
+    #[serde(default)]
+    pub name_index: BTreeMap<NamespaceNameKey, NamespaceId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +140,7 @@ where
 
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 pub type LeaseStateEnvelope = ControlObjectEnvelope<LeaseState>;
+pub type NamespaceCatalogEnvelope = ControlObjectEnvelope<NamespaceCatalogState>;
 pub type ProgressStateEnvelope = ControlObjectEnvelope<ProgressState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 

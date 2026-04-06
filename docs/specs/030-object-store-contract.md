@@ -25,6 +25,7 @@ The required durable families and canonical key shapes are:
 
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
+| **Namespace catalog** | Mutable | Map stable namespace ids to current human-facing names and resolve name selectors. | `control/namespaces/catalog.json` |
 | **Namespace head** | Mutable | Record the current visible boundary and replay hints. | `namespaces/{namespace_id}/head.json` |
 | **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/lease.json` |
 | **Content blocks** | Immutable | Store file bytes. | `namespaces/{namespace_id}/blobs/{block_digest_sha256}` |
@@ -35,6 +36,10 @@ The required durable families and canonical key shapes are:
 
 These key shapes are part of the interoperable storage contract. Implementations may add other
 control-plane objects.
+
+`namespace_id` is a generated opaque identifier, not a user-chosen display string. Human-facing
+namespace names are mutable metadata stored in the namespace catalog. Renaming a namespace updates
+the catalog only and never changes the `namespaces/{namespace_id}/...` storage prefix.
 
 ## 4. Immutable content rules
 

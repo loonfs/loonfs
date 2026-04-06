@@ -62,24 +62,63 @@ A representative v0 binding is shown below.
 
 | Purpose | Representative HTTP shape |
 | --- | --- |
-| Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
-| List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs` |
-| Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
-| Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
-| Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
-| Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
-| Publish an explicit commit | `POST /v0/namespaces/{ns}/commits` |
-| Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
+| Create a namespace | `POST /v0/namespaces` |
+| List namespaces | `GET /v0/namespaces` |
+| Rename a namespace | `POST /v0/namespaces/{namespace_selector}/rename` |
+| Stat a path | `GET /v0/namespaces/{namespace_selector}/filesystem/stat?path=/docs/report.txt` |
+| List a path | `GET /v0/namespaces/{namespace_selector}/filesystem/list?path=/docs` |
+| Read file content | `GET /v0/namespaces/{namespace_selector}/filesystem/content?path=/docs/report.txt` |
+| Apply path-oriented operations | `POST /v0/namespaces/{namespace_selector}/filesystem/operations` |
+| Begin or prepare upload | `POST /v0/namespaces/{namespace_selector}/uploads` |
+| Complete staged upload | `POST /v0/namespaces/{namespace_selector}/uploads/{upload_id}/complete` |
+| Publish an explicit commit | `POST /v0/namespaces/{namespace_selector}/commits` |
+| Read committed changes | `GET /v0/namespaces/{namespace_selector}/changes?after_seq=123` |
 
 Long-running transfers may additionally expose session or job resources. The exact endpoint set is less important than the semantic rule: once a long-running operation begins, the server-issued session or job id becomes the stable in-flight identifier of that operation.
 
+`namespace_selector` may be either the stable generated `namespace_id` or the namespace's current
+human-facing `name`. The server resolves that selector through the namespace catalog before
+touching authoritative namespace state.
+
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
+
+### 3.0 Namespace create, list, and rename
+
+Representative create request:
+
+```json
+{
+  "name": "demo"
+}
+```
+
+Representative create or rename response:
+
+```json
+{
+  "namespace_id": "ns_0123456789abcdef0123456789abcdef",
+  "name": "demo"
+}
+```
+
+Representative list response:
+
+```json
+{
+  "namespaces": [
+    {
+      "namespace_id": "ns_0123456789abcdef0123456789abcdef",
+      "name": "demo"
+    }
+  ]
+}
+```
 
 ### 3.1 `GET /filesystem/stat`
 
 ```json
 {
-  "namespace_id": "demo",
+  "namespace_id": "ns_0123456789abcdef0123456789abcdef",
   "absolute_path": "/docs/report.txt",
   "inode_id": 42,
   "inode_kind": "FILE",
@@ -94,7 +133,7 @@ A few representative requests and responses are shown below. These examples are 
 
 ```json
 {
-  "namespace_id": "demo",
+  "namespace_id": "ns_0123456789abcdef0123456789abcdef",
   "absolute_path": "/docs",
   "head_seq": 418,
   "entries": [
@@ -149,7 +188,7 @@ Representative response:
 
 ```json
 {
-  "namespace_id": "demo",
+  "namespace_id": "ns_0123456789abcdef0123456789abcdef",
   "committed_seq": 419,
   "results": [
     {
@@ -194,7 +233,7 @@ Representative complete-upload response:
 
 ```json
 {
-  "namespace_id": "demo",
+  "namespace_id": "ns_0123456789abcdef0123456789abcdef",
   "upload_id": "upl_01J...",
   "content_manifest_digest": "sha256:report-v8"
 }
@@ -242,7 +281,7 @@ Representative response:
 
 ```json
 {
-  "namespace_id": "demo",
+  "namespace_id": "ns_0123456789abcdef0123456789abcdef",
   "commit_id": "c_01J...",
   "committed_seq": 419,
   "results": [
@@ -259,7 +298,7 @@ Representative response:
 
 ```json
 {
-  "namespace_id": "demo",
+  "namespace_id": "ns_0123456789abcdef0123456789abcdef",
   "from_exclusive_seq": 418,
   "through_seq": 420,
   "changes": [

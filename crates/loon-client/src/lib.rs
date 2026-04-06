@@ -10,7 +10,8 @@ use loon_api::{
     },
     ApiError, AuthoritativePathEntry, ChangeSeq, CreateNamespaceRequest, FilesystemOperation,
     FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
-    ListNamespacesResponse, MutationResult, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
+    ListNamespacesResponse, MutationResult, NamespaceSummary, RenameNamespaceRequest,
+    CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::Deserialize;
 use std::fs;
@@ -129,6 +130,24 @@ impl Client {
             .namespaces)
     }
 
+    pub fn rename_namespace(
+        &self,
+        namespace_selector: &str,
+        new_name: &str,
+    ) -> Result<NamespaceSummary, ClientError> {
+        let url = format!(
+            "{}/v0/namespaces/{}/rename",
+            self.base_url,
+            encode_namespace_selector(namespace_selector)
+        );
+        self.request_json::<_, NamespaceSummary>(
+            self.agent.post(&url),
+            Some(&RenameNamespaceRequest {
+                new_name: new_name.to_owned(),
+            }),
+        )
+    }
+
     pub fn list_path(
         &self,
         spec: &NamespacePath,
@@ -136,7 +155,7 @@ impl Client {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/list?path={}",
             self.base_url,
-            spec.namespace,
+            encode_namespace_selector(&spec.namespace),
             urlencoding::encode(&spec.absolute_path)
         );
         self.request_json::<(), Vec<AuthoritativePathEntry>>(self.agent.get(&url), None)
@@ -146,7 +165,7 @@ impl Client {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/stat?path={}",
             self.base_url,
-            spec.namespace,
+            encode_namespace_selector(&spec.namespace),
             urlencoding::encode(&spec.absolute_path)
         );
         self.request_json::<(), AuthoritativePathEntry>(self.agent.get(&url), None)
@@ -156,7 +175,7 @@ impl Client {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/content?path={}",
             self.base_url,
-            spec.namespace,
+            encode_namespace_selector(&spec.namespace),
             urlencoding::encode(&spec.absolute_path)
         );
         let request = self.authenticated(self.agent.get(&url));
@@ -176,7 +195,11 @@ impl Client {
     }
 
     pub fn begin_upload(&self, namespace: &str) -> Result<BeginUploadResponse, ClientError> {
-        let url = format!("{}/v0/namespaces/{namespace}/uploads", self.base_url);
+        let url = format!(
+            "{}/v0/namespaces/{}/uploads",
+            self.base_url,
+            encode_namespace_selector(namespace)
+        );
         self.request_json::<(), BeginUploadResponse>(self.agent.post(&url), None)
     }
 
@@ -188,8 +211,9 @@ impl Client {
         bytes: &[u8],
     ) -> Result<UploadBlockResponse, ClientError> {
         let url = format!(
-            "{}/v0/namespaces/{namespace}/uploads/{upload_id}/blocks/{block_index}",
-            self.base_url
+            "{}/v0/namespaces/{}/uploads/{upload_id}/blocks/{block_index}",
+            self.base_url,
+            encode_namespace_selector(namespace)
         );
         let request = self
             .authenticated(self.agent.put(&url))
@@ -208,8 +232,9 @@ impl Client {
         request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse, ClientError> {
         let url = format!(
-            "{}/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
-            self.base_url
+            "{}/v0/namespaces/{}/uploads/{upload_id}/complete",
+            self.base_url,
+            encode_namespace_selector(namespace)
         );
         self.request_json::<_, CompleteUploadResponse>(self.agent.post(&url), Some(request))
     }
@@ -219,7 +244,11 @@ impl Client {
         namespace: &str,
         request: &V0CommitRequest,
     ) -> Result<V0CommitResponse, ClientError> {
-        let url = format!("{}/v0/namespaces/{namespace}/commits", self.base_url);
+        let url = format!(
+            "{}/v0/namespaces/{}/commits",
+            self.base_url,
+            encode_namespace_selector(namespace)
+        );
         self.request_json::<_, V0CommitResponse>(self.agent.post(&url), Some(request))
     }
 
@@ -229,8 +258,10 @@ impl Client {
         after_seq: ChangeSeq,
     ) -> Result<ChangesResponse, ClientError> {
         let url = format!(
-            "{}/v0/namespaces/{namespace}/changes?after_seq={}",
-            self.base_url, after_seq.0
+            "{}/v0/namespaces/{}/changes?after_seq={}",
+            self.base_url,
+            encode_namespace_selector(namespace),
+            after_seq.0
         );
         self.request_json::<(), ChangesResponse>(self.agent.get(&url), None)
     }
@@ -241,8 +272,9 @@ impl Client {
         request: &FilesystemOperationRequest,
     ) -> Result<FilesystemOperationResponse, ClientError> {
         let url = format!(
-            "{}/v0/namespaces/{namespace}/filesystem/operations",
-            self.base_url
+            "{}/v0/namespaces/{}/filesystem/operations",
+            self.base_url,
+            encode_namespace_selector(namespace)
         );
         self.request_json::<_, FilesystemOperationResponse>(self.agent.post(&url), Some(request))
     }
@@ -580,6 +612,10 @@ fn file_name_for_path(path: &str) -> Result<String, ClientError> {
         .find(|segment| !segment.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| ClientError::InvalidNamespacePath(path.to_owned()))
+}
+
+fn encode_namespace_selector(namespace_selector: &str) -> String {
+    urlencoding::encode(namespace_selector).into_owned()
 }
 
 fn join_remote_path(base: &str, relative: &Path) -> Result<String, ClientError> {

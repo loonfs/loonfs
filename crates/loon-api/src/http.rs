@@ -14,7 +14,13 @@ pub struct CreateNamespaceRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceSummary {
-    pub name: NamespaceId,
+    pub namespace_id: NamespaceId,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameNamespaceRequest {
+    pub new_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

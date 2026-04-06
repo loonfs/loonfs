@@ -29,10 +29,14 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        harness
+        let namespace = harness
             .client
             .create_namespace("demo")
             .expect("create namespace");
+        assert_eq!(namespace.name, "demo");
+        assert!(loon_api::NamespaceId::looks_generated(
+            namespace.namespace_id.as_str()
+        ));
         let target = NamespacePath::parse("demo:/notes/hello.txt").expect("parse namespace path");
         harness
             .client
@@ -52,6 +56,137 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_namespace_rename_keeps_id_stable_and_switches_name_resolution() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-rename",
+        "http-rename-smoke",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let created = harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let namespace_id = created.namespace_id.clone();
+
+        let target_by_name = NamespacePath::parse("demo:/notes/hello.txt").expect("target");
+        harness
+            .client
+            .write_file_bytes(&target_by_name, b"rename me\n")
+            .expect("write file");
+
+        let target_by_id = NamespacePath::parse(&format!("{namespace_id}:/notes/hello.txt"))
+            .expect("target by id");
+        let id_entry = harness.client.stat_path(&target_by_id).expect("stat by id");
+        assert_eq!(id_entry.size_bytes, Some(10));
+
+        let renamed = harness
+            .client
+            .rename_namespace("demo", "docs")
+            .expect("rename namespace");
+        assert_eq!(renamed.namespace_id, namespace_id);
+        assert_eq!(renamed.name, "docs");
+
+        let namespaces = harness.client.list_namespaces().expect("list namespaces");
+        assert_eq!(namespaces.len(), 1);
+        assert_eq!(namespaces[0], renamed);
+
+        let target_by_new_name =
+            NamespacePath::parse("docs:/notes/hello.txt").expect("target by new name");
+        let new_name_entry = harness
+            .client
+            .stat_path(&target_by_new_name)
+            .expect("stat by new name");
+        assert_eq!(new_name_entry.inode_id, id_entry.inode_id);
+
+        let bytes_by_id = harness
+            .client
+            .read_file_bytes(&target_by_id)
+            .expect("read by id");
+        assert_eq!(bytes_by_id, b"rename me\n");
+
+        match harness.client.stat_path(&target_by_name) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_not_found"),
+            other => panic!("expected namespace_not_found for old name, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_namespace_name_collisions_are_rejected() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-name-collision",
+        "http-name-collision",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let first = harness
+            .client
+            .create_namespace("alpha")
+            .expect("create first namespace");
+        let second = harness
+            .client
+            .create_namespace("beta")
+            .expect("create second namespace");
+        assert_ne!(first.namespace_id, second.namespace_id);
+
+        match harness.client.rename_namespace("alpha", "beta") {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_name_conflict"),
+            other => panic!("expected namespace_name_conflict, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_namespace_selectors_with_spaces_round_trip_through_client_urls() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-selector-encoding",
+        "http-selector-encoding",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = harness
+            .client
+            .create_namespace("Demo Space")
+            .expect("create namespace");
+        assert_eq!(namespace.name, "Demo Space");
+
+        let target = NamespacePath::parse("Demo Space:/docs/hello.txt").expect("target");
+        harness
+            .client
+            .write_file_bytes(&target, b"space selector\n")
+            .expect("write file");
+
+        let entry = harness.client.stat_path(&target).expect("stat path");
+        assert_eq!(entry.size_bytes, Some(15));
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_create_only_and_copy_preserve_cli_semantics() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -63,10 +198,11 @@ async fn http_put_create_only_and_copy_preserve_cli_semantics() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        harness
+        let namespace = harness
             .client
             .create_namespace("demo")
             .expect("create namespace");
+        assert_eq!(namespace.name, "demo");
         let source = NamespacePath::parse("demo:/docs/hello.txt").expect("source");
         harness
             .client
@@ -120,35 +256,39 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
+        let namespace_selector = "demo";
         let file_bytes = b"phase-2a over http\n";
         let target = NamespacePath::parse("demo:/uploaded.txt").expect("target");
-        harness
+        let namespace = harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(namespace_selector)
             .expect("create namespace");
+        assert_eq!(namespace.name, "demo");
 
         let begin = harness
             .client
-            .begin_upload(namespace)
+            .begin_upload(namespace_selector)
             .expect("begin upload");
         let first_block = harness
             .client
-            .upload_block(namespace, &begin.upload_id, 0, file_bytes)
+            .upload_block(namespace_selector, &begin.upload_id, 0, file_bytes)
             .expect("upload block");
         let repeated_block = harness
             .client
-            .upload_block(namespace, &begin.upload_id, 0, file_bytes)
+            .upload_block(namespace_selector, &begin.upload_id, 0, file_bytes)
             .expect("repeat upload block");
         assert_eq!(first_block, repeated_block);
-        match harness
-            .client
-            .upload_block(namespace, &begin.upload_id, 0, b"different bytes")
-        {
+        match harness.client.upload_block(
+            namespace_selector,
+            &begin.upload_id,
+            0,
+            b"different bytes",
+        ) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_block_conflict"),
             other => panic!("expected upload_block_conflict, got {other:?}"),
         }
-        let manifest_digest = stage_uploaded_manifest(&harness.client, namespace, file_bytes);
+        let manifest_digest =
+            stage_uploaded_manifest(&harness.client, namespace_selector, file_bytes);
 
         let mut annotations = CommitAnnotations::new();
         annotations.insert("source".to_owned(), json!("http-smoke"));
@@ -169,7 +309,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         };
         let commit = harness
             .client
-            .commit_operations(namespace, &commit_request)
+            .commit_operations(namespace_selector, &commit_request)
             .expect("commit uploaded file");
         assert_eq!(commit.commit_id, "req-phase-2a-create-file");
         assert_eq!(commit.committed_seq, ChangeSeq(1));
@@ -185,7 +325,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let repeated_commit = harness
             .client
-            .commit_operations(namespace, &commit_request)
+            .commit_operations(namespace_selector, &commit_request)
             .expect("repeat commit");
         assert_eq!(repeated_commit, commit);
 
@@ -206,9 +346,9 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let changes = harness
             .client
-            .list_changes(namespace, ChangeSeq(0))
+            .list_changes(namespace_selector, ChangeSeq(0))
             .expect("list changes");
-        assert_eq!(changes.namespace_id.as_str(), namespace);
+        assert_eq!(changes.namespace_id, namespace.namespace_id);
         assert_eq!(changes.from_exclusive_seq, ChangeSeq(0));
         assert_eq!(changes.through_seq, commit.committed_seq);
         assert_eq!(changes.changes.len(), 1);
@@ -222,7 +362,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let empty = harness
             .client
-            .list_changes(namespace, commit.committed_seq)
+            .list_changes(namespace_selector, commit.committed_seq)
             .expect("list changes after head");
         assert_eq!(empty.changes, Vec::new());
     })
@@ -448,14 +588,15 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let namespace = "demo";
-        harness
+        let namespace_selector = "demo";
+        let namespace = harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(namespace_selector)
             .expect("create namespace");
+        assert_eq!(namespace.name, "demo");
 
         let first_manifest =
-            stage_uploaded_manifest(&harness.client, namespace, b"first payload\n");
+            stage_uploaded_manifest(&harness.client, namespace_selector, b"first payload\n");
         let first_request = V0CommitRequest {
             request_id: "req-phase-2a-conflict".to_owned(),
             planned_head_seq: ChangeSeq(0),
@@ -472,11 +613,11 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
         };
         harness
             .client
-            .commit_operations(namespace, &first_request)
+            .commit_operations(namespace_selector, &first_request)
             .expect("first commit");
 
         let second_manifest =
-            stage_uploaded_manifest(&harness.client, namespace, b"second payload\n");
+            stage_uploaded_manifest(&harness.client, namespace_selector, b"second payload\n");
         let mut changed_annotations = BTreeMap::new();
         changed_annotations.insert("source".to_owned(), json!("changed"));
         let conflicting_request = V0CommitRequest {
@@ -494,7 +635,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
 
         match harness
             .client
-            .commit_operations(namespace, &conflicting_request)
+            .commit_operations(namespace_selector, &conflicting_request)
         {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "request_id_conflict"),
             other => panic!("expected request_id_conflict, got {other:?}"),
@@ -518,10 +659,11 @@ async fn http_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        harness
+        let namespace = harness
             .client
             .create_namespace("demo")
             .expect("create namespace");
+        assert_eq!(namespace.name, "demo");
         let target = NamespacePath::parse("demo:/docs/retry.txt").expect("target");
         let request_id = "req-v1-put";
 
@@ -570,10 +712,11 @@ async fn http_delete_move_and_copy_request_ids_are_idempotent() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        harness
+        let namespace = harness
             .client
             .create_namespace("demo")
             .expect("create namespace");
+        assert_eq!(namespace.name, "demo");
         let source = NamespacePath::parse("demo:/docs/source.txt").expect("source");
         harness
             .client
@@ -781,7 +924,8 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
     let client_b = server_b.client.clone();
 
     tokio::task::spawn_blocking(move || {
-        client_a.create_namespace("demo").expect("create namespace");
+        let namespace = client_a.create_namespace("demo").expect("create namespace");
+        assert_eq!(namespace.name, "demo");
         let host_a_target = NamespacePath::parse("demo:/docs/host-a.txt").expect("host a target");
         client_a
             .write_file_bytes(&host_a_target, b"host a\n")

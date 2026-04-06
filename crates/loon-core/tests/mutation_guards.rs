@@ -866,7 +866,8 @@ fn move_path_into_occupied_target_is_path_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -903,7 +904,8 @@ fn move_path_directory_cycle_is_would_cycle() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -931,7 +933,8 @@ fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -987,7 +990,8 @@ fn put_file_create_only_rejects_existing_target_without_force() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -1016,7 +1020,8 @@ fn delete_path_non_recursive_rejects_non_empty_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -1043,7 +1048,8 @@ fn copy_file_path_creates_new_inode_and_reuses_content_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -1080,7 +1086,8 @@ fn resolve_path_uses_nfc_casefold_name_policy() {
     let context = mutation_context();
     let stored_path = "/Cafe\u{0301}.txt";
     let lookup_path = "/CAF\u{00c9}.TXT";
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -1101,7 +1108,8 @@ fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -1187,5 +1195,9 @@ fn mutation_context() -> MutationContext {
 }
 
 fn namespace_id() -> NamespaceId {
-    NamespaceId::from("demo".to_owned())
+    NamespaceId::from("ns_00000000000000000000000000000001".to_owned())
+}
+
+fn namespace_name() -> &'static str {
+    "demo"
 }
