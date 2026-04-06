@@ -19,13 +19,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    Init(InitArgs),
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
-    },
-    Local {
-        #[command(subcommand)]
-        command: LocalCommand,
     },
     Namespace {
         #[command(subcommand)]
@@ -42,51 +39,137 @@ pub enum Command {
     Version,
 }
 
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    pub name: Option<String>,
+    #[arg(long)]
+    pub store_kind: Option<String>,
+    #[arg(long)]
+    pub root: Option<String>,
+    #[arg(long)]
+    pub bucket: Option<String>,
+    #[arg(long)]
+    pub region: Option<String>,
+    #[arg(long)]
+    pub access_key_id: Option<String>,
+    #[arg(long)]
+    pub secret_access_key: Option<String>,
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
+    #[arg(long)]
+    pub account_id: Option<String>,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ProfileCommand {
     Add {
         #[command(subcommand)]
-        command: ProfileAddCommand,
+        command: Option<ProfileAddCommand>,
     },
     List,
-    Use {
-        name: String,
-    },
     Show {
         name: Option<String>,
     },
+    Update(ProfileUpdateArgs),
     Remove {
+        name: String,
+    },
+    MakeDefault {
         name: String,
     },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProfileAddCommand {
-    Local(ProfileAddLocalArgs),
+    LocalFs(ProfileAddLocalFsArgs),
+    AwsS3(ProfileAddAwsS3Args),
+    CloudflareR2(ProfileAddCloudflareR2Args),
     Remote(ProfileAddRemoteArgs),
 }
 
 #[derive(Debug, Args)]
-pub struct ProfileAddLocalArgs {
+pub struct ProfileAddLocalFsArgs {
     pub name: String,
     #[arg(long)]
-    pub server_config: Option<PathBuf>,
+    pub root: String,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileAddAwsS3Args {
+    pub name: String,
+    #[arg(long)]
+    pub bucket: String,
+    #[arg(long)]
+    pub region: String,
+    #[arg(long)]
+    pub access_key_id: String,
+    #[arg(long)]
+    pub secret_access_key: String,
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
+    #[arg(long)]
+    pub session_token: Option<String>,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    #[arg(long)]
+    pub force_path_style: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileAddCloudflareR2Args {
+    pub name: String,
+    #[arg(long)]
+    pub bucket: String,
+    #[arg(long)]
+    pub account_id: String,
+    #[arg(long)]
+    pub endpoint_url: String,
+    #[arg(long)]
+    pub access_key_id: String,
+    #[arg(long)]
+    pub secret_access_key: String,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct ProfileAddRemoteArgs {
     pub name: String,
     #[arg(long)]
-    pub server_url: Option<String>,
+    pub server_url: String,
     #[arg(long)]
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Subcommand)]
-pub enum LocalCommand {
-    Up,
-    Status,
-    Down,
+#[derive(Debug, Args)]
+pub struct ProfileUpdateArgs {
+    pub name: String,
+    #[arg(long)]
+    pub root: Option<String>,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    #[arg(long)]
+    pub bucket: Option<String>,
+    #[arg(long)]
+    pub region: Option<String>,
+    #[arg(long)]
+    pub access_key_id: Option<String>,
+    #[arg(long)]
+    pub secret_access_key: Option<String>,
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
+    #[arg(long)]
+    pub session_token: Option<String>,
+    #[arg(long)]
+    pub account_id: Option<String>,
+    #[arg(long)]
+    pub server_url: Option<String>,
+    #[arg(long)]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -166,14 +249,13 @@ impl RuntimeBehavior {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
+    Init,
     ProfileAdd,
     ProfileList,
-    ProfileUse,
     ProfileShow,
+    ProfileUpdate,
     ProfileRemove,
-    LocalUp,
-    LocalStatus,
-    LocalDown,
+    ProfileMakeDefault,
     NamespaceCreate,
     NamespaceList,
     FilesystemLs,
@@ -192,14 +274,13 @@ pub enum CommandKind {
 impl CommandKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            CommandKind::Init => "init",
             CommandKind::ProfileAdd => "profile_add",
             CommandKind::ProfileList => "profile_list",
-            CommandKind::ProfileUse => "profile_use",
             CommandKind::ProfileShow => "profile_show",
+            CommandKind::ProfileUpdate => "profile_update",
             CommandKind::ProfileRemove => "profile_remove",
-            CommandKind::LocalUp => "local_up",
-            CommandKind::LocalStatus => "local_status",
-            CommandKind::LocalDown => "local_down",
+            CommandKind::ProfileMakeDefault => "profile_make_default",
             CommandKind::NamespaceCreate => "namespace_create",
             CommandKind::NamespaceList => "namespace_list",
             CommandKind::FilesystemLs => "filesystem_ls",
@@ -224,17 +305,14 @@ impl CommandKind {
 impl Cli {
     pub fn kind(&self) -> CommandKind {
         match &self.command {
+            Command::Init(_) => CommandKind::Init,
             Command::Profile { command } => match command {
                 ProfileCommand::Add { .. } => CommandKind::ProfileAdd,
                 ProfileCommand::List => CommandKind::ProfileList,
-                ProfileCommand::Use { .. } => CommandKind::ProfileUse,
                 ProfileCommand::Show { .. } => CommandKind::ProfileShow,
+                ProfileCommand::Update { .. } => CommandKind::ProfileUpdate,
                 ProfileCommand::Remove { .. } => CommandKind::ProfileRemove,
-            },
-            Command::Local { command } => match command {
-                LocalCommand::Up => CommandKind::LocalUp,
-                LocalCommand::Status => CommandKind::LocalStatus,
-                LocalCommand::Down => CommandKind::LocalDown,
+                ProfileCommand::MakeDefault { .. } => CommandKind::ProfileMakeDefault,
             },
             Command::Namespace { command } => match command {
                 NamespaceCommand::Create { .. } => CommandKind::NamespaceCreate,

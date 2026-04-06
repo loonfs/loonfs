@@ -1,6 +1,6 @@
 ---
 source: crates/loon-cli/src/render.rs
-assertion_line: 272
+assertion_line: 228
 expression: "serde_json::from_str::<serde_json::Value>(&json_error(&failure).unwrap()).unwrap()"
 ---
 {
@@ -11,5 +11,5 @@ expression: "serde_json::from_str::<serde_json::Value>(&json_error(&failure).unw
   "format_version": 1,
   "kind": "config_show",
   "mode": "remote",
-  "profile": "alpha"
+  "profile": "default"
 }

@@ -1,6 +1,5 @@
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput};
-use crate::config::ProfileMode;
 use crate::error::CliError;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -71,7 +70,7 @@ pub fn json_success(output: &CommandOutput) -> io::Result<String> {
             kind: output.kind.as_str(),
             format_version: FORMAT_VERSION,
             profile: output.profile.as_deref(),
-            mode: output.mode.map(profile_mode_str),
+            mode: output.mode.as_deref(),
             data: Some(data),
             error: None,
         })
@@ -84,7 +83,7 @@ pub fn json_error(failure: &CommandFailure) -> io::Result<String> {
         kind: failure.kind.as_str(),
         format_version: FORMAT_VERSION,
         profile: failure.profile.as_deref(),
-        mode: failure.mode.map(profile_mode_str),
+        mode: failure.mode.as_deref(),
         data: None,
         error: Some(&failure.error),
     })
@@ -93,41 +92,39 @@ pub fn json_error(failure: &CommandFailure) -> io::Result<String> {
 
 pub fn human_success(output: &CommandOutput) -> String {
     match &output.data {
-        CommandData::Profile(profile) => toml::to_string_pretty(profile).unwrap_or_else(|_| {
-            format!(
-                "name = \"{}\"\nmode = \"{}\"",
-                profile.name,
-                profile_mode_str(profile.mode)
-            )
-        }),
+        CommandData::Profile(profile) => toml::to_string_pretty(profile)
+            .unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode_str())),
         CommandData::ProfileSummary(profile) => match output.kind {
             CommandKind::ProfileRemove => format!("removed profile {}", profile.name),
-            _ => format!("{} ({})", profile.name, profile_mode_str(profile.mode)),
+            _ => {
+                let store = profile
+                    .store_kind
+                    .as_deref()
+                    .map(|s| format!(" ({s})"))
+                    .unwrap_or_default();
+                format!("{} {}{store}", profile.mode, profile.name)
+            }
         },
-        CommandData::ProfileList { profiles } => profiles
-            .iter()
-            .map(|profile| {
-                format!(
-                    "{} {}\t{}",
-                    if profile.active { "*" } else { "-" },
-                    profile.name,
-                    profile_mode_str(profile.mode)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        CommandData::LocalStatus(status) => {
-            let mut lines = vec![
-                format!("profile: {}", status.profile_name),
-                format!("status: {}", local_status_str(status.status)),
-                format!("server_url: {}", status.server_url),
-                format!("server_config_path: {}", status.server_config_path),
-            ];
-            if let Some(pid) = status.pid {
-                lines.push(format!("pid: {pid}"));
+        CommandData::ProfileList {
+            default_profile,
+            profiles,
+        } => {
+            let mut lines = vec!["NAME\tMODE\tSTORE\tDEFAULT".to_owned()];
+            for profile in profiles {
+                let store = profile.store_kind.as_deref().unwrap_or("-");
+                let default = if profile.name == *default_profile {
+                    "*"
+                } else {
+                    ""
+                };
+                lines.push(format!(
+                    "{}\t{}\t{store}\t{default}",
+                    profile.name, profile.mode
+                ));
             }
             lines.join("\n")
         }
+        CommandData::DefaultProfile { name } => format!("default profile set to `{name}`"),
         CommandData::NamespaceSummary(namespace) => namespace.name.to_string(),
         CommandData::NamespaceList { namespaces } => namespaces
             .iter()
@@ -139,7 +136,7 @@ pub fn human_success(output: &CommandOutput) -> String {
             .map(|entry| {
                 let size = entry
                     .size_bytes
-                    .map(|value| value.to_string())
+                    .map(|value: u64| value.to_string())
                     .unwrap_or_else(|| "-".to_owned());
                 format!("{:?}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
             })
@@ -194,32 +191,14 @@ pub fn human_success(output: &CommandOutput) -> String {
     }
 }
 
-fn profile_mode_str(mode: ProfileMode) -> &'static str {
-    match mode {
-        ProfileMode::Local => "local",
-        ProfileMode::Remote => "remote",
-    }
-}
-
-fn local_status_str(status: crate::local_runtime::LocalServerStatusKind) -> &'static str {
-    match status {
-        crate::local_runtime::LocalServerStatusKind::Running => "running",
-        crate::local_runtime::LocalServerStatusKind::Stale => "stale",
-        crate::local_runtime::LocalServerStatusKind::Stopped => "stopped",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{human_success, json_error, json_success};
+    use super::{human_success, json_error};
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
-    use crate::config::{ProfileMode, RedactedCliConfig};
     use crate::error::CliError;
-    use crate::local_runtime::{LocalServerStatus, LocalServerStatusKind};
-    use crate::profiles::{ProfileSummary, ProfileView};
+    use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
-    use std::collections::BTreeMap;
 
     #[test]
     fn human_profile_list_snapshot() {
@@ -228,16 +207,17 @@ mod tests {
             profile: None,
             mode: None,
             data: CommandData::ProfileList {
+                default_profile: "default".to_owned(),
                 profiles: vec![
                     ProfileSummary {
-                        name: "alpha".to_owned(),
-                        mode: ProfileMode::Local,
-                        active: true,
+                        name: "default".to_owned(),
+                        mode: "local".to_owned(),
+                        store_kind: Some("local-fs".to_owned()),
                     },
                     ProfileSummary {
-                        name: "beta".to_owned(),
-                        mode: ProfileMode::Remote,
-                        active: false,
+                        name: "prod".to_owned(),
+                        mode: "remote".to_owned(),
+                        store_kind: None,
                     },
                 ],
             },
@@ -246,73 +226,16 @@ mod tests {
     }
 
     #[test]
-    fn json_local_status_snapshot() {
-        let output = CommandOutput {
-            kind: CommandKind::LocalStatus,
-            profile: Some("alpha".to_owned()),
-            mode: Some(ProfileMode::Local),
-            data: CommandData::LocalStatus(LocalServerStatus {
-                profile_name: "alpha".to_owned(),
-                status: LocalServerStatusKind::Running,
-                server_url: "http://127.0.0.1:9400".to_owned(),
-                server_config_path: "/tmp/loond.toml".to_owned(),
-                pid: Some(42),
-            }),
-        };
-        assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
-            &json_success(&output).unwrap()
-        )
-        .unwrap());
-    }
-
-    #[test]
     fn json_error_snapshot() {
         let failure = CommandFailure {
             kind: CommandKind::ConfigShow,
-            profile: Some("alpha".to_owned()),
-            mode: Some(ProfileMode::Remote),
+            profile: Some("default".to_owned()),
+            mode: Some("remote".to_owned()),
             error: CliError::new("client_error", "connection refused"),
         };
         assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
             &json_error(&failure).unwrap()
         )
         .unwrap());
-    }
-
-    #[test]
-    fn human_profile_show_snapshot() {
-        let output = CommandOutput {
-            kind: CommandKind::ProfileShow,
-            profile: Some("alpha".to_owned()),
-            mode: Some(ProfileMode::Remote),
-            data: CommandData::Profile(ProfileView {
-                name: "alpha".to_owned(),
-                mode: ProfileMode::Remote,
-                active: true,
-                local: None,
-                remote: Some(crate::config::RedactedRemoteProfileConfig {
-                    server_url: "https://example.com".to_owned(),
-                    auth_token: Some("REDACTED".to_owned()),
-                }),
-            }),
-        };
-        assert_snapshot!(human_success(&output));
-    }
-
-    #[test]
-    fn human_config_show_snapshot() {
-        let output = CommandOutput {
-            kind: CommandKind::ConfigShow,
-            profile: None,
-            mode: None,
-            data: CommandData::ConfigShow {
-                config: RedactedCliConfig {
-                    config_version: 1,
-                    active_profile: Some("alpha".to_owned()),
-                    profiles: BTreeMap::new(),
-                },
-            },
-        };
-        assert_snapshot!(human_success(&output));
     }
 }

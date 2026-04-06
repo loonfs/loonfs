@@ -5,8 +5,8 @@ mod backend;
 mod commands;
 mod config;
 mod error;
-mod local_runtime;
 mod profiles;
+mod prompt;
 mod render;
 mod resolve;
 

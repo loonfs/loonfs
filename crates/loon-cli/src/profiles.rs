@@ -1,26 +1,13 @@
-use crate::config::{
-    CliConfig, LocalProfileConfig, ProfileConfig, ProfileMode, RedactedProfileConfig,
-    RedactedRemoteProfileConfig, RemoteProfileConfig,
-};
+use crate::config::{validate_profile_name, CliConfig, ProfileConfig};
 use crate::error::CliError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileSummary {
     pub name: String,
-    pub mode: ProfileMode,
-    pub active: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileView {
-    pub name: String,
-    pub mode: ProfileMode,
-    pub active: bool,
+    pub mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local: Option<LocalProfileConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote: Option<RedactedRemoteProfileConfig>,
+    pub store_kind: Option<String>,
 }
 
 pub fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
@@ -32,8 +19,8 @@ pub fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
         .iter()
         .map(|(name, profile)| ProfileSummary {
             name: name.clone(),
-            mode: profile.mode,
-            active: config.active_profile.as_deref() == Some(name.as_str()),
+            mode: profile.mode_str().to_owned(),
+            store_kind: profile.store_kind_str().map(ToOwned::to_owned),
         })
         .collect()
 }
@@ -41,64 +28,48 @@ pub fn list_profiles(config: Option<&CliConfig>) -> Vec<ProfileSummary> {
 pub fn show_profile(
     config: &CliConfig,
     explicit_name: Option<&str>,
-) -> Result<ProfileView, CliError> {
+) -> Result<(String, ProfileConfig), CliError> {
     let name = match explicit_name {
-        Some(name) => name.to_owned(),
-        None => config
-            .active_profile
-            .clone()
-            .ok_or_else(CliError::no_active_profile)?,
+        Some(name) => name,
+        None if config.default_profile.is_empty() => return Err(CliError::no_default_profile()),
+        None => &config.default_profile,
     };
-    let profile = config
-        .profiles
-        .get(&name)
-        .ok_or_else(|| CliError::profile_not_found(&name))?;
-    Ok(profile_view(
-        &name,
-        profile.redacted(),
-        config.active_profile.as_deref() == Some(name.as_str()),
-    ))
-}
-
-pub fn add_local_profile(
-    config: &mut CliConfig,
-    name: &str,
-    local: LocalProfileConfig,
-) -> Result<ProfileView, CliError> {
-    add_profile(config, name, ProfileConfig::local(local))
-}
-
-pub fn add_remote_profile(
-    config: &mut CliConfig,
-    name: &str,
-    remote: RemoteProfileConfig,
-) -> Result<ProfileView, CliError> {
-    add_profile(config, name, ProfileConfig::remote(remote))
-}
-
-fn add_profile(
-    config: &mut CliConfig,
-    name: &str,
-    profile: ProfileConfig,
-) -> Result<ProfileView, CliError> {
-    if config.profiles.contains_key(name) {
-        return Err(CliError::profile_already_exists(name));
-    }
-    let should_activate = config.active_profile.is_none();
-    config.profiles.insert(name.to_owned(), profile.clone());
-    if should_activate {
-        config.active_profile = Some(name.to_owned());
-    }
-    Ok(profile_view(name, profile.redacted(), should_activate))
-}
-
-pub fn use_profile(config: &mut CliConfig, name: &str) -> Result<ProfileView, CliError> {
     let profile = config
         .profiles
         .get(name)
         .ok_or_else(|| CliError::profile_not_found(name))?;
-    config.active_profile = Some(name.to_owned());
-    Ok(profile_view(name, profile.redacted(), true))
+    Ok((name.to_owned(), profile.redacted()))
+}
+
+pub fn add_profile(
+    config: &mut CliConfig,
+    name: &str,
+    profile: ProfileConfig,
+) -> Result<(String, ProfileConfig), CliError> {
+    validate_profile_name(name)?;
+    if config.profiles.contains_key(name) {
+        return Err(CliError::profile_already_exists(name));
+    }
+    let is_first = config.profiles.is_empty();
+    let redacted = profile.redacted();
+    config.profiles.insert(name.to_owned(), profile);
+    if is_first {
+        config.default_profile = name.to_owned();
+    }
+    Ok((name.to_owned(), redacted))
+}
+
+pub fn update_profile(
+    config: &mut CliConfig,
+    name: &str,
+    profile: ProfileConfig,
+) -> Result<(String, ProfileConfig), CliError> {
+    if !config.profiles.contains_key(name) {
+        return Err(CliError::profile_not_found(name));
+    }
+    let redacted = profile.redacted();
+    config.profiles.insert(name.to_owned(), profile);
+    Ok((name.to_owned(), redacted))
 }
 
 pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSummary, CliError> {
@@ -106,14 +77,22 @@ pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSumma
         .profiles
         .remove(name)
         .ok_or_else(|| CliError::profile_not_found(name))?;
-    if config.active_profile.as_deref() == Some(name) {
-        config.active_profile = None;
+    if config.default_profile == name {
+        config.default_profile.clear();
     }
     Ok(ProfileSummary {
         name: name.to_owned(),
-        mode: removed.mode,
-        active: false,
+        mode: removed.mode_str().to_owned(),
+        store_kind: removed.store_kind_str().map(ToOwned::to_owned),
     })
+}
+
+pub fn make_default_profile(config: &mut CliConfig, name: &str) -> Result<(), CliError> {
+    if !config.profiles.contains_key(name) {
+        return Err(CliError::profile_not_found(name));
+    }
+    config.default_profile = name.to_owned();
+    Ok(())
 }
 
 pub fn resolve_profile<'a>(
@@ -122,24 +101,12 @@ pub fn resolve_profile<'a>(
 ) -> Result<(&'a str, &'a ProfileConfig), CliError> {
     let name = match explicit_name {
         Some(name) => name,
-        None => config
-            .active_profile
-            .as_deref()
-            .ok_or_else(CliError::no_active_profile)?,
+        None if config.default_profile.is_empty() => return Err(CliError::no_default_profile()),
+        None => &config.default_profile,
     };
     let profile = config
         .profiles
         .get(name)
         .ok_or_else(|| CliError::profile_not_found(name))?;
     Ok((name, profile))
-}
-
-fn profile_view(name: &str, redacted: RedactedProfileConfig, active: bool) -> ProfileView {
-    ProfileView {
-        name: name.to_owned(),
-        mode: redacted.mode,
-        active,
-        local: redacted.local,
-        remote: redacted.remote,
-    }
 }

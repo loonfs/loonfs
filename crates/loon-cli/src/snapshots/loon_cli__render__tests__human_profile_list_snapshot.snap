@@ -1,7 +1,8 @@
 ---
 source: crates/loon-cli/src/render.rs
-assertion_line: 241
+assertion_line: 225
 expression: human_success(&output)
 ---
-* alpha	local
-- beta	remote
+NAME	MODE	STORE	DEFAULT
+default	local	local-fs	*
+prod	remote	-

@@ -1,50 +1,81 @@
 use crate::args::{
-    Cli, Command, CommandKind, ConfigCommand, FilesystemCommand, LocalCommand, NamespaceCommand,
-    ProfileAddCommand, ProfileAddLocalArgs, ProfileAddRemoteArgs, ProfileCommand, RuntimeBehavior,
+    Cli, Command, CommandKind, ConfigCommand, FilesystemCommand, InitArgs, NamespaceCommand,
+    ProfileAddCommand, ProfileCommand, ProfileUpdateArgs, RuntimeBehavior,
 };
 use crate::config::{
-    load_config, load_config_if_exists, load_or_default_config, resolve_profile_path, save_config,
-    LocalProfileConfig, ProfileMode, RemoteProfileConfig,
+    load_config, load_config_if_exists, load_or_default_config, save_config, ProfileConfig,
+    StoreConfig,
 };
 use crate::error::CliError;
-use crate::local_runtime::{
-    inspect_local_server, start_local_server, stop_local_server, LocalServerStatus,
-};
 use crate::profiles::{
-    add_local_profile, add_remote_profile, list_profiles, remove_profile, show_profile,
-    use_profile, ProfileSummary, ProfileView,
+    add_profile, list_profiles, make_default_profile, remove_profile, show_profile, update_profile,
+    ProfileSummary,
 };
+use crate::prompt;
 use crate::resolve::{resolve_target_profile, resolved_config_path};
 use loon_api::{AuthoritativePathEntry, NamespaceSummary};
-use loon_client::{ClientError, NamespacePath};
+
+const AWS_REGIONS: &[&str] = &[
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
+    "eu-central-1",
+    "eu-central-2",
+    "eu-north-1",
+    "eu-south-1",
+    "eu-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-east-1",
+    "ca-central-1",
+    "ca-west-1",
+    "sa-east-1",
+    "me-south-1",
+    "me-central-1",
+    "af-south-1",
+    "il-central-1",
+];
+use loon_client::NamespacePath;
 use serde::Serialize;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 pub struct CommandOutput {
     pub kind: CommandKind,
     pub profile: Option<String>,
-    pub mode: Option<ProfileMode>,
+    pub mode: Option<String>,
     pub data: CommandData,
 }
 
 pub struct CommandFailure {
     pub kind: CommandKind,
     pub profile: Option<String>,
-    pub mode: Option<ProfileMode>,
+    pub mode: Option<String>,
     pub error: CliError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandData {
-    Profile(ProfileView),
+    Profile(ProfileConfig),
     ProfileSummary(ProfileSummary),
     ProfileList {
+        default_profile: String,
         profiles: Vec<ProfileSummary>,
     },
-    LocalStatus(LocalServerStatus),
+    DefaultProfile {
+        name: String,
+    },
     NamespaceSummary(NamespaceSummary),
     NamespaceList {
         namespaces: Vec<NamespaceSummary>,
@@ -71,7 +102,7 @@ pub enum CommandData {
         path: String,
     },
     ConfigShow {
-        config: crate::config::RedactedCliConfig,
+        config: crate::config::CliConfig,
     },
     Version {
         version: String,
@@ -104,12 +135,10 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
         }),
+        Command::Init(args) => run_init(kind, cli.config.as_deref(), args, runtime),
         Command::Config { command } => run_config_command(kind, cli.config.as_deref(), command),
         Command::Profile { command } => {
             run_profile_command(kind, cli.config.as_deref(), command, runtime)
-        }
-        Command::Local { command } => {
-            run_local_command(kind, cli.config.as_deref(), cli.profile.as_deref(), command)
         }
         Command::Namespace { command } => {
             run_namespace_command(kind, cli.config.as_deref(), cli.profile.as_deref(), command)
@@ -123,6 +152,134 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
         ),
     }
 }
+
+// --- init ---
+
+fn run_init(
+    kind: CommandKind,
+    explicit_config: Option<&Path>,
+    args: InitArgs,
+    runtime: RuntimeBehavior,
+) -> Result<CommandOutput, CommandFailure> {
+    let config_path =
+        resolved_config_path(explicit_config).map_err(|error| fail(kind, None, None, error))?;
+
+    let result = (|| -> Result<(String, ProfileConfig), CliError> {
+        let name = match &args.name {
+            Some(n) => n.clone(),
+            None if runtime.interactive => prompt::prompt_line_default("profile name", "default")?,
+            None => "default".to_owned(),
+        };
+
+        let store = build_local_store_interactive(&args, runtime)?;
+        let profile = ProfileConfig::Local {
+            store,
+            writer_id: None,
+            writer_version: None,
+            lease_duration_ms: None,
+        };
+
+        let mut config = load_or_default_config(&config_path)?;
+        let (profile_name, redacted) = add_profile(&mut config, &name, profile)?;
+        config.default_profile = profile_name.clone();
+        save_config(&config_path, &config)?;
+        Ok((profile_name, redacted))
+    })()
+    .map_err(|error| fail(kind, None, Some("local".to_owned()), error))?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(result.0),
+        mode: Some("local".to_owned()),
+        data: CommandData::Profile(result.1),
+    })
+}
+
+fn build_local_store_interactive(
+    args: &InitArgs,
+    runtime: RuntimeBehavior,
+) -> Result<StoreConfig, CliError> {
+    let store_kind = match &args.store_kind {
+        Some(k) => k.clone(),
+        None if runtime.interactive => {
+            prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])?
+        }
+        None => {
+            return Err(CliError::non_interactive_input_required("store-kind"));
+        }
+    };
+
+    match store_kind.as_str() {
+        "local-fs" => {
+            let root = require_or_prompt(&args.root, "root", runtime)?;
+            Ok(StoreConfig::LocalFs {
+                root,
+                key_prefix: args.key_prefix.clone(),
+            })
+        }
+        "aws-s3" => {
+            let bucket = require_or_prompt(&args.bucket, "bucket name", runtime)?;
+            let region = require_or_prompt_region(&args.region, runtime)?;
+            let access_key_id = require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
+            let secret_access_key =
+                require_or_prompt(&args.secret_access_key, "secret-access-key", runtime)?;
+            Ok(StoreConfig::AwsS3 {
+                bucket,
+                region,
+                endpoint_url: args.endpoint_url.clone(),
+                access_key_id,
+                secret_access_key,
+                session_token: None,
+                key_prefix: args.key_prefix.clone(),
+                force_path_style: None,
+            })
+        }
+        "cloudflare-r2" => {
+            let bucket = require_or_prompt(&args.bucket, "bucket name", runtime)?;
+            let account_id = require_or_prompt(&args.account_id, "account-id", runtime)?;
+            let endpoint_url = require_or_prompt(&args.endpoint_url, "endpoint-url", runtime)?;
+            let access_key_id = require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
+            let secret_access_key =
+                require_or_prompt(&args.secret_access_key, "secret-access-key", runtime)?;
+            Ok(StoreConfig::CloudflareR2 {
+                bucket,
+                account_id,
+                endpoint_url,
+                access_key_id,
+                secret_access_key,
+                key_prefix: args.key_prefix.clone(),
+            })
+        }
+        other => Err(CliError::invalid_input(format!(
+            "unknown store kind: `{other}` (expected local-fs, aws-s3, or cloudflare-r2)"
+        ))),
+    }
+}
+
+fn require_or_prompt(
+    value: &Option<String>,
+    field: &str,
+    runtime: RuntimeBehavior,
+) -> Result<String, CliError> {
+    match value {
+        Some(v) if !v.trim().is_empty() => Ok(v.clone()),
+        _ if runtime.interactive => prompt::prompt_line(field),
+        _ => Err(CliError::non_interactive_input_required(field)),
+    }
+}
+
+fn require_or_prompt_region(
+    value: &Option<String>,
+    runtime: RuntimeBehavior,
+) -> Result<String, CliError> {
+    match value {
+        Some(v) if !v.trim().is_empty() => Ok(v.clone()),
+        _ if runtime.interactive => prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0),
+        _ => Err(CliError::non_interactive_input_required("region")),
+    }
+}
+
+// --- config ---
 
 fn run_config_command(
     kind: CommandKind,
@@ -155,6 +312,8 @@ fn run_config_command(
     }
 }
 
+// --- profile ---
+
 fn run_profile_command(
     kind: CommandKind,
     explicit_config: Option<&Path>,
@@ -164,10 +323,7 @@ fn run_profile_command(
     let config_path =
         resolved_config_path(explicit_config).map_err(|error| fail(kind, None, None, error))?;
     match command {
-        ProfileCommand::Add { command } => match command {
-            ProfileAddCommand::Local(args) => add_local(kind, &config_path, args, runtime),
-            ProfileAddCommand::Remote(args) => add_remote(kind, &config_path, args, runtime),
-        },
+        ProfileCommand::Add { command } => run_profile_add(kind, &config_path, command, runtime),
         ProfileCommand::List => {
             let config = load_config_if_exists(&config_path)
                 .map_err(|error| fail(kind, None, None, error))?;
@@ -176,281 +332,489 @@ fn run_profile_command(
                 profile: None,
                 mode: None,
                 data: CommandData::ProfileList {
+                    default_profile: config
+                        .as_ref()
+                        .map(|c| c.default_profile.clone())
+                        .unwrap_or_default(),
                     profiles: list_profiles(config.as_ref()),
                 },
-            })
-        }
-        ProfileCommand::Use { name } => {
-            let mut config = load_config(&config_path)
-                .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
-            let view = use_profile(&mut config, &name)
-                .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
-            save_config(&config_path, &config)
-                .map_err(|error| fail(kind, Some(name.clone()), Some(view.mode), error))?;
-            Ok(CommandOutput {
-                kind,
-                profile: Some(name),
-                mode: Some(view.mode),
-                data: CommandData::Profile(view),
             })
         }
         ProfileCommand::Show { name } => {
             let config =
                 load_config(&config_path).map_err(|error| fail(kind, name.clone(), None, error))?;
-            let view = show_profile(&config, name.as_deref())
+            let (profile_name, redacted) = show_profile(&config, name.as_deref())
                 .map_err(|error| fail(kind, name.clone(), None, error))?;
+            let mode = redacted.mode_str().to_owned();
             Ok(CommandOutput {
                 kind,
-                profile: Some(view.name.clone()),
-                mode: Some(view.mode),
-                data: CommandData::Profile(view),
+                profile: Some(profile_name),
+                mode: Some(mode),
+                data: CommandData::Profile(redacted),
             })
         }
-        ProfileCommand::Remove { name } => {
-            let mut config = load_config(&config_path)
-                .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
-            let removed = remove_profile(&mut config, &name)
-                .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
-            save_config(&config_path, &config)
-                .map_err(|error| fail(kind, Some(name.clone()), Some(removed.mode), error))?;
-            Ok(CommandOutput {
-                kind,
-                profile: Some(name),
-                mode: Some(removed.mode),
-                data: CommandData::ProfileSummary(removed),
-            })
+        ProfileCommand::Update(args) => run_profile_update(kind, &config_path, args, runtime),
+        ProfileCommand::Remove { name } => run_profile_remove(kind, &config_path, &name, runtime),
+        ProfileCommand::MakeDefault { name } => run_profile_make_default(kind, &config_path, &name),
+    }
+}
+
+fn run_profile_add(
+    kind: CommandKind,
+    config_path: &Path,
+    command: Option<ProfileAddCommand>,
+    runtime: RuntimeBehavior,
+) -> Result<CommandOutput, CommandFailure> {
+    let (name, profile) = match command {
+        Some(cmd) => build_profile_from_add_command(cmd),
+        None => {
+            build_profile_interactive(runtime).map_err(|error| fail(kind, None, None, error))?
+        }
+    };
+
+    let mode = profile.mode_str().to_owned();
+    let mut config = load_or_default_config(config_path)
+        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
+    let (profile_name, redacted) = add_profile(&mut config, &name, profile)
+        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
+    save_config(config_path, &config)
+        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(profile_name),
+        mode: Some(mode),
+        data: CommandData::Profile(redacted),
+    })
+}
+
+fn build_profile_from_add_command(command: ProfileAddCommand) -> (String, ProfileConfig) {
+    match command {
+        ProfileAddCommand::LocalFs(args) => {
+            let profile = ProfileConfig::Local {
+                store: StoreConfig::LocalFs {
+                    root: args.root,
+                    key_prefix: args.key_prefix,
+                },
+                writer_id: None,
+                writer_version: None,
+                lease_duration_ms: None,
+            };
+            (args.name, profile)
+        }
+        ProfileAddCommand::AwsS3(args) => {
+            let profile = ProfileConfig::Local {
+                store: StoreConfig::AwsS3 {
+                    bucket: args.bucket,
+                    region: args.region,
+                    endpoint_url: args.endpoint_url,
+                    access_key_id: args.access_key_id,
+                    secret_access_key: args.secret_access_key,
+                    session_token: args.session_token,
+                    key_prefix: args.key_prefix,
+                    force_path_style: if args.force_path_style {
+                        Some(true)
+                    } else {
+                        None
+                    },
+                },
+                writer_id: None,
+                writer_version: None,
+                lease_duration_ms: None,
+            };
+            (args.name, profile)
+        }
+        ProfileAddCommand::CloudflareR2(args) => {
+            let profile = ProfileConfig::Local {
+                store: StoreConfig::CloudflareR2 {
+                    bucket: args.bucket,
+                    account_id: args.account_id,
+                    endpoint_url: args.endpoint_url,
+                    access_key_id: args.access_key_id,
+                    secret_access_key: args.secret_access_key,
+                    key_prefix: args.key_prefix,
+                },
+                writer_id: None,
+                writer_version: None,
+                lease_duration_ms: None,
+            };
+            (args.name, profile)
+        }
+        ProfileAddCommand::Remote(args) => {
+            let profile = ProfileConfig::Remote {
+                server_url: args.server_url,
+                auth_token: args.auth_token,
+            };
+            (args.name, profile)
         }
     }
 }
 
-fn add_local(
-    kind: CommandKind,
-    config_path: &Path,
-    args: ProfileAddLocalArgs,
+fn build_profile_interactive(
     runtime: RuntimeBehavior,
-) -> Result<CommandOutput, CommandFailure> {
-    let profile_name = args.name.clone();
-    let mut config = load_or_default_config(config_path).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-    if config.profiles.contains_key(&profile_name) {
-        return Err(fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            CliError::profile_already_exists(&profile_name),
+) -> Result<(String, ProfileConfig), CliError> {
+    if !runtime.interactive {
+        return Err(CliError::non_interactive_input_required(
+            "subcommand (local-fs, aws-s3, cloudflare-r2, or remote)",
         ));
     }
 
-    let server_config = required_path(
-        args.server_config,
-        "server-config",
-        "local server config path",
-        runtime,
-    )
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-    let resolved_server_config = resolve_cli_input_path(&server_config)
-        .unwrap_or_else(|_| resolve_profile_path(config_path, &server_config));
-    loon_server::load_server_config(&resolved_server_config).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            CliError::invalid_config(format!(
-                "failed to load local server config `{}`: {error}",
-                resolved_server_config.display()
-            )),
-        )
-    })?;
-    let view = add_local_profile(
-        &mut config,
-        &profile_name,
-        LocalProfileConfig {
-            server_config_path: resolved_server_config.display().to_string(),
+    let name = prompt::prompt_line("profile name")?;
+    let mode = prompt::prompt_choice("mode", &["local", "remote"])?;
+
+    match mode.as_str() {
+        "local" => {
+            let store_kind =
+                prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])?;
+            let store = match store_kind.as_str() {
+                "local-fs" => StoreConfig::LocalFs {
+                    root: prompt::prompt_line("root")?,
+                    key_prefix: prompt::prompt_optional("key prefix", None)?,
+                },
+                "aws-s3" => StoreConfig::AwsS3 {
+                    bucket: prompt::prompt_line("bucket name")?,
+                    region: prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0)?,
+                    access_key_id: prompt::prompt_line("access key id")?,
+                    secret_access_key: prompt::prompt_line("secret access key")?,
+                    endpoint_url: prompt::prompt_optional("endpoint url", None)?,
+                    session_token: None,
+                    key_prefix: prompt::prompt_optional("key prefix", None)?,
+                    force_path_style: None,
+                },
+                "cloudflare-r2" => StoreConfig::CloudflareR2 {
+                    bucket: prompt::prompt_line("bucket name")?,
+                    account_id: prompt::prompt_line("account id")?,
+                    endpoint_url: prompt::prompt_line("endpoint url")?,
+                    access_key_id: prompt::prompt_line("access key id")?,
+                    secret_access_key: prompt::prompt_line("secret access key")?,
+                    key_prefix: prompt::prompt_optional("key prefix", None)?,
+                },
+                _ => unreachable!(),
+            };
+            Ok((
+                name,
+                ProfileConfig::Local {
+                    store,
+                    writer_id: None,
+                    writer_version: None,
+                    lease_duration_ms: None,
+                },
+            ))
+        }
+        "remote" => {
+            let server_url = prompt::prompt_line("server url")?;
+            let auth_token = prompt::prompt_optional("auth token", None)?;
+            Ok((
+                name,
+                ProfileConfig::Remote {
+                    server_url,
+                    auth_token,
+                },
+            ))
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn run_profile_update(
+    kind: CommandKind,
+    config_path: &Path,
+    args: ProfileUpdateArgs,
+    runtime: RuntimeBehavior,
+) -> Result<CommandOutput, CommandFailure> {
+    let name = args.name.clone();
+    let result = (|| -> Result<(String, ProfileConfig), CliError> {
+        let mut config = load_config(config_path)?;
+        let existing = config
+            .profiles
+            .get(&name)
+            .ok_or_else(|| CliError::profile_not_found(&name))?
+            .clone();
+
+        let has_flags = args.root.is_some()
+            || args.bucket.is_some()
+            || args.region.is_some()
+            || args.access_key_id.is_some()
+            || args.secret_access_key.is_some()
+            || args.endpoint_url.is_some()
+            || args.session_token.is_some()
+            || args.account_id.is_some()
+            || args.key_prefix.is_some()
+            || args.server_url.is_some()
+            || args.auth_token.is_some();
+
+        let updated = if has_flags {
+            apply_update_flags(existing, &args)?
+        } else if runtime.interactive {
+            apply_update_interactive(existing)?
+        } else {
+            return Err(CliError::non_interactive_input_required(
+                "update flags (e.g. --root, --bucket)",
+            ));
+        };
+
+        let (profile_name, redacted) = update_profile(&mut config, &name, updated)?;
+        save_config(config_path, &config)?;
+        Ok((profile_name, redacted))
+    })()
+    .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(result.0),
+        mode: Some(result.1.mode_str().to_owned()),
+        data: CommandData::Profile(result.1),
+    })
+}
+
+fn apply_update_flags(
+    existing: ProfileConfig,
+    args: &ProfileUpdateArgs,
+) -> Result<ProfileConfig, CliError> {
+    match &existing {
+        ProfileConfig::Local { store, .. } => {
+            reject_flag("server-url", &args.server_url, "local")?;
+            reject_flag("auth-token", &args.auth_token, "local")?;
+            match store {
+                StoreConfig::LocalFs { .. } => {
+                    reject_flag("bucket", &args.bucket, "local-fs")?;
+                    reject_flag("region", &args.region, "local-fs")?;
+                    reject_flag("access-key-id", &args.access_key_id, "local-fs")?;
+                    reject_flag("secret-access-key", &args.secret_access_key, "local-fs")?;
+                    reject_flag("endpoint-url", &args.endpoint_url, "local-fs")?;
+                    reject_flag("session-token", &args.session_token, "local-fs")?;
+                    reject_flag("account-id", &args.account_id, "local-fs")?;
+                }
+                StoreConfig::AwsS3 { .. } => {
+                    reject_flag("root", &args.root, "aws-s3")?;
+                    reject_flag("account-id", &args.account_id, "aws-s3")?;
+                }
+                StoreConfig::CloudflareR2 { .. } => {
+                    reject_flag("root", &args.root, "cloudflare-r2")?;
+                    reject_flag("region", &args.region, "cloudflare-r2")?;
+                    reject_flag("session-token", &args.session_token, "cloudflare-r2")?;
+                }
+            }
+        }
+        ProfileConfig::Remote { .. } => {
+            reject_flag("root", &args.root, "remote")?;
+            reject_flag("bucket", &args.bucket, "remote")?;
+            reject_flag("region", &args.region, "remote")?;
+            reject_flag("access-key-id", &args.access_key_id, "remote")?;
+            reject_flag("secret-access-key", &args.secret_access_key, "remote")?;
+            reject_flag("endpoint-url", &args.endpoint_url, "remote")?;
+            reject_flag("session-token", &args.session_token, "remote")?;
+            reject_flag("account-id", &args.account_id, "remote")?;
+            reject_flag("key-prefix", &args.key_prefix, "remote")?;
+        }
+    }
+
+    match existing {
+        ProfileConfig::Local {
+            store,
+            writer_id,
+            writer_version,
+            lease_duration_ms,
+        } => {
+            let store = match store {
+                StoreConfig::LocalFs { root, key_prefix } => StoreConfig::LocalFs {
+                    root: args.root.clone().unwrap_or(root),
+                    key_prefix: args.key_prefix.clone().or(key_prefix),
+                },
+                StoreConfig::AwsS3 {
+                    bucket,
+                    region,
+                    endpoint_url,
+                    access_key_id,
+                    secret_access_key,
+                    session_token,
+                    key_prefix,
+                    force_path_style,
+                } => StoreConfig::AwsS3 {
+                    bucket: args.bucket.clone().unwrap_or(bucket),
+                    region: args.region.clone().unwrap_or(region),
+                    endpoint_url: args.endpoint_url.clone().or(endpoint_url),
+                    access_key_id: args.access_key_id.clone().unwrap_or(access_key_id),
+                    secret_access_key: args.secret_access_key.clone().unwrap_or(secret_access_key),
+                    session_token: args.session_token.clone().or(session_token),
+                    key_prefix: args.key_prefix.clone().or(key_prefix),
+                    force_path_style,
+                },
+                StoreConfig::CloudflareR2 {
+                    bucket,
+                    account_id,
+                    endpoint_url,
+                    access_key_id,
+                    secret_access_key,
+                    key_prefix,
+                } => StoreConfig::CloudflareR2 {
+                    bucket: args.bucket.clone().unwrap_or(bucket),
+                    account_id: args.account_id.clone().unwrap_or(account_id),
+                    endpoint_url: args.endpoint_url.clone().unwrap_or(endpoint_url),
+                    access_key_id: args.access_key_id.clone().unwrap_or(access_key_id),
+                    secret_access_key: args.secret_access_key.clone().unwrap_or(secret_access_key),
+                    key_prefix: args.key_prefix.clone().or(key_prefix),
+                },
+            };
+            Ok(ProfileConfig::Local {
+                store,
+                writer_id,
+                writer_version,
+                lease_duration_ms,
+            })
+        }
+        ProfileConfig::Remote {
+            server_url,
+            auth_token,
+        } => Ok(ProfileConfig::Remote {
+            server_url: args.server_url.clone().unwrap_or(server_url),
+            auth_token: args.auth_token.clone().or(auth_token),
+        }),
+    }
+}
+
+fn reject_flag(flag: &str, value: &Option<String>, profile_kind: &str) -> Result<(), CliError> {
+    if value.is_some() {
+        return Err(CliError::invalid_input(format!(
+            "`--{flag}` does not apply to {profile_kind} profiles"
+        )));
+    }
+    Ok(())
+}
+
+fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, CliError> {
+    match existing {
+        ProfileConfig::Local {
+            store,
+            writer_id,
+            writer_version,
+            lease_duration_ms,
+        } => {
+            let store = match store {
+                StoreConfig::LocalFs { root, key_prefix } => StoreConfig::LocalFs {
+                    root: prompt::prompt_line_default("root", &root)?,
+                    key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
+                },
+                StoreConfig::AwsS3 {
+                    bucket,
+                    region,
+                    endpoint_url,
+                    access_key_id,
+                    secret_access_key,
+                    session_token,
+                    key_prefix,
+                    force_path_style,
+                } => StoreConfig::AwsS3 {
+                    bucket: prompt::prompt_line_default("bucket name", &bucket)?,
+                    region: {
+                        let default_idx =
+                            AWS_REGIONS.iter().position(|r| *r == region).unwrap_or(0);
+                        prompt::prompt_fuzzy_choice("region", AWS_REGIONS, default_idx)?
+                    },
+                    access_key_id: prompt::prompt_line_default("access key id", &access_key_id)?,
+                    secret_access_key: prompt::prompt_line_default(
+                        "secret access key",
+                        &secret_access_key,
+                    )?,
+                    endpoint_url: prompt::prompt_optional("endpoint url", endpoint_url.as_deref())?,
+                    session_token: prompt::prompt_optional(
+                        "session token",
+                        session_token.as_deref(),
+                    )?,
+                    key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
+                    force_path_style,
+                },
+                StoreConfig::CloudflareR2 {
+                    bucket,
+                    account_id,
+                    endpoint_url,
+                    access_key_id,
+                    secret_access_key,
+                    key_prefix,
+                } => StoreConfig::CloudflareR2 {
+                    bucket: prompt::prompt_line_default("bucket name", &bucket)?,
+                    account_id: prompt::prompt_line_default("account id", &account_id)?,
+                    endpoint_url: prompt::prompt_line_default("endpoint url", &endpoint_url)?,
+                    access_key_id: prompt::prompt_line_default("access key id", &access_key_id)?,
+                    secret_access_key: prompt::prompt_line_default(
+                        "secret access key",
+                        &secret_access_key,
+                    )?,
+                    key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
+                },
+            };
+            Ok(ProfileConfig::Local {
+                store,
+                writer_id,
+                writer_version,
+                lease_duration_ms,
+            })
+        }
+        ProfileConfig::Remote {
+            server_url,
+            auth_token,
+        } => Ok(ProfileConfig::Remote {
+            server_url: prompt::prompt_line_default("server url", &server_url)?,
+            auth_token: prompt::prompt_optional("auth token", auth_token.as_deref())?,
+        }),
+    }
+}
+
+fn run_profile_remove(
+    kind: CommandKind,
+    config_path: &Path,
+    name: &str,
+    runtime: RuntimeBehavior,
+) -> Result<CommandOutput, CommandFailure> {
+    if runtime.interactive {
+        let confirmed = prompt::prompt_confirm(&format!("remove profile `{name}`?"))
+            .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+        if !confirmed {
+            return Err(fail(
+                kind,
+                Some(name.to_owned()),
+                None,
+                CliError::new("cancelled", "operation cancelled"),
+            ));
+        }
+    }
+
+    let mut config =
+        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    let removed = remove_profile(&mut config, name)
+        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    let mode = removed.mode.clone();
+    save_config(config_path, &config)
+        .map_err(|error| fail(kind, Some(name.to_owned()), Some(mode.clone()), error))?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(name.to_owned()),
+        mode: Some(mode),
+        data: CommandData::ProfileSummary(removed),
+    })
+}
+
+fn run_profile_make_default(
+    kind: CommandKind,
+    config_path: &Path,
+    name: &str,
+) -> Result<CommandOutput, CommandFailure> {
+    let mut config =
+        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    make_default_profile(&mut config, name)
+        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    save_config(config_path, &config)
+        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(name.to_owned()),
+        mode: None,
+        data: CommandData::DefaultProfile {
+            name: name.to_owned(),
         },
-    )
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-    save_config(config_path, &config).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-    Ok(CommandOutput {
-        kind,
-        profile: Some(view.name.clone()),
-        mode: Some(ProfileMode::Local),
-        data: CommandData::Profile(view),
     })
 }
 
-fn resolve_cli_input_path(path: &Path) -> Result<PathBuf, CliError> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|err| {
-                CliError::invalid_config(format!(
-                    "failed to resolve current working directory: {err}"
-                ))
-            })?
-            .join(path)
-    };
-
-    absolute.canonicalize().map_err(|err| {
-        CliError::invalid_config(format!(
-            "failed to resolve server config path `{}`: {err}",
-            path.display()
-        ))
-    })
-}
-
-fn add_remote(
-    kind: CommandKind,
-    config_path: &Path,
-    args: ProfileAddRemoteArgs,
-    runtime: RuntimeBehavior,
-) -> Result<CommandOutput, CommandFailure> {
-    let profile_name = args.name.clone();
-    let mut config = load_or_default_config(config_path).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            error,
-        )
-    })?;
-    if config.profiles.contains_key(&profile_name) {
-        return Err(fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            CliError::profile_already_exists(&profile_name),
-        ));
-    }
-
-    let remote = RemoteProfileConfig {
-        server_url: required_value(args.server_url, "server-url", "remote server URL", runtime)
-            .map_err(|error| {
-                fail(
-                    kind,
-                    Some(profile_name.clone()),
-                    Some(ProfileMode::Remote),
-                    error,
-                )
-            })?,
-        auth_token: args.auth_token,
-    };
-    remote.validate(&profile_name).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            error,
-        )
-    })?;
-    let view = add_remote_profile(&mut config, &profile_name, remote).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            error,
-        )
-    })?;
-    save_config(config_path, &config).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            error,
-        )
-    })?;
-    Ok(CommandOutput {
-        kind,
-        profile: Some(view.name.clone()),
-        mode: Some(ProfileMode::Remote),
-        data: CommandData::Profile(view),
-    })
-}
-
-fn run_local_command(
-    kind: CommandKind,
-    explicit_config: Option<&Path>,
-    global_profile: Option<&str>,
-    command: LocalCommand,
-) -> Result<CommandOutput, CommandFailure> {
-    let resolved = resolve_target_profile(explicit_config, global_profile)
-        .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
-    let Some(local) = resolved.target.as_local() else {
-        return Err(fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(resolved.target.mode()),
-            CliError::invalid_profile_mode(
-                &resolved.profile_name,
-                "local",
-                profile_mode_str(resolved.target.mode()),
-            ),
-        ));
-    };
-
-    let status = match command {
-        LocalCommand::Up => start_local_server(
-            &resolved.config_path,
-            &resolved.profile_name,
-            &local.server_url,
-            &local.server_config_path,
-        ),
-        LocalCommand::Status => inspect_local_server(
-            &resolved.config_path,
-            &resolved.profile_name,
-            &local.server_url,
-            &local.server_config_path,
-        ),
-        LocalCommand::Down => stop_local_server(
-            &resolved.config_path,
-            &resolved.profile_name,
-            &local.server_url,
-            &local.server_config_path,
-        ),
-    }
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(resolved.profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(ProfileMode::Local),
-        data: CommandData::LocalStatus(status),
-    })
-}
+// --- namespace ---
 
 fn run_namespace_command(
     kind: CommandKind,
@@ -460,30 +824,35 @@ fn run_namespace_command(
 ) -> Result<CommandOutput, CommandFailure> {
     let resolved = resolve_target_profile(explicit_config, global_profile)
         .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode();
-    let client = resolved.target.client();
+    let mode = resolved.target.mode_str().to_owned();
+    let backend = resolved.target.backend();
     let output = match command {
         NamespaceCommand::Create { name } => {
             validate_namespace_name(&name).map_err(|error| {
-                fail(kind, Some(resolved.profile_name.clone()), Some(mode), error)
-            })?;
-            let namespace = client.create_namespace(&name).map_err(|error| {
                 fail(
                     kind,
                     Some(resolved.profile_name.clone()),
-                    Some(mode),
-                    map_client_error(error),
+                    Some(mode.clone()),
+                    error,
+                )
+            })?;
+            let namespace = backend.create_namespace(&name).map_err(|error| {
+                fail(
+                    kind,
+                    Some(resolved.profile_name.clone()),
+                    Some(mode.clone()),
+                    error,
                 )
             })?;
             CommandData::NamespaceSummary(namespace)
         }
         NamespaceCommand::List => {
-            let namespaces = client.list_namespaces().map_err(|error| {
+            let namespaces = backend.list_namespaces().map_err(|error| {
                 fail(
                     kind,
                     Some(resolved.profile_name.clone()),
-                    Some(mode),
-                    map_client_error(error),
+                    Some(mode.clone()),
+                    error,
                 )
             })?;
             CommandData::NamespaceList { namespaces }
@@ -498,6 +867,8 @@ fn run_namespace_command(
     })
 }
 
+// --- filesystem ---
+
 fn run_filesystem_command(
     kind: CommandKind,
     explicit_config: Option<&Path>,
@@ -507,25 +878,25 @@ fn run_filesystem_command(
 ) -> Result<CommandOutput, CommandFailure> {
     let resolved = resolve_target_profile(explicit_config, global_profile)
         .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode();
-    let client = resolved.target.client();
+    let mode = resolved.target.mode_str().to_owned();
+    let backend = resolved.target.backend();
     let profile_name = resolved.profile_name.clone();
 
     let output = (|| -> Result<CommandData, CliError> {
         match command {
             FilesystemCommand::Ls { namespace, path } => {
                 let spec = namespace_path(&namespace, path.as_deref().unwrap_or("/"), true)?;
-                let entries = client.list_path(&spec).map_err(map_client_error)?;
+                let entries = backend.list_path(&spec)?;
                 Ok(CommandData::PathEntries { entries })
             }
             FilesystemCommand::Stat { namespace, path } => {
                 let spec = namespace_path(&namespace, &path, true)?;
-                let entry = client.stat_path(&spec).map_err(map_client_error)?;
+                let entry = backend.stat_path(&spec)?;
                 Ok(CommandData::PathEntry(entry))
             }
             FilesystemCommand::Cat { namespace, path } => {
                 let spec = namespace_path(&namespace, &path, false)?;
-                let bytes = client.read_file_bytes(&spec).map_err(map_client_error)?;
+                let bytes = backend.read_file_bytes(&spec)?;
                 Ok(CommandData::StreamBytes(bytes))
             }
             FilesystemCommand::Get {
@@ -537,14 +908,14 @@ fn run_filesystem_command(
                     return Err(CliError::json_not_supported_for_streaming());
                 }
                 let spec = namespace_path(&namespace, &remote_path, false)?;
-                let entry = client.stat_path(&spec).map_err(map_client_error)?;
+                let entry = backend.stat_path(&spec)?;
                 if entry.inode_kind == loon_api::InodeKind::Dir {
                     return Err(CliError::invalid_input(format!(
                         "directory operations are not available for `{}`",
                         spec.absolute_path
                     )));
                 }
-                let bytes = client.read_file_bytes(&spec).map_err(map_client_error)?;
+                let bytes = backend.read_file_bytes(&spec)?;
                 match local_destination.as_deref() {
                     Some("-") => Ok(CommandData::StreamBytes(bytes)),
                     other => {
@@ -583,9 +954,7 @@ fn run_filesystem_command(
                 };
                 let spec = namespace_path(&namespace, &remote_path, false)?;
                 let bytes = fs::read(&local_path).map_err(CliError::io)?;
-                let result = client
-                    .put_file_bytes(&spec, &bytes, force)
-                    .map_err(map_client_error)?;
+                let result = backend.put_file_bytes(&spec, &bytes, force)?;
                 Ok(CommandData::FileMutation {
                     target: render_target(&namespace, &spec.absolute_path),
                     committed_seq: result.committed_seq.0,
@@ -596,7 +965,7 @@ fn run_filesystem_command(
                 remote_path,
             } => {
                 let spec = namespace_path(&namespace, &remote_path, false)?;
-                let result = client.delete_path(&spec).map_err(map_client_error)?;
+                let result = backend.delete_path(&spec)?;
                 Ok(CommandData::FileMutation {
                     target: render_target(&namespace, &spec.absolute_path),
                     committed_seq: result.committed_seq.0,
@@ -609,7 +978,7 @@ fn run_filesystem_command(
             } => {
                 let from = namespace_path(&namespace, &source_path, false)?;
                 let to = namespace_path(&namespace, &dest_path, false)?;
-                let result = client.move_path(&from, &to).map_err(map_client_error)?;
+                let result = backend.move_path(&from, &to)?;
                 Ok(CommandData::PathMove {
                     from: render_target(&namespace, &from.absolute_path),
                     to: render_target(&namespace, &to.absolute_path),
@@ -622,7 +991,7 @@ fn run_filesystem_command(
                 dest_path,
             } => {
                 let from = namespace_path(&namespace, &source_path, false)?;
-                let entry = client.stat_path(&from).map_err(map_client_error)?;
+                let entry = backend.stat_path(&from)?;
                 if entry.inode_kind == loon_api::InodeKind::Dir {
                     return Err(CliError::invalid_input(format!(
                         "directory operations are not available for `{}`",
@@ -630,7 +999,7 @@ fn run_filesystem_command(
                     )));
                 }
                 let to = namespace_path(&namespace, &dest_path, false)?;
-                let result = client.copy_path(&from, &to).map_err(map_client_error)?;
+                let result = backend.copy_path(&from, &to)?;
                 Ok(CommandData::PathMove {
                     from: render_target(&namespace, &from.absolute_path),
                     to: render_target(&namespace, &to.absolute_path),
@@ -639,7 +1008,7 @@ fn run_filesystem_command(
             }
         }
     })()
-    .map_err(|error| fail(kind, Some(profile_name.clone()), Some(mode), error))?;
+    .map_err(|error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error))?;
 
     Ok(CommandOutput {
         kind,
@@ -649,71 +1018,7 @@ fn run_filesystem_command(
     })
 }
 
-fn required_value(
-    existing: Option<String>,
-    field: &str,
-    prompt_label: &str,
-    runtime: RuntimeBehavior,
-) -> Result<String, CliError> {
-    if let Some(value) = existing {
-        if !value.trim().is_empty() {
-            return Ok(value);
-        }
-    }
-    if !runtime.interactive {
-        return Err(CliError::non_interactive_input_required(field));
-    }
-    eprint!("{prompt_label}: ");
-    io::stderr().flush().map_err(CliError::io)?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line).map_err(CliError::io)?;
-    let value = line.trim().to_owned();
-    if value.is_empty() {
-        return Err(CliError::invalid_input(format!("missing `{field}`")));
-    }
-    Ok(value)
-}
-
-fn required_path(
-    existing: Option<PathBuf>,
-    field: &str,
-    prompt_label: &str,
-    runtime: RuntimeBehavior,
-) -> Result<PathBuf, CliError> {
-    if let Some(value) = existing {
-        return Ok(value);
-    }
-    if !runtime.interactive {
-        return Err(CliError::non_interactive_input_required(field));
-    }
-    eprint!("{prompt_label}: ");
-    io::stderr().flush().map_err(CliError::io)?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line).map_err(CliError::io)?;
-    let value = line.trim();
-    if value.is_empty() {
-        return Err(CliError::invalid_input(format!("missing `{field}`")));
-    }
-    Ok(PathBuf::from(value))
-}
-
-fn map_client_error(error: ClientError) -> CliError {
-    match error {
-        ClientError::ConfigIo(message) | ClientError::ConfigDecode(message) => {
-            CliError::invalid_config(message)
-        }
-        ClientError::MissingConfigField { field } => {
-            CliError::invalid_config(format!("missing `{field}`"))
-        }
-        ClientError::ConfigValidation { field, reason } => {
-            CliError::invalid_config(format!("invalid `{field}`: {reason}"))
-        }
-        ClientError::InvalidNamespacePath(message) => CliError::invalid_input(message),
-        ClientError::Http(message) | ClientError::Json(message) => CliError::client_error(message),
-        ClientError::Api { code, message, .. } => CliError::new(code, message),
-        ClientError::Io(message) => CliError::new("io_error", format!("i/o error: {message}")),
-    }
-}
+// --- helpers ---
 
 fn validate_namespace_name(namespace: &str) -> Result<(), CliError> {
     if namespace.trim().is_empty() {
@@ -790,13 +1095,6 @@ fn destination_path_for_get(
     }
 }
 
-fn profile_mode_str(mode: ProfileMode) -> &'static str {
-    match mode {
-        ProfileMode::Local => "local",
-        ProfileMode::Remote => "remote",
-    }
-}
-
 fn render_target(namespace: &str, path: &str) -> String {
     format!("{namespace}:{path}")
 }
@@ -804,7 +1102,7 @@ fn render_target(namespace: &str, path: &str) -> String {
 fn fail(
     kind: CommandKind,
     profile: Option<String>,
-    mode: Option<ProfileMode>,
+    mode: Option<String>,
     error: CliError,
 ) -> CommandFailure {
     CommandFailure {

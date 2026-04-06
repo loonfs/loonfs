@@ -1,9 +1,0 @@
----
-source: crates/loon-cli/src/render.rs
-assertion_line: 312
-expression: human_success(&output)
----
-config_version = 1
-active_profile = "alpha"
-
-[profiles]
