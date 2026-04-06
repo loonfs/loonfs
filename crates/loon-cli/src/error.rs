@@ -40,6 +40,15 @@ impl CliError {
         )
     }
 
+    pub fn config_already_exists(path: &str) -> Self {
+        Self::new(
+            "config_already_exists",
+            format!(
+                "config file already exists at `{path}`. use `loon profile add` to create a new profile, `loon profile update` to modify an existing profile, or `loon profile make-default` to change the default profile"
+            ),
+        )
+    }
+
     pub fn non_interactive_input_required(field: &str) -> Self {
         Self::new(
             "non_interactive_input_required",

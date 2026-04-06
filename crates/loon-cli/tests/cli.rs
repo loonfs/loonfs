@@ -67,7 +67,7 @@ fn profile_add_list_show_remove_work() {
 
     let list_after_remove = harness.run(&["--json", "profile", "list"]);
     assert_success(&list_after_remove);
-    assert_eq!(json_data(&list_after_remove)["default_profile"], "");
+    assert!(json_data(&list_after_remove)["default_profile"].is_null());
 
     let show_without_default = harness.run(&["--json", "profile", "show"]);
     assert_failure(&show_without_default);
@@ -223,8 +223,12 @@ fn removing_last_profile_leaves_empty_config() {
     let list = harness.run(&["--json", "profile", "list"]);
     assert_success(&list);
     let data = json_data(&list);
-    assert_eq!(data["default_profile"], "");
+    assert!(data["default_profile"].is_null());
     assert_eq!(data["profiles"].as_array().unwrap().len(), 0);
+
+    let show_config = harness.run(&["config", "show"]);
+    assert_success(&show_config);
+    assert!(!stdout_string(&show_config).contains("default_profile"));
 
     let show = harness.run(&["--json", "profile", "show"]);
     assert_failure(&show);
@@ -243,7 +247,7 @@ fn removing_default_profile_requires_explicit_reselection() {
     let list = harness.run(&["--json", "profile", "list"]);
     assert_success(&list);
     let data = json_data(&list);
-    assert_eq!(data["default_profile"], "");
+    assert!(data["default_profile"].is_null());
     assert_eq!(data["profiles"].as_array().unwrap().len(), 1);
 
     let show = harness.run(&["--json", "profile", "show"]);
@@ -342,14 +346,53 @@ fn reserved_profile_names_are_rejected() {
 }
 
 #[test]
+fn init_rejects_existing_config_file() {
+    let harness = Harness::new();
+    harness.write_cli_config(&format!(
+        r#"
+config_version = 1
+default_profile = "default"
+
+[default]
+mode = "local"
+
+[default.store]
+kind = "local-fs"
+root = "{}"
+"#,
+        harness.store_root("default").display()
+    ));
+    let existing = fs::read_to_string(&harness.config_path).expect("read existing config");
+
+    let init = harness.run(&[
+        "--json",
+        "init",
+        "mystore",
+        "--store-kind",
+        "local-fs",
+        "--root",
+        harness.store_root("mystore").to_str().unwrap(),
+    ]);
+    assert_failure(&init);
+    let error = json_error(&init);
+    assert_eq!(error["code"], "config_already_exists");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("config file already exists"));
+    assert!(message.contains("loon profile add"));
+    assert!(message.contains("loon profile update"));
+    assert!(message.contains("loon profile make-default"));
+    assert_eq!(
+        fs::read_to_string(&harness.config_path).expect("read unchanged config"),
+        existing
+    );
+}
+
+#[test]
 fn reserved_profile_names_in_config_are_rejected() {
     let harness = Harness::new();
-    fs::write(
-        &harness.config_path,
-        format!(
-            r#"
+    harness.write_cli_config(format!(
+        r#"
 config_version = 1
-default_profile = ""
 
 [default_profile]
 mode = "local"
@@ -358,10 +401,8 @@ mode = "local"
 kind = "local-fs"
 root = "{}"
 "#,
-            harness.store_root("default_profile").display()
-        ),
-    )
-    .expect("write invalid config");
+        harness.store_root("default_profile").display()
+    ));
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_failure(&list);
@@ -369,10 +410,49 @@ root = "{}"
 }
 
 #[test]
+fn empty_default_profile_in_config_is_rejected() {
+    let harness = Harness::new();
+    harness.write_cli_config(
+        r#"
+config_version = 1
+default_profile = ""
+"#,
+    );
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_failure(&list);
+    let error = json_error(&list);
+    assert_eq!(error["code"], "invalid_config");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("default_profile"));
+}
+
+#[test]
+fn whitespace_default_profile_in_config_is_rejected() {
+    let harness = Harness::new();
+    harness.write_cli_config(
+        r#"
+config_version = 1
+default_profile = "   "
+"#,
+    );
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_failure(&list);
+    let error = json_error(&list);
+    assert_eq!(error["code"], "invalid_config");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("default_profile"));
+}
+
+#[test]
 fn invalid_store_field_messages_use_flattened_paths() {
     let harness = Harness::new();
-    fs::write(
-        &harness.config_path,
+    harness.write_cli_config(
         r#"
 config_version = 1
 default_profile = "default"
@@ -384,8 +464,7 @@ mode = "local"
 kind = "local-fs"
 root = ""
 "#,
-    )
-    .expect("write invalid config");
+    );
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_failure(&list);
@@ -461,22 +540,25 @@ fn external_remote_profile_executes_through_http() {
 
 struct Harness {
     temp_dir: TempDir,
+    home_dir: PathBuf,
     config_path: PathBuf,
 }
 
 impl Harness {
     fn new() -> Self {
         let temp_dir = tempfile::tempdir().expect("tempdir");
+        let home_dir = temp_dir.path().join("home");
+        fs::create_dir_all(&home_dir).expect("create temp home");
         Self {
-            config_path: temp_dir.path().join("config.toml"),
+            config_path: home_dir.join(".loonfs").join("config.toml"),
+            home_dir,
             temp_dir,
         }
     }
 
     fn run(&self, args: &[&str]) -> Output {
         Command::new(loon_binary_path())
-            .arg("--config")
-            .arg(&self.config_path)
+            .env("HOME", &self.home_dir)
             .args(args)
             .output()
             .expect("run loon")
@@ -497,6 +579,12 @@ impl Harness {
             self.store_root(name).to_str().unwrap(),
         ]);
         assert_success(&output);
+    }
+
+    fn write_cli_config(&self, contents: impl AsRef<[u8]>) {
+        fs::create_dir_all(self.config_path.parent().expect("config dir"))
+            .expect("create config dir");
+        fs::write(&self.config_path, contents).expect("write cli config");
     }
 
     fn write_server_config(&self, name: &str, key_prefix: &str) -> PathBuf {
@@ -532,6 +620,18 @@ key_prefix = "{key_prefix}"
         wait_for_healthz(&server_url);
         ExternalServer { child, server_url }
     }
+}
+
+#[test]
+fn help_omits_config_flag() {
+    let harness = Harness::new();
+    let output = Command::new(loon_binary_path())
+        .env("HOME", &harness.home_dir)
+        .arg("--help")
+        .output()
+        .expect("run help");
+    assert_success(&output);
+    assert!(!stdout_string(&output).contains("--config"));
 }
 
 struct ExternalServer {

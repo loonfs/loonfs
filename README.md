@@ -63,11 +63,9 @@ xtask/
 - `loon` owns CLI-managed profile state
 - `loond` owns operator-authored server configuration
 
-`loon` default config path when `--config` is omitted:
+`loon` always uses:
 
-- macOS: `~/Library/Application Support/loon/config.toml`
-- other Unix: `~/.config/loon/config.toml`
-- Windows: `%APPDATA%\\loon\\config.toml`
+- `~/.loonfs/config.toml`
 
 `loond` has no code-level default path. You pass a server config path explicitly when you start
 `loond` or when you create a local `loon` profile.
@@ -154,7 +152,6 @@ Global flags:
 - `--profile <NAME>`
 - `--json`
 - `--no-input`
-- `--config <PATH>`
 
 `filesystem cat` and `filesystem get ... -` stream raw bytes to stdout and reject `--json`.
 
