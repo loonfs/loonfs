@@ -1,4 +1,4 @@
-use crate::config::{CliConfig, ProfileConfig};
+use crate::config::{validate_profile_name, CliConfig, ProfileConfig};
 use crate::error::CliError;
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +29,11 @@ pub fn show_profile(
     config: &CliConfig,
     explicit_name: Option<&str>,
 ) -> Result<(String, ProfileConfig), CliError> {
-    let name = explicit_name.unwrap_or(&config.default_profile);
+    let name = match explicit_name {
+        Some(name) => name,
+        None if config.default_profile.is_empty() => return Err(CliError::no_default_profile()),
+        None => &config.default_profile,
+    };
     let profile = config
         .profiles
         .get(name)
@@ -42,6 +46,7 @@ pub fn add_profile(
     name: &str,
     profile: ProfileConfig,
 ) -> Result<(String, ProfileConfig), CliError> {
+    validate_profile_name(name)?;
     if config.profiles.contains_key(name) {
         return Err(CliError::profile_already_exists(name));
     }
@@ -73,7 +78,7 @@ pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSumma
         .remove(name)
         .ok_or_else(|| CliError::profile_not_found(name))?;
     if config.default_profile == name {
-        config.default_profile = config.profiles.keys().next().cloned().unwrap_or_default();
+        config.default_profile.clear();
     }
     Ok(ProfileSummary {
         name: name.to_owned(),
@@ -94,7 +99,11 @@ pub fn resolve_profile<'a>(
     config: &'a CliConfig,
     explicit_name: Option<&'a str>,
 ) -> Result<(&'a str, &'a ProfileConfig), CliError> {
-    let name = explicit_name.unwrap_or(&config.default_profile);
+    let name = match explicit_name {
+        Some(name) => name,
+        None if config.default_profile.is_empty() => return Err(CliError::no_default_profile()),
+        None => &config.default_profile,
+    };
     let profile = config
         .profiles
         .get(name)

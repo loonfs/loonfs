@@ -26,6 +26,13 @@ impl CliError {
         Self::new("profile_not_found", format!("profile `{name}` not found"))
     }
 
+    pub fn no_default_profile() -> Self {
+        Self::new(
+            "no_default_profile",
+            "no default profile is set; use `profile make-default` or `--profile`",
+        )
+    }
+
     pub fn profile_already_exists(name: &str) -> Self {
         Self::new(
             "profile_already_exists",

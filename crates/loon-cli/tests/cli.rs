@@ -64,6 +64,17 @@ fn profile_add_list_show_remove_work() {
     let remove_default = harness.run(&["--json", "profile", "remove", "default"]);
     assert_success(&remove_default);
     assert_eq!(json_data(&remove_default)["name"], "default");
+
+    let list_after_remove = harness.run(&["--json", "profile", "list"]);
+    assert_success(&list_after_remove);
+    assert_eq!(json_data(&list_after_remove)["default_profile"], "");
+
+    let show_without_default = harness.run(&["--json", "profile", "show"]);
+    assert_failure(&show_without_default);
+    assert_eq!(
+        json_error(&show_without_default)["code"],
+        "no_default_profile"
+    );
 }
 
 #[test]
@@ -202,6 +213,60 @@ fn init_creates_local_profile_and_sets_default() {
 }
 
 #[test]
+fn removing_last_profile_leaves_empty_config() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let remove = harness.run(&["--json", "--no-input", "profile", "remove", "default"]);
+    assert_success(&remove);
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_success(&list);
+    let data = json_data(&list);
+    assert_eq!(data["default_profile"], "");
+    assert_eq!(data["profiles"].as_array().unwrap().len(), 0);
+
+    let show = harness.run(&["--json", "profile", "show"]);
+    assert_failure(&show);
+    assert_eq!(json_error(&show)["code"], "no_default_profile");
+}
+
+#[test]
+fn removing_default_profile_requires_explicit_reselection() {
+    let harness = Harness::new();
+    harness.add_local_profile("alpha");
+    harness.add_local_profile("beta");
+
+    let remove = harness.run(&["--json", "--no-input", "profile", "remove", "alpha"]);
+    assert_success(&remove);
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_success(&list);
+    let data = json_data(&list);
+    assert_eq!(data["default_profile"], "");
+    assert_eq!(data["profiles"].as_array().unwrap().len(), 1);
+
+    let show = harness.run(&["--json", "profile", "show"]);
+    assert_failure(&show);
+    assert_eq!(json_error(&show)["code"], "no_default_profile");
+
+    let namespace = harness.run(&["--json", "namespace", "list"]);
+    assert_failure(&namespace);
+    assert_eq!(json_error(&namespace)["code"], "no_default_profile");
+
+    let filesystem = harness.run(&["--json", "filesystem", "ls", "demo"]);
+    assert_failure(&filesystem);
+    assert_eq!(json_error(&filesystem)["code"], "no_default_profile");
+
+    let make_default = harness.run(&["--json", "profile", "make-default", "beta"]);
+    assert_success(&make_default);
+
+    let show_after = harness.run(&["--json", "profile", "show"]);
+    assert_success(&show_after);
+    assert_eq!(json_data(&show_after)["mode"], "local");
+}
+
+#[test]
 fn profile_update_changes_fields() {
     let harness = Harness::new();
     harness.add_local_profile("default");
@@ -245,6 +310,91 @@ fn profile_make_default_rejects_missing_profile() {
     let result = harness.run(&["--json", "profile", "make-default", "nonexistent"]);
     assert_failure(&result);
     assert_eq!(json_error(&result)["code"], "profile_not_found");
+}
+
+#[test]
+fn reserved_profile_names_are_rejected() {
+    let harness = Harness::new();
+
+    let init_reserved = harness.run(&[
+        "--json",
+        "init",
+        "default_profile",
+        "--store-kind",
+        "local-fs",
+        "--root",
+        harness.store_root("default_profile").to_str().unwrap(),
+    ]);
+    assert_failure(&init_reserved);
+    assert_eq!(json_error(&init_reserved)["code"], "invalid_input");
+
+    let add_reserved = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "local-fs",
+        "config_version",
+        "--root",
+        harness.store_root("config_version").to_str().unwrap(),
+    ]);
+    assert_failure(&add_reserved);
+    assert_eq!(json_error(&add_reserved)["code"], "invalid_input");
+}
+
+#[test]
+fn reserved_profile_names_in_config_are_rejected() {
+    let harness = Harness::new();
+    fs::write(
+        &harness.config_path,
+        format!(
+            r#"
+config_version = 1
+default_profile = ""
+
+[default_profile]
+mode = "local"
+
+[default_profile.store]
+kind = "local-fs"
+root = "{}"
+"#,
+            harness.store_root("default_profile").display()
+        ),
+    )
+    .expect("write invalid config");
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_failure(&list);
+    assert_eq!(json_error(&list)["code"], "invalid_config");
+}
+
+#[test]
+fn invalid_remote_urls_are_rejected() {
+    let harness = Harness::new();
+
+    let missing_host_http = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "remote",
+        "default",
+        "--server-url",
+        "http://",
+    ]);
+    assert_failure(&missing_host_http);
+    assert_eq!(json_error(&missing_host_http)["code"], "invalid_config");
+
+    let missing_host_https = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "remote",
+        "default",
+        "--server-url",
+        "https://",
+    ]);
+    assert_failure(&missing_host_https);
+    assert_eq!(json_error(&missing_host_https)["code"], "invalid_config");
 }
 
 #[test]

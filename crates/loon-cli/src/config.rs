@@ -1,4 +1,5 @@
 use crate::error::CliError;
+use http::Uri;
 use loon_objectstore::r2::R2StoreConfig;
 use loon_objectstore::s3::AwsS3StoreConfig;
 use loon_objectstore::ConfiguredObjectStore;
@@ -74,7 +75,7 @@ impl CliConfig {
     pub fn new() -> Self {
         Self {
             config_version: CONFIG_VERSION,
-            default_profile: "default".to_owned(),
+            default_profile: String::new(),
             profiles: BTreeMap::new(),
         }
     }
@@ -86,15 +87,14 @@ impl CliConfig {
                 self.config_version
             )));
         }
-        require_non_empty("default_profile", &self.default_profile)?;
-        if !self.profiles.is_empty() && !self.profiles.contains_key(&self.default_profile) {
+        if !self.default_profile.is_empty() && !self.profiles.contains_key(&self.default_profile) {
             return Err(CliError::invalid_config(format!(
                 "`default_profile` points to missing profile `{}`",
                 self.default_profile
             )));
         }
         for (name, profile) in &self.profiles {
-            require_non_empty("profile name", name)?;
+            validate_profile_name(name).map_err(|error| CliError::invalid_config(error.message))?;
             profile.validate(name)?;
         }
         Ok(())
@@ -326,6 +326,20 @@ pub fn default_config_path() -> Result<PathBuf, CliError> {
     Ok(home.join(".loonfs").join("config.toml"))
 }
 
+pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
+    require_non_empty("profile name", name)?;
+    if is_reserved_profile_name(name) {
+        return Err(CliError::invalid_input(format!(
+            "profile name `{name}` is reserved"
+        )));
+    }
+    Ok(())
+}
+
+fn is_reserved_profile_name(name: &str) -> bool {
+    matches!(name, "config_version" | "default_profile")
+}
+
 pub fn load_config(path: &Path) -> Result<CliConfig, CliError> {
     let bytes = fs::read(path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
@@ -423,9 +437,21 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), CliError> {
 
 fn validate_http_url(field: &str, value: &str) -> Result<(), CliError> {
     require_non_empty(field, value)?;
-    if !value.starts_with("http://") && !value.starts_with("https://") {
+    let uri = value
+        .trim()
+        .parse::<Uri>()
+        .map_err(|err| CliError::invalid_config(format!("invalid `{field}`: {err}")))?;
+    let scheme = uri
+        .scheme_str()
+        .ok_or_else(|| CliError::invalid_config(format!("invalid `{field}`: missing scheme")))?;
+    if !matches!(scheme, "http" | "https") {
         return Err(CliError::invalid_config(format!(
-            "invalid `{field}`: scheme must be http or https"
+            "invalid `{field}`: scheme must be http or https, got `{scheme}`"
+        )));
+    }
+    if uri.host().is_none() {
+        return Err(CliError::invalid_config(format!(
+            "invalid `{field}`: missing host"
         )));
     }
     Ok(())

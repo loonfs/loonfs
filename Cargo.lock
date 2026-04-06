@@ -1335,6 +1335,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "hostname",
+ "http 0.2.12",
  "insta",
  "loon-api",
  "loon-client",
