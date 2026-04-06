@@ -13,6 +13,7 @@ pub const CONFIG_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CliConfig {
     pub config_version: u32,
+    pub default_profile: String,
     #[serde(flatten)]
     pub profiles: BTreeMap<String, ProfileConfig>,
 }
@@ -73,6 +74,7 @@ impl CliConfig {
     pub fn new() -> Self {
         Self {
             config_version: CONFIG_VERSION,
+            default_profile: "default".to_owned(),
             profiles: BTreeMap::new(),
         }
     }
@@ -82,6 +84,13 @@ impl CliConfig {
             return Err(CliError::invalid_config(format!(
                 "unsupported `config_version`: expected `{CONFIG_VERSION}`, got `{}`",
                 self.config_version
+            )));
+        }
+        require_non_empty("default_profile", &self.default_profile)?;
+        if !self.profiles.is_empty() && !self.profiles.contains_key(&self.default_profile) {
+            return Err(CliError::invalid_config(format!(
+                "`default_profile` points to missing profile `{}`",
+                self.default_profile
             )));
         }
         for (name, profile) in &self.profiles {
@@ -94,6 +103,7 @@ impl CliConfig {
     pub fn redacted(&self) -> Self {
         CliConfig {
             config_version: self.config_version,
+            default_profile: self.default_profile.clone(),
             profiles: self
                 .profiles
                 .iter()

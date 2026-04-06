@@ -29,7 +29,7 @@ pub fn show_profile(
     config: &CliConfig,
     explicit_name: Option<&str>,
 ) -> Result<(String, ProfileConfig), CliError> {
-    let name = explicit_name.unwrap_or("default");
+    let name = explicit_name.unwrap_or(&config.default_profile);
     let profile = config
         .profiles
         .get(name)
@@ -45,8 +45,12 @@ pub fn add_profile(
     if config.profiles.contains_key(name) {
         return Err(CliError::profile_already_exists(name));
     }
+    let is_first = config.profiles.is_empty();
     let redacted = profile.redacted();
     config.profiles.insert(name.to_owned(), profile);
+    if is_first {
+        config.default_profile = name.to_owned();
+    }
     Ok((name.to_owned(), redacted))
 }
 
@@ -55,6 +59,14 @@ pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSumma
         .profiles
         .remove(name)
         .ok_or_else(|| CliError::profile_not_found(name))?;
+    if config.default_profile == name {
+        config.default_profile = config
+            .profiles
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_default();
+    }
     Ok(ProfileSummary {
         name: name.to_owned(),
         mode: removed.mode_str().to_owned(),
@@ -66,7 +78,7 @@ pub fn resolve_profile<'a>(
     config: &'a CliConfig,
     explicit_name: Option<&'a str>,
 ) -> Result<(&'a str, &'a ProfileConfig), CliError> {
-    let name = explicit_name.unwrap_or("default");
+    let name = explicit_name.unwrap_or(&config.default_profile);
     let profile = config
         .profiles
         .get(name)
