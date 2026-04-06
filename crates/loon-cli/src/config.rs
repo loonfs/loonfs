@@ -14,7 +14,8 @@ pub const CONFIG_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CliConfig {
     pub config_version: u32,
-    pub default_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
     #[serde(flatten)]
     pub profiles: BTreeMap<String, ProfileConfig>,
 }
@@ -75,7 +76,7 @@ impl CliConfig {
     pub fn new() -> Self {
         Self {
             config_version: CONFIG_VERSION,
-            default_profile: String::new(),
+            default_profile: None,
             profiles: BTreeMap::new(),
         }
     }
@@ -87,11 +88,13 @@ impl CliConfig {
                 self.config_version
             )));
         }
-        if !self.default_profile.is_empty() && !self.profiles.contains_key(&self.default_profile) {
-            return Err(CliError::invalid_config(format!(
-                "`default_profile` points to missing profile `{}`",
-                self.default_profile
-            )));
+        if let Some(default_profile) = &self.default_profile {
+            require_non_empty("default_profile", default_profile)?;
+            if !self.profiles.contains_key(default_profile) {
+                return Err(CliError::invalid_config(format!(
+                    "`default_profile` points to missing profile `{default_profile}`"
+                )));
+            }
         }
         for (name, profile) in &self.profiles {
             validate_profile_name(name).map_err(|error| CliError::invalid_config(error.message))?;

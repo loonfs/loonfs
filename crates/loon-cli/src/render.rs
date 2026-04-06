@@ -112,7 +112,7 @@ pub fn human_success(output: &CommandOutput) -> String {
             let mut lines = vec!["NAME\tMODE\tSTORE\tDEFAULT".to_owned()];
             for profile in profiles {
                 let store = profile.store_kind.as_deref().unwrap_or("-");
-                let default = if profile.name == *default_profile {
+                let default = if default_profile.as_deref() == Some(profile.name.as_str()) {
                     "*"
                 } else {
                     ""
@@ -207,7 +207,7 @@ mod tests {
             profile: None,
             mode: None,
             data: CommandData::ProfileList {
-                default_profile: "default".to_owned(),
+                default_profile: Some("default".to_owned()),
                 profiles: vec![
                     ProfileSummary {
                         name: "default".to_owned(),

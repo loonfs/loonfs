@@ -31,8 +31,10 @@ pub fn show_profile(
 ) -> Result<(String, ProfileConfig), CliError> {
     let name = match explicit_name {
         Some(name) => name,
-        None if config.default_profile.is_empty() => return Err(CliError::no_default_profile()),
-        None => &config.default_profile,
+        None => config
+            .default_profile
+            .as_deref()
+            .ok_or_else(CliError::no_default_profile)?,
     };
     let profile = config
         .profiles
@@ -54,7 +56,7 @@ pub fn add_profile(
     let redacted = profile.redacted();
     config.profiles.insert(name.to_owned(), profile);
     if is_first {
-        config.default_profile = name.to_owned();
+        config.default_profile = Some(name.to_owned());
     }
     Ok((name.to_owned(), redacted))
 }
@@ -77,8 +79,8 @@ pub fn remove_profile(config: &mut CliConfig, name: &str) -> Result<ProfileSumma
         .profiles
         .remove(name)
         .ok_or_else(|| CliError::profile_not_found(name))?;
-    if config.default_profile == name {
-        config.default_profile.clear();
+    if config.default_profile.as_deref() == Some(name) {
+        config.default_profile = None;
     }
     Ok(ProfileSummary {
         name: name.to_owned(),
@@ -91,7 +93,7 @@ pub fn make_default_profile(config: &mut CliConfig, name: &str) -> Result<(), Cl
     if !config.profiles.contains_key(name) {
         return Err(CliError::profile_not_found(name));
     }
-    config.default_profile = name.to_owned();
+    config.default_profile = Some(name.to_owned());
     Ok(())
 }
 
@@ -101,8 +103,10 @@ pub fn resolve_profile<'a>(
 ) -> Result<(&'a str, &'a ProfileConfig), CliError> {
     let name = match explicit_name {
         Some(name) => name,
-        None if config.default_profile.is_empty() => return Err(CliError::no_default_profile()),
-        None => &config.default_profile,
+        None => config
+            .default_profile
+            .as_deref()
+            .ok_or_else(CliError::no_default_profile)?,
     };
     let profile = config
         .profiles

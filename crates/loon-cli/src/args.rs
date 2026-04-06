@@ -1,6 +1,5 @@
 use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;
-use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "loon")]
@@ -11,8 +10,6 @@ pub struct Cli {
     pub json: bool,
     #[arg(long, global = true)]
     pub no_input: bool,
-    #[arg(long, global = true)]
-    pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }

@@ -3,8 +3,8 @@ use crate::args::{
     ProfileAddCommand, ProfileCommand, ProfileUpdateArgs, RuntimeBehavior,
 };
 use crate::config::{
-    load_config, load_config_if_exists, load_or_default_config, save_config, ProfileConfig,
-    StoreConfig,
+    default_config_path, load_config, load_config_if_exists, load_or_default_config, save_config,
+    ProfileConfig, StoreConfig,
 };
 use crate::error::CliError;
 use crate::profiles::{
@@ -12,7 +12,7 @@ use crate::profiles::{
     ProfileSummary,
 };
 use crate::prompt;
-use crate::resolve::{resolve_target_profile, resolved_config_path};
+use crate::resolve::resolve_target_profile;
 use loon_api::{AuthoritativePathEntry, NamespaceSummary};
 
 const AWS_REGIONS: &[&str] = &[
@@ -70,7 +70,7 @@ pub enum CommandData {
     Profile(ProfileConfig),
     ProfileSummary(ProfileSummary),
     ProfileList {
-        default_profile: String,
+        default_profile: Option<String>,
         profiles: Vec<ProfileSummary>,
     },
     DefaultProfile {
@@ -135,21 +135,15 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
         }),
-        Command::Init(args) => run_init(kind, cli.config.as_deref(), args, runtime),
-        Command::Config { command } => run_config_command(kind, cli.config.as_deref(), command),
-        Command::Profile { command } => {
-            run_profile_command(kind, cli.config.as_deref(), command, runtime)
-        }
+        Command::Init(args) => run_init(kind, args, runtime),
+        Command::Config { command } => run_config_command(kind, command),
+        Command::Profile { command } => run_profile_command(kind, command, runtime),
         Command::Namespace { command } => {
-            run_namespace_command(kind, cli.config.as_deref(), cli.profile.as_deref(), command)
+            run_namespace_command(kind, cli.profile.as_deref(), command)
         }
-        Command::Filesystem { command } => run_filesystem_command(
-            kind,
-            cli.config.as_deref(),
-            cli.profile.as_deref(),
-            command,
-            runtime,
-        ),
+        Command::Filesystem { command } => {
+            run_filesystem_command(kind, cli.profile.as_deref(), command, runtime)
+        }
     }
 }
 
@@ -157,14 +151,18 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
 
 fn run_init(
     kind: CommandKind,
-    explicit_config: Option<&Path>,
     args: InitArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let config_path =
-        resolved_config_path(explicit_config).map_err(|error| fail(kind, None, None, error))?;
+    let config_path = default_config_path().map_err(|error| fail(kind, None, None, error))?;
 
     let result = (|| -> Result<(String, ProfileConfig), CliError> {
+        if config_path.exists() {
+            return Err(CliError::config_already_exists(
+                &config_path.display().to_string(),
+            ));
+        }
+
         let name = match &args.name {
             Some(n) => n.clone(),
             None if runtime.interactive => prompt::prompt_line_default("profile name", "default")?,
@@ -181,7 +179,7 @@ fn run_init(
 
         let mut config = load_or_default_config(&config_path)?;
         let (profile_name, redacted) = add_profile(&mut config, &name, profile)?;
-        config.default_profile = profile_name.clone();
+        config.default_profile = Some(profile_name.clone());
         save_config(&config_path, &config)?;
         Ok((profile_name, redacted))
     })()
@@ -283,11 +281,9 @@ fn require_or_prompt_region(
 
 fn run_config_command(
     kind: CommandKind,
-    explicit_config: Option<&Path>,
     command: ConfigCommand,
 ) -> Result<CommandOutput, CommandFailure> {
-    let config_path =
-        resolved_config_path(explicit_config).map_err(|error| fail(kind, None, None, error))?;
+    let config_path = default_config_path().map_err(|error| fail(kind, None, None, error))?;
     match command {
         ConfigCommand::Path => Ok(CommandOutput {
             kind,
@@ -316,12 +312,10 @@ fn run_config_command(
 
 fn run_profile_command(
     kind: CommandKind,
-    explicit_config: Option<&Path>,
     command: ProfileCommand,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let config_path =
-        resolved_config_path(explicit_config).map_err(|error| fail(kind, None, None, error))?;
+    let config_path = default_config_path().map_err(|error| fail(kind, None, None, error))?;
     match command {
         ProfileCommand::Add { command } => run_profile_add(kind, &config_path, command, runtime),
         ProfileCommand::List => {
@@ -332,10 +326,7 @@ fn run_profile_command(
                 profile: None,
                 mode: None,
                 data: CommandData::ProfileList {
-                    default_profile: config
-                        .as_ref()
-                        .map(|c| c.default_profile.clone())
-                        .unwrap_or_default(),
+                    default_profile: config.as_ref().and_then(|c| c.default_profile.clone()),
                     profiles: list_profiles(config.as_ref()),
                 },
             })
@@ -818,11 +809,10 @@ fn run_profile_make_default(
 
 fn run_namespace_command(
     kind: CommandKind,
-    explicit_config: Option<&Path>,
     global_profile: Option<&str>,
     command: NamespaceCommand,
 ) -> Result<CommandOutput, CommandFailure> {
-    let resolved = resolve_target_profile(explicit_config, global_profile)
+    let resolved = resolve_target_profile(global_profile)
         .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     let backend = resolved.target.backend();
@@ -871,12 +861,11 @@ fn run_namespace_command(
 
 fn run_filesystem_command(
     kind: CommandKind,
-    explicit_config: Option<&Path>,
     global_profile: Option<&str>,
     command: FilesystemCommand,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let resolved = resolve_target_profile(explicit_config, global_profile)
+    let resolved = resolve_target_profile(global_profile)
         .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
     let backend = resolved.target.backend();
