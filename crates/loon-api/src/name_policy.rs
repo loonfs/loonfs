@@ -2,16 +2,11 @@ use serde::{Deserialize, Serialize};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NamePolicy {
+    #[default]
     NfcCasefoldV0,
-}
-
-impl Default for NamePolicy {
-    fn default() -> Self {
-        Self::NfcCasefoldV0
-    }
 }
 
 pub fn name_key_for_display_name(policy: NamePolicy, display_name: &str) -> String {

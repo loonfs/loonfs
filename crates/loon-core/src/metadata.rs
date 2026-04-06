@@ -459,7 +459,7 @@ impl MetadataState {
             let requested_absolute_path = join_absolute_path(&current_absolute_path, &component);
             let direntry = self
                 .visible_child(current_inode_id, &component, base_seq)
-                .ok_or_else(|| VisiblePathError::PathNotFound {
+                .ok_or(VisiblePathError::PathNotFound {
                     absolute_path: requested_absolute_path,
                 })?;
             current_inode_id = direntry.child_inode_id;
