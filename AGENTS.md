@@ -71,7 +71,6 @@ Every randomized failure must print:
 - `crates/loon-model/`: pure reference model for metadata replay and semantic comparison
 - `crates/loon-core/`: canonical implementation of metadata rules and replay
 - `crates/loon-objectstore/`: provider contract, keys, and conformance behavior
-- `crates/loon-testkit/`: shared test helpers
 
 ## 6. How to add a new namespace mutation
 

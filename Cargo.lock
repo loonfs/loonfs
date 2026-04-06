@@ -1399,13 +1399,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "loon-testkit"
-version = "0.1.0"
-dependencies = [
- "tempfile",
-]
-
-[[package]]
 name = "matchit"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

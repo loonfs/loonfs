@@ -52,7 +52,6 @@ crates/
   loon-server/       `loond` HTTP server over core + object storage
   loon-client/       thin HTTP transport client
   loon-cli/          profile-based `loon` CLI
-  loon-testkit/      shared test helpers
 xtask/
   smoke             end-to-end acceptance helper
 ```
