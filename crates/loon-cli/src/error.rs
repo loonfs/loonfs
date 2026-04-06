@@ -1,45 +1,75 @@
-#[derive(Debug)]
-pub enum CliError {
-    Parse(clap::Error),
-    Runtime(anyhow::Error),
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliError {
+    pub code: String,
+    pub message: String,
 }
 
 impl CliError {
-    pub fn exit_code(&self) -> u8 {
-        match self {
-            Self::Parse(error) => error
-                .exit_code()
-                .try_into()
-                .expect("clap exit code should fit in u8"),
-            Self::Runtime(_) => 1,
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
         }
     }
 
-    pub fn use_stderr(&self) -> bool {
-        match self {
-            Self::Parse(error) => error.use_stderr(),
-            Self::Runtime(_) => true,
-        }
+    pub fn invalid_config(message: impl Into<String>) -> Self {
+        Self::new("invalid_config", message)
     }
 
-    pub fn render(&self) -> String {
-        match self {
-            Self::Parse(error) => error.to_string(),
-            Self::Runtime(error) => error.to_string(),
-        }
+    pub fn invalid_input(message: impl Into<String>) -> Self {
+        Self::new("invalid_input", message)
+    }
+
+    pub fn profile_not_found(name: &str) -> Self {
+        Self::new("profile_not_found", format!("profile `{name}` not found"))
+    }
+
+    pub fn profile_already_exists(name: &str) -> Self {
+        Self::new(
+            "profile_already_exists",
+            format!("profile `{name}` already exists"),
+        )
+    }
+
+    pub fn no_active_profile() -> Self {
+        Self::new("no_active_profile", "no active profile")
+    }
+
+    pub fn non_interactive_input_required(field: &str) -> Self {
+        Self::new(
+            "non_interactive_input_required",
+            format!("missing required `{field}` while `--no-input` is active"),
+        )
+    }
+
+    pub fn json_not_supported_for_streaming() -> Self {
+        Self::new(
+            "json_not_supported_for_streaming",
+            "streaming commands do not support `--json`",
+        )
+    }
+
+    pub fn local_server_already_running(profile: &str) -> Self {
+        Self::new(
+            "local_server_already_running",
+            format!("managed local server for profile `{profile}` is already running"),
+        )
+    }
+
+    pub fn invalid_profile_mode(profile: &str, expected: &str, actual: &str) -> Self {
+        Self::new(
+            "invalid_profile_mode",
+            format!("profile `{profile}` uses `{actual}` mode; expected `{expected}`"),
+        )
+    }
+
+    pub fn client_error(message: impl Into<String>) -> Self {
+        Self::new("client_error", message)
+    }
+
+    pub fn io(error: std::io::Error) -> Self {
+        Self::new("io_error", format!("i/o error: {error}"))
     }
 }
-
-impl From<clap::Error> for CliError {
-    fn from(value: clap::Error) -> Self {
-        Self::Parse(value)
-    }
-}
-
-impl From<anyhow::Error> for CliError {
-    fn from(value: anyhow::Error) -> Self {
-        Self::Runtime(value)
-    }
-}
-
-pub type CliResult<T> = Result<T, CliError>;

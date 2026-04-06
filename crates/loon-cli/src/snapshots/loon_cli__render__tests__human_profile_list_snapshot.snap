@@ -1,0 +1,7 @@
+---
+source: crates/loon-cli/src/render.rs
+assertion_line: 241
+expression: human_success(&output)
+---
+* alpha	local
+- beta	remote

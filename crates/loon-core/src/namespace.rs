@@ -1,0 +1,31 @@
+use loon_api::FenceToken;
+pub use loon_api::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
+use thiserror::Error;
+
+pub fn head_and_lease_fence_tokens_agree(head: &HeadState, lease: &LeaseState) -> bool {
+    head.namespace_id == lease.namespace_id && head.active_fence_token == lease.fence_token
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum HeadFenceTakeoverError {
+    #[error("head fence token overflow from `{active:?}`")]
+    FenceTokenOverflow { active: FenceToken },
+}
+
+pub fn next_takeover_head(current_head: &HeadState) -> Result<HeadState, HeadFenceTakeoverError> {
+    let next_fence = current_head.active_fence_token.0.checked_add(1).ok_or(
+        HeadFenceTakeoverError::FenceTokenOverflow {
+            active: current_head.active_fence_token,
+        },
+    )?;
+
+    Ok(HeadState {
+        namespace_id: current_head.namespace_id.clone(),
+        seq: current_head.seq,
+        active_fence_token: FenceToken(next_fence),
+        next_inode_id: current_head.next_inode_id,
+        name_policy: current_head.name_policy,
+        snapshot_hint_seq: current_head.snapshot_hint_seq,
+        retention_floor_seq: current_head.retention_floor_seq,
+    })
+}

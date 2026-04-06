@@ -21,13 +21,16 @@ The durable source of truth is object storage. Everything else is either compute
 
 ## 2a. Required reading before changing core behavior
 
-Before touching `loon-server` (including its `objectstore`, `core`, or `queue` modules) or `loon-client`, read:
+Before touching `loon-server`, `loon-core`, `loon-objectstore`, or `loon-client`, read:
 
-- `docs/specs/020-objectstore-contract.md`
-- `docs/specs/040-namespace-commit.md`
-- `docs/specs/050-background-work.md`
-- `docs/specs/090-major-implementation-decisions.md`
-- ADRs 0009 through 0015
+- `README.md`
+- `docs/specs/020-architecture-overview.md`
+- `docs/specs/030-object-store-contract.md`
+- `docs/specs/040-filesystem-and-storage-model.md`
+- `docs/specs/050-write-read-protocol.md`
+- `docs/specs/060-interfaces-and-clients.md`
+- `docs/specs/080-background-jobs.md`
+- `docs/specs/090-versioning-conformance-and-extensions.md`
 
 These documents lock the high-leverage choices that are easiest to get wrong in a way that cascades through the codebase.
 
@@ -35,12 +38,11 @@ These documents lock the high-leverage choices that are easiest to get wrong in 
 
 For normal feature work, follow this order:
 
-1. Update or add the readable spec under `docs/specs/`.
-2. Add or update an ADR if the decision is architectural or hard to reverse.
-3. Add a scenario fixture under `tests/scenarios/`.
-4. Update the reference model in `crates/loon-model/`.
-5. Implement the production code.
-6. Add unit tests only after the higher-level behavior is captured.
+1. Confirm the relevant behavior in `docs/specs/` and `README.md`.
+2. Update the reference model in `crates/loon-model/` when metadata semantics change.
+3. Implement the production code to the current spec.
+4. Add or update deterministic tests after the behavior is understood.
+5. If the required behavior cannot fit the current spec, stop and escalate to the core team rather than inventing a local contract.
 
 The point is simple: **the behavior should be explained before it is encoded**.
 
@@ -63,13 +65,12 @@ Every randomized failure must print:
 
 ## 5. What belongs where
 
-- `docs/specs/`: readable contracts and examples
-- `docs/adr/`: decisions that are hard to reverse
-- `docs/runbooks/`: “how to debug X” guides
-- `crates/loon-testkit/src/model/`: pure reference model for state-machine testing
-- `crates/loon-server/src/core/`: canonical implementation of metadata rules
-- `crates/loon-sim/`: deterministic scheduler and failure injection
-- `tests/scenarios/`: human-readable input cases
+- `README.md`: active product and operator guide
+- `docs/specs/`: authoritative contracts and examples
+- `docs/appendices/`: supporting matrices and reference material
+- `crates/loon-model/`: pure reference model for metadata replay and semantic comparison
+- `crates/loon-core/`: canonical implementation of metadata rules and replay
+- `crates/loon-objectstore/`: provider contract, keys, and conformance behavior
 
 ## 6. How to add a new namespace mutation
 
@@ -77,11 +78,11 @@ Suppose you add a new mutation, such as “restore revision.”
 
 You must do all of the following:
 
-1. Describe the mutation in `docs/specs/040-namespace-commit.md`.
+1. Confirm the mutation in `docs/specs/050-write-read-protocol.md`, and update `docs/specs/040-filesystem-and-storage-model.md` if it changes visible resource semantics.
 2. Document preconditions and failure modes.
-3. Add a model transition in `crates/loon-testkit/src/model/`.
-4. Add at least one scenario fixture.
-5. Add or update invariants in `crates/loon-server/src/core/invariants.rs`.
+3. Add or update the model behavior in `crates/loon-model/`.
+4. Add or update invariants in `crates/loon-core/src/invariants.rs`.
+5. Add deterministic tests for the new behavior.
 6. Only then add the production implementation.
 
 ## 7. How to add a new object-store assumption
@@ -90,12 +91,12 @@ Example: “we need compare-and-swap update on small mutable control objects.”
 
 Required steps:
 
-1. Add the capability to `loon-server/src/objectstore` provider profiles.
+1. Add the capability to `crates/loon-objectstore/`.
 2. Add a conformance test case.
 3. Mark the provider expectation for S3 and R2.
-4. Update the object-store contract spec.
+4. If the contract itself must change, stop and escalate to the core team so the spec can be reoriented before code diverges.
 
-Do not smuggle provider-specific behavior into `loon-server/src/core`.
+Do not smuggle provider-specific behavior into `loon-core`.
 
 ## 8. Commit and PR style
 

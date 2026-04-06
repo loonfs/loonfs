@@ -1,1059 +1,555 @@
-use loon_client::ops::OpsCommand;
-use loon_server::mutation::{execute_client_mutation, ClientMutationExecutionParams};
-use loon_server::objectstore::keys::{blob, content_manifest};
-use loon_server::objectstore::r2::R2StoreConfig;
-use loon_server::objectstore::s3::AwsS3StoreConfig;
-use loon_server::objectstore::ConfiguredObjectStore;
-use loon_server::ops::{
-    bootstrap_namespace as server_bootstrap_namespace, list_authoritative_path as server_list_path,
-    load_namespace_state_summary as server_load_namespace_state_summary,
-    read_authoritative_file_bytes as server_read_file_bytes,
-    resolve_authoritative_path as server_resolve_path,
-    translate_authoritative_state_to_remote_observations as server_translate,
-    NamespaceBootstrapError, NamespaceStateSummaryError, RemoteObservationTranslationError,
-};
-use loon_testkit::tempdir::TestDir;
-use loon_types::{
-    sha256_digest, ClientMutationOp, ClientMutationRequest, ContentBlockDescriptor,
-    ContentManifestEnvelope, ContentManifestPayload, NamespaceId, ObjectStore,
-};
+use serde_json::Value;
+use std::env;
 use std::fs;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Output};
+use std::thread;
+use std::time::{Duration, Instant};
+use tempfile::TempDir;
 
 #[test]
-fn version_subcommand_prints_version() {
-    let output = run_loon(["version"]);
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stderr).expect("utf-8 stderr"), "");
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("utf-8 stdout"),
-        format!("loon {}\n", env!("CARGO_PKG_VERSION"))
-    );
-}
-
-#[test]
-fn help_ops_mentions_bootstrap_namespace() {
-    let output = run_loon(["help", "ops"]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("bootstrap-namespace"));
-    assert!(stdout.contains("Use `bootstrap-namespace`"));
-}
-
-#[test]
-fn help_file_mentions_authoritative_subcommands() {
-    let output = run_loon(["help", "file"]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("ls"));
-    assert!(stdout.contains("stat"));
-    assert!(stdout.contains("get"));
-    assert!(stdout.contains("cat"));
-}
-
-#[test]
-fn file_ls_and_cat_read_authoritative_state_directly() {
-    let temp_dir = TestDir::new("loon-cli-file-read");
-    let config_path = write_demo_local_fs_config(temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
-    seed_authoritative_hello_file(&config_path, &namespace_id, b"hello from loon\n");
-
-    let ls = run_loon([
-        "file",
-        "ls",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "demo:/",
-    ]);
-    assert!(ls.status.success());
-    assert_eq!(
-        String::from_utf8(ls.stdout).expect("utf-8 stdout"),
-        "hello.txt\n"
-    );
-
-    let cat = run_loon([
-        "file",
-        "cat",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "demo:/hello.txt",
-    ]);
-    assert!(cat.status.success());
-    assert_eq!(cat.stdout, b"hello from loon\n");
-    assert!(cat.stderr.is_empty());
-}
-
-#[test]
-fn file_get_writes_download_without_touching_existing_target() {
-    let temp_dir = TestDir::new("loon-cli-file-get");
-    let config_path = write_demo_local_fs_config(temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
-    seed_authoritative_hello_file(&config_path, &namespace_id, b"hello from loon\n");
-    let download_dir = temp_dir.path().join("downloads");
-    fs::create_dir_all(&download_dir).expect("create downloads dir");
-
-    let get = run_loon([
-        "file",
-        "get",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "demo:/hello.txt",
-        download_dir.to_str().expect("utf-8 path"),
-    ]);
-    assert!(get.status.success());
-    assert_eq!(
-        fs::read(download_dir.join("hello.txt")).expect("read downloaded file"),
-        b"hello from loon\n"
-    );
-
-    let second_get = run_loon([
-        "file",
-        "get",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "demo:/hello.txt",
-        download_dir.to_str().expect("utf-8 path"),
-    ]);
-    assert!(!second_get.status.success());
-    assert!(String::from_utf8(second_get.stderr)
-        .expect("utf-8 stderr")
-        .contains("already exists"));
-}
-
-#[test]
-fn help_bootstrap_namespace_shows_required_flags() {
-    let output = run_loon(["help", "ops", "bootstrap-namespace"]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("--config"));
-    assert!(stdout.contains("--namespace"));
-    assert!(stdout.contains("--allow-existing"));
-}
-
-#[test]
-fn completion_generation_mentions_active_ops_subcommands() {
-    let output = run_loon(["completion", "bash"]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("bootstrap-namespace"));
-    assert!(stdout.contains("sync-until-idle"));
-}
-
-#[test]
-fn manpages_generation_writes_root_and_ops_pages() {
-    let temp_dir = TestDir::new("loon-cli-manpages");
-    let output_dir = temp_dir.path().join("man");
-    let output = run_loon(["manpages", output_dir.to_str().expect("utf-8 path")]);
-    assert!(output.status.success());
-    assert!(output_dir.join("loon.1").is_file());
-    assert!(output_dir.join("loon-ops.1").is_file());
-    assert!(output_dir.join("loon-ops-smoke.1").is_file());
-    let bootstrap_manpage = fs::read_to_string(output_dir.join("loon-ops-bootstrap-namespace.1"))
-        .expect("read bootstrap manpage");
-    assert!(bootstrap_manpage.contains("bootstrap-namespace"));
-}
-
-#[test]
-fn config_path_uses_local_default_resolution() {
-    let temp_dir = TestDir::new("loon-cli-config-path");
-    write_demo_local_fs_config_with_name(temp_dir.path(), "loondb-demo.local.toml");
-    let output = run_loon_in_dir(temp_dir.path(), ["config", "path"]);
-    assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("utf-8 stdout"),
-        "loondb-demo.local.toml\n"
-    );
-}
-
-#[test]
-fn config_path_prefers_loon_config_env() {
-    let temp_dir = TestDir::new("loon-cli-config-env");
-    let env_config_path = write_demo_local_fs_config_with_name(temp_dir.path(), "env-demo.toml");
-    write_demo_local_fs_config_with_name(temp_dir.path(), "loondb-demo.local.toml");
-    let output = run_loon_in_dir_with_env(
-        temp_dir.path(),
-        [("LOON_CONFIG", env_config_path.to_str().expect("utf-8 path"))],
-        ["config", "path"],
-    );
-    assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("utf-8 stdout"),
-        format!("{}\n", env_config_path.display())
-    );
-}
-
-#[test]
-fn config_path_missing_points_at_example_template() {
-    let temp_dir = TestDir::new("loon-cli-config-missing");
-    let output = run_loon_in_dir(temp_dir.path(), ["config", "path"]);
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8(output.stderr)
-        .expect("utf-8 stderr")
-        .contains("configs/loondb-demo.local-fs.example.toml"));
-}
-
-#[test]
-fn config_show_prints_normalized_toml() {
-    let temp_dir = TestDir::new("loon-cli-config-show");
-    let config_path = write_demo_local_fs_config(temp_dir.path());
-    let output = run_loon([
-        "config",
-        "show",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-    ]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("[object_store]"));
-    assert!(stdout.contains("kind = \"local-fs\""));
-    assert!(stdout.contains("[ops]"));
-}
-
-#[test]
-fn config_validate_reports_valid_status() {
-    let temp_dir = TestDir::new("loon-cli-config-validate");
-    let config_path = write_demo_local_fs_config(temp_dir.path());
-    let output = run_loon([
-        "config",
-        "validate",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-    ]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("command=config/validate"));
-    assert!(stdout.contains("status=valid"));
-}
-
-#[test]
-fn config_validate_invalid_config_fails_cleanly() {
-    let temp_dir = TestDir::new("loon-cli-config-invalid");
-    let config_path = temp_dir.path().join("broken.toml");
-    fs::write(&config_path, "[object_store\nkind = \"local-fs\"\n").expect("write invalid config");
-    let output = run_loon([
-        "config",
-        "validate",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-    ]);
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8(output.stderr)
-        .expect("utf-8 stderr")
-        .contains("parse ops config"));
-}
-
-#[test]
-fn doctor_reports_success_for_valid_local_fs_config() {
-    let temp_dir = TestDir::new("loon-cli-doctor-valid");
-    let config_path = write_demo_local_fs_config(temp_dir.path());
-    let output = run_loon([
-        "doctor",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-    ]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("command=doctor"));
-    assert!(stdout.contains("object_store_kind=local-fs"));
-    assert!(stdout.contains("client_state_db=missing"));
-    assert!(stdout.contains("status=ok"));
-}
-
-#[test]
-fn doctor_invalid_config_fails_cleanly() {
-    let temp_dir = TestDir::new("loon-cli-doctor-invalid");
-    let config_path = temp_dir.path().join("broken.toml");
-    fs::write(&config_path, "[object_store\nkind = \"local-fs\"\n").expect("write invalid config");
-    let output = run_loon([
-        "doctor",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-    ]);
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
-    assert!(stderr.contains("command=doctor"));
-    assert!(stderr.contains("config_parse=error"));
-    assert!(stderr.contains("status=failed"));
-}
-
-#[test]
-fn doctor_reports_missing_paths_cleanly() {
-    let temp_dir = TestDir::new("loon-cli-doctor-missing-paths");
-    let config_path = write_demo_local_fs_config_with_paths(
-        temp_dir.path(),
-        temp_dir.path().join("object-store"),
-        temp_dir.path().join("missing-parent/client.sqlite3"),
-        temp_dir.path().join("missing-mirror"),
-        "loondb-demo.toml",
-        false,
-    );
-    let output = run_loon([
-        "doctor",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-    ]);
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
-    assert!(stderr.contains("client_state_db_parent=missing"));
-    assert!(stderr.contains("mirror_root=missing"));
-    assert!(stderr.contains("status=failed"));
-}
-
-#[test]
-fn ops_smoke_stdout_matches_loon_ops_exactly() {
-    let cli_temp_dir = TestDir::new("loon-cli-smoke-cli");
-    let ops_temp_dir = TestDir::new("loon-cli-smoke-ops");
-    let cli_config_path = write_demo_local_fs_config(cli_temp_dir.path());
-    let ops_config_path = write_demo_local_fs_config(ops_temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
-
-    let output = run_loon([
-        "ops",
-        "smoke",
-        "--config",
-        cli_config_path.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("utf-8 stdout"),
-        loon_client::ops::run_command(
-            OpsCommand::Smoke {
-                config_path: ops_config_path,
-                namespace_id: namespace_id.clone(),
-            },
-            &test_make_transport,
-            &test_open_store,
-        )
-        .expect("run loon_client::ops smoke")
-    );
-}
-
-#[test]
-fn bootstrap_namespace_stdout_matches_loon_ops_exactly() {
-    let cli_temp_dir = TestDir::new("loon-cli-bootstrap-cli");
-    let ops_temp_dir = TestDir::new("loon-cli-bootstrap-ops");
-    let cli_config_path = write_demo_local_fs_config(cli_temp_dir.path());
-    let ops_config_path = write_demo_local_fs_config(ops_temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
-
-    let output = run_loon([
-        "ops",
-        "bootstrap-namespace",
-        "--config",
-        cli_config_path.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("utf-8 stdout"),
-        loon_client::ops::run_command(
-            OpsCommand::BootstrapNamespace {
-                config_path: ops_config_path,
-                namespace_id,
-                allow_existing: false,
-            },
-            &test_make_transport,
-            &test_open_store,
-        )
-        .expect("run loon_client::ops bootstrap")
-    );
-}
-
-#[test]
-fn import_then_sync_once_materializes_root_directory() {
-    let temp_dir = TestDir::new("loon-cli-root-materialization");
-    let config_path = write_demo_local_fs_config(temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
-
-    let bootstrap = run_loon([
-        "ops",
-        "bootstrap-namespace",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(bootstrap.status.success());
-
-    let import = run_loon([
-        "ops",
-        "import-remote-observations",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(import.status.success());
-
-    let imported_state = run_loon([
-        "ops",
-        "show-client-state",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(imported_state.status.success());
-    let imported_stdout = String::from_utf8(imported_state.stdout).expect("utf-8 stdout");
-    assert!(imported_stdout.contains("decision: materialize_remote_dir"));
-    assert!(imported_stdout.contains("exists_on_disk: false"));
-
-    let sync = run_loon([
-        "ops",
-        "sync-once",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(sync.status.success());
-
-    let final_state = run_loon([
-        "ops",
-        "show-client-state",
-        "--config",
-        config_path.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(final_state.status.success());
-    let final_stdout = String::from_utf8(final_state.stdout).expect("utf-8 stdout");
-    assert!(final_stdout.contains("exists_on_disk: true"));
-    assert!(final_stdout.contains("synced_seq: 0"));
-    assert!(final_stdout.contains("planned_actions: []"));
-}
-
-#[test]
-fn expired_same_writer_lease_is_reacquired_on_sync_once() {
-    let temp_dir = TestDir::new("loon-cli-expired-same-writer");
-    let object_store_root = temp_dir.path().join("object-store");
-    let state_db_path = temp_dir.path().join("client.sqlite3");
-    let mirror_root = temp_dir.path().join("mirror");
-    let bootstrap_config = write_demo_local_fs_config_with_spec(
-        temp_dir.path(),
-        object_store_root.clone(),
-        state_db_path.clone(),
-        mirror_root.clone(),
-        "bootstrap.toml",
-        true,
-        "writer-a",
-        1_000,
-    );
-    let run_config = write_demo_local_fs_config_with_spec(
-        temp_dir.path(),
-        object_store_root,
-        state_db_path,
-        mirror_root.clone(),
-        "run.toml",
-        true,
-        "writer-a",
-        70_000,
-    );
-    let namespace_id = NamespaceId::from("demo");
-
-    assert!(run_loon([
-        "ops",
-        "bootstrap-namespace",
-        "--config",
-        bootstrap_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-    assert!(run_loon([
-        "ops",
-        "import-remote-observations",
-        "--config",
-        bootstrap_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-    assert!(run_loon([
-        "ops",
-        "sync-once",
-        "--config",
-        bootstrap_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-
-    fs::write(mirror_root.join("hello.txt"), b"hello from writer a\n").expect("write local file");
-    assert!(run_loon([
-        "ops",
-        "observe-local",
-        "--config",
-        run_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-        "--path",
-        mirror_root.join("hello.txt").to_str().expect("utf-8 path"),
-    ])
-    .status
-    .success());
-
-    let sync = run_loon([
-        "ops",
-        "sync-once",
-        "--config",
-        run_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(sync.status.success());
-
-    let namespace_state = run_loon([
-        "ops",
-        "show-namespace-state",
-        "--config",
-        run_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(namespace_state.status.success());
-    let stdout = String::from_utf8(namespace_state.stdout).expect("utf-8 stdout");
-    assert!(stdout.contains("active_fence_token: 1"));
-    assert!(stdout.contains("holder_id: writer-a"));
-    assert!(stdout.contains("lease_expires_at_ms: 130000"));
-}
-
-#[test]
-fn writer_b_can_take_over_after_expiry_and_writer_a_is_then_rejected() {
-    let temp_dir = TestDir::new("loon-cli-writer-takeover");
-    let object_store_root = temp_dir.path().join("object-store");
-    let writer_a_db = temp_dir.path().join("writer-a.sqlite3");
-    let writer_a_mirror = temp_dir.path().join("mirror-a");
-    let writer_b_db = temp_dir.path().join("writer-b.sqlite3");
-    let writer_b_mirror = temp_dir.path().join("mirror-b");
-    let bootstrap_config = write_demo_local_fs_config_with_spec(
-        temp_dir.path(),
-        object_store_root.clone(),
-        writer_a_db.clone(),
-        writer_a_mirror.clone(),
-        "bootstrap-a.toml",
-        true,
-        "writer-a",
-        1_000,
-    );
-    let writer_a_run = write_demo_local_fs_config_with_spec(
-        temp_dir.path(),
-        object_store_root.clone(),
-        writer_a_db,
-        writer_a_mirror.clone(),
-        "run-a.toml",
-        true,
-        "writer-a",
-        70_000,
-    );
-    let writer_b_run = write_demo_local_fs_config_with_spec(
-        temp_dir.path(),
-        object_store_root,
-        writer_b_db,
-        writer_b_mirror.clone(),
-        "run-b.toml",
-        true,
-        "writer-b",
-        70_000,
-    );
-    let namespace_id = NamespaceId::from("demo");
-
-    assert!(run_loon([
-        "ops",
-        "bootstrap-namespace",
-        "--config",
-        bootstrap_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-    assert!(run_loon([
-        "ops",
-        "import-remote-observations",
-        "--config",
-        bootstrap_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-    assert!(run_loon([
-        "ops",
-        "sync-once",
-        "--config",
-        bootstrap_config.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-
-    assert!(run_loon([
-        "ops",
-        "import-remote-observations",
-        "--config",
-        writer_b_run.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-    assert!(run_loon([
-        "ops",
-        "sync-once",
-        "--config",
-        writer_b_run.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-
-    fs::write(writer_b_mirror.join("hello.txt"), b"writer b takeover\n").expect("write b file");
-    assert!(run_loon([
-        "ops",
-        "observe-local",
-        "--config",
-        writer_b_run.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-        "--path",
-        writer_b_mirror
-            .join("hello.txt")
-            .to_str()
-            .expect("utf-8 path"),
-    ])
-    .status
-    .success());
-    assert!(run_loon([
-        "ops",
-        "sync-once",
-        "--config",
-        writer_b_run.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ])
-    .status
-    .success());
-
-    fs::write(writer_a_mirror.join("stale.txt"), b"writer a stale\n").expect("write a file");
-    assert!(run_loon([
-        "ops",
-        "observe-local",
-        "--config",
-        writer_a_run.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-        "--path",
-        writer_a_mirror
-            .join("stale.txt")
-            .to_str()
-            .expect("utf-8 path"),
-    ])
-    .status
-    .success());
-
-    let stale_sync = run_loon([
-        "ops",
-        "sync-once",
-        "--config",
-        writer_a_run.to_str().expect("utf-8 path"),
-        "--namespace",
-        namespace_id.as_str(),
-    ]);
-    assert!(!stale_sync.status.success());
-    let stderr = String::from_utf8(stale_sync.stderr).expect("utf-8 stderr");
-    assert!(stderr.contains("writer-b"));
-    assert!(stderr.contains("held by another active writer"));
-}
-
-#[test]
-fn parse_failure_writes_to_stderr_and_exits_non_zero() {
-    let output = run_loon([
-        "ops",
-        "observe-local",
-        "--config",
-        "demo.toml",
-        "--namespace",
-        "demo",
-    ]);
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8(output.stderr)
-        .expect("utf-8 stderr")
-        .contains("--path"));
-}
-
-#[test]
-fn runtime_failure_writes_to_stderr_and_exits_non_zero() {
-    let output = run_loon([
-        "ops",
-        "show-client-state",
-        "--config",
-        "missing.toml",
-        "--namespace",
-        "demo",
-    ]);
-    assert!(!output.status.success());
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8(output.stderr)
-        .expect("utf-8 stderr")
-        .contains("read ops config missing.toml"));
-}
-
-fn run_loon<I, S>(args: I) -> std::process::Output
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    run_loon_command(Command::new(env!("CARGO_BIN_EXE_loon")).args(args))
-}
-
-fn run_loon_in_dir<I, S>(dir: &Path, args: I) -> std::process::Output
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    run_loon_command(
-        Command::new(env!("CARGO_BIN_EXE_loon"))
-            .current_dir(dir)
-            .args(args),
-    )
-}
-
-fn run_loon_in_dir_with_env<I, S, K, V>(
-    dir: &Path,
-    envs: impl IntoIterator<Item = (K, V)>,
-    args: I,
-) -> std::process::Output
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-    K: AsRef<std::ffi::OsStr>,
-    V: AsRef<std::ffi::OsStr>,
-{
-    let mut command = Command::new(env!("CARGO_BIN_EXE_loon"));
-    command.current_dir(dir).args(args);
-    for (key, value) in envs {
-        command.env(key, value);
-    }
-    run_loon_command(&mut command)
-}
-
-fn run_loon_command(command: &mut Command) -> std::process::Output {
-    command.output().expect("run loon cli")
-}
-
-fn write_demo_local_fs_config(base_dir: &Path) -> PathBuf {
-    write_demo_local_fs_config_with_name(base_dir, "loondb-demo.toml")
-}
-
-fn write_demo_local_fs_config_with_name(base_dir: &Path, name: &str) -> PathBuf {
-    write_demo_local_fs_config_with_spec(
-        base_dir,
-        base_dir.join("object-store"),
-        base_dir.join("client.sqlite3"),
-        base_dir.join("mirror"),
-        name,
-        true,
-        "loon-cli-test",
-        1_700_000_000_000,
-    )
-}
-
-fn write_demo_local_fs_config_with_paths(
-    base_dir: &Path,
-    object_store_root: PathBuf,
-    state_db_path: PathBuf,
-    mirror_root: PathBuf,
-    name: &str,
-    create_mirror_root: bool,
-) -> PathBuf {
-    write_demo_local_fs_config_with_spec(
-        base_dir,
-        object_store_root,
-        state_db_path,
-        mirror_root,
-        name,
-        create_mirror_root,
-        "loon-cli-test",
-        1_700_000_000_000,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_demo_local_fs_config_with_spec(
-    base_dir: &Path,
-    object_store_root: PathBuf,
-    state_db_path: PathBuf,
-    mirror_root: PathBuf,
-    name: &str,
-    create_mirror_root: bool,
-    writer_id: &str,
-    now_ms: u64,
-) -> PathBuf {
-    let config_path = base_dir.join(name);
-    fs::create_dir_all(&object_store_root).expect("create object store root");
-    if create_mirror_root {
-        fs::create_dir_all(&mirror_root).expect("create mirror root");
-    }
+fn unsupported_config_version_is_rejected() {
+    let harness = Harness::new();
     fs::write(
-        &config_path,
-        format!(
-            r#"[object_store]
+        harness.config_path(),
+        r#"
+config_version = 2
+
+[profiles.local]
+mode = "local"
+
+[profiles.local.local]
+server_config_path = "/tmp/loond.toml"
+"#,
+    )
+    .expect("write config");
+
+    let output = harness.run(&["--json", "profile", "list"]);
+    assert_failure(&output);
+    assert_eq!(json_error(&output)["code"], "invalid_config");
+    assert!(json_error(&output)["message"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported `config_version`"));
+}
+
+#[test]
+fn profile_add_list_show_use_remove_and_config_show_work() {
+    let harness = Harness::new();
+    let local_config = harness.write_server_config("local", "profile-add-local");
+
+    let add_local = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "local",
+        "local",
+        "--server-config",
+        local_config.to_str().unwrap(),
+    ]);
+    assert_success(&add_local);
+    assert_eq!(json_data(&add_local)["name"], "local");
+    assert_eq!(json_data(&add_local)["active"], true);
+
+    let external =
+        harness.start_external_server(harness.write_server_config("remote", "profile-add-remote"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "remote",
+        "remote",
+        "--server-url",
+        &external.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+    assert_eq!(json_data(&add_remote)["name"], "remote");
+    assert_eq!(json_data(&add_remote)["active"], false);
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_success(&list);
+    let list_data = json_data(&list);
+    let profiles = list_data["profiles"].as_array().unwrap();
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles[0]["name"], "local");
+    assert_eq!(profiles[0]["active"], true);
+    assert_eq!(profiles[1]["name"], "remote");
+    assert_eq!(profiles[1]["active"], false);
+
+    let show = harness.run(&["config", "show"]);
+    assert_success(&show);
+    let stdout = stdout_string(&show);
+    assert!(stdout.contains("mode = \"remote\""));
+    assert!(stdout.contains("REDACTED"));
+    assert!(!stdout.contains("test-token"));
+
+    let use_remote = harness.run(&["--json", "profile", "use", "remote"]);
+    assert_success(&use_remote);
+    assert_eq!(json_data(&use_remote)["name"], "remote");
+    assert_eq!(json_data(&use_remote)["active"], true);
+
+    let show_remote = harness.run(&["--json", "profile", "show"]);
+    assert_success(&show_remote);
+    assert_eq!(json_data(&show_remote)["name"], "remote");
+    assert_eq!(json_data(&show_remote)["mode"], "remote");
+
+    let remove_local = harness.run(&["--json", "profile", "remove", "local"]);
+    assert_success(&remove_local);
+    assert_eq!(json_data(&remove_local)["name"], "local");
+}
+
+#[test]
+fn no_input_rejects_missing_profile_fields_and_keeps_stdout_empty() {
+    let harness = Harness::new();
+    let output = harness.run(&["--json", "--no-input", "profile", "add", "local", "local"]);
+
+    assert_failure(&output);
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        json_error(&output)["code"],
+        "non_interactive_input_required"
+    );
+}
+
+#[test]
+fn profile_add_local_accepts_server_config_relative_to_shell_cwd() {
+    let harness = Harness::new();
+    let nested_dir = harness.temp_dir.path().join("configs");
+    fs::create_dir_all(&nested_dir).expect("nested configs dir");
+    let config_path = nested_dir.join("loon.local.toml");
+    let server_config_source = harness.write_server_config("cwd-relative", "cwd-relative");
+    let server_config = nested_dir.join("cwd-relative.loond.toml");
+    fs::copy(&server_config_source, &server_config).expect("copy server config into configs dir");
+    let relative_server_config = PathBuf::from("configs").join("cwd-relative.loond.toml");
+
+    let output = Command::new(loon_binary_path())
+        .current_dir(harness.temp_dir.path())
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .arg("profile")
+        .arg("add")
+        .arg("local")
+        .arg("local")
+        .arg("--server-config")
+        .arg(&relative_server_config)
+        .output()
+        .expect("run loon with cwd-relative config path");
+
+    assert_success(&output);
+    let stored = fs::read_to_string(&config_path).expect("read stored config");
+    assert!(stored.contains(&server_config.display().to_string()));
+}
+
+#[test]
+fn local_up_status_down_and_stale_cleanup_work() {
+    let harness = Harness::new();
+    let local_config = harness.write_server_config("alpha", "local-up-status");
+    harness.add_local_profile("alpha", &local_config);
+
+    let up = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
+    assert_success(&up);
+    let pid = json_data(&up)["pid"].as_u64().unwrap() as u32;
+
+    let status = harness.run(&["--json", "--profile", "alpha", "local", "status"]);
+    assert_success(&status);
+    assert_eq!(json_data(&status)["status"], "running");
+
+    let double_up = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
+    assert_failure(&double_up);
+    assert_eq!(
+        json_error(&double_up)["code"],
+        "local_server_already_running"
+    );
+
+    terminate_pid(pid);
+    wait_for_stale(&harness, "alpha");
+
+    let stale = harness.run(&["--json", "--profile", "alpha", "local", "status"]);
+    assert_success(&stale);
+    assert_eq!(json_data(&stale)["status"], "stale");
+
+    let up_again = harness.run(&["--json", "--profile", "alpha", "local", "up"]);
+    assert_success(&up_again);
+    assert_eq!(json_data(&up_again)["status"], "running");
+
+    let down = harness.run(&["--json", "--profile", "alpha", "local", "down"]);
+    assert_success(&down);
+    assert_eq!(json_data(&down)["status"], "stopped");
+}
+
+#[test]
+fn managed_local_http_filesystem_flow_works_end_to_end() {
+    let harness = Harness::new();
+    let local_config = harness.write_server_config("local", "managed-local-flow");
+    harness.add_local_profile("local", &local_config);
+    assert_success(&harness.run(&["--profile", "local", "local", "up"]));
+
+    let upload_path = harness.temp_dir.path().join("upload.txt");
+    let download_path = harness.temp_dir.path().join("downloaded.txt");
+    fs::write(&upload_path, b"hello over managed loond\n").expect("upload payload");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+
+    let put = harness.run(&[
+        "--json",
+        "filesystem",
+        "put",
+        "demo",
+        upload_path.to_str().unwrap(),
+        "/docs/hello.txt",
+    ]);
+    assert_success(&put);
+    assert_eq!(json_data(&put)["target"], "demo:/docs/hello.txt");
+
+    let put_conflict = harness.run(&[
+        "--json",
+        "filesystem",
+        "put",
+        "demo",
+        upload_path.to_str().unwrap(),
+        "/docs/hello.txt",
+    ]);
+    assert_failure(&put_conflict);
+    assert_eq!(json_error(&put_conflict)["code"], "path_conflict");
+
+    let put_force = harness.run(&[
+        "--json",
+        "filesystem",
+        "put",
+        "demo",
+        upload_path.to_str().unwrap(),
+        "/docs/hello.txt",
+        "--force",
+    ]);
+    assert_success(&put_force);
+
+    let cp = harness.run(&[
+        "--json",
+        "filesystem",
+        "cp",
+        "demo",
+        "/docs/hello.txt",
+        "/docs/copy.txt",
+    ]);
+    assert_success(&cp);
+
+    let source = harness.run(&["--json", "filesystem", "stat", "demo", "/docs/hello.txt"]);
+    let copy = harness.run(&["--json", "filesystem", "stat", "demo", "/docs/copy.txt"]);
+    assert_success(&source);
+    assert_success(&copy);
+    assert_ne!(json_data(&source)["inode_id"], json_data(&copy)["inode_id"]);
+    assert_eq!(
+        json_data(&source)["content_manifest_digest"],
+        json_data(&copy)["content_manifest_digest"]
+    );
+
+    let cat = harness.run(&["filesystem", "cat", "demo", "/docs/hello.txt"]);
+    assert_success(&cat);
+    assert_eq!(cat.stdout, b"hello over managed loond\n");
+    assert!(cat.stderr.is_empty());
+
+    let get_stdout = harness.run(&["filesystem", "get", "demo", "/docs/hello.txt", "-"]);
+    assert_success(&get_stdout);
+    assert_eq!(get_stdout.stdout, b"hello over managed loond\n");
+
+    let get_file = harness.run(&[
+        "--json",
+        "filesystem",
+        "get",
+        "demo",
+        "/docs/hello.txt",
+        download_path.to_str().unwrap(),
+    ]);
+    assert_success(&get_file);
+    assert_eq!(
+        fs::read(&download_path).expect("downloaded bytes"),
+        b"hello over managed loond\n"
+    );
+
+    let mv = harness.run(&[
+        "--json",
+        "filesystem",
+        "mv",
+        "demo",
+        "/docs/copy.txt",
+        "/docs/final.txt",
+    ]);
+    assert_success(&mv);
+
+    let rm_dir = harness.run(&["--json", "filesystem", "rm", "demo", "/docs"]);
+    assert_failure(&rm_dir);
+    assert_eq!(json_error(&rm_dir)["code"], "path_conflict");
+
+    let rm = harness.run(&["--json", "filesystem", "rm", "demo", "/docs/final.txt"]);
+    assert_success(&rm);
+
+    let down = harness.run(&["--profile", "local", "local", "down"]);
+    assert_success(&down);
+}
+
+#[test]
+fn external_remote_profile_executes_through_http() {
+    let harness = Harness::new();
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "remote-exec"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "remote",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+
+    let create = harness.run(&[
+        "--json",
+        "--profile",
+        "remote",
+        "namespace",
+        "create",
+        "demo",
+    ]);
+    assert_success(&create);
+
+    let list = harness.run(&["--json", "--profile", "remote", "namespace", "list"]);
+    assert_success(&list);
+    let list_data = json_data(&list);
+    let namespaces = list_data["namespaces"].as_array().unwrap();
+    assert_eq!(namespaces.len(), 1);
+    assert_eq!(namespaces[0]["name"], "demo");
+}
+
+struct Harness {
+    temp_dir: TempDir,
+    config_path: PathBuf,
+}
+
+impl Harness {
+    fn new() -> Self {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        Self {
+            config_path: temp_dir.path().join("config.toml"),
+            temp_dir,
+        }
+    }
+
+    fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        Command::new(loon_binary_path())
+            .arg("--config")
+            .arg(&self.config_path)
+            .args(args)
+            .output()
+            .expect("run loon")
+    }
+
+    fn add_local_profile(&self, name: &str, server_config_path: &Path) {
+        let output = self.run(&[
+            "--json",
+            "profile",
+            "add",
+            "local",
+            name,
+            "--server-config",
+            server_config_path.to_str().unwrap(),
+        ]);
+        assert_success(&output);
+    }
+
+    fn write_server_config(&self, name: &str, key_prefix: &str) -> PathBuf {
+        let bind = format!("127.0.0.1:{}", available_port());
+        let path = self.temp_dir.path().join(format!("{name}.loond.toml"));
+        let store_root = self.temp_dir.path().join(format!("{name}-store"));
+        let contents = format!(
+            r#"
+bind = "{bind}"
+auth_token = "test-token"
+writer_id = "{name}"
+writer_version = "{name}/0.1.0"
+lease_duration_ms = 200
+
+[store]
 kind = "local-fs"
 root = "{}"
-
-[client]
-state_db_path = "{}"
-mirror_root = "{}"
-
-[server]
-writer_id = "{writer_id}"
-writer_version = "v1"
-lease_duration_ms = 60000
-
-[ops]
-now_ms = {now_ms}
+key_prefix = "{key_prefix}"
 "#,
-            object_store_root.display(),
-            state_db_path.display(),
-            mirror_root.display(),
-        ),
-    )
-    .expect("write ops config");
-    config_path
-}
-
-fn seed_authoritative_hello_file(config_path: &Path, namespace_id: &NamespaceId, bytes: &[u8]) {
-    let config = loon_client::ops::OpsConfig::load(config_path).expect("load config");
-    let store = test_open_store(&config).expect("open store");
-    server_bootstrap_namespace(
-        &store,
-        namespace_id,
-        &loon_types::server::NamespaceBootstrapParams {
-            holder_id: config.server.writer_id.clone(),
-            writer_version: config.server.writer_version.clone(),
-            now_ms: config.ops.now_ms.expect("configured now_ms"),
-            lease_duration_ms: config.server.lease_duration_ms,
-            allow_existing: false,
-        },
-    )
-    .expect("bootstrap namespace");
-
-    let file_digest_sha256 = sha256_digest(bytes);
-    let block_digest = sha256_digest(bytes);
-    store
-        .put_if_absent(&blob(namespace_id.as_str(), &block_digest), bytes)
-        .expect("write content block");
-    let manifest = ContentManifestEnvelope::from_payload(ContentManifestPayload {
-        namespace_id: namespace_id.clone(),
-        file_size_bytes: bytes.len() as u64,
-        file_digest_sha256,
-        block_size_bytes: bytes.len() as u64,
-        blocks: vec![ContentBlockDescriptor {
-            content_digest_sha256: block_digest,
-            plaintext_size_bytes: bytes.len() as u64,
-        }],
-    })
-    .expect("build manifest");
-    let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
-    let manifest_digest = sha256_digest(&manifest_bytes);
-    store
-        .put_if_absent(
-            &content_manifest(namespace_id.as_str(), &manifest_digest),
-            &manifest_bytes,
-        )
-        .expect("write manifest");
-
-    execute_client_mutation(
-        &store,
-        &ClientMutationRequest {
-            namespace_id: namespace_id.clone(),
-            client_request_id: "create-file".to_owned(),
-            op: ClientMutationOp::CreateFile {
-                parent_inode_id: loon_types::InodeId(1),
-                display_name: "hello.txt".to_owned(),
-                content_manifest_digest: manifest_digest,
-            },
-        },
-        &ClientMutationExecutionParams {
-            writer_id: config.server.writer_id,
-            writer_version: config.server.writer_version,
-            now_ms: 2_000,
-            lease_duration_ms: config.server.lease_duration_ms,
-        },
-    )
-    .expect("create authoritative file");
-}
-
-// --- Test transport/store factories for `run_command` calls ---
-
-struct TestLocalTransport {
-    store: ConfiguredObjectStore,
-    writer_id: String,
-    writer_version: String,
-    now_ms: u64,
-    lease_duration_ms: u64,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum TestTransportError {
-    #[error(transparent)]
-    Bootstrap(#[from] NamespaceBootstrapError),
-    #[error(transparent)]
-    StateSummary(#[from] NamespaceStateSummaryError),
-    #[error(transparent)]
-    RemoteObservations(#[from] RemoteObservationTranslationError),
-    #[error("mutation execution failed: {0}")]
-    Mutation(String),
-    #[error("file read failed: {0}")]
-    FileRead(String),
-}
-
-impl loon_types::server::ServerTransport for TestLocalTransport {
-    type Error = TestTransportError;
-
-    fn execute_mutation(
-        &self,
-        request: &loon_types::ClientMutationRequest,
-    ) -> Result<loon_types::ClientMutationResponse, Self::Error> {
-        execute_client_mutation(
-            &self.store,
-            request,
-            &ClientMutationExecutionParams {
-                writer_id: self.writer_id.clone(),
-                writer_version: self.writer_version.clone(),
-                now_ms: self.now_ms,
-                lease_duration_ms: self.lease_duration_ms,
-            },
-        )
-        .map(|executed| executed.response)
-        .map_err(|err| TestTransportError::Mutation(err.to_string()))
+            store_root.display()
+        );
+        fs::write(&path, contents).expect("write server config");
+        path
     }
 
-    fn load_namespace_state_summary(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<loon_types::server::NamespaceStateSummary, Self::Error> {
-        Ok(server_load_namespace_state_summary(
-            &self.store,
-            namespace_id,
-        )?)
-    }
-
-    fn load_remote_observations(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<(loon_types::ChangeSeq, Vec<loon_types::ObservedRemoteInode>), Self::Error> {
-        let summary = server_load_namespace_state_summary(&self.store, namespace_id)?;
-        let observations = server_translate(&self.store, namespace_id)?;
-        Ok((summary.head.seq, observations))
-    }
-
-    fn bootstrap_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        params: &loon_types::server::NamespaceBootstrapParams,
-    ) -> Result<loon_types::server::BootstrappedNamespace, Self::Error> {
-        Ok(server_bootstrap_namespace(
-            &self.store,
-            namespace_id,
-            params,
-        )?)
-    }
-
-    fn list_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<Vec<loon_types::server::AuthoritativePathEntry>, Self::Error> {
-        server_list_path(&self.store, namespace_id, absolute_path)
-            .map_err(|e| TestTransportError::FileRead(e.to_string()))
-    }
-
-    fn resolve_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<loon_types::server::AuthoritativePathEntry, Self::Error> {
-        server_resolve_path(&self.store, namespace_id, absolute_path)
-            .map_err(|e| TestTransportError::FileRead(e.to_string()))
-    }
-
-    fn read_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<loon_types::server::AuthoritativeFileBytes, Self::Error> {
-        server_read_file_bytes(&self.store, namespace_id, absolute_path)
-            .map_err(|e| TestTransportError::FileRead(e.to_string()))
+    fn start_external_server(&self, server_config_path: PathBuf) -> ExternalServer {
+        let child = Command::new(loond_binary_path())
+            .arg("--config")
+            .arg(&server_config_path)
+            .spawn()
+            .expect("spawn loond");
+        let server_url = server_url_from_config(&server_config_path);
+        wait_for_healthz(&server_url);
+        ExternalServer { child, server_url }
     }
 }
 
-fn test_make_transport(config: &loon_client::ops::OpsConfig) -> anyhow::Result<TestLocalTransport> {
-    let store = test_open_store(config)?;
-    Ok(TestLocalTransport {
-        store,
-        writer_id: config.server.writer_id.clone(),
-        writer_version: config.server.writer_version.clone(),
-        now_ms: config.now_ms(),
-        lease_duration_ms: config.server.lease_duration_ms,
-    })
+struct ExternalServer {
+    child: Child,
+    server_url: String,
 }
 
-fn test_open_store(config: &loon_client::ops::OpsConfig) -> anyhow::Result<ConfiguredObjectStore> {
-    match &config.object_store {
-        loon_client::ops::OpsObjectStoreSpec::LocalFs { root, key_prefix } => {
-            ConfiguredObjectStore::local_fs(root, key_prefix.as_deref()).map_err(Into::into)
+impl Drop for ExternalServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn loon_binary_path() -> PathBuf {
+    if let Some(path) = env::var_os("CARGO_BIN_EXE_loon") {
+        return PathBuf::from(path);
+    }
+
+    let current_exe = env::current_exe().expect("current test binary path");
+    let debug_dir = current_exe
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("target debug dir");
+    let candidate = debug_dir.join(if cfg!(windows) { "loon.exe" } else { "loon" });
+    assert!(
+        candidate.exists(),
+        "expected loon binary at {}",
+        candidate.display()
+    );
+    candidate
+}
+
+fn loond_binary_path() -> PathBuf {
+    if let Some(path) = env::var_os("CARGO_BIN_EXE_loond") {
+        return PathBuf::from(path);
+    }
+
+    let current_exe = env::current_exe().expect("current test binary path");
+    let debug_dir = current_exe
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("target debug dir");
+    let candidate = debug_dir.join(if cfg!(windows) { "loond.exe" } else { "loond" });
+    assert!(
+        candidate.exists(),
+        "expected loond binary at {}",
+        candidate.display()
+    );
+    candidate
+}
+
+fn server_url_from_config(path: &Path) -> String {
+    let config = fs::read_to_string(path).expect("read server config");
+    let bind = config
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("bind = "))
+        .expect("bind line")
+        .trim_matches('"')
+        .to_owned();
+    format!("http://{bind}")
+}
+
+fn wait_for_healthz(server_url: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if ureq::get(&format!("{server_url}/healthz")).call().is_ok() {
+            return;
         }
-        loon_client::ops::OpsObjectStoreSpec::AwsS3 {
-            bucket,
-            region,
-            endpoint_url,
-            access_key_id,
-            secret_access_key,
-            session_token,
-            key_prefix,
-            force_path_style,
-        } => ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
-            bucket: bucket.clone(),
-            region: region.clone(),
-            endpoint_url: endpoint_url.clone(),
-            access_key_id: access_key_id.clone(),
-            secret_access_key: secret_access_key.clone(),
-            session_token: session_token.clone(),
-            key_prefix: key_prefix.clone(),
-            force_path_style: *force_path_style,
-        })
-        .map_err(Into::into),
-        loon_client::ops::OpsObjectStoreSpec::CloudflareR2 {
-            bucket,
-            account_id,
-            endpoint_url,
-            access_key_id,
-            secret_access_key,
-            key_prefix,
-        } => ConfiguredObjectStore::cloudflare_r2(R2StoreConfig {
-            bucket: bucket.clone(),
-            account_id: account_id.clone(),
-            endpoint_url: endpoint_url.clone(),
-            access_key_id: access_key_id.clone(),
-            secret_access_key: secret_access_key.clone(),
-            key_prefix: key_prefix.clone(),
-        })
-        .map_err(Into::into),
+        thread::sleep(Duration::from_millis(100));
     }
+    panic!("timed out waiting for {server_url}/healthz");
+}
+
+fn wait_for_stale(harness: &Harness, profile: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let output = harness.run(&["--json", "--profile", profile, "local", "status"]);
+        assert_success(&output);
+        if json_data(&output)["status"] == "stale" {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("timed out waiting for stale local runtime");
+}
+
+fn terminate_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()
+            .expect("kill process");
+        assert!(status.success(), "failed to terminate pid {pid}");
+    }
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status()
+            .expect("taskkill process");
+        assert!(status.success(), "failed to terminate pid {pid}");
+    }
+}
+
+fn available_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind port")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
+
+fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "expected success, got {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        stdout_string(output),
+        stderr_string(output)
+    );
+}
+
+fn assert_failure(output: &Output) {
+    assert!(
+        !output.status.success(),
+        "expected failure, got success\nstdout:\n{}\nstderr:\n{}",
+        stdout_string(output),
+        stderr_string(output)
+    );
+}
+
+fn stdout_string(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr_string(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn parse_json(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).expect("parse json")
+}
+
+fn json_data(output: &Output) -> Value {
+    parse_json(&output.stdout)["data"].clone()
+}
+
+fn json_error(output: &Output) -> Value {
+    parse_json(&output.stderr)["error"].clone()
 }

@@ -1,7 +1,0 @@
-scenario=background_stale_writer_remains_fenced_after_handover kind=sim schema_version=1 seed=Some(1402) actions=4 faults=0 expect_keys=2
-  1. actor_step actor=fixture now_ms=0 initial head=(seq=41, fence=8, next_inode=501) lease=(holder=writer-a, fence=8, expires_at_ms=1000) metadata_rows=(inodes=0, direntries=0, revisions=0, tombstones=0) progress_objects=0 queue_shard_present=false
-  2. actor_step actor=stale_writer now_ms=0 step=1 action=writer_read_current_head cached_view=(writer_id=writer-a, planned_head_seq=41, writer_fence_token=8)
-  3. actor_step actor=writer now_ms=0 step=2 action=lease_handover(new_holder_id=writer-b, new_fence_token=9, lease_expires_at_ms=2000) resulting_lease=(holder=writer-b, fence=9, expires_at_ms=2000)
-  4. actor_step actor=writer now_ms=0 step=3 action=writer_publish_head(seq=42, active_fence_token=9, next_inode_id=504) resulting_head=(seq=42, fence=9, next_inode=504)
-  5. actor_step actor=stale_writer now_ms=0 step=4 action=writer_attempt_commit(planned_head_seq=41, writer_fence_token=8) model_outcome=Rejected(PlannedHeadSeqMismatch { expected: ChangeSeq(42), actual: ChangeSeq(41) }) core_outcome=Rejected(PlannedHeadSeqMismatch { expected: ChangeSeq(42), actual: ChangeSeq(41) }) now_ms=1999 head=(seq=42, fence=9) lease=(holder=writer-b, fence=9)
-  6. invariants[background-sim] stale_writer_publish_remains_fenced_after_handover=pass detail=stale_publish_rejected=true head_fence_matches_lease=true stale_writer_fence_token=8 active_fence_token=9

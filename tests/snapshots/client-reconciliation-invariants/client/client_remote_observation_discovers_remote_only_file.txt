@@ -1,5 +1,0 @@
-scenario=client_remote_observation_discovers_remote_only_file kind=client schema_version=1 seed=None actions=3 faults=0 expect_keys=7
-  1. outcome=DiscoveredRemoteOnly { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(601) }
-  2. planner_result=PlannedActionRecord { namespace_id: NamespaceId("ns-1"), inode_id: InodeId(601), decision: NoOp, reason: RemoteParentWaitingForMaterialization, created_at_ms: 1700000610000 }
-  3. invariants[remote-only-discovery] remote_only_file_discovery_creates_placeholder_without_anchor=pass detail=inode_kind=File local_exists_on_disk_after=false local_dirty_after=false sync_anchor_present_after=false planned_action_decision_after=None expected_immediate_decision=Some("download_remote_edit")
-  4. invariants[remote-only-discovery] remote_only_materialization_waits_for_parent_materialization=pass detail=planner_decision=no_op planner_reason=remote_parent_waiting_for_materialization planned_action_present_after=false
