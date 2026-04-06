@@ -571,6 +571,45 @@ fn apply_update_flags(
     existing: ProfileConfig,
     args: &ProfileUpdateArgs,
 ) -> Result<ProfileConfig, CliError> {
+    // Reject flags that don't apply to this profile type
+    match &existing {
+        ProfileConfig::Local { store, .. } => {
+            reject_flag("server-url", &args.server_url, "local")?;
+            reject_flag("auth-token", &args.auth_token, "local")?;
+            match store {
+                StoreConfig::LocalFs { .. } => {
+                    reject_flag("bucket", &args.bucket, "local-fs")?;
+                    reject_flag("region", &args.region, "local-fs")?;
+                    reject_flag("access-key-id", &args.access_key_id, "local-fs")?;
+                    reject_flag("secret-access-key", &args.secret_access_key, "local-fs")?;
+                    reject_flag("endpoint-url", &args.endpoint_url, "local-fs")?;
+                    reject_flag("session-token", &args.session_token, "local-fs")?;
+                    reject_flag("account-id", &args.account_id, "local-fs")?;
+                }
+                StoreConfig::AwsS3 { .. } => {
+                    reject_flag("root", &args.root, "aws-s3")?;
+                    reject_flag("account-id", &args.account_id, "aws-s3")?;
+                }
+                StoreConfig::CloudflareR2 { .. } => {
+                    reject_flag("root", &args.root, "cloudflare-r2")?;
+                    reject_flag("region", &args.region, "cloudflare-r2")?;
+                    reject_flag("session-token", &args.session_token, "cloudflare-r2")?;
+                }
+            }
+        }
+        ProfileConfig::Remote { .. } => {
+            reject_flag("root", &args.root, "remote")?;
+            reject_flag("bucket", &args.bucket, "remote")?;
+            reject_flag("region", &args.region, "remote")?;
+            reject_flag("access-key-id", &args.access_key_id, "remote")?;
+            reject_flag("secret-access-key", &args.secret_access_key, "remote")?;
+            reject_flag("endpoint-url", &args.endpoint_url, "remote")?;
+            reject_flag("session-token", &args.session_token, "remote")?;
+            reject_flag("account-id", &args.account_id, "remote")?;
+            reject_flag("key-prefix", &args.key_prefix, "remote")?;
+        }
+    }
+
     match existing {
         ProfileConfig::Local {
             store,
@@ -639,6 +678,15 @@ fn apply_update_flags(
             auth_token: args.auth_token.clone().or(auth_token),
         }),
     }
+}
+
+fn reject_flag(flag: &str, value: &Option<String>, profile_kind: &str) -> Result<(), CliError> {
+    if value.is_some() {
+        return Err(CliError::invalid_input(format!(
+            "`--{flag}` does not apply to {profile_kind} profiles"
+        )));
+    }
+    Ok(())
 }
 
 fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, CliError> {
