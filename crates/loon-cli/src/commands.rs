@@ -170,7 +170,7 @@ fn build_local_store_interactive(
     let store_kind = match &args.store_kind {
         Some(k) => k.clone(),
         None if runtime.interactive => {
-            prompt::prompt_choice("store kind", &["local-fs", "aws-s3", "cloudflare-r2"])?
+            prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])?
         }
         None => {
             return Err(CliError::non_interactive_input_required("store-kind"));
@@ -423,7 +423,7 @@ fn build_profile_interactive(
     match mode.as_str() {
         "local" => {
             let store_kind =
-                prompt::prompt_choice("store kind", &["local-fs", "aws-s3", "cloudflare-r2"])?;
+                prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])?;
             let store = match store_kind.as_str() {
                 "local-fs" => StoreConfig::LocalFs {
                     root: prompt::prompt_line("root")?,
