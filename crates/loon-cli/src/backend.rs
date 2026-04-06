@@ -1,4 +1,4 @@
-use crate::config::{LocalProfileConfig, ProfileConfig, ProfileMode, RemoteProfileConfig};
+use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use loon_api::{AuthoritativePathEntry, MutationResult, NamespaceId, NamespaceSummary};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
@@ -8,8 +8,9 @@ use loon_core::{
     CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::ConfiguredObjectStore;
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
 
 pub trait Backend {
     fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, CliError>;
@@ -274,6 +275,13 @@ fn map_bootstrap_error(error: BootstrapNamespaceError) -> CliError {
     }
 }
 
+fn default_writer_id() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "loon-cli".to_owned())
+}
+
 // --- Target resolution ---
 
 pub enum ResolvedTarget {
@@ -290,35 +298,34 @@ pub struct RemoteTarget {
 }
 
 impl ResolvedTarget {
-    pub fn resolve(
-        profile_name: &str,
-        profile: &ProfileConfig,
-        config_path: &Path,
-    ) -> Result<Self, CliError> {
-        match profile.mode {
-            ProfileMode::Local => {
-                let local = profile.local.as_ref().ok_or_else(|| {
-                    CliError::invalid_config(format!(
-                        "profile `{profile_name}` is missing local settings"
-                    ))
-                })?;
-                Ok(Self::Local(LocalTarget::new(local, config_path)?))
-            }
-            ProfileMode::Remote => {
-                let remote = profile.remote.as_ref().ok_or_else(|| {
-                    CliError::invalid_config(format!(
-                        "profile `{profile_name}` is missing remote settings"
-                    ))
-                })?;
-                Ok(Self::Remote(RemoteTarget::new(remote)?))
-            }
+    pub fn resolve(profile_name: &str, profile: &ProfileConfig) -> Result<Self, CliError> {
+        match profile {
+            ProfileConfig::Local {
+                store,
+                writer_id,
+                writer_version,
+                lease_duration_ms,
+            } => Ok(Self::Local(LocalTarget::new(
+                store,
+                writer_id.as_deref(),
+                writer_version.as_deref(),
+                *lease_duration_ms,
+            )?)),
+            ProfileConfig::Remote {
+                server_url,
+                auth_token,
+            } => Ok(Self::Remote(RemoteTarget::new(
+                profile_name,
+                server_url,
+                auth_token.as_deref(),
+            )?)),
         }
     }
 
-    pub fn mode(&self) -> ProfileMode {
+    pub fn mode_str(&self) -> &'static str {
         match self {
-            ResolvedTarget::Local(_) => ProfileMode::Local,
-            ResolvedTarget::Remote(_) => ProfileMode::Remote,
+            ResolvedTarget::Local(_) => "local",
+            ResolvedTarget::Remote(_) => "remote",
         }
     }
 
@@ -331,37 +338,36 @@ impl ResolvedTarget {
 }
 
 impl LocalTarget {
-    fn new(profile: &LocalProfileConfig, config_path: &Path) -> Result<Self, CliError> {
-        let server_config_path = crate::config::resolve_profile_path(
-            config_path,
-            Path::new(&profile.server_config_path),
-        );
-        let server_config =
-            loon_server::load_server_config(&server_config_path).map_err(|err| {
-                CliError::invalid_config(format!(
-                    "failed to load local server config `{}`: {err}",
-                    server_config_path.display()
-                ))
-            })?;
-        let store = server_config.object_store().map_err(|err| {
-            CliError::invalid_config(format!("failed to initialize object store: {err}"))
-        })?;
+    fn new(
+        store_config: &StoreConfig,
+        writer_id: Option<&str>,
+        writer_version: Option<&str>,
+        lease_duration_ms: Option<u64>,
+    ) -> Result<Self, CliError> {
+        let store = store_config.object_store()?;
         let backend = DirectBackend {
             store,
-            writer_id: server_config.writer_id.clone(),
-            writer_version: server_config.writer_version.clone(),
-            lease_duration_ms: server_config.lease_duration_ms,
+            writer_id: writer_id
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(default_writer_id),
+            writer_version: writer_version
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION"))),
+            lease_duration_ms: lease_duration_ms.unwrap_or(DEFAULT_LEASE_DURATION_MS),
         };
         Ok(Self { backend })
     }
 }
 
 impl RemoteTarget {
-    fn new(profile: &RemoteProfileConfig) -> Result<Self, CliError> {
-        profile.validate("remote")?;
+    fn new(
+        _profile_name: &str,
+        server_url: &str,
+        auth_token: Option<&str>,
+    ) -> Result<Self, CliError> {
         let client = Client::new(ClientConfig {
-            server_url: profile.server_url.clone(),
-            auth_token: profile.auth_token.clone(),
+            server_url: server_url.to_owned(),
+            auth_token: auth_token.map(ToOwned::to_owned),
         });
         Ok(Self {
             backend: RemoteBackend { client },

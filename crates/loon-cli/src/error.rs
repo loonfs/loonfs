@@ -33,17 +33,6 @@ impl CliError {
         )
     }
 
-    pub fn no_active_profile() -> Self {
-        Self::new("no_active_profile", "no active profile")
-    }
-
-    pub fn non_interactive_input_required(field: &str) -> Self {
-        Self::new(
-            "non_interactive_input_required",
-            format!("missing required `{field}` while `--no-input` is active"),
-        )
-    }
-
     pub fn json_not_supported_for_streaming() -> Self {
         Self::new(
             "json_not_supported_for_streaming",

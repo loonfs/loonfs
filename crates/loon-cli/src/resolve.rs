@@ -22,13 +22,10 @@ pub fn resolve_target_profile(
 ) -> Result<ResolvedProfile, CliError> {
     let config_path = resolved_config_path(explicit_config)?;
     let config = load_config(&config_path)?;
-    let (profile_name, target) = {
-        let (profile_name, profile) = resolve_profile(&config, explicit_profile)?;
-        let target = ResolvedTarget::resolve(profile_name, profile, &config_path)?;
-        (profile_name.to_owned(), target)
-    };
+    let (profile_name, profile) = resolve_profile(&config, explicit_profile)?;
+    let target = ResolvedTarget::resolve(profile_name, profile)?;
     Ok(ResolvedProfile {
-        profile_name,
+        profile_name: profile_name.to_owned(),
         target,
     })
 }

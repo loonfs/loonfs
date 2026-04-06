@@ -45,9 +45,6 @@ pub enum ProfileCommand {
         command: ProfileAddCommand,
     },
     List,
-    Use {
-        name: String,
-    },
     Show {
         name: Option<String>,
     },
@@ -58,22 +55,64 @@ pub enum ProfileCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ProfileAddCommand {
-    Local(ProfileAddLocalArgs),
+    LocalFs(ProfileAddLocalFsArgs),
+    AwsS3(ProfileAddAwsS3Args),
+    CloudflareR2(ProfileAddCloudflareR2Args),
     Remote(ProfileAddRemoteArgs),
 }
 
 #[derive(Debug, Args)]
-pub struct ProfileAddLocalArgs {
+pub struct ProfileAddLocalFsArgs {
     pub name: String,
     #[arg(long)]
-    pub server_config: Option<PathBuf>,
+    pub root: String,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileAddAwsS3Args {
+    pub name: String,
+    #[arg(long)]
+    pub bucket: String,
+    #[arg(long)]
+    pub region: String,
+    #[arg(long)]
+    pub access_key_id: String,
+    #[arg(long)]
+    pub secret_access_key: String,
+    #[arg(long)]
+    pub endpoint_url: Option<String>,
+    #[arg(long)]
+    pub session_token: Option<String>,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    #[arg(long)]
+    pub force_path_style: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileAddCloudflareR2Args {
+    pub name: String,
+    #[arg(long)]
+    pub bucket: String,
+    #[arg(long)]
+    pub account_id: String,
+    #[arg(long)]
+    pub endpoint_url: String,
+    #[arg(long)]
+    pub access_key_id: String,
+    #[arg(long)]
+    pub secret_access_key: String,
+    #[arg(long)]
+    pub key_prefix: Option<String>,
 }
 
 #[derive(Debug, Args)]
 pub struct ProfileAddRemoteArgs {
     pub name: String,
     #[arg(long)]
-    pub server_url: Option<String>,
+    pub server_url: String,
     #[arg(long)]
     pub auth_token: Option<String>,
 }
@@ -157,7 +196,6 @@ impl RuntimeBehavior {
 pub enum CommandKind {
     ProfileAdd,
     ProfileList,
-    ProfileUse,
     ProfileShow,
     ProfileRemove,
     NamespaceCreate,
@@ -180,7 +218,6 @@ impl CommandKind {
         match self {
             CommandKind::ProfileAdd => "profile_add",
             CommandKind::ProfileList => "profile_list",
-            CommandKind::ProfileUse => "profile_use",
             CommandKind::ProfileShow => "profile_show",
             CommandKind::ProfileRemove => "profile_remove",
             CommandKind::NamespaceCreate => "namespace_create",
@@ -210,7 +247,6 @@ impl Cli {
             Command::Profile { command } => match command {
                 ProfileCommand::Add { .. } => CommandKind::ProfileAdd,
                 ProfileCommand::List => CommandKind::ProfileList,
-                ProfileCommand::Use { .. } => CommandKind::ProfileUse,
                 ProfileCommand::Show { .. } => CommandKind::ProfileShow,
                 ProfileCommand::Remove { .. } => CommandKind::ProfileRemove,
             },

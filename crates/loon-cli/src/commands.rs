@@ -1,42 +1,38 @@
 use crate::args::{
     Cli, Command, CommandKind, ConfigCommand, FilesystemCommand, NamespaceCommand,
-    ProfileAddCommand, ProfileAddLocalArgs, ProfileAddRemoteArgs, ProfileCommand, RuntimeBehavior,
+    ProfileAddCommand, ProfileCommand, RuntimeBehavior,
 };
 use crate::config::{
-    load_config, load_config_if_exists, load_or_default_config, resolve_profile_path, save_config,
-    LocalProfileConfig, ProfileMode, RemoteProfileConfig,
+    load_config, load_config_if_exists, load_or_default_config, save_config, ProfileConfig,
+    StoreConfig,
 };
 use crate::error::CliError;
-use crate::profiles::{
-    add_local_profile, add_remote_profile, list_profiles, remove_profile, show_profile,
-    use_profile, ProfileSummary, ProfileView,
-};
+use crate::profiles::{add_profile, list_profiles, remove_profile, show_profile, ProfileSummary};
 use crate::resolve::{resolve_target_profile, resolved_config_path};
 use loon_api::{AuthoritativePathEntry, NamespaceSummary};
 use loon_client::NamespacePath;
 use serde::Serialize;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 pub struct CommandOutput {
     pub kind: CommandKind,
     pub profile: Option<String>,
-    pub mode: Option<ProfileMode>,
+    pub mode: Option<String>,
     pub data: CommandData,
 }
 
 pub struct CommandFailure {
     pub kind: CommandKind,
     pub profile: Option<String>,
-    pub mode: Option<ProfileMode>,
+    pub mode: Option<String>,
     pub error: CliError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandData {
-    Profile(ProfileView),
+    Profile(ProfileConfig),
     ProfileSummary(ProfileSummary),
     ProfileList {
         profiles: Vec<ProfileSummary>,
@@ -67,7 +63,7 @@ pub enum CommandData {
         path: String,
     },
     ConfigShow {
-        config: crate::config::RedactedCliConfig,
+        config: crate::config::CliConfig,
     },
     Version {
         version: String,
@@ -152,15 +148,12 @@ fn run_profile_command(
     kind: CommandKind,
     explicit_config: Option<&Path>,
     command: ProfileCommand,
-    runtime: RuntimeBehavior,
+    _runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let config_path =
         resolved_config_path(explicit_config).map_err(|error| fail(kind, None, None, error))?;
     match command {
-        ProfileCommand::Add { command } => match command {
-            ProfileAddCommand::Local(args) => add_local(kind, &config_path, args, runtime),
-            ProfileAddCommand::Remote(args) => add_remote(kind, &config_path, args, runtime),
-        },
+        ProfileCommand::Add { command } => run_profile_add(kind, &config_path, command),
         ProfileCommand::List => {
             let config = load_config_if_exists(&config_path)
                 .map_err(|error| fail(kind, None, None, error))?;
@@ -173,30 +166,17 @@ fn run_profile_command(
                 },
             })
         }
-        ProfileCommand::Use { name } => {
-            let mut config = load_config(&config_path)
-                .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
-            let view = use_profile(&mut config, &name)
-                .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
-            save_config(&config_path, &config)
-                .map_err(|error| fail(kind, Some(name.clone()), Some(view.mode), error))?;
-            Ok(CommandOutput {
-                kind,
-                profile: Some(name),
-                mode: Some(view.mode),
-                data: CommandData::Profile(view),
-            })
-        }
         ProfileCommand::Show { name } => {
             let config =
                 load_config(&config_path).map_err(|error| fail(kind, name.clone(), None, error))?;
-            let view = show_profile(&config, name.as_deref())
+            let (profile_name, redacted) = show_profile(&config, name.as_deref())
                 .map_err(|error| fail(kind, name.clone(), None, error))?;
+            let mode = redacted.mode_str().to_owned();
             Ok(CommandOutput {
                 kind,
-                profile: Some(view.name.clone()),
-                mode: Some(view.mode),
-                data: CommandData::Profile(view),
+                profile: Some(profile_name),
+                mode: Some(mode),
+                data: CommandData::Profile(redacted),
             })
         }
         ProfileCommand::Remove { name } => {
@@ -204,186 +184,92 @@ fn run_profile_command(
                 .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
             let removed = remove_profile(&mut config, &name)
                 .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
+            let mode = removed.mode.clone();
             save_config(&config_path, &config)
-                .map_err(|error| fail(kind, Some(name.clone()), Some(removed.mode), error))?;
+                .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
             Ok(CommandOutput {
                 kind,
                 profile: Some(name),
-                mode: Some(removed.mode),
+                mode: Some(mode),
                 data: CommandData::ProfileSummary(removed),
             })
         }
     }
 }
 
-fn add_local(
+fn run_profile_add(
     kind: CommandKind,
     config_path: &Path,
-    args: ProfileAddLocalArgs,
-    runtime: RuntimeBehavior,
+    command: ProfileAddCommand,
 ) -> Result<CommandOutput, CommandFailure> {
-    let profile_name = args.name.clone();
-    let mut config = load_or_default_config(config_path).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-    if config.profiles.contains_key(&profile_name) {
-        return Err(fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            CliError::profile_already_exists(&profile_name),
-        ));
-    }
-
-    let server_config = required_path(
-        args.server_config,
-        "server-config",
-        "local server config path",
-        runtime,
-    )
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-    let resolved_server_config = resolve_cli_input_path(&server_config)
-        .unwrap_or_else(|_| resolve_profile_path(config_path, &server_config));
-    loon_server::load_server_config(&resolved_server_config).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            CliError::invalid_config(format!(
-                "failed to load local server config `{}`: {error}",
-                resolved_server_config.display()
-            )),
-        )
-    })?;
-    let view = add_local_profile(
-        &mut config,
-        &profile_name,
-        LocalProfileConfig {
-            server_config_path: resolved_server_config.display().to_string(),
-        },
-    )
-    .map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-    save_config(config_path, &config).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Local),
-            error,
-        )
-    })?;
-    Ok(CommandOutput {
-        kind,
-        profile: Some(view.name.clone()),
-        mode: Some(ProfileMode::Local),
-        data: CommandData::Profile(view),
-    })
-}
-
-fn resolve_cli_input_path(path: &Path) -> Result<PathBuf, CliError> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|err| {
-                CliError::invalid_config(format!(
-                    "failed to resolve current working directory: {err}"
-                ))
-            })?
-            .join(path)
+    let (name, profile) = match command {
+        ProfileAddCommand::LocalFs(args) => {
+            let profile = ProfileConfig::Local {
+                store: StoreConfig::LocalFs {
+                    root: args.root,
+                    key_prefix: args.key_prefix,
+                },
+                writer_id: None,
+                writer_version: None,
+                lease_duration_ms: None,
+            };
+            (args.name, profile)
+        }
+        ProfileAddCommand::AwsS3(args) => {
+            let profile = ProfileConfig::Local {
+                store: StoreConfig::AwsS3 {
+                    bucket: args.bucket,
+                    region: args.region,
+                    endpoint_url: args.endpoint_url,
+                    access_key_id: args.access_key_id,
+                    secret_access_key: args.secret_access_key,
+                    session_token: args.session_token,
+                    key_prefix: args.key_prefix,
+                    force_path_style: if args.force_path_style { Some(true) } else { None },
+                },
+                writer_id: None,
+                writer_version: None,
+                lease_duration_ms: None,
+            };
+            (args.name, profile)
+        }
+        ProfileAddCommand::CloudflareR2(args) => {
+            let profile = ProfileConfig::Local {
+                store: StoreConfig::CloudflareR2 {
+                    bucket: args.bucket,
+                    account_id: args.account_id,
+                    endpoint_url: args.endpoint_url,
+                    access_key_id: args.access_key_id,
+                    secret_access_key: args.secret_access_key,
+                    key_prefix: args.key_prefix,
+                },
+                writer_id: None,
+                writer_version: None,
+                lease_duration_ms: None,
+            };
+            (args.name, profile)
+        }
+        ProfileAddCommand::Remote(args) => {
+            let profile = ProfileConfig::Remote {
+                server_url: args.server_url,
+                auth_token: args.auth_token,
+            };
+            (args.name, profile)
+        }
     };
 
-    absolute.canonicalize().map_err(|err| {
-        CliError::invalid_config(format!(
-            "failed to resolve server config path `{}`: {err}",
-            path.display()
-        ))
-    })
-}
-
-fn add_remote(
-    kind: CommandKind,
-    config_path: &Path,
-    args: ProfileAddRemoteArgs,
-    runtime: RuntimeBehavior,
-) -> Result<CommandOutput, CommandFailure> {
-    let profile_name = args.name.clone();
-    let mut config = load_or_default_config(config_path).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            error,
-        )
-    })?;
-    if config.profiles.contains_key(&profile_name) {
-        return Err(fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            CliError::profile_already_exists(&profile_name),
-        ));
-    }
-
-    let remote = RemoteProfileConfig {
-        server_url: required_value(args.server_url, "server-url", "remote server URL", runtime)
-            .map_err(|error| {
-                fail(
-                    kind,
-                    Some(profile_name.clone()),
-                    Some(ProfileMode::Remote),
-                    error,
-                )
-            })?,
-        auth_token: args.auth_token,
-    };
-    remote.validate(&profile_name).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            error,
-        )
-    })?;
-    let view = add_remote_profile(&mut config, &profile_name, remote).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            error,
-        )
-    })?;
-    save_config(config_path, &config).map_err(|error| {
-        fail(
-            kind,
-            Some(profile_name.clone()),
-            Some(ProfileMode::Remote),
-            error,
-        )
-    })?;
+    let mode = profile.mode_str().to_owned();
+    let mut config = load_or_default_config(config_path)
+        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
+    let (profile_name, redacted) = add_profile(&mut config, &name, profile)
+        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
+    save_config(config_path, &config)
+        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
     Ok(CommandOutput {
         kind,
-        profile: Some(view.name.clone()),
-        mode: Some(ProfileMode::Remote),
-        data: CommandData::Profile(view),
+        profile: Some(profile_name),
+        mode: Some(mode),
+        data: CommandData::Profile(redacted),
     })
 }
 
@@ -395,21 +281,36 @@ fn run_namespace_command(
 ) -> Result<CommandOutput, CommandFailure> {
     let resolved = resolve_target_profile(explicit_config, global_profile)
         .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode();
+    let mode = resolved.target.mode_str().to_owned();
     let backend = resolved.target.backend();
     let output = match command {
         NamespaceCommand::Create { name } => {
             validate_namespace_name(&name).map_err(|error| {
-                fail(kind, Some(resolved.profile_name.clone()), Some(mode), error)
+                fail(
+                    kind,
+                    Some(resolved.profile_name.clone()),
+                    Some(mode.clone()),
+                    error,
+                )
             })?;
             let namespace = backend.create_namespace(&name).map_err(|error| {
-                fail(kind, Some(resolved.profile_name.clone()), Some(mode), error)
+                fail(
+                    kind,
+                    Some(resolved.profile_name.clone()),
+                    Some(mode.clone()),
+                    error,
+                )
             })?;
             CommandData::NamespaceSummary(namespace)
         }
         NamespaceCommand::List => {
             let namespaces = backend.list_namespaces().map_err(|error| {
-                fail(kind, Some(resolved.profile_name.clone()), Some(mode), error)
+                fail(
+                    kind,
+                    Some(resolved.profile_name.clone()),
+                    Some(mode.clone()),
+                    error,
+                )
             })?;
             CommandData::NamespaceList { namespaces }
         }
@@ -432,7 +333,7 @@ fn run_filesystem_command(
 ) -> Result<CommandOutput, CommandFailure> {
     let resolved = resolve_target_profile(explicit_config, global_profile)
         .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode();
+    let mode = resolved.target.mode_str().to_owned();
     let backend = resolved.target.backend();
     let profile_name = resolved.profile_name.clone();
 
@@ -562,7 +463,7 @@ fn run_filesystem_command(
             }
         }
     })()
-    .map_err(|error| fail(kind, Some(profile_name.clone()), Some(mode), error))?;
+    .map_err(|error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error))?;
 
     Ok(CommandOutput {
         kind,
@@ -570,54 +471,6 @@ fn run_filesystem_command(
         mode: Some(mode),
         data: output,
     })
-}
-
-fn required_value(
-    existing: Option<String>,
-    field: &str,
-    prompt_label: &str,
-    runtime: RuntimeBehavior,
-) -> Result<String, CliError> {
-    if let Some(value) = existing {
-        if !value.trim().is_empty() {
-            return Ok(value);
-        }
-    }
-    if !runtime.interactive {
-        return Err(CliError::non_interactive_input_required(field));
-    }
-    eprint!("{prompt_label}: ");
-    io::stderr().flush().map_err(CliError::io)?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line).map_err(CliError::io)?;
-    let value = line.trim().to_owned();
-    if value.is_empty() {
-        return Err(CliError::invalid_input(format!("missing `{field}`")));
-    }
-    Ok(value)
-}
-
-fn required_path(
-    existing: Option<PathBuf>,
-    field: &str,
-    prompt_label: &str,
-    runtime: RuntimeBehavior,
-) -> Result<PathBuf, CliError> {
-    if let Some(value) = existing {
-        return Ok(value);
-    }
-    if !runtime.interactive {
-        return Err(CliError::non_interactive_input_required(field));
-    }
-    eprint!("{prompt_label}: ");
-    io::stderr().flush().map_err(CliError::io)?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line).map_err(CliError::io)?;
-    let value = line.trim();
-    if value.is_empty() {
-        return Err(CliError::invalid_input(format!("missing `{field}`")));
-    }
-    Ok(PathBuf::from(value))
 }
 
 fn validate_namespace_name(namespace: &str) -> Result<(), CliError> {
@@ -702,7 +555,7 @@ fn render_target(namespace: &str, path: &str) -> String {
 fn fail(
     kind: CommandKind,
     profile: Option<String>,
-    mode: Option<ProfileMode>,
+    mode: Option<String>,
     error: CliError,
 ) -> CommandFailure {
     CommandFailure {

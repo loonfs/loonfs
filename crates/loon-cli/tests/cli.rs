@@ -9,48 +9,20 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[test]
-fn unsupported_config_version_is_rejected() {
+fn profile_add_list_show_remove_work() {
     let harness = Harness::new();
-    fs::write(
-        harness.config_path(),
-        r#"
-config_version = 2
-
-[profiles.local]
-mode = "local"
-
-[profiles.local.local]
-server_config_path = "/tmp/loond.toml"
-"#,
-    )
-    .expect("write config");
-
-    let output = harness.run(&["--json", "profile", "list"]);
-    assert_failure(&output);
-    assert_eq!(json_error(&output)["code"], "invalid_config");
-    assert!(json_error(&output)["message"]
-        .as_str()
-        .unwrap()
-        .contains("unsupported `config_version`"));
-}
-
-#[test]
-fn profile_add_list_show_use_remove_and_config_show_work() {
-    let harness = Harness::new();
-    let local_config = harness.write_server_config("local", "profile-add-local");
 
     let add_local = harness.run(&[
         "--json",
         "profile",
         "add",
-        "local",
-        "local",
-        "--server-config",
-        local_config.to_str().unwrap(),
+        "local-fs",
+        "default",
+        "--root",
+        harness.store_root("default").to_str().unwrap(),
     ]);
     assert_success(&add_local);
-    assert_eq!(json_data(&add_local)["name"], "local");
-    assert_eq!(json_data(&add_local)["active"], true);
+    assert_eq!(json_data(&add_local)["mode"], "local");
 
     let external =
         harness.start_external_server(harness.write_server_config("remote", "profile-add-remote"));
@@ -59,25 +31,24 @@ fn profile_add_list_show_use_remove_and_config_show_work() {
         "profile",
         "add",
         "remote",
-        "remote",
+        "prod",
         "--server-url",
         &external.server_url,
         "--auth-token",
         "test-token",
     ]);
     assert_success(&add_remote);
-    assert_eq!(json_data(&add_remote)["name"], "remote");
-    assert_eq!(json_data(&add_remote)["active"], false);
+    assert_eq!(json_data(&add_remote)["mode"], "remote");
 
     let list = harness.run(&["--json", "profile", "list"]);
     assert_success(&list);
     let list_data = json_data(&list);
     let profiles = list_data["profiles"].as_array().unwrap();
     assert_eq!(profiles.len(), 2);
-    assert_eq!(profiles[0]["name"], "local");
-    assert_eq!(profiles[0]["active"], true);
-    assert_eq!(profiles[1]["name"], "remote");
-    assert_eq!(profiles[1]["active"], false);
+    assert_eq!(profiles[0]["name"], "default");
+    assert_eq!(profiles[0]["mode"], "local");
+    assert_eq!(profiles[1]["name"], "prod");
+    assert_eq!(profiles[1]["mode"], "remote");
 
     let show = harness.run(&["config", "show"]);
     assert_success(&show);
@@ -86,73 +57,23 @@ fn profile_add_list_show_use_remove_and_config_show_work() {
     assert!(stdout.contains("REDACTED"));
     assert!(!stdout.contains("test-token"));
 
-    let use_remote = harness.run(&["--json", "profile", "use", "remote"]);
-    assert_success(&use_remote);
-    assert_eq!(json_data(&use_remote)["name"], "remote");
-    assert_eq!(json_data(&use_remote)["active"], true);
+    let show_default = harness.run(&["--json", "profile", "show"]);
+    assert_success(&show_default);
+    assert_eq!(json_data(&show_default)["mode"], "local");
 
-    let show_remote = harness.run(&["--json", "profile", "show"]);
-    assert_success(&show_remote);
-    assert_eq!(json_data(&show_remote)["name"], "remote");
-    assert_eq!(json_data(&show_remote)["mode"], "remote");
-
-    let remove_local = harness.run(&["--json", "profile", "remove", "local"]);
-    assert_success(&remove_local);
-    assert_eq!(json_data(&remove_local)["name"], "local");
-}
-
-#[test]
-fn no_input_rejects_missing_profile_fields_and_keeps_stdout_empty() {
-    let harness = Harness::new();
-    let output = harness.run(&["--json", "--no-input", "profile", "add", "local", "local"]);
-
-    assert_failure(&output);
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        json_error(&output)["code"],
-        "non_interactive_input_required"
-    );
-}
-
-#[test]
-fn profile_add_local_accepts_server_config_relative_to_shell_cwd() {
-    let harness = Harness::new();
-    let nested_dir = harness.temp_dir.path().join("configs");
-    fs::create_dir_all(&nested_dir).expect("nested configs dir");
-    let config_path = nested_dir.join("loon.local.toml");
-    let server_config_source = harness.write_server_config("cwd-relative", "cwd-relative");
-    let server_config = nested_dir.join("cwd-relative.loond.toml");
-    fs::copy(&server_config_source, &server_config).expect("copy server config into configs dir");
-    let relative_server_config = PathBuf::from("configs").join("cwd-relative.loond.toml");
-
-    let output = Command::new(loon_binary_path())
-        .current_dir(harness.temp_dir.path())
-        .arg("--config")
-        .arg(&config_path)
-        .arg("--json")
-        .arg("profile")
-        .arg("add")
-        .arg("local")
-        .arg("local")
-        .arg("--server-config")
-        .arg(&relative_server_config)
-        .output()
-        .expect("run loon with cwd-relative config path");
-
-    assert_success(&output);
-    let stored = fs::read_to_string(&config_path).expect("read stored config");
-    assert!(stored.contains(&server_config.display().to_string()));
+    let remove_default = harness.run(&["--json", "profile", "remove", "default"]);
+    assert_success(&remove_default);
+    assert_eq!(json_data(&remove_default)["name"], "default");
 }
 
 #[test]
 fn local_profile_filesystem_flow_works_end_to_end() {
     let harness = Harness::new();
-    let local_config = harness.write_server_config("local", "managed-local-flow");
-    harness.add_local_profile("local", &local_config);
+    harness.add_local_profile("default");
 
     let upload_path = harness.temp_dir.path().join("upload.txt");
     let download_path = harness.temp_dir.path().join("downloaded.txt");
-    fs::write(&upload_path, b"hello over managed loond\n").expect("upload payload");
+    fs::write(&upload_path, b"hello from direct core\n").expect("upload payload");
 
     assert_success(&harness.run(&["namespace", "create", "demo"]));
 
@@ -211,12 +132,12 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 
     let cat = harness.run(&["filesystem", "cat", "demo", "/docs/hello.txt"]);
     assert_success(&cat);
-    assert_eq!(cat.stdout, b"hello over managed loond\n");
+    assert_eq!(cat.stdout, b"hello from direct core\n");
     assert!(cat.stderr.is_empty());
 
     let get_stdout = harness.run(&["filesystem", "get", "demo", "/docs/hello.txt", "-"]);
     assert_success(&get_stdout);
-    assert_eq!(get_stdout.stdout, b"hello over managed loond\n");
+    assert_eq!(get_stdout.stdout, b"hello from direct core\n");
 
     let get_file = harness.run(&[
         "--json",
@@ -229,7 +150,7 @@ fn local_profile_filesystem_flow_works_end_to_end() {
     assert_success(&get_file);
     assert_eq!(
         fs::read(&download_path).expect("downloaded bytes"),
-        b"hello over managed loond\n"
+        b"hello from direct core\n"
     );
 
     let mv = harness.run(&[
@@ -260,7 +181,7 @@ fn external_remote_profile_executes_through_http() {
         "profile",
         "add",
         "remote",
-        "remote",
+        "default",
         "--server-url",
         &remote_server.server_url,
         "--auth-token",
@@ -268,17 +189,10 @@ fn external_remote_profile_executes_through_http() {
     ]);
     assert_success(&add_remote);
 
-    let create = harness.run(&[
-        "--json",
-        "--profile",
-        "remote",
-        "namespace",
-        "create",
-        "demo",
-    ]);
+    let create = harness.run(&["--json", "namespace", "create", "demo"]);
     assert_success(&create);
 
-    let list = harness.run(&["--json", "--profile", "remote", "namespace", "list"]);
+    let list = harness.run(&["--json", "namespace", "list"]);
     assert_success(&list);
     let list_data = json_data(&list);
     let namespaces = list_data["namespaces"].as_array().unwrap();
@@ -300,10 +214,6 @@ impl Harness {
         }
     }
 
-    fn config_path(&self) -> &Path {
-        &self.config_path
-    }
-
     fn run(&self, args: &[&str]) -> Output {
         Command::new(loon_binary_path())
             .arg("--config")
@@ -313,15 +223,19 @@ impl Harness {
             .expect("run loon")
     }
 
-    fn add_local_profile(&self, name: &str, server_config_path: &Path) {
+    fn store_root(&self, name: &str) -> PathBuf {
+        self.temp_dir.path().join(format!("{name}-store"))
+    }
+
+    fn add_local_profile(&self, name: &str) {
         let output = self.run(&[
             "--json",
             "profile",
             "add",
-            "local",
+            "local-fs",
             name,
-            "--server-config",
-            server_config_path.to_str().unwrap(),
+            "--root",
+            self.store_root(name).to_str().unwrap(),
         ]);
         assert_success(&output);
     }
@@ -329,7 +243,7 @@ impl Harness {
     fn write_server_config(&self, name: &str, key_prefix: &str) -> PathBuf {
         let bind = format!("127.0.0.1:{}", available_port());
         let path = self.temp_dir.path().join(format!("{name}.loond.toml"));
-        let store_root = self.temp_dir.path().join(format!("{name}-store"));
+        let store_root = self.store_root(name);
         let contents = format!(
             r#"
 bind = "{bind}"

@@ -1,114 +1,94 @@
 use crate::error::CliError;
-use http::Uri;
+use loon_objectstore::r2::R2StoreConfig;
+use loon_objectstore::s3::AwsS3StoreConfig;
+use loon_objectstore::ConfiguredObjectStore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub const CONFIG_VERSION: u32 = 1;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct CliConfig {
-    pub config_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_profile: Option<String>,
-    #[serde(default)]
     pub profiles: BTreeMap<String, ProfileConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileConfig {
-    pub mode: ProfileMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local: Option<LocalProfileConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote: Option<RemoteProfileConfig>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProfileMode {
-    Local,
-    Remote,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LocalProfileConfig {
-    pub server_config_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemoteProfileConfig {
-    pub server_url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_token: Option<String>,
+#[serde(tag = "mode", rename_all = "kebab-case")]
+pub enum ProfileConfig {
+    Local {
+        store: StoreConfig,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writer_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        writer_version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lease_duration_ms: Option<u64>,
+    },
+    Remote {
+        server_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_token: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RedactedCliConfig {
-    pub config_version: u32,
-    pub active_profile: Option<String>,
-    pub profiles: BTreeMap<String, RedactedProfileConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RedactedProfileConfig {
-    pub mode: ProfileMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local: Option<LocalProfileConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote: Option<RedactedRemoteProfileConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RedactedRemoteProfileConfig {
-    pub server_url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_token: Option<String>,
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum StoreConfig {
+    LocalFs {
+        root: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_prefix: Option<String>,
+    },
+    AwsS3 {
+        bucket: String,
+        region: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint_url: Option<String>,
+        access_key_id: String,
+        secret_access_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_prefix: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        force_path_style: Option<bool>,
+    },
+    CloudflareR2 {
+        bucket: String,
+        account_id: String,
+        endpoint_url: String,
+        access_key_id: String,
+        secret_access_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_prefix: Option<String>,
+    },
 }
 
 impl CliConfig {
     pub fn new() -> Self {
         Self {
-            config_version: CONFIG_VERSION,
-            active_profile: None,
             profiles: BTreeMap::new(),
         }
     }
 
-    pub fn redacted(&self) -> RedactedCliConfig {
-        RedactedCliConfig {
-            config_version: self.config_version,
-            active_profile: self.active_profile.clone(),
+    pub fn validate(&self) -> Result<(), CliError> {
+        for (name, profile) in &self.profiles {
+            require_non_empty("profile name", name)?;
+            profile.validate(name)?;
+        }
+        Ok(())
+    }
+
+    pub fn redacted(&self) -> Self {
+        CliConfig {
             profiles: self
                 .profiles
                 .iter()
                 .map(|(name, profile)| (name.clone(), profile.redacted()))
                 .collect(),
         }
-    }
-
-    pub fn validate(&self) -> Result<(), CliError> {
-        if self.config_version != CONFIG_VERSION {
-            return Err(CliError::invalid_config(format!(
-                "unsupported `config_version`: expected `{CONFIG_VERSION}`, got `{}`",
-                self.config_version
-            )));
-        }
-        if let Some(active_profile) = &self.active_profile {
-            require_non_empty("active_profile", active_profile)?;
-            if !self.profiles.contains_key(active_profile) {
-                return Err(CliError::invalid_config(format!(
-                    "`active_profile` points to missing profile `{active_profile}`"
-                )));
-            }
-        }
-        for (name, profile) in &self.profiles {
-            require_non_empty("profiles.<name>", name)?;
-            profile.validate(name)?;
-        }
-        Ok(())
     }
 }
 
@@ -119,109 +99,149 @@ impl Default for CliConfig {
 }
 
 impl ProfileConfig {
-    pub fn local(local: LocalProfileConfig) -> Self {
-        Self {
-            mode: ProfileMode::Local,
-            local: Some(local),
-            remote: None,
+    pub fn mode_str(&self) -> &'static str {
+        match self {
+            ProfileConfig::Local { .. } => "local",
+            ProfileConfig::Remote { .. } => "remote",
         }
     }
 
-    pub fn remote(remote: RemoteProfileConfig) -> Self {
-        Self {
-            mode: ProfileMode::Remote,
-            local: None,
-            remote: Some(remote),
+    pub fn store_kind_str(&self) -> Option<&'static str> {
+        match self {
+            ProfileConfig::Local { store, .. } => Some(store.kind_str()),
+            ProfileConfig::Remote { .. } => None,
         }
     }
 
     pub(crate) fn validate(&self, name: &str) -> Result<(), CliError> {
-        match self.mode {
-            ProfileMode::Local => {
-                let local = self.local.as_ref().ok_or_else(|| {
-                    CliError::invalid_config(format!(
-                        "profile `{name}` is missing `[profiles.{name}.local]`"
-                    ))
-                })?;
-                if self.remote.is_some() {
-                    return Err(CliError::invalid_config(format!(
-                        "profile `{name}` has unexpected `[profiles.{name}.remote]` section"
-                    )));
+        match self {
+            ProfileConfig::Local { store, .. } => store.validate(name),
+            ProfileConfig::Remote { server_url, auth_token, .. } => {
+                validate_http_url(&format!("profiles.{name}.server_url"), server_url)?;
+                if let Some(token) = auth_token {
+                    require_non_empty(&format!("profiles.{name}.auth_token"), token)?;
                 }
-                local.validate(name)
-            }
-            ProfileMode::Remote => {
-                let remote = self.remote.as_ref().ok_or_else(|| {
-                    CliError::invalid_config(format!(
-                        "profile `{name}` is missing `[profiles.{name}.remote]`"
-                    ))
-                })?;
-                if self.local.is_some() {
-                    return Err(CliError::invalid_config(format!(
-                        "profile `{name}` has unexpected `[profiles.{name}.local]` section"
-                    )));
-                }
-                remote.validate(name)
+                Ok(())
             }
         }
     }
 
-    pub fn redacted(&self) -> RedactedProfileConfig {
-        RedactedProfileConfig {
-            mode: self.mode,
-            local: self.local.clone(),
-            remote: self.remote.as_ref().map(RemoteProfileConfig::redacted),
+    pub fn redacted(&self) -> Self {
+        match self {
+            ProfileConfig::Local { store, writer_id, writer_version, lease_duration_ms } => {
+                ProfileConfig::Local {
+                    store: store.redacted(),
+                    writer_id: writer_id.clone(),
+                    writer_version: writer_version.clone(),
+                    lease_duration_ms: *lease_duration_ms,
+                }
+            }
+            ProfileConfig::Remote { server_url, auth_token } => ProfileConfig::Remote {
+                server_url: server_url.clone(),
+                auth_token: auth_token.as_ref().map(|_| "REDACTED".to_owned()),
+            },
         }
     }
 }
 
-impl LocalProfileConfig {
-    pub(crate) fn validate(&self, name: &str) -> Result<(), CliError> {
-        require_non_empty(
-            &format!("profiles.{name}.local.server_config_path"),
-            &self.server_config_path,
-        )
-    }
-}
-
-impl RemoteProfileConfig {
-    pub(crate) fn validate(&self, name: &str) -> Result<(), CliError> {
-        validate_http_url(
-            &format!("profiles.{name}.remote.server_url"),
-            &self.server_url,
-        )?;
-        if let Some(token) = &self.auth_token {
-            require_non_empty(&format!("profiles.{name}.remote.auth_token"), token)?;
+impl StoreConfig {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            StoreConfig::LocalFs { .. } => "local-fs",
+            StoreConfig::AwsS3 { .. } => "aws-s3",
+            StoreConfig::CloudflareR2 { .. } => "cloudflare-r2",
         }
-        Ok(())
     }
 
-    fn redacted(&self) -> RedactedRemoteProfileConfig {
-        RedactedRemoteProfileConfig {
-            server_url: self.server_url.clone(),
-            auth_token: self.auth_token.as_ref().map(|_| "REDACTED".to_owned()),
+    pub fn object_store(&self) -> Result<ConfiguredObjectStore, CliError> {
+        match self {
+            StoreConfig::LocalFs { root, key_prefix } => {
+                ConfiguredObjectStore::local_fs(root, key_prefix.as_deref())
+                    .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))
+            }
+            StoreConfig::AwsS3 {
+                bucket, region, endpoint_url, access_key_id, secret_access_key,
+                session_token, key_prefix, force_path_style,
+            } => ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
+                bucket: bucket.clone(),
+                region: region.clone(),
+                endpoint_url: endpoint_url.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                session_token: session_token.clone(),
+                key_prefix: key_prefix.clone(),
+                force_path_style: force_path_style.unwrap_or(false),
+            })
+            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
+            StoreConfig::CloudflareR2 {
+                bucket, account_id, endpoint_url, access_key_id, secret_access_key, key_prefix,
+            } => ConfiguredObjectStore::cloudflare_r2(R2StoreConfig {
+                bucket: bucket.clone(),
+                account_id: account_id.clone(),
+                endpoint_url: endpoint_url.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                key_prefix: key_prefix.clone(),
+            })
+            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}"))),
+        }
+    }
+
+    fn validate(&self, profile_name: &str) -> Result<(), CliError> {
+        match self {
+            StoreConfig::LocalFs { root, .. } => {
+                require_non_empty(&format!("profiles.{profile_name}.store.root"), root)
+            }
+            StoreConfig::AwsS3 { bucket, region, access_key_id, secret_access_key, .. } => {
+                require_non_empty(&format!("profiles.{profile_name}.store.bucket"), bucket)?;
+                require_non_empty(&format!("profiles.{profile_name}.store.region"), region)?;
+                require_non_empty(&format!("profiles.{profile_name}.store.access_key_id"), access_key_id)?;
+                require_non_empty(&format!("profiles.{profile_name}.store.secret_access_key"), secret_access_key)
+            }
+            StoreConfig::CloudflareR2 { bucket, account_id, endpoint_url, access_key_id, secret_access_key, .. } => {
+                require_non_empty(&format!("profiles.{profile_name}.store.bucket"), bucket)?;
+                require_non_empty(&format!("profiles.{profile_name}.store.account_id"), account_id)?;
+                require_non_empty(&format!("profiles.{profile_name}.store.endpoint_url"), endpoint_url)?;
+                require_non_empty(&format!("profiles.{profile_name}.store.access_key_id"), access_key_id)?;
+                require_non_empty(&format!("profiles.{profile_name}.store.secret_access_key"), secret_access_key)
+            }
+        }
+    }
+
+    fn redacted(&self) -> Self {
+        match self {
+            StoreConfig::LocalFs { .. } => self.clone(),
+            StoreConfig::AwsS3 {
+                bucket, region, endpoint_url, key_prefix, force_path_style, ..
+            } => StoreConfig::AwsS3 {
+                bucket: bucket.clone(),
+                region: region.clone(),
+                endpoint_url: endpoint_url.clone(),
+                access_key_id: "REDACTED".to_owned(),
+                secret_access_key: "REDACTED".to_owned(),
+                session_token: None,
+                key_prefix: key_prefix.clone(),
+                force_path_style: *force_path_style,
+            },
+            StoreConfig::CloudflareR2 {
+                bucket, account_id, endpoint_url, key_prefix, ..
+            } => StoreConfig::CloudflareR2 {
+                bucket: bucket.clone(),
+                account_id: account_id.clone(),
+                endpoint_url: endpoint_url.clone(),
+                access_key_id: "REDACTED".to_owned(),
+                secret_access_key: "REDACTED".to_owned(),
+                key_prefix: key_prefix.clone(),
+            },
         }
     }
 }
 
 pub fn default_config_path() -> Result<PathBuf, CliError> {
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
+    let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))?
-        .join("Library")
-        .join("Application Support");
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))?
-        .join(".config");
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .ok_or_else(|| CliError::invalid_config("unable to determine the config directory"))?;
-
-    Ok(base.join("loon").join("config.toml"))
+        .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))?;
+    Ok(home.join(".loon").join("config.toml"))
 }
 
 pub fn load_config(path: &Path) -> Result<CliConfig, CliError> {
@@ -275,16 +295,6 @@ pub fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn resolve_profile_path(config_path: &Path, input: &Path) -> PathBuf {
-    if input.is_absolute() {
-        return input.to_path_buf();
-    }
-    config_path
-        .parent()
-        .map(|parent| parent.join(input))
-        .unwrap_or_else(|| input.to_path_buf())
-}
-
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     #[cfg(unix)]
     let mut file = {
@@ -331,21 +341,9 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), CliError> {
 
 fn validate_http_url(field: &str, value: &str) -> Result<(), CliError> {
     require_non_empty(field, value)?;
-    let uri = value
-        .trim()
-        .parse::<Uri>()
-        .map_err(|err| CliError::invalid_config(format!("invalid `{field}`: {err}")))?;
-    let scheme = uri
-        .scheme_str()
-        .ok_or_else(|| CliError::invalid_config(format!("invalid `{field}`: missing scheme")))?;
-    if !matches!(scheme, "http" | "https") {
+    if !value.starts_with("http://") && !value.starts_with("https://") {
         return Err(CliError::invalid_config(format!(
-            "invalid `{field}`: scheme must be http or https, got `{scheme}`"
-        )));
-    }
-    if uri.host().is_none() {
-        return Err(CliError::invalid_config(format!(
-            "invalid `{field}`: missing host"
+            "invalid `{field}`: scheme must be http or https"
         )));
     }
     Ok(())
