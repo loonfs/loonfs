@@ -570,7 +570,6 @@ fn apply_update_flags(
     existing: ProfileConfig,
     args: &ProfileUpdateArgs,
 ) -> Result<ProfileConfig, CliError> {
-    // Reject flags that don't apply to this profile type
     match &existing {
         ProfileConfig::Local { store, .. } => {
             reject_flag("server-url", &args.server_url, "local")?;

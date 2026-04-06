@@ -187,12 +187,10 @@ fn init_creates_local_profile_and_sets_default() {
     assert_success(&init);
     assert_eq!(json_data(&init)["mode"], "local");
 
-    // verify it's the default profile
     let show = harness.run(&["--json", "profile", "show"]);
     assert_success(&show);
     assert_eq!(json_data(&show)["mode"], "local");
 
-    // verify filesystem operations work
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     let list = harness.run(&["--json", "namespace", "list"]);
     assert_success(&list);
@@ -237,7 +235,6 @@ fn profile_make_default_switches_default() {
 
     let show = harness.run(&["--json", "profile", "show"]);
     assert_success(&show);
-    // default is now beta, so show without name returns beta's config
 }
 
 #[test]

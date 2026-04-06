@@ -19,7 +19,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Set up a new local profile (interactive or via flags)
     Init(InitArgs),
     Profile {
         #[command(subcommand)]
@@ -42,14 +41,11 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Profile name
     pub name: Option<String>,
     #[arg(long)]
     pub store_kind: Option<String>,
-    // local-fs
     #[arg(long)]
     pub root: Option<String>,
-    // aws-s3
     #[arg(long)]
     pub bucket: Option<String>,
     #[arg(long)]
@@ -60,31 +56,29 @@ pub struct InitArgs {
     pub secret_access_key: Option<String>,
     #[arg(long)]
     pub endpoint_url: Option<String>,
-    // cloudflare-r2
     #[arg(long)]
     pub account_id: Option<String>,
-    // shared optional
     #[arg(long)]
     pub key_prefix: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProfileCommand {
-    /// Add a new profile
     Add {
         #[command(subcommand)]
         command: Option<ProfileAddCommand>,
     },
-    /// List all profiles
     List,
-    /// Show profile details
-    Show { name: Option<String> },
-    /// Update an existing profile
+    Show {
+        name: Option<String>,
+    },
     Update(ProfileUpdateArgs),
-    /// Remove a profile
-    Remove { name: String },
-    /// Set the default profile
-    MakeDefault { name: String },
+    Remove {
+        name: String,
+    },
+    MakeDefault {
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -154,7 +148,6 @@ pub struct ProfileAddRemoteArgs {
 #[derive(Debug, Args)]
 pub struct ProfileUpdateArgs {
     pub name: String,
-    // Fields that can be updated (all optional)
     #[arg(long)]
     pub root: Option<String>,
     #[arg(long)]
