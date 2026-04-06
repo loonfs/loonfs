@@ -285,7 +285,7 @@ fn default_writer_id() -> String {
 // --- Target resolution ---
 
 pub enum ResolvedTarget {
-    Local(LocalTarget),
+    Local(Box<LocalTarget>),
     Remote(RemoteTarget),
 }
 
@@ -305,12 +305,12 @@ impl ResolvedTarget {
                 writer_id,
                 writer_version,
                 lease_duration_ms,
-            } => Ok(Self::Local(LocalTarget::new(
+            } => Ok(Self::Local(Box::new(LocalTarget::new(
                 store,
                 writer_id.as_deref(),
                 writer_version.as_deref(),
                 *lease_duration_ms,
-            )?)),
+            )?))),
             ProfileConfig::Remote {
                 server_url,
                 auth_token,
