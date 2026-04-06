@@ -8,9 +8,12 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub const CONFIG_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
 pub struct CliConfig {
+    pub config_version: u32,
+    #[serde(flatten)]
     pub profiles: BTreeMap<String, ProfileConfig>,
 }
 
@@ -69,11 +72,18 @@ pub enum StoreConfig {
 impl CliConfig {
     pub fn new() -> Self {
         Self {
+            config_version: CONFIG_VERSION,
             profiles: BTreeMap::new(),
         }
     }
 
     pub fn validate(&self) -> Result<(), CliError> {
+        if self.config_version != CONFIG_VERSION {
+            return Err(CliError::invalid_config(format!(
+                "unsupported `config_version`: expected `{CONFIG_VERSION}`, got `{}`",
+                self.config_version
+            )));
+        }
         for (name, profile) in &self.profiles {
             require_non_empty("profile name", name)?;
             profile.validate(name)?;
@@ -83,6 +93,7 @@ impl CliConfig {
 
     pub fn redacted(&self) -> Self {
         CliConfig {
+            config_version: self.config_version,
             profiles: self
                 .profiles
                 .iter()
@@ -241,7 +252,7 @@ pub fn default_config_path() -> Result<PathBuf, CliError> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))?;
-    Ok(home.join(".loon").join("config.toml"))
+    Ok(home.join(".loonfs").join("config.toml"))
 }
 
 pub fn load_config(path: &Path) -> Result<CliConfig, CliError> {
