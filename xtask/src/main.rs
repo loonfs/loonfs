@@ -1067,12 +1067,9 @@ mod tests {
             ],
         );
         assert!(
-            !calls.iter().any(|call| {
-                call.iter()
-                    .skip_while(|arg| *arg != "local")
-                    .next()
-                    .is_some()
-            }),
+            !calls
+                .iter()
+                .any(|call| call.iter().any(|arg| *arg == "local")),
             "remote smoke should not issue local lifecycle commands"
         );
         assert_eq!(report.steps.first(), Some(&STEP_CREATE_NAMESPACE));
