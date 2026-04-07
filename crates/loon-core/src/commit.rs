@@ -45,6 +45,11 @@ pub enum CommitOp {
         base_revision: RevisionNo,
         content_manifest_digest: String,
     },
+    RestoreRevision {
+        inode_id: InodeId,
+        source_revision: RevisionNo,
+        base_revision: RevisionNo,
+    },
     DeleteFile {
         inode_id: InodeId,
     },
@@ -81,6 +86,7 @@ pub struct CommitPlan {
     pub base_head_seq: ChangeSeq,
     pub next_seq: ChangeSeq,
     pub allocated_inode_ids: Vec<InodeId>,
+    pub resolved_restore_content_manifest_digests: Vec<Option<String>>,
     pub resulting_next_inode_id: InodeId,
     pub durable_content_required: bool,
     pub wal_object_must_be_written: bool,
@@ -156,6 +162,27 @@ pub enum CommitValidationError {
         expected: RevisionNo,
         actual: Option<RevisionNo>,
     },
+    RestoreRevisionInodeMissing {
+        inode_id: InodeId,
+    },
+    RestoreRevisionInodeNotFile {
+        inode_id: InodeId,
+        actual_kind: InodeKind,
+    },
+    RestoreRevisionBaseRevisionMismatch {
+        inode_id: InodeId,
+        expected: RevisionNo,
+        actual: Option<RevisionNo>,
+    },
+    RestoreRevisionSourceRevisionMissing {
+        inode_id: InodeId,
+        source_revision: RevisionNo,
+    },
+    RestoreRevisionUnderSubtreeTombstone {
+        inode_id: InodeId,
+        root_inode: InodeId,
+        tombstone_seq: ChangeSeq,
+    },
     ReplaceFileUnderSubtreeTombstone {
         inode_id: InodeId,
         root_inode: InodeId,
@@ -216,6 +243,10 @@ pub enum CommitValidationError {
         root_inode: InodeId,
         covering_root_inode: InodeId,
         tombstone_seq: ChangeSeq,
+    },
+    RestoreRevisionOverflow {
+        inode_id: InodeId,
+        base_revision: RevisionNo,
     },
     ReplaceFileRevisionOverflow {
         inode_id: InodeId,

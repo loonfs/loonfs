@@ -1,4 +1,5 @@
 use loon_api::{
+    v0::{CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest},
     ChangeSeq, FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
@@ -7,11 +8,13 @@ use loon_core::commit::{
 };
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
-    bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, move_path,
-    put_file_bytes, resolve_path, write_file_bytes, CoreError, CoreErrorKind, MutationContext,
-    PutFileBehavior,
+    bootstrap_namespace, commit_operations, copy_file_path, delete_path, delete_path_non_recursive,
+    move_path, put_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes, CoreError,
+    CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
+use loon_objectstore::keys::content_manifest;
+use loon_objectstore::ObjectStore;
 use tempfile::tempdir;
 
 #[test]
@@ -186,6 +189,362 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             inode_id: InodeId(3),
             ..
         }
+    ));
+}
+
+#[test]
+fn restore_revision_validation_rejects_missing_inode() {
+    let metadata_state = metadata_state_after(&[vec![loon_api::WalOp::CreateDir {
+        op_index: 0,
+        inode_id: InodeId(2),
+        parent_inode: InodeId(1),
+        display_name: "docs".to_owned(),
+    }]]);
+    let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
+    let request = CommitRequest {
+        namespace_id: namespace_id(),
+        request_id: "restore-missing-inode".to_owned(),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token: FenceToken(1),
+        planned_head_seq: ChangeSeq(1),
+        source_request_checksum_sha256: None,
+        ops: vec![CommitOp::RestoreRevision {
+            inode_id: InodeId(99),
+            source_revision: RevisionNo(1),
+            base_revision: RevisionNo(1),
+        }],
+        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
+        message: None,
+        annotations: None,
+    };
+
+    let error = build_commit_plan(&request, &context).expect_err("restore missing inode");
+    assert!(matches!(
+        error,
+        CommitValidationError::RestoreRevisionInodeMissing {
+            inode_id: InodeId(99),
+        }
+    ));
+}
+
+#[test]
+fn restore_revision_validation_rejects_non_file_target() {
+    let metadata_state = metadata_state_after(&[vec![loon_api::WalOp::CreateDir {
+        op_index: 0,
+        inode_id: InodeId(2),
+        parent_inode: InodeId(1),
+        display_name: "docs".to_owned(),
+    }]]);
+    let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
+    let request = CommitRequest {
+        namespace_id: namespace_id(),
+        request_id: "restore-non-file".to_owned(),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token: FenceToken(1),
+        planned_head_seq: ChangeSeq(1),
+        source_request_checksum_sha256: None,
+        ops: vec![CommitOp::RestoreRevision {
+            inode_id: InodeId(2),
+            source_revision: RevisionNo(1),
+            base_revision: RevisionNo(1),
+        }],
+        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
+        message: None,
+        annotations: None,
+    };
+
+    let error = build_commit_plan(&request, &context).expect_err("restore non-file");
+    assert!(matches!(
+        error,
+        CommitValidationError::RestoreRevisionInodeNotFile {
+            inode_id: InodeId(2),
+            actual_kind: InodeKind::Dir,
+        }
+    ));
+}
+
+#[test]
+fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
+    let metadata_state = metadata_state_after(&[
+        vec![loon_api::WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![loon_api::WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+        vec![loon_api::WalOp::ReplaceFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            base_revision: RevisionNo(1),
+            content_manifest_digest: "sha256:manifest-2".to_owned(),
+        }],
+    ]);
+    let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
+
+    let stale_base = build_commit_plan(
+        &CommitRequest {
+            namespace_id: namespace_id(),
+            request_id: "restore-stale-base".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(1),
+            planned_head_seq: ChangeSeq(3),
+            source_request_checksum_sha256: None,
+            ops: vec![CommitOp::RestoreRevision {
+                inode_id: InodeId(3),
+                source_revision: RevisionNo(1),
+                base_revision: RevisionNo(1),
+            }],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("restore stale base");
+    assert!(matches!(
+        stale_base,
+        CommitValidationError::RestoreRevisionBaseRevisionMismatch {
+            inode_id: InodeId(3),
+            expected: RevisionNo(1),
+            actual: Some(RevisionNo(2)),
+        }
+    ));
+
+    let missing_source = build_commit_plan(
+        &CommitRequest {
+            namespace_id: namespace_id(),
+            request_id: "restore-missing-source".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(1),
+            planned_head_seq: ChangeSeq(3),
+            source_request_checksum_sha256: None,
+            ops: vec![CommitOp::RestoreRevision {
+                inode_id: InodeId(3),
+                source_revision: RevisionNo(99),
+                base_revision: RevisionNo(2),
+            }],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("restore missing source");
+    assert!(matches!(
+        missing_source,
+        CommitValidationError::RestoreRevisionSourceRevisionMissing {
+            inode_id: InodeId(3),
+            source_revision: RevisionNo(99),
+        }
+    ));
+}
+
+#[test]
+fn restore_revision_under_tombstoned_ancestor_is_rejected() {
+    let metadata_state = metadata_state_after(&[
+        vec![loon_api::WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![loon_api::WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+        vec![loon_api::WalOp::DeleteSubtree {
+            op_index: 0,
+            root_inode: InodeId(2),
+        }],
+    ]);
+    let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
+
+    let error = build_commit_plan(
+        &CommitRequest {
+            namespace_id: namespace_id(),
+            request_id: "restore-under-tombstone".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(1),
+            planned_head_seq: ChangeSeq(3),
+            source_request_checksum_sha256: None,
+            ops: vec![CommitOp::RestoreRevision {
+                inode_id: InodeId(3),
+                source_revision: RevisionNo(1),
+                base_revision: RevisionNo(1),
+            }],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("restore tombstone conflict");
+    assert!(matches!(
+        error,
+        CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
+            inode_id: InodeId(3),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn restore_revision_overflow_is_rejected() {
+    let metadata_state = MetadataState {
+        inodes: vec![
+            InodeRecord {
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(0),
+            },
+            InodeRecord {
+                inode_id: InodeId(2),
+                inode_kind: InodeKind::File,
+                created_seq: ChangeSeq(1),
+            },
+        ],
+        direntries: vec![loon_core::metadata::DirentryRecord {
+            parent_inode_id: InodeId(1),
+            name_key: "overflow.txt".to_owned(),
+            display_name: "overflow.txt".to_owned(),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(1),
+            bind_op_index: 0,
+        }],
+        revisions: vec![loon_core::metadata::RevisionRecord {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(u64::MAX),
+            committed_seq: ChangeSeq(1),
+            revision_op_index: 0,
+            content_manifest_digest: "sha256:manifest-max".to_owned(),
+        }],
+        subtree_tombstones: Vec::new(),
+    };
+    let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
+    let request = CommitRequest {
+        namespace_id: namespace_id(),
+        request_id: "restore-overflow".to_owned(),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token: FenceToken(1),
+        planned_head_seq: ChangeSeq(1),
+        source_request_checksum_sha256: None,
+        ops: vec![CommitOp::RestoreRevision {
+            inode_id: InodeId(2),
+            source_revision: RevisionNo(u64::MAX),
+            base_revision: RevisionNo(u64::MAX),
+        }],
+        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
+        message: None,
+        annotations: None,
+    };
+
+    let error = build_commit_plan(&request, &context).expect_err("restore overflow");
+    assert!(matches!(
+        error,
+        CommitValidationError::RestoreRevisionOverflow {
+            inode_id: InodeId(2),
+            base_revision: RevisionNo(u64::MAX),
+        }
+    ));
+}
+
+#[test]
+fn restore_revision_revalidates_durable_content_before_publish() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+
+    let first = store_bytes_as_content(&store, &namespace_id(), b"first").expect("stage first");
+    let create = commit_operations(
+        &store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "restore-create".to_owned(),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(0),
+            }],
+            ops: vec![V0CommitOp::CreateFile {
+                parent_inode: InodeId(1),
+                display_name: "restore.txt".to_owned(),
+                content_manifest_digest: first.content_manifest_digest.clone(),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect("create file");
+    let inode_id = match &create.results[0] {
+        loon_api::v0::CommitOpResult::CreateFile { inode_id, .. } => *inode_id,
+        other => panic!("unexpected create result: {other:?}"),
+    };
+
+    let second = store_bytes_as_content(&store, &namespace_id(), b"second").expect("stage second");
+    commit_operations(
+        &store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "restore-replace".to_owned(),
+            planned_head_seq: ChangeSeq(1),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(1),
+            }],
+            ops: vec![V0CommitOp::ReplaceFile {
+                inode_id,
+                base_revision_no: RevisionNo(1),
+                content_manifest_digest: second.content_manifest_digest,
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect("replace file");
+
+    store
+        .delete(&content_manifest(
+            namespace_id().as_str(),
+            &first.content_manifest_digest,
+        ))
+        .expect("delete first manifest");
+
+    let error = commit_operations(
+        &store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "restore-missing-manifest".to_owned(),
+            planned_head_seq: ChangeSeq(2),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(2),
+            }],
+            ops: vec![V0CommitOp::RestoreRevision {
+                inode_id,
+                source_revision_no: RevisionNo(1),
+                base_revision_no: RevisionNo(2),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("restore missing durable content");
+    assert!(matches!(
+        error,
+        CoreError::DurableContent(
+            loon_core::content::DurableContentValidationError::MissingManifestObject { .. }
+        )
     ));
 }
 

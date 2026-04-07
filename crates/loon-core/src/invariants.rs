@@ -5,6 +5,7 @@ pub const NAMESPACE_CORE_COMMIT_FRAME_INVARIANTS: &[&str] = &[
     "create_mutation_consumes_next_inode_id",
     "create_file_requires_durable_content",
     "replace_file_requires_durable_content",
+    "restore_revision_requires_durable_content",
     "subtree_tombstone_blocks_descendant_mutation",
 ];
 
@@ -12,10 +13,10 @@ pub const NAMESPACE_CORE_METADATA_APPLY_INVARIANTS: &[&str] = &[
     "create_dir_writes_inode_and_direntry_rows",
     "create_file_writes_inode_direntry_and_initial_revision",
     "replace_file_appends_new_revision_head",
+    "restore_creates_new_revision_head",
     "delete_file_writes_tombstone_row",
     "rename_appends_new_direntry_binding",
     "delete_subtree_writes_tombstone_row",
-    "restore_creates_new_revision_head",
 ];
 
 pub const NAMESPACE_CORE_WAL_REPLAY_INVARIANTS: &[&str] = &[
@@ -216,9 +217,11 @@ pub const INVARIANTS: &[&str] = &[
     "create_mutation_consumes_next_inode_id",
     "create_file_requires_durable_content",
     "replace_file_requires_durable_content",
+    "restore_revision_requires_durable_content",
     "create_dir_writes_inode_and_direntry_rows",
     "create_file_writes_inode_direntry_and_initial_revision",
     "replace_file_appends_new_revision_head",
+    "restore_creates_new_revision_head",
     "delete_file_writes_tombstone_row",
     "rename_appends_new_direntry_binding",
     "delete_subtree_writes_tombstone_row",

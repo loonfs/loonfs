@@ -66,6 +66,7 @@ pub fn build_commit_plan(
     validate_metadata_preconditions(
         request,
         &context.metadata_state,
+        context.head.seq,
         next_seq,
         &allocated_inode_ids,
         &mut checked_invariants,
@@ -74,7 +75,9 @@ pub fn build_commit_plan(
     let durable_content_required = request.ops.iter().any(|op| {
         matches!(
             op,
-            CommitOp::CreateFile { .. } | CommitOp::ReplaceFile { .. }
+            CommitOp::CreateFile { .. }
+                | CommitOp::ReplaceFile { .. }
+                | CommitOp::RestoreRevision { .. }
         )
     });
     if create_op_count > 0 {
@@ -103,6 +106,16 @@ pub fn build_commit_plan(
             "replace_file_requires_durable_content",
         );
     }
+    if request
+        .ops
+        .iter()
+        .any(|op| matches!(op, CommitOp::RestoreRevision { .. }))
+    {
+        push_unique_invariant(
+            &mut checked_invariants,
+            "restore_revision_requires_durable_content",
+        );
+    }
 
     Ok(CommitPlan {
         namespace_id: request.namespace_id.clone(),
@@ -110,6 +123,21 @@ pub fn build_commit_plan(
         base_head_seq: request.planned_head_seq,
         next_seq,
         allocated_inode_ids,
+        resolved_restore_content_manifest_digests: request
+            .ops
+            .iter()
+            .map(|op| match op {
+                CommitOp::RestoreRevision {
+                    inode_id,
+                    source_revision,
+                    ..
+                } => context
+                    .metadata_state
+                    .revision_at_seq(*inode_id, *source_revision, context.head.seq)
+                    .map(|revision| revision.content_manifest_digest),
+                _ => None,
+            })
+            .collect(),
         resulting_next_inode_id,
         durable_content_required,
         wal_object_must_be_written: true,
@@ -122,6 +150,7 @@ pub fn build_commit_plan(
 fn validate_metadata_preconditions(
     request: &CommitRequest,
     metadata_state: &MetadataState,
+    basis_seq: ChangeSeq,
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
     checked_invariants: &mut Vec<String>,
@@ -132,6 +161,40 @@ fn validate_metadata_preconditions(
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
+        let resolved_restore_content_manifest_digest = match op {
+            CommitOp::RestoreRevision {
+                inode_id,
+                source_revision,
+                base_revision,
+            } => {
+                validate_restore_target(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    *base_revision,
+                    committed_seq,
+                )?;
+                let source_revision = validate_restore_source_revision(
+                    metadata_state,
+                    *inode_id,
+                    *source_revision,
+                    basis_seq,
+                )?;
+                if base_revision.0.checked_add(1).is_none() {
+                    return Err(CommitValidationError::RestoreRevisionOverflow {
+                        inode_id: *inode_id,
+                        base_revision: *base_revision,
+                    });
+                }
+                validate_restore_not_covered(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    committed_seq,
+                    checked_invariants,
+                )?;
+                Some(source_revision.content_manifest_digest)
+            }
+            _ => None,
+        };
         match op {
             CommitOp::CreateDir {
                 parent_inode,
@@ -181,6 +244,7 @@ fn validate_metadata_preconditions(
                     false,
                 )?;
             }
+            CommitOp::RestoreRevision { .. } => {}
             CommitOp::DeleteFile { inode_id } => {
                 validate_delete_file_target(&ephemeral_metadata_state, *inode_id, committed_seq)?;
                 validate_delete_file_not_covered(
@@ -242,6 +306,7 @@ fn validate_metadata_preconditions(
                 &[materialize_simulated_wal_op(
                     op,
                     op_index,
+                    resolved_restore_content_manifest_digest.as_deref(),
                     &mut allocated_inode_ids,
                 )?],
             )
@@ -255,6 +320,7 @@ fn validate_metadata_preconditions(
 fn materialize_simulated_wal_op(
     op: &CommitOp,
     op_index: u32,
+    resolved_restore_content_manifest_digest: Option<&str>,
     allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
 ) -> Result<WalOp, CommitValidationError> {
     Ok(match op {
@@ -291,6 +357,24 @@ fn materialize_simulated_wal_op(
             inode_id: *inode_id,
             base_revision: *base_revision,
             content_manifest_digest: content_manifest_digest.clone(),
+        },
+        CommitOp::RestoreRevision {
+            inode_id,
+            source_revision,
+            base_revision,
+        } => WalOp::RestoreRevision {
+            op_index,
+            inode_id: *inode_id,
+            source_revision_no: *source_revision,
+            base_revision: *base_revision,
+            content_manifest_digest: resolved_restore_content_manifest_digest
+                .ok_or(
+                    CommitValidationError::RestoreRevisionSourceRevisionMissing {
+                        inode_id: *inode_id,
+                        source_revision: *source_revision,
+                    },
+                )?
+                .to_owned(),
         },
         CommitOp::DeleteFile { inode_id } => WalOp::DeleteFile {
             op_index,
@@ -370,6 +454,52 @@ fn validate_inode_revision_is(
     Ok(())
 }
 
+fn validate_restore_target(
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    expected_revision: RevisionNo,
+    base_seq: ChangeSeq,
+) -> Result<(), CommitValidationError> {
+    let inode = metadata_state
+        .inode_at_seq(inode_id, base_seq)
+        .ok_or(CommitValidationError::RestoreRevisionInodeMissing { inode_id })?;
+    if inode.inode_kind != InodeKind::File {
+        return Err(CommitValidationError::RestoreRevisionInodeNotFile {
+            inode_id,
+            actual_kind: inode.inode_kind,
+        });
+    }
+
+    let actual_revision = metadata_state
+        .latest_revision_head_at_seq(inode_id, base_seq)
+        .map(|revision| revision.revision_no);
+    if actual_revision != Some(expected_revision) {
+        return Err(CommitValidationError::RestoreRevisionBaseRevisionMismatch {
+            inode_id,
+            expected: expected_revision,
+            actual: actual_revision,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_restore_source_revision(
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    source_revision: RevisionNo,
+    base_seq: ChangeSeq,
+) -> Result<crate::metadata::RevisionRecord, CommitValidationError> {
+    metadata_state
+        .revision_at_seq(inode_id, source_revision, base_seq)
+        .ok_or(
+            CommitValidationError::RestoreRevisionSourceRevisionMissing {
+                inode_id,
+                source_revision,
+            },
+        )
+}
+
 fn validate_ancestors_not_subtree_deleted(
     metadata_state: &MetadataState,
     inode_id: InodeId,
@@ -391,6 +521,29 @@ fn validate_ancestors_not_subtree_deleted(
                 tombstone_seq: tombstone.tombstone_seq,
             })
         };
+    }
+
+    push_unique_invariant(
+        checked_invariants,
+        "subtree_tombstone_blocks_descendant_mutation",
+    );
+    Ok(())
+}
+
+fn validate_restore_not_covered(
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    base_seq: ChangeSeq,
+    checked_invariants: &mut Vec<String>,
+) -> Result<(), CommitValidationError> {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
+        return Err(
+            CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
+                inode_id,
+                root_inode: tombstone.root_inode_id,
+                tombstone_seq: tombstone.tombstone_seq,
+            },
+        );
     }
 
     push_unique_invariant(

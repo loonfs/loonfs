@@ -344,8 +344,6 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
         }
     }
 
-    validate_commit_content_references(store, namespace_id, &request)?;
-
     let validation = CommitValidationContext {
         head: basis.head.clone(),
         lease: basis.lease.clone(),
@@ -353,7 +351,12 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
         metadata_state: basis.metadata_state.clone(),
     };
     let plan = build_commit_plan(&request, &validation)?;
-    let results = derive_commit_results(&request.ops, &plan.allocated_inode_ids);
+    validate_commit_content_references(store, namespace_id, &request, &plan)?;
+    let results = derive_commit_results(
+        &request.ops,
+        &plan.allocated_inode_ids,
+        &plan.resolved_restore_content_manifest_digests,
+    );
     let wal = prepare_wal_commit(&request, &plan, results.clone(), &context.writer_version)?;
     let _applied = basis
         .metadata_state
@@ -499,6 +502,15 @@ fn map_commit_op(op: V0CommitOp) -> CommitOp {
             base_revision: base_revision_no,
             content_manifest_digest,
         },
+        V0CommitOp::RestoreRevision {
+            inode_id,
+            source_revision_no,
+            base_revision_no,
+        } => CommitOp::RestoreRevision {
+            inode_id,
+            source_revision: source_revision_no,
+            base_revision: base_revision_no,
+        },
         V0CommitOp::DeleteFile { inode_id } => CommitOp::DeleteFile { inode_id },
         V0CommitOp::Rename {
             inode_id,
@@ -566,6 +578,16 @@ fn map_wal_op(op: loon_api::WalOp) -> V0CommitOp {
             base_revision_no: base_revision,
             content_manifest_digest,
         },
+        loon_api::WalOp::RestoreRevision {
+            inode_id,
+            source_revision_no,
+            base_revision,
+            ..
+        } => V0CommitOp::RestoreRevision {
+            inode_id,
+            source_revision_no,
+            base_revision_no: base_revision,
+        },
         loon_api::WalOp::DeleteFile { inode_id, .. } => V0CommitOp::DeleteFile { inode_id },
         loon_api::WalOp::Rename {
             inode_id,
@@ -611,8 +633,9 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: &CoreCommitRequest,
+    plan: &crate::commit::CommitPlan,
 ) -> Result<(), CoreError> {
-    for op in &request.ops {
+    for (index, op) in request.ops.iter().enumerate() {
         match op {
             CommitOp::CreateFile {
                 content_manifest_digest,
@@ -622,6 +645,23 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
                 content_manifest_digest,
                 ..
             } => {
+                validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
+            }
+            CommitOp::RestoreRevision {
+                inode_id,
+                source_revision,
+                ..
+            } => {
+                let content_manifest_digest = plan
+                    .resolved_restore_content_manifest_digests
+                    .get(index)
+                    .and_then(|digest| digest.as_deref())
+                    .ok_or_else(|| {
+                        CoreError::Store(format!(
+                            "missing resolved restore manifest digest for inode {:?} source revision {:?}",
+                            inode_id, source_revision
+                        ))
+                    })?;
                 validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
             }
             _ => {}

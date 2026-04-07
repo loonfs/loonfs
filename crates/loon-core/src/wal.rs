@@ -275,6 +275,10 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index = u32::try_from(op_index)
             .map_err(|_| WalBuildError::Codec("op index overflow".to_owned()))?;
+        let resolved_restore_content_manifest_digest = plan
+            .resolved_restore_content_manifest_digests
+            .get(op_index as usize)
+            .and_then(|digest| digest.as_deref());
         let wal_op = match op {
             CommitOp::CreateDir {
                 parent_inode,
@@ -315,6 +319,23 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
                 inode_id: *inode_id,
                 base_revision: *base_revision,
                 content_manifest_digest: content_manifest_digest.clone(),
+            },
+            CommitOp::RestoreRevision {
+                inode_id,
+                source_revision,
+                base_revision,
+            } => WalOp::RestoreRevision {
+                op_index,
+                inode_id: *inode_id,
+                source_revision_no: *source_revision,
+                base_revision: *base_revision,
+                content_manifest_digest: resolved_restore_content_manifest_digest
+                    .ok_or_else(|| {
+                        WalBuildError::Codec(format!(
+                            "missing resolved restore manifest digest for op index {op_index}"
+                        ))
+                    })?
+                    .to_owned(),
             },
             CommitOp::DeleteFile { inode_id } => WalOp::DeleteFile {
                 op_index,
@@ -398,6 +419,7 @@ fn replay_next_inode_id(current_next_inode_id: InodeId, ops: &[WalOp]) -> InodeI
                 InodeId(next_inode_id.0.max(inode_id.0.saturating_add(1)))
             }
             WalOp::ReplaceFile { .. }
+            | WalOp::RestoreRevision { .. }
             | WalOp::DeleteFile { .. }
             | WalOp::Rename { .. }
             | WalOp::DeleteSubtree { .. } => next_inode_id,

@@ -970,6 +970,7 @@ fn mutation_result_from_commit_response(response: V0CommitResponse) -> MutationR
 pub(crate) fn derive_commit_results(
     ops: &[CommitOp],
     allocated_inode_ids: &[InodeId],
+    resolved_restore_content_manifest_digests: &[Option<String>],
 ) -> Vec<CommitOpResult> {
     let mut allocated = allocated_inode_ids.iter().copied();
     ops.iter()
@@ -1008,6 +1009,25 @@ pub(crate) fn derive_commit_results(
                             .expect("replace_file revision increment validated"),
                     ),
                     content_manifest_digest: content_manifest_digest.clone(),
+                },
+                CommitOp::RestoreRevision {
+                    inode_id,
+                    source_revision,
+                    base_revision,
+                } => CommitOpResult::RestoreRevision {
+                    op_index,
+                    inode_id: *inode_id,
+                    source_revision_no: *source_revision,
+                    revision_no: loon_api::RevisionNo(
+                        base_revision
+                            .0
+                            .checked_add(1)
+                            .expect("restore_revision increment validated"),
+                    ),
+                    content_manifest_digest: resolved_restore_content_manifest_digests[index]
+                        .as_ref()
+                        .expect("resolved restore manifest digest should be present")
+                        .clone(),
                 },
                 CommitOp::DeleteFile { inode_id } => CommitOpResult::DeleteFile {
                     op_index,
@@ -1360,11 +1380,14 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         CommitValidationError::PlannedHeadSeqMismatch { .. }
         | CommitValidationError::MissingHeadSeqPrecondition { .. }
         | CommitValidationError::ConflictingHeadSeqPrecondition { .. } => CoreErrorKind::StaleHead,
-        CommitValidationError::ReplaceFileBaseRevisionMismatch { .. } => {
+        CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
+        | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. }
+        | CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
             CoreErrorKind::StaleRevision
         }
         CommitValidationError::CreateUnderSubtreeTombstone { .. }
         | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }
+        | CommitValidationError::RestoreRevisionUnderSubtreeTombstone { .. }
         | CommitValidationError::DeleteFileCoveredByTombstone { .. }
         | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
         | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
@@ -1374,6 +1397,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         CommitValidationError::CreateChildNameCollision { .. }
         | CommitValidationError::CreateParentNotDirectory { .. }
         | CommitValidationError::ReplaceFileInodeNotFile { .. }
+        | CommitValidationError::RestoreRevisionInodeNotFile { .. }
         | CommitValidationError::DeleteFileInodeNotFile { .. }
         | CommitValidationError::RenameTargetParentNotDirectory { .. }
         | CommitValidationError::RenameTargetNameCollision { .. }
@@ -1382,6 +1406,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         }
         CommitValidationError::CreateParentMissing { .. }
         | CommitValidationError::ReplaceFileInodeMissing { .. }
+        | CommitValidationError::RestoreRevisionInodeMissing { .. }
         | CommitValidationError::DeleteFileInodeMissing { .. }
         | CommitValidationError::RenameInodeMissing { .. }
         | CommitValidationError::RenameSourceBindingMissing { .. }
@@ -1395,6 +1420,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::NamespaceMismatch
         | CommitValidationError::HeadLeaseNamespaceMismatch
         | CommitValidationError::HeadLeaseFenceMismatch { .. }
+        | CommitValidationError::RestoreRevisionOverflow { .. }
         | CommitValidationError::ReplaceFileRevisionOverflow { .. }
         | CommitValidationError::SeqOverflow
         | CommitValidationError::NextInodeOverflow
