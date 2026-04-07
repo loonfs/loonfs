@@ -694,14 +694,13 @@ fn post_admin_json<T: serde::de::DeserializeOwned>(
             code: "invalid_json".to_owned(),
             message: err.to_string(),
         }),
-        Err(ureq::Error::Status(_, response)) => {
-            Err(serde_json::from_reader::<_, ApiError>(response.into_reader()).unwrap_or_else(
-                |err| ApiError {
-                    code: "invalid_json".to_owned(),
-                    message: err.to_string(),
-                },
-            ))
-        }
+        Err(ureq::Error::Status(_, response)) => Err(serde_json::from_reader::<_, ApiError>(
+            response.into_reader(),
+        )
+        .unwrap_or_else(|err| ApiError {
+            code: "invalid_json".to_owned(),
+            message: err.to_string(),
+        })),
         Err(ureq::Error::Transport(error)) => Err(ApiError {
             code: "transport".to_owned(),
             message: error.to_string(),
