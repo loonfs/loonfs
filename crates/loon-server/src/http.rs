@@ -159,7 +159,8 @@ async fn list_entries(
     let namespace_id = NamespaceId::from(namespace);
     let path = query.path;
     let entries = run_blocking(move || {
-        list_path(store.as_ref(), &namespace_id, &path).map_err(ApiResponseError::core)
+        list_path(store.as_ref(), &namespace_id, &path)
+            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(entries))
@@ -176,7 +177,8 @@ async fn stat_entry(
     let namespace_id = NamespaceId::from(namespace);
     let path = query.path;
     let entry = run_blocking(move || {
-        resolve_path(store.as_ref(), &namespace_id, &path).map_err(ApiResponseError::core)
+        resolve_path(store.as_ref(), &namespace_id, &path)
+            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(entry))
@@ -193,7 +195,8 @@ async fn get_content(
     let namespace_id = NamespaceId::from(namespace);
     let path = query.path;
     let file = run_blocking(move || {
-        read_file_bytes(store.as_ref(), &namespace_id, &path).map_err(ApiResponseError::core)
+        read_file_bytes(store.as_ref(), &namespace_id, &path)
+            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok((StatusCode::OK, file.bytes).into_response())
@@ -248,7 +251,7 @@ async fn filesystem_operation(
                 Some(&request.request_id),
             ),
         }
-        .map_err(ApiResponseError::core)?;
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
         Ok(FilesystemOperationResponse::from(result))
     })
     .await?;
@@ -266,7 +269,7 @@ async fn begin_upload_handler(
     let namespace_id = NamespaceId::from(namespace);
     let response = run_blocking(move || {
         begin_upload(store.as_ref(), &namespace_id, &mutation_context(&config))
-            .map_err(ApiResponseError::core)
+            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -292,7 +295,7 @@ async fn upload_block_handler(
             &bytes,
             &mutation_context(&config),
         )
-        .map_err(ApiResponseError::core)
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -316,7 +319,7 @@ async fn complete_upload_handler(
             &request,
             &mutation_context(&config),
         )
-        .map_err(ApiResponseError::core)
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -339,7 +342,7 @@ async fn commit_operations_handler(
             request,
             &mutation_context(&config),
         )
-        .map_err(ApiResponseError::core)
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -356,7 +359,8 @@ async fn list_changes_handler(
     let namespace_id = NamespaceId::from(namespace);
     let after_seq = loon_api::ChangeSeq(query.after_seq);
     let response = run_blocking(move || {
-        list_changes_after(store.as_ref(), &namespace_id, after_seq).map_err(ApiResponseError::core)
+        list_changes_after(store.as_ref(), &namespace_id, after_seq)
+            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -481,6 +485,18 @@ impl ApiResponseError {
         };
         Self::new(status, code, &error.to_string())
     }
+
+    fn core_for_namespace(namespace: &NamespaceId, error: CoreError) -> Self {
+        if matches!(error.kind(), CoreErrorKind::NamespaceNotFound) {
+            return Self::new(
+                StatusCode::NOT_FOUND,
+                "namespace_not_found",
+                &format!("namespace `{}` does not exist", namespace.as_str()),
+            );
+        }
+
+        Self::core(error)
+    }
 }
 
 impl IntoResponse for ApiResponseError {
@@ -572,17 +588,41 @@ mod tests {
                 harness.client.write_file_bytes(&target, b"hello"),
                 404,
                 "namespace_not_found",
+                Some("namespace `missing` does not exist"),
             );
             assert_api_error(
                 harness.client.delete_path(&target),
                 404,
                 "namespace_not_found",
+                Some("namespace `missing` does not exist"),
             );
             let destination = NamespacePath::parse("missing:/notes/renamed.txt").expect("target");
             assert_api_error(
                 harness.client.move_path(&target, &destination),
                 404,
                 "namespace_not_found",
+                Some("namespace `missing` does not exist"),
+            );
+        })
+        .await
+        .expect("join blocking task");
+
+        harness.server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_missing_namespace_reads_return_namespace_not_found() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let harness = start_server(store, temp_dir.path(), "server-writer").await;
+
+        tokio::task::spawn_blocking(move || {
+            let target = NamespacePath::parse("missing:/").expect("target");
+            assert_api_error(
+                harness.client.list_path(&target),
+                404,
+                "namespace_not_found",
+                Some("namespace `missing` does not exist"),
             );
         })
         .await
@@ -607,7 +647,12 @@ mod tests {
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
         tokio::task::spawn_blocking(move || {
             let target = NamespacePath::parse("demo:/missing.txt").expect("target");
-            assert_api_error(harness.client.delete_path(&target), 404, "path_not_found");
+            assert_api_error(
+                harness.client.delete_path(&target),
+                404,
+                "path_not_found",
+                None,
+            );
         })
         .await
         .expect("join blocking task");
@@ -658,11 +703,17 @@ mod tests {
                 harness.client.write_file_bytes(&dir_target, b"not a file"),
                 409,
                 "path_conflict",
+                None,
             );
 
             let from = NamespacePath::parse("demo:/tmp/a.txt").expect("from");
             let to = NamespacePath::parse("demo:/docs/a.txt").expect("to");
-            assert_api_error(harness.client.move_path(&from, &to), 409, "path_conflict");
+            assert_api_error(
+                harness.client.move_path(&from, &to),
+                409,
+                "path_conflict",
+                None,
+            );
         })
         .await
         .expect("join blocking task");
@@ -712,6 +763,7 @@ mod tests {
                 harness.client.write_file_bytes(&put_target, b"new"),
                 409,
                 "tombstone_conflict",
+                None,
             );
 
             let from = NamespacePath::parse("demo:/tmp/source.txt").expect("from");
@@ -720,6 +772,7 @@ mod tests {
                 harness.client.move_path(&from, &to),
                 409,
                 "tombstone_conflict",
+                None,
             );
         })
         .await
@@ -748,6 +801,7 @@ mod tests {
                 harness.client.write_file_bytes(&target, b"race"),
                 409,
                 "stale_head",
+                None,
             );
         })
         .await
@@ -776,6 +830,7 @@ mod tests {
                 harness.client.write_file_bytes(&target, b"blocked"),
                 409,
                 "lease_conflict",
+                None,
             );
         })
         .await
@@ -843,15 +898,20 @@ mod tests {
         result: Result<T, ClientError>,
         status: u16,
         code: &str,
+        message: Option<&str>,
     ) {
         match result {
             Err(ClientError::Api {
                 status: actual_status,
                 code: actual_code,
+                message: actual_message,
                 ..
             }) => {
                 assert_eq!(actual_status, status);
                 assert_eq!(actual_code, code);
+                if let Some(expected_message) = message {
+                    assert_eq!(actual_message, expected_message);
+                }
             }
             other => panic!("expected api error {status} {code}, got {other:?}"),
         }
