@@ -151,18 +151,20 @@ impl Backend for DirectBackend {
 
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
         let ns_id = NamespaceId::from(spec.namespace.clone());
-        list_path(&self.store, &ns_id, &spec.absolute_path).map_err(map_core_error)
+        list_path(&self.store, &ns_id, &spec.absolute_path)
+            .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError> {
         let ns_id = NamespaceId::from(spec.namespace.clone());
-        resolve_path(&self.store, &ns_id, &spec.absolute_path).map_err(map_core_error)
+        resolve_path(&self.store, &ns_id, &spec.absolute_path)
+            .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError> {
         let ns_id = NamespaceId::from(spec.namespace.clone());
-        let result =
-            read_file_bytes(&self.store, &ns_id, &spec.absolute_path).map_err(map_core_error)?;
+        let result = read_file_bytes(&self.store, &ns_id, &spec.absolute_path)
+            .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))?;
         Ok(result.bytes)
     }
 
@@ -187,7 +189,7 @@ impl Backend for DirectBackend {
             &self.mutation_context(),
             None,
         )
-        .map_err(map_core_error)
+        .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
@@ -199,7 +201,7 @@ impl Backend for DirectBackend {
             &self.mutation_context(),
             None,
         )
-        .map_err(map_core_error)
+        .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
     fn move_path(
@@ -216,7 +218,7 @@ impl Backend for DirectBackend {
             &self.mutation_context(),
             None,
         )
-        .map_err(map_core_error)
+        .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
     }
 
     fn copy_path(
@@ -233,7 +235,7 @@ impl Backend for DirectBackend {
             &self.mutation_context(),
             None,
         )
-        .map_err(map_core_error)
+        .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
     }
 }
 
@@ -258,6 +260,16 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::ServerError => "server_error",
     };
     CliError::new(code, error.to_string())
+}
+
+fn map_namespace_scoped_core_error(namespace: &str, error: CoreError) -> CliError {
+    match error.kind() {
+        CoreErrorKind::NamespaceNotFound => CliError::new(
+            "namespace_not_found",
+            format!("namespace `{namespace}` does not exist"),
+        ),
+        _ => map_core_error(error),
+    }
 }
 
 fn map_bootstrap_error(error: BootstrapNamespaceError) -> CliError {

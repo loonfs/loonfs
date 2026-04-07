@@ -538,6 +538,43 @@ fn external_remote_profile_executes_through_http() {
     assert_eq!(namespaces[0]["name"], "demo");
 }
 
+#[test]
+fn local_profile_missing_namespace_reports_user_facing_message() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let output = harness.run(&["--json", "filesystem", "ls", "missing"]);
+    assert_failure(&output);
+    let error = json_error(&output);
+    assert_eq!(error["code"], "namespace_not_found");
+    assert_eq!(error["message"], "namespace `missing` does not exist");
+}
+
+#[test]
+fn remote_profile_missing_namespace_reports_user_facing_message() {
+    let harness = Harness::new();
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "remote-missing-ns"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "add",
+        "remote",
+        "default",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+
+    let output = harness.run(&["--json", "filesystem", "ls", "missing"]);
+    assert_failure(&output);
+    let error = json_error(&output);
+    assert_eq!(error["code"], "namespace_not_found");
+    assert_eq!(error["message"], "namespace `missing` does not exist");
+}
+
 struct Harness {
     temp_dir: TempDir,
     home_dir: PathBuf,
