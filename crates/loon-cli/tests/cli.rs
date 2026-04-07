@@ -519,7 +519,7 @@ fn external_remote_profile_executes_through_http() {
         "profile",
         "add",
         "remote",
-        "default",
+        "remote",
         "--server-url",
         &remote_server.server_url,
         "--auth-token",

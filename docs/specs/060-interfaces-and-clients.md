@@ -80,6 +80,8 @@ Long-running transfers may additionally expose session or job resources. The exa
 human-facing `name`. The server resolves that selector through the namespace catalog before
 touching authoritative namespace state.
 
+The catalog resolves namespace names case-insensitively while preserving the current display form.
+
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
 
 ### 3.0 Namespace create, list, and rename

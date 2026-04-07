@@ -126,15 +126,24 @@ impl fmt::Display for InodeId {
 }
 
 pub fn normalize_namespace_name(value: &str) -> Result<(String, NamespaceNameKey), String> {
+    const MAX_NAMESPACE_NAME_LEN: usize = 128;
+
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err("namespace name must not be empty".to_owned());
     }
-    if trimmed.contains('/') {
-        return Err("namespace name must not contain `/`".to_owned());
+    if trimmed.len() > MAX_NAMESPACE_NAME_LEN {
+        return Err(format!(
+            "namespace name must be at most {MAX_NAMESPACE_NAME_LEN} characters"
+        ));
     }
-    if trimmed.contains(':') {
-        return Err("namespace name must not contain `:`".to_owned());
+    if !trimmed
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(
+            "namespace name must contain only ASCII letters, digits, `.`, `-`, or `_`".to_owned(),
+        );
     }
 
     let name_key = NamespaceNameKey(trimmed.to_ascii_lowercase());
@@ -164,8 +173,26 @@ mod tests {
         assert!(normalize_namespace_name("NS_demo").is_err());
         assert!(normalize_namespace_name("ns_0123456789abcdef0123456789abcdef").is_err());
 
-        let (name, key) = normalize_namespace_name("demo").expect("valid namespace name");
-        assert_eq!(name, "demo");
-        assert_eq!(key.as_str(), "demo");
+        let (name, key) =
+            normalize_namespace_name("Demo.01_Test-Name").expect("valid namespace name");
+        assert_eq!(name, "Demo.01_Test-Name");
+        assert_eq!(key.as_str(), "demo.01_test-name");
+    }
+
+    #[test]
+    fn namespace_names_reject_characters_outside_ascii_letters_digits_period_dash_and_underscore() {
+        assert!(normalize_namespace_name("demo space").is_err());
+        assert!(normalize_namespace_name("demo/space").is_err());
+        assert!(normalize_namespace_name("demo:space").is_err());
+        assert!(normalize_namespace_name("d\u{00e9}mo").is_err());
+    }
+
+    #[test]
+    fn namespace_names_reject_values_longer_than_128_characters() {
+        let too_long = "a".repeat(129);
+        assert!(normalize_namespace_name(&too_long).is_err());
+
+        let max = "a".repeat(128);
+        assert!(normalize_namespace_name(&max).is_ok());
     }
 }

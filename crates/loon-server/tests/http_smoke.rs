@@ -154,7 +154,7 @@ async fn http_namespace_name_collisions_are_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_namespace_selectors_with_spaces_round_trip_through_client_urls() {
+async fn http_namespace_names_accept_ascii_letters_digits_periods_dashes_and_underscores() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -167,18 +167,47 @@ async fn http_namespace_selectors_with_spaces_round_trip_through_client_urls() {
     tokio::task::spawn_blocking(move || {
         let namespace = harness
             .client
-            .create_namespace("Demo Space")
+            .create_namespace("Demo.Space_01-test")
             .expect("create namespace");
-        assert_eq!(namespace.name, "Demo Space");
+        assert_eq!(namespace.name, "Demo.Space_01-test");
 
-        let target = NamespacePath::parse("Demo Space:/docs/hello.txt").expect("target");
+        let target = NamespacePath::parse("Demo.Space_01-test:/docs/hello.txt").expect("target");
         harness
             .client
-            .write_file_bytes(&target, b"space selector\n")
+            .write_file_bytes(&target, b"allowed chars\n")
             .expect("write file");
 
         let entry = harness.client.stat_path(&target).expect("stat path");
-        assert_eq!(entry.size_bytes, Some(15));
+        assert_eq!(entry.size_bytes, Some(14));
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_namespace_names_reject_spaces_and_overlength_values() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-selector-invalid",
+        "http-selector-invalid",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        match harness.client.create_namespace("Demo Space") {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "invalid_namespace_name"),
+            other => panic!("expected invalid_namespace_name, got {other:?}"),
+        }
+
+        let too_long = "a".repeat(129);
+        match harness.client.create_namespace(&too_long) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "invalid_namespace_name"),
+            other => panic!("expected invalid_namespace_name, got {other:?}"),
+        }
     })
     .await
     .expect("join blocking task");
@@ -269,17 +298,28 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .client
             .begin_upload(namespace_selector)
             .expect("begin upload");
+        let stable_namespace_id = begin.namespace_id.clone();
         let first_block = harness
             .client
-            .upload_block(namespace_selector, &begin.upload_id, 0, file_bytes)
+            .upload_block(
+                stable_namespace_id.as_str(),
+                &begin.upload_id,
+                0,
+                file_bytes,
+            )
             .expect("upload block");
         let repeated_block = harness
             .client
-            .upload_block(namespace_selector, &begin.upload_id, 0, file_bytes)
+            .upload_block(
+                stable_namespace_id.as_str(),
+                &begin.upload_id,
+                0,
+                file_bytes,
+            )
             .expect("repeat upload block");
         assert_eq!(first_block, repeated_block);
         match harness.client.upload_block(
-            namespace_selector,
+            stable_namespace_id.as_str(),
             &begin.upload_id,
             0,
             b"different bytes",
@@ -365,6 +405,89 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .list_changes(namespace_selector, commit.committed_seq)
             .expect("list changes after head");
         assert_eq!(empty.changes, Vec::new());
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_staged_upload_can_continue_after_namespace_rename_by_namespace_id() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-upload-rename",
+        "http-upload-rename",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let created = harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let namespace_id = created.namespace_id.clone();
+        let file_bytes = b"rename resilient upload\n";
+
+        let begin = harness.client.begin_upload("demo").expect("begin upload");
+        assert_eq!(begin.namespace_id, namespace_id);
+
+        let renamed = harness
+            .client
+            .rename_namespace("demo", "docs")
+            .expect("rename namespace");
+        assert_eq!(renamed.namespace_id, namespace_id);
+
+        harness
+            .client
+            .upload_block(namespace_id.as_str(), &begin.upload_id, 0, file_bytes)
+            .expect("upload block after rename");
+
+        let complete = harness
+            .client
+            .complete_upload(
+                namespace_id.as_str(),
+                &begin.upload_id,
+                &CompleteUploadRequest {
+                    file_size_bytes: file_bytes.len() as u64,
+                    file_digest_sha256: sha256_digest(file_bytes),
+                },
+            )
+            .expect("complete upload after rename");
+        let manifest_digest = complete.content_manifest_digest.clone();
+
+        harness
+            .client
+            .commit_operations(
+                namespace_id.as_str(),
+                &V0CommitRequest {
+                    request_id: "req-upload-rename".to_owned(),
+                    planned_head_seq: ChangeSeq(0),
+                    preconditions: vec![CommitPrecondition::HeadSeqIs {
+                        expected_seq: ChangeSeq(0),
+                    }],
+                    ops: vec![CommitOp::CreateFile {
+                        parent_inode: InodeId(1),
+                        display_name: "uploaded.txt".to_owned(),
+                        content_manifest_digest: manifest_digest.clone(),
+                    }],
+                    message: Some("upload through rename".to_owned()),
+                    annotations: None,
+                },
+            )
+            .expect("commit after rename");
+
+        let renamed_target = NamespacePath::parse("docs:/uploaded.txt").expect("renamed target");
+        let entry = harness
+            .client
+            .stat_path(&renamed_target)
+            .expect("stat renamed target");
+        assert_eq!(
+            entry.content_manifest_digest.as_deref(),
+            Some(manifest_digest.as_str())
+        );
     })
     .await
     .expect("join blocking task");
@@ -1072,18 +1195,19 @@ fn retry_until_lease_handoff(client: &Client, from: &NamespacePath, to: &Namespa
 
 fn stage_uploaded_manifest(client: &Client, namespace: &str, file_bytes: &[u8]) -> String {
     let begin = client.begin_upload(namespace).expect("begin upload");
+    let namespace_id = begin.namespace_id;
     client
-        .upload_block(namespace, &begin.upload_id, 0, file_bytes)
+        .upload_block(namespace_id.as_str(), &begin.upload_id, 0, file_bytes)
         .expect("upload single block");
     let complete_request = CompleteUploadRequest {
         file_size_bytes: file_bytes.len() as u64,
         file_digest_sha256: sha256_digest(file_bytes),
     };
     let complete = client
-        .complete_upload(namespace, &begin.upload_id, &complete_request)
+        .complete_upload(namespace_id.as_str(), &begin.upload_id, &complete_request)
         .expect("complete upload");
     let repeated = client
-        .complete_upload(namespace, &begin.upload_id, &complete_request)
+        .complete_upload(namespace_id.as_str(), &begin.upload_id, &complete_request)
         .expect("repeat complete upload");
     assert_eq!(repeated, complete);
     complete.content_manifest_digest

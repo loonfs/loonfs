@@ -10,7 +10,7 @@ use loon_api::{
     },
     ApiError, AuthoritativePathEntry, ChangeSeq, CreateNamespaceRequest, FilesystemOperation,
     FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
-    ListNamespacesResponse, MutationResult, NamespaceSummary, RenameNamespaceRequest,
+    ListNamespacesResponse, MutationResult, NamespaceId, NamespaceSummary, RenameNamespaceRequest,
     CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::Deserialize;
@@ -43,6 +43,12 @@ pub struct GetPathResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PutPathResult {
     pub committed_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedManifest {
+    namespace_id: NamespaceId,
+    content_manifest_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,20 +289,29 @@ impl Client {
         &self,
         namespace: &str,
         bytes: &[u8],
-    ) -> Result<String, ClientError> {
+    ) -> Result<StagedManifest, ClientError> {
         let upload = self.begin_upload(namespace)?;
+        let namespace_id = upload.namespace_id.clone();
         for (index, chunk) in bytes.chunks(CONTENT_BLOCK_SIZE_BYTES as usize).enumerate() {
-            self.upload_block(namespace, &upload.upload_id, index as u32, chunk)?;
+            self.upload_block(
+                namespace_id.as_str(),
+                &upload.upload_id,
+                index as u32,
+                chunk,
+            )?;
         }
         let response = self.complete_upload(
-            namespace,
+            namespace_id.as_str(),
             &upload.upload_id,
             &CompleteUploadRequest {
                 file_size_bytes: bytes.len() as u64,
                 file_digest_sha256: sha256_digest(bytes),
             },
         )?;
-        Ok(response.content_manifest_digest)
+        Ok(StagedManifest {
+            namespace_id,
+            content_manifest_digest: response.content_manifest_digest,
+        })
     }
 
     pub fn put_file_bytes(
@@ -315,14 +330,14 @@ impl Client {
         force: bool,
         request_id: &str,
     ) -> Result<MutationResult, ClientError> {
-        let content_manifest_digest = self.stage_bytes_as_manifest(&spec.namespace, bytes)?;
+        let staged = self.stage_bytes_as_manifest(&spec.namespace, bytes)?;
         let response = self.apply_filesystem_operation(
-            &spec.namespace,
+            staged.namespace_id.as_str(),
             &FilesystemOperationRequest {
                 request_id: request_id.to_owned(),
                 operation: FilesystemOperation::PutFile {
                     path: spec.absolute_path.clone(),
-                    content_manifest_digest,
+                    content_manifest_digest: staged.content_manifest_digest,
                     behavior: if force {
                         FilesystemPutBehavior::ReplaceExisting
                     } else {
@@ -680,8 +695,12 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Cl
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientConfig, ClientError};
+    use super::{Client, ClientConfig, ClientError, NamespacePath};
+    use loon_api::ChangeSeq;
     use std::fs;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
     use tempfile::tempdir;
 
     #[test]
@@ -737,11 +756,108 @@ auth_token = "   "
         assert!(matches!(error, ClientError::ConfigDecode(_)));
     }
 
+    #[test]
+    fn put_file_uses_resolved_namespace_id_after_begin_upload() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let namespace_id = "ns_0123456789abcdef0123456789abcdef";
+        let upload_id = "upl_0123456789abcdef0123456789abcdef";
+        let server = thread::spawn(move || {
+            expect_request(
+                &listener,
+                "POST /v0/namespaces/demo/uploads HTTP/1.1",
+                &format!(
+                    "{{\"namespace_id\":\"{namespace_id}\",\"upload_id\":\"{upload_id}\",\"block_size_bytes\":16777216,\"mode\":\"service_proxied\"}}"
+                ),
+            );
+            expect_request(
+                &listener,
+                &format!(
+                    "PUT /v0/namespaces/{namespace_id}/uploads/{upload_id}/blocks/0 HTTP/1.1"
+                ),
+                &format!(
+                    "{{\"namespace_id\":\"{namespace_id}\",\"upload_id\":\"{upload_id}\",\"block_index\":0,\"content_digest_sha256\":\"sha256:block\",\"plaintext_size_bytes\":5}}"
+                ),
+            );
+            expect_request(
+                &listener,
+                &format!(
+                    "POST /v0/namespaces/{namespace_id}/uploads/{upload_id}/complete HTTP/1.1"
+                ),
+                &format!(
+                    "{{\"namespace_id\":\"{namespace_id}\",\"upload_id\":\"{upload_id}\",\"content_manifest_digest\":\"sha256:manifest\"}}"
+                ),
+            );
+            expect_request(
+                &listener,
+                &format!("POST /v0/namespaces/{namespace_id}/filesystem/operations HTTP/1.1"),
+                &format!("{{\"namespace_id\":\"{namespace_id}\",\"committed_seq\":1}}"),
+            );
+        });
+
+        let client = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: None,
+        });
+        let result = client
+            .put_file_bytes_with_request_id(
+                &NamespacePath {
+                    namespace: "demo".to_owned(),
+                    absolute_path: "/docs/hello.txt".to_owned(),
+                },
+                b"hello",
+                false,
+                "req-1",
+            )
+            .expect("put file succeeds");
+
+        assert_eq!(result.committed_seq, ChangeSeq(1));
+        server.join().expect("server thread");
+    }
+
     fn write_config(contents: &str) -> std::path::PathBuf {
         let temp_dir = tempdir().expect("tempdir");
         let path = temp_dir.path().join("client.toml");
         fs::write(&path, contents).expect("write config");
         let _ = temp_dir.keep();
         path
+    }
+
+    fn expect_request(listener: &TcpListener, expected_request_line: &str, response_body: &str) {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        assert_eq!(request_line.trim_end(), expected_request_line);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().expect("content length");
+            }
+        }
+
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).expect("read request body");
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
     }
 }

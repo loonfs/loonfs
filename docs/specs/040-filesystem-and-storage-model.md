@@ -20,9 +20,6 @@ Namespace lookup by human-facing name is a control-plane concern. The catalog at
 `namespace_id`. All authoritative metadata, content, and cross-namespace references continue to
 use `namespace_id`.
 
-Namespace names reserve the `ns_` prefix so selector resolution can continue to treat that prefix
-as the namespace-id space without ambiguity.
-
 Each namespace has:
 
 - a current head
