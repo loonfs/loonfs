@@ -489,6 +489,36 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_admin_retention_advance_preserves_checkpoint_unavailable_error() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-admin-missing-checkpoint",
+        "http-admin-missing-checkpoint",
+        60_000,
+    ))
+    .await;
+    let client = harness.client.clone();
+    let server_url = harness.server_url.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        client
+            .create_namespace(namespace)
+            .expect("create namespace");
+
+        match post_retention_advance(&server_url, namespace) {
+            Err(ApiError { code, .. }) => assert_eq!(code, "checkpoint_unavailable"),
+            other => panic!("expected checkpoint_unavailable, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -664,11 +694,14 @@ fn post_admin_json<T: serde::de::DeserializeOwned>(
             code: "invalid_json".to_owned(),
             message: err.to_string(),
         }),
-        Err(ureq::Error::Status(_, response)) => serde_json::from_reader(response.into_reader())
-            .map_err(|err| ApiError {
-                code: "invalid_json".to_owned(),
-                message: err.to_string(),
-            }),
+        Err(ureq::Error::Status(_, response)) => {
+            Err(serde_json::from_reader::<_, ApiError>(response.into_reader()).unwrap_or_else(
+                |err| ApiError {
+                    code: "invalid_json".to_owned(),
+                    message: err.to_string(),
+                },
+            ))
+        }
         Err(ureq::Error::Transport(error)) => Err(ApiError {
             code: "transport".to_owned(),
             message: error.to_string(),
