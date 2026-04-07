@@ -26,3 +26,4 @@ toml.workspace = true
 [dev-dependencies]
 loon-client = { path = "../loon-client" }
 tempfile.workspace = true
+ureq.workspace = true

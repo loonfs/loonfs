@@ -68,6 +68,20 @@ pub struct FilesystemOperationResponse {
     pub committed_seq: ChangeSeq,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateCheckpointResponse {
+    pub namespace_id: NamespaceId,
+    pub checkpoint_seq: ChangeSeq,
+    pub snapshot_hint_seq: Option<ChangeSeq>,
+    pub snapshot_hint_points_at_checkpoint: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvanceRetentionResponse {
+    pub namespace_id: NamespaceId,
+    pub retention_floor_seq: ChangeSeq,
+}
+
 impl From<MutationResult> for FilesystemOperationResponse {
     fn from(value: MutationResult) -> Self {
         Self {

@@ -4,12 +4,15 @@ use loon_api::{
         CommitAnnotations, CommitOp, CommitOpResult, CommitPrecondition,
         CommitRequest as V0CommitRequest, CompleteUploadRequest,
     },
-    ChangeSeq, InodeId,
+    AdvanceRetentionResponse, ApiError, ChangeSeq, CreateCheckpointResponse, InodeId,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
+use loon_objectstore::keys::snapshot_manifest;
+use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loon_server::{app, ServerConfig, StoreConfig};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -429,6 +432,106 @@ async fn http_delete_move_and_copy_request_ids_are_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-admin",
+        "http-admin",
+        60_000,
+    ))
+    .await;
+    let client = harness.client.clone();
+    let server_url = harness.server_url.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
+        client
+            .create_namespace(namespace)
+            .expect("create namespace");
+        client
+            .write_file_bytes(&target, b"hello admin\n")
+            .expect("write file");
+
+        let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
+        assert_eq!(first.checkpoint_seq, ChangeSeq(1));
+        assert_eq!(first.snapshot_hint_seq, Some(ChangeSeq(1)));
+        assert!(first.snapshot_hint_points_at_checkpoint);
+
+        let repeated = post_checkpoint(&server_url, namespace).expect("repeat checkpoint");
+        assert_eq!(repeated, first);
+
+        let advanced = post_retention_advance(&server_url, namespace).expect("advance retention");
+        assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
+
+        let repeated_advance =
+            post_retention_advance(&server_url, namespace).expect("repeat retention");
+        assert_eq!(repeated_advance, advanced);
+
+        let bytes = client.read_file_bytes(&target).expect("read file");
+        assert_eq!(bytes, b"hello admin\n");
+
+        match client.list_changes(namespace, ChangeSeq(0)) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
+            other => panic!("expected rebootstrap_required, got {other:?}"),
+        }
+
+        let empty = client
+            .list_changes(namespace, ChangeSeq(1))
+            .expect("changes after floor");
+        assert_eq!(empty.changes, Vec::new());
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-admin-corrupt",
+        "http-admin-corrupt",
+        60_000,
+    ))
+    .await;
+    let client = harness.client.clone();
+    let server_url = harness.server_url.clone();
+    let store_root = harness.store_root.clone();
+    let store_key_prefix = harness.store_key_prefix.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
+        client
+            .create_namespace(namespace)
+            .expect("create namespace");
+        client
+            .write_file_bytes(&target, b"hello\n")
+            .expect("write file");
+        post_checkpoint(&server_url, namespace).expect("checkpoint");
+
+        let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
+            .expect("construct store");
+        store
+            .put_overwrite(&snapshot_manifest(namespace, 1), br#"{"bad":"json"}"#)
+            .expect("corrupt manifest");
+
+        match client.stat_path(&target) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
+            other => panic!("expected namespace_corrupt, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_servers_share_one_store_and_handoff_the_lease() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
@@ -480,10 +583,17 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
 
 struct TestServer {
     client: Client,
+    server_url: String,
+    store_root: PathBuf,
+    store_key_prefix: Option<String>,
     server: tokio::task::JoinHandle<()>,
 }
 
 async fn start_server(config: ServerConfig) -> TestServer {
+    let (store_root, store_key_prefix) = match &config.store {
+        StoreConfig::LocalFs { root, key_prefix } => (PathBuf::from(root), key_prefix.clone()),
+        other => panic!("test harness requires local fs store, got {other:?}"),
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -498,6 +608,9 @@ async fn start_server(config: ServerConfig) -> TestServer {
             server_url: format!("http://{}", addr),
             auth_token: Some("test-token".to_owned()),
         }),
+        server_url: format!("http://{}", addr),
+        store_root,
+        store_key_prefix,
         server,
     }
 }
@@ -518,6 +631,48 @@ fn test_config(
             root: store_root.display().to_string(),
             key_prefix: Some(key_prefix.to_owned()),
         },
+    }
+}
+
+fn post_checkpoint(
+    server_url: &str,
+    namespace: &str,
+) -> Result<CreateCheckpointResponse, ApiError> {
+    post_admin_json(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoint"),
+        "test-token",
+    )
+}
+
+fn post_retention_advance(
+    server_url: &str,
+    namespace: &str,
+) -> Result<AdvanceRetentionResponse, ApiError> {
+    post_admin_json(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/retention/advance"),
+        "test-token",
+    )
+}
+
+fn post_admin_json<T: serde::de::DeserializeOwned>(
+    url: &str,
+    auth_token: &str,
+) -> Result<T, ApiError> {
+    let request = ureq::post(url).set("authorization", &format!("Bearer {auth_token}"));
+    match request.call() {
+        Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| ApiError {
+            code: "invalid_json".to_owned(),
+            message: err.to_string(),
+        }),
+        Err(ureq::Error::Status(_, response)) => serde_json::from_reader(response.into_reader())
+            .map_err(|err| ApiError {
+                code: "invalid_json".to_owned(),
+                message: err.to_string(),
+            }),
+        Err(ureq::Error::Transport(error)) => Err(ApiError {
+            code: "transport".to_owned(),
+            message: error.to_string(),
+        }),
     }
 }
 
