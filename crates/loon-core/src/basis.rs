@@ -1,3 +1,6 @@
+use crate::checkpoint::{
+    checkpoint_basis_head, load_verified_checkpoint_materialization, CheckpointLoadError,
+};
 use crate::genesis::bootstrap_basis_metadata_state;
 use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::metadata::MetadataState;
@@ -42,6 +45,8 @@ pub enum BasisLoadError {
     ReadWal { object_key: String, message: String },
     #[error("missing WAL object after list `{object_key}`")]
     MissingWalObjectAfterList { object_key: String },
+    #[error(transparent)]
+    CheckpointLoad(#[from] CheckpointLoadError),
     #[error("wal replay failed: {0:?}")]
     WalReplay(WalReplayError),
     #[error(
@@ -69,8 +74,21 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
                 object_key: loaded_head.object_key.clone(),
             })?;
 
-    let initial_head = HeadState::initial(expected_namespace.clone());
-    let initial_metadata_state = bootstrap_basis_metadata_state();
+    let (initial_head, initial_metadata_state) = if let Some(checkpoint_seq) =
+        loaded_head.envelope.state.snapshot_hint_seq
+    {
+        let materialized =
+            load_verified_checkpoint_materialization(store, expected_namespace, checkpoint_seq)?;
+        (
+            checkpoint_basis_head(&loaded_head.envelope.state, &materialized.manifest),
+            materialized.metadata_state,
+        )
+    } else {
+        (
+            HeadState::initial(expected_namespace.clone()),
+            bootstrap_basis_metadata_state(),
+        )
+    };
     let wal_tail = load_stored_wal_tail(
         store,
         expected_namespace,
@@ -93,6 +111,8 @@ fn ensure_reconstructed_head_matches(
     current_head: &HeadState,
     reconstructed: &HeadState,
 ) -> Result<(), BasisLoadError> {
+    // `active_fence_token` is intentionally excluded. Lease takeover can bump
+    // the fence token in the control plane without any WAL replay.
     if current_head.namespace_id != reconstructed.namespace_id
         || current_head.seq != reconstructed.seq
         || current_head.next_inode_id != reconstructed.next_inode_id

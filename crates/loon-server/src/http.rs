@@ -11,14 +11,16 @@ use loon_api::{
         CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         UploadBlockResponse,
     },
-    ApiError, CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
-    FilesystemOperationResponse, FilesystemPutBehavior, ListNamespacesResponse, NamespaceId,
+    AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
+    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
+    FilesystemPutBehavior, ListNamespacesResponse, NamespaceId,
 };
 use loon_core::{
-    begin_upload, bootstrap_namespace, commit_operations, complete_upload, copy_file_path,
-    delete_path_non_recursive, list_changes_after, list_namespaces, list_path, move_path,
-    put_file_manifest, read_file_bytes, resolve_path, upload_block, BootstrapNamespaceError,
-    CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
+    advance_retention_floor, begin_upload, bootstrap_namespace, commit_operations, complete_upload,
+    copy_file_path, create_checkpoint, delete_path_non_recursive, list_changes_after,
+    list_namespaces, list_path, move_path, put_file_manifest, read_file_bytes, resolve_path,
+    upload_block, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
+    PutFileBehavior,
 };
 use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
@@ -92,6 +94,14 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
         .route(
             "/v0/namespaces/:namespace/changes",
             get(list_changes_handler),
+        )
+        .route(
+            "/v0/admin/namespaces/:namespace/checkpoint",
+            post(create_checkpoint_handler),
+        )
+        .route(
+            "/v0/admin/namespaces/:namespace/retention/advance",
+            post(advance_retention_handler),
         )
         .with_state(state)
 }
@@ -366,6 +376,40 @@ async fn list_changes_handler(
     Ok(Json(response))
 }
 
+async fn create_checkpoint_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let response = run_blocking(move || {
+        create_checkpoint(store.as_ref(), &namespace_id, &mutation_context(&config))
+            .map_err(ApiResponseError::core)
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+async fn advance_retention_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<AdvanceRetentionResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let response = run_blocking(move || {
+        advance_retention_floor(store.as_ref(), &namespace_id, &mutation_context(&config))
+            .map_err(ApiResponseError::core)
+    })
+    .await?;
+    Ok(Json(response))
+}
+
 fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiResponseError> {
     let Some(expected) = &config.auth_token else {
         return Ok(());
@@ -471,6 +515,9 @@ impl ApiResponseError {
             CoreErrorKind::LeaseConflict => (StatusCode::CONFLICT, "lease_conflict"),
             CoreErrorKind::WouldCycle => (StatusCode::CONFLICT, "would_cycle"),
             CoreErrorKind::RequestIdConflict => (StatusCode::CONFLICT, "request_id_conflict"),
+            CoreErrorKind::CheckpointUnavailable => {
+                (StatusCode::CONFLICT, "checkpoint_unavailable")
+            }
             CoreErrorKind::UploadNotFound => (StatusCode::NOT_FOUND, "upload_not_found"),
             CoreErrorKind::UploadAlreadyCompleted => {
                 (StatusCode::CONFLICT, "upload_already_completed")

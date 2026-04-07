@@ -59,6 +59,7 @@ pub enum CoreErrorKind {
     LeaseConflict,
     WouldCycle,
     RequestIdConflict,
+    CheckpointUnavailable,
     UploadNotFound,
     UploadAlreadyCompleted,
     UploadBlockConflict,
@@ -122,6 +123,8 @@ pub enum CoreError {
     DestinationExists(String),
     #[error("request id conflict for `{0}`")]
     RequestIdConflict(String),
+    #[error("{0}")]
+    CheckpointUnavailable(String),
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: String },
     #[error("upload session `{upload_id}` is already completed")]
@@ -193,6 +196,7 @@ impl CoreError {
             }
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
             CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
+            CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => CoreErrorKind::UploadAlreadyCompleted,
             CoreError::UploadBlockConflict { .. } => CoreErrorKind::UploadBlockConflict,
@@ -1297,6 +1301,10 @@ fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
         | BasisLoadError::MissingWalObjectAfterList { .. }
         | BasisLoadError::WalReplay(_)
         | BasisLoadError::ReconstructedHeadMismatch { .. } => CoreErrorKind::NamespaceCorrupt,
+        BasisLoadError::CheckpointLoad(error) => match error.kind() {
+            crate::CheckpointLoadErrorKind::Corrupt => CoreErrorKind::NamespaceCorrupt,
+            crate::CheckpointLoadErrorKind::Store => CoreErrorKind::ServerError,
+        },
         BasisLoadError::MissingHeadEtag { .. }
         | BasisLoadError::ListWal { .. }
         | BasisLoadError::ReadWal { .. } => CoreErrorKind::ServerError,
