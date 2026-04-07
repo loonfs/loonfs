@@ -126,11 +126,13 @@ pub fn human_success(output: &CommandOutput) -> String {
         }
         CommandData::DefaultProfile { name } => format!("default profile set to `{name}`"),
         CommandData::NamespaceSummary(namespace) => namespace.name.to_string(),
-        CommandData::NamespaceList { namespaces } => namespaces
-            .iter()
-            .map(|namespace| namespace.name.to_string())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        CommandData::NamespaceList { namespaces } => {
+            let mut lines = vec!["NAME".to_owned()];
+            for namespace in namespaces {
+                lines.push(namespace.name.to_string());
+            }
+            lines.join("\n")
+        }
         CommandData::PathEntries { entries } => entries
             .iter()
             .map(|entry| {
@@ -199,6 +201,7 @@ mod tests {
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
+    use loon_api::NamespaceSummary;
 
     #[test]
     fn human_profile_list_snapshot() {
@@ -220,6 +223,39 @@ mod tests {
                         store_kind: None,
                     },
                 ],
+            },
+        };
+        assert_snapshot!(human_success(&output));
+    }
+
+    #[test]
+    fn human_namespace_list_snapshot() {
+        let output = CommandOutput {
+            kind: CommandKind::NamespaceList,
+            profile: Some("default".to_owned()),
+            mode: Some("remote".to_owned()),
+            data: CommandData::NamespaceList {
+                namespaces: vec![
+                    NamespaceSummary {
+                        name: "alpha".into(),
+                    },
+                    NamespaceSummary {
+                        name: "prod".into(),
+                    },
+                ],
+            },
+        };
+        assert_snapshot!(human_success(&output));
+    }
+
+    #[test]
+    fn human_namespace_list_empty_snapshot() {
+        let output = CommandOutput {
+            kind: CommandKind::NamespaceList,
+            profile: Some("default".to_owned()),
+            mode: Some("remote".to_owned()),
+            data: CommandData::NamespaceList {
+                namespaces: Vec::new(),
             },
         };
         assert_snapshot!(human_success(&output));
