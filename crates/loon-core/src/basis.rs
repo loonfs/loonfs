@@ -111,6 +111,8 @@ fn ensure_reconstructed_head_matches(
     current_head: &HeadState,
     reconstructed: &HeadState,
 ) -> Result<(), BasisLoadError> {
+    // `active_fence_token` is intentionally excluded. Lease takeover can bump
+    // the fence token in the control plane without any WAL replay.
     if current_head.namespace_id != reconstructed.namespace_id
         || current_head.seq != reconstructed.seq
         || current_head.next_inode_id != reconstructed.next_inode_id

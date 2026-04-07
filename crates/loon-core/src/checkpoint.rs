@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
+// V1 does not require any derived work classes to be caught up before the
+// retention floor advances. This hook stays in place so future retention gates
+// can add progress requirements without restructuring the flow.
 const REQUIRED_RETENTION_PROGRESS_CLASSES: &[&str] = &[];
 const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 4] = [
     CheckpointTableFamily::Inodes,
@@ -213,17 +216,9 @@ pub fn create_checkpoint<S: ObjectStore + ?Sized>(
                 },
             )
             .map_err(|err| CoreError::Store(err.to_string()))?;
-            write_checkpoint_manifest(store, &manifest).or_else(|error| {
-                let BasisLoadError::CheckpointLoad(error) = error else {
-                    return Err(CoreError::Basis(error));
-                };
-                match error {
-                    CheckpointLoadError::MissingManifest { .. } => {
-                        Err(CoreError::Basis(BasisLoadError::CheckpointLoad(error)))
-                    }
-                    _ => Ok(()),
-                }
-            })?;
+            // `write_checkpoint_manifest` owns the idempotent "manifest already
+            // exists" path. Any checkpoint load error it returns must surface.
+            write_checkpoint_manifest(store, &manifest).map_err(CoreError::Basis)?;
         }
         Err(error) => return Err(CoreError::Basis(BasisLoadError::CheckpointLoad(error))),
     }
@@ -316,6 +311,8 @@ pub(crate) fn checkpoint_basis_head(
     HeadState {
         namespace_id: current_head.namespace_id.clone(),
         seq: manifest.payload.checkpoint_seq,
+        // The manifest records the checkpoint-time fence token. That may lag the
+        // live head if lease takeover advanced the fence without any WAL replay.
         active_fence_token: manifest.payload.active_fence_token,
         next_inode_id: manifest.payload.next_inode_id,
         name_policy: current_head.name_policy,
@@ -1024,7 +1021,8 @@ mod tests {
     use loon_api::{ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{snapshot_manifest, snapshot_table, SnapshotTableFamily};
-    use loon_objectstore::ObjectStore;
+    use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use std::sync::Mutex;
     use tempfile::tempdir;
 
     #[test]
@@ -1115,6 +1113,39 @@ mod tests {
             Err(BasisLoadError::CheckpointLoad(CheckpointLoadError::ManifestCodec { .. })) => {}
             other => panic!("expected manifest codec checkpoint load error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let context = test_context();
+        let manifest_key = snapshot_manifest(namespace_id.as_str(), 1);
+        let store = ConflictOnManifestCreateStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            manifest_key,
+            br#"{"bad":"json"}"#.to_vec(),
+        );
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+
+        match create_checkpoint(&store, &namespace_id, &context) {
+            Err(CoreError::Basis(BasisLoadError::CheckpointLoad(
+                CheckpointLoadError::ManifestCodec { .. },
+            ))) => {}
+            other => panic!("expected manifest codec checkpoint load error, got {other:?}"),
+        }
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        assert_eq!(basis.head.snapshot_hint_seq, None);
     }
 
     #[test]
@@ -1265,6 +1296,66 @@ mod tests {
             writer_version: "test-writer/0.1.0".to_owned(),
             now_ms: 1_000,
             lease_duration_ms: 60_000,
+        }
+    }
+
+    struct ConflictOnManifestCreateStore {
+        inner: LocalFsStore,
+        manifest_key: String,
+        replacement_bytes: Vec<u8>,
+        injected: Mutex<bool>,
+    }
+
+    impl ConflictOnManifestCreateStore {
+        fn new(inner: LocalFsStore, manifest_key: String, replacement_bytes: Vec<u8>) -> Self {
+            Self {
+                inner,
+                manifest_key,
+                replacement_bytes,
+                injected: Mutex::new(false),
+            }
+        }
+    }
+
+    impl ObjectStore for ConflictOnManifestCreateStore {
+        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key)
+        }
+
+        fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+            self.inner.get(key, range)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            if key == self.manifest_key && matches!(&mode, PutMode::CreateIfAbsent) {
+                let mut injected = self
+                    .injected
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !*injected {
+                    *injected = true;
+                    self.inner.put_overwrite(key, &self.replacement_bytes)?;
+                    return Err(ObjectStoreError::Conflict);
+                }
+            }
+            self.inner.put(key, bytes, mode)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key)
+        }
+
+        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+            self.inner.list_prefix(prefix)
         }
     }
 }
