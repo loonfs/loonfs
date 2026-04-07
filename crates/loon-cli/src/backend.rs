@@ -263,13 +263,14 @@ fn map_core_error(error: CoreError) -> CliError {
 }
 
 fn map_namespace_scoped_core_error(namespace: &str, error: CoreError) -> CliError {
-    match error.kind() {
-        CoreErrorKind::NamespaceNotFound => CliError::new(
+    if matches!(error.kind(), CoreErrorKind::NamespaceNotFound) {
+        return CliError::new(
             "namespace_not_found",
             format!("namespace `{namespace}` does not exist"),
-        ),
-        _ => map_core_error(error),
+        );
     }
+
+    map_core_error(error)
 }
 
 fn map_bootstrap_error(error: BootstrapNamespaceError) -> CliError {
