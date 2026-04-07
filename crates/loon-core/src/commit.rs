@@ -10,6 +10,7 @@ mod ordered;
 mod publish;
 
 pub use self::ordered::build_commit_plan;
+pub(crate) use self::ordered::resolve_restore_content_manifest_digests;
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

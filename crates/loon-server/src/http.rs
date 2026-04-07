@@ -508,6 +508,7 @@ impl ApiResponseError {
             CoreErrorKind::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path"),
             CoreErrorKind::NamespaceNotFound => (StatusCode::NOT_FOUND, "namespace_not_found"),
             CoreErrorKind::PathNotFound => (StatusCode::NOT_FOUND, "path_not_found"),
+            CoreErrorKind::RevisionNotFound => (StatusCode::CONFLICT, "revision_not_found"),
             CoreErrorKind::PathConflict => (StatusCode::CONFLICT, "path_conflict"),
             CoreErrorKind::StaleHead => (StatusCode::CONFLICT, "stale_head"),
             CoreErrorKind::StaleRevision => (StatusCode::CONFLICT, "stale_revision"),

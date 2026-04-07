@@ -9,6 +9,28 @@ use loon_api::{
     name_key_for_display_name, ChangeSeq, InodeId, InodeKind, NamePolicy, RevisionNo, WalOp,
 };
 
+struct CommitShape {
+    next_seq: ChangeSeq,
+    allocated_inode_ids: Vec<InodeId>,
+    resulting_next_inode_id: InodeId,
+}
+
+pub(crate) fn resolve_restore_content_manifest_digests(
+    request: &CommitRequest,
+    context: &CommitValidationContext,
+) -> Result<Vec<Option<String>>, CommitValidationError> {
+    validate_commit_request_frame(request, context)?;
+    let shape = compute_commit_shape(request, context)?;
+
+    validate_metadata_preconditions(
+        request,
+        &context.metadata_state,
+        shape.next_seq,
+        &shape.allocated_inode_ids,
+        &mut Vec::new(),
+    )
+}
+
 pub fn build_commit_plan(
     request: &CommitRequest,
     context: &CommitValidationContext,
@@ -28,47 +50,12 @@ pub fn build_commit_plan(
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let next_seq = context
-        .head
-        .seq
-        .0
-        .checked_add(1)
-        .map(ChangeSeq)
-        .ok_or(CommitValidationError::SeqOverflow)?;
-    let create_op_count = request
-        .ops
-        .iter()
-        .filter(|op| matches!(op, CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. }))
-        .count();
-    let allocated_inode_ids = (0..create_op_count)
-        .map(|offset| {
-            let offset =
-                u64::try_from(offset).map_err(|_| CommitValidationError::NextInodeOverflow)?;
-            context
-                .head
-                .next_inode_id
-                .0
-                .checked_add(offset)
-                .map(InodeId)
-                .ok_or(CommitValidationError::NextInodeOverflow)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let resulting_next_inode_id = context
-        .head
-        .next_inode_id
-        .0
-        .checked_add(
-            u64::try_from(create_op_count).map_err(|_| CommitValidationError::NextInodeOverflow)?,
-        )
-        .map(InodeId)
-        .ok_or(CommitValidationError::NextInodeOverflow)?;
-
-    validate_metadata_preconditions(
+    let shape = compute_commit_shape(request, context)?;
+    let resolved_restore_content_manifest_digests = validate_metadata_preconditions(
         request,
         &context.metadata_state,
-        context.head.seq,
-        next_seq,
-        &allocated_inode_ids,
+        shape.next_seq,
+        &shape.allocated_inode_ids,
         &mut checked_invariants,
     )?;
 
@@ -80,7 +67,7 @@ pub fn build_commit_plan(
                 | CommitOp::RestoreRevision { .. }
         )
     });
-    if create_op_count > 0 {
+    if !shape.allocated_inode_ids.is_empty() {
         push_unique_invariant(
             &mut checked_invariants,
             "create_mutation_consumes_next_inode_id",
@@ -121,24 +108,10 @@ pub fn build_commit_plan(
         namespace_id: request.namespace_id.clone(),
         commit_id: request.request_id.clone(),
         base_head_seq: request.planned_head_seq,
-        next_seq,
-        allocated_inode_ids,
-        resolved_restore_content_manifest_digests: request
-            .ops
-            .iter()
-            .map(|op| match op {
-                CommitOp::RestoreRevision {
-                    inode_id,
-                    source_revision,
-                    ..
-                } => context
-                    .metadata_state
-                    .revision_at_seq(*inode_id, *source_revision, context.head.seq)
-                    .map(|revision| revision.content_manifest_digest),
-                _ => None,
-            })
-            .collect(),
-        resulting_next_inode_id,
+        next_seq: shape.next_seq,
+        allocated_inode_ids: shape.allocated_inode_ids,
+        resolved_restore_content_manifest_digests,
+        resulting_next_inode_id: shape.resulting_next_inode_id,
         durable_content_required,
         wal_object_must_be_written: true,
         head_cas_must_succeed: true,
@@ -147,16 +120,62 @@ pub fn build_commit_plan(
     })
 }
 
+fn compute_commit_shape(
+    request: &CommitRequest,
+    context: &CommitValidationContext,
+) -> Result<CommitShape, CommitValidationError> {
+    let next_seq = context
+        .head
+        .seq
+        .0
+        .checked_add(1)
+        .map(ChangeSeq)
+        .ok_or(CommitValidationError::SeqOverflow)?;
+    let create_op_count = request
+        .ops
+        .iter()
+        .filter(|op| matches!(op, CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. }))
+        .count();
+    let allocated_inode_ids = (0..create_op_count)
+        .map(|offset| {
+            let offset =
+                u64::try_from(offset).map_err(|_| CommitValidationError::NextInodeOverflow)?;
+            context
+                .head
+                .next_inode_id
+                .0
+                .checked_add(offset)
+                .map(InodeId)
+                .ok_or(CommitValidationError::NextInodeOverflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let resulting_next_inode_id = context
+        .head
+        .next_inode_id
+        .0
+        .checked_add(
+            u64::try_from(create_op_count).map_err(|_| CommitValidationError::NextInodeOverflow)?,
+        )
+        .map(InodeId)
+        .ok_or(CommitValidationError::NextInodeOverflow)?;
+
+    Ok(CommitShape {
+        next_seq,
+        allocated_inode_ids,
+        resulting_next_inode_id,
+    })
+}
+
 fn validate_metadata_preconditions(
     request: &CommitRequest,
     metadata_state: &MetadataState,
-    basis_seq: ChangeSeq,
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
     checked_invariants: &mut Vec<String>,
-) -> Result<(), CommitValidationError> {
+) -> Result<Vec<Option<String>>, CommitValidationError> {
     let mut ephemeral_metadata_state = metadata_state.clone();
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
+    let mut resolved_restore_content_manifest_digests = Vec::with_capacity(request.ops.len());
 
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index =
@@ -174,10 +193,10 @@ fn validate_metadata_preconditions(
                     committed_seq,
                 )?;
                 let source_revision = validate_restore_source_revision(
-                    metadata_state,
+                    &ephemeral_metadata_state,
                     *inode_id,
                     *source_revision,
-                    basis_seq,
+                    committed_seq,
                 )?;
                 if base_revision.0.checked_add(1).is_none() {
                     return Err(CommitValidationError::RestoreRevisionOverflow {
@@ -299,6 +318,8 @@ fn validate_metadata_preconditions(
                 )?;
             }
         }
+        resolved_restore_content_manifest_digests
+            .push(resolved_restore_content_manifest_digest.clone());
 
         let applied_metadata = ephemeral_metadata_state
             .apply_committed_wal_ops(
@@ -314,7 +335,7 @@ fn validate_metadata_preconditions(
         ephemeral_metadata_state = applied_metadata.metadata_state;
     }
 
-    Ok(())
+    Ok(resolved_restore_content_manifest_digests)
 }
 
 fn materialize_simulated_wal_op(

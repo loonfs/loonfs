@@ -52,6 +52,7 @@ pub enum CoreErrorKind {
     InvalidPath,
     NamespaceNotFound,
     PathNotFound,
+    RevisionNotFound,
     PathConflict,
     StaleHead,
     StaleRevision,
@@ -1381,9 +1382,11 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::MissingHeadSeqPrecondition { .. }
         | CommitValidationError::ConflictingHeadSeqPrecondition { .. } => CoreErrorKind::StaleHead,
         CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
-        | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. }
-        | CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
+        | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. } => {
             CoreErrorKind::StaleRevision
+        }
+        CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
+            CoreErrorKind::RevisionNotFound
         }
         CommitValidationError::CreateUnderSubtreeTombstone { .. }
         | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }

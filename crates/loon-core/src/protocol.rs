@@ -1,7 +1,8 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::commit::{
-    build_commit_plan, prepare_commit_head_publish, publish_commit_head, CommitOp,
-    CommitRequest as CoreCommitRequest, CommitValidationContext, Precondition,
+    build_commit_plan, prepare_commit_head_publish, publish_commit_head,
+    resolve_restore_content_manifest_digests, CommitOp, CommitRequest as CoreCommitRequest,
+    CommitValidationContext, Precondition,
 };
 use crate::content::validate_durable_content_reference;
 use crate::services::{derive_commit_results, write_immutable_object, CoreError, MutationContext};
@@ -350,8 +351,20 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
         now_ms: context.now_ms,
         metadata_state: basis.metadata_state.clone(),
     };
+    let resolved_restore_content_manifest_digests =
+        resolve_restore_content_manifest_digests(&request, &validation)
+            .map_err(CoreError::CommitValidation)?;
+    validate_commit_content_references(
+        store,
+        namespace_id,
+        &request,
+        &resolved_restore_content_manifest_digests,
+    )?;
     let plan = build_commit_plan(&request, &validation)?;
-    validate_commit_content_references(store, namespace_id, &request, &plan)?;
+    debug_assert_eq!(
+        plan.resolved_restore_content_manifest_digests,
+        resolved_restore_content_manifest_digests
+    );
     let results = derive_commit_results(
         &request.ops,
         &plan.allocated_inode_ids,
@@ -633,7 +646,7 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: &CoreCommitRequest,
-    plan: &crate::commit::CommitPlan,
+    resolved_restore_content_manifest_digests: &[Option<String>],
 ) -> Result<(), CoreError> {
     for (index, op) in request.ops.iter().enumerate() {
         match op {
@@ -652,8 +665,7 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
                 source_revision,
                 ..
             } => {
-                let content_manifest_digest = plan
-                    .resolved_restore_content_manifest_digests
+                let content_manifest_digest = resolved_restore_content_manifest_digests
                     .get(index)
                     .and_then(|digest| digest.as_deref())
                     .ok_or_else(|| {

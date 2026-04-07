@@ -347,6 +347,119 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
 }
 
 #[test]
+fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
+    let metadata_state = metadata_state_after(&[
+        vec![loon_api::WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![loon_api::WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+    ]);
+    let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
+
+    let plan = build_commit_plan(
+        &CommitRequest {
+            namespace_id: namespace_id(),
+            request_id: "restore-same-request-source".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(1),
+            planned_head_seq: ChangeSeq(2),
+            source_request_checksum_sha256: None,
+            ops: vec![
+                CommitOp::ReplaceFile {
+                    inode_id: InodeId(3),
+                    base_revision: RevisionNo(1),
+                    content_manifest_digest: "sha256:manifest-2".to_owned(),
+                },
+                CommitOp::RestoreRevision {
+                    inode_id: InodeId(3),
+                    source_revision: RevisionNo(2),
+                    base_revision: RevisionNo(2),
+                },
+            ],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(2))],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect("replace then restore in same request should validate");
+    assert_eq!(
+        plan.resolved_restore_content_manifest_digests,
+        vec![None, Some("sha256:manifest-2".to_owned())]
+    );
+}
+
+#[test]
+fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
+    let metadata_state = metadata_state_after(&[
+        vec![loon_api::WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![loon_api::WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+        vec![loon_api::WalOp::ReplaceFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            base_revision: RevisionNo(1),
+            content_manifest_digest: "sha256:manifest-2".to_owned(),
+        }],
+    ]);
+    let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
+
+    let plan = build_commit_plan(
+        &CommitRequest {
+            namespace_id: namespace_id(),
+            request_id: "restore-after-restore-same-request".to_owned(),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(1),
+            planned_head_seq: ChangeSeq(3),
+            source_request_checksum_sha256: None,
+            ops: vec![
+                CommitOp::RestoreRevision {
+                    inode_id: InodeId(3),
+                    source_revision: RevisionNo(1),
+                    base_revision: RevisionNo(2),
+                },
+                CommitOp::RestoreRevision {
+                    inode_id: InodeId(3),
+                    source_revision: RevisionNo(3),
+                    base_revision: RevisionNo(3),
+                },
+            ],
+            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect("restore then restore in same request should validate");
+    assert_eq!(
+        plan.resolved_restore_content_manifest_digests,
+        vec![
+            Some("sha256:manifest-1".to_owned()),
+            Some("sha256:manifest-1".to_owned())
+        ]
+    );
+}
+
+#[test]
 fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     let metadata_state = metadata_state_after(&[
         vec![loon_api::WalOp::CreateDir {
@@ -540,6 +653,124 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &context,
     )
     .expect_err("restore missing durable content");
+    assert!(matches!(
+        error,
+        CoreError::DurableContent(
+            loon_core::content::DurableContentValidationError::MissingManifestObject { .. }
+        )
+    ));
+}
+
+#[test]
+fn restore_revision_missing_source_is_revision_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/restore.txt",
+        b"first",
+        &context,
+        Some("seed-restore"),
+    )
+    .expect("seed restore target");
+    let inode_id = resolve_path(&store, &namespace_id(), "/docs/restore.txt")
+        .expect("resolve path")
+        .inode_id;
+
+    let error = commit_operations(
+        &store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "restore-missing-source".to_owned(),
+            planned_head_seq: ChangeSeq(1),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(1),
+            }],
+            ops: vec![V0CommitOp::RestoreRevision {
+                inode_id,
+                source_revision_no: RevisionNo(99),
+                base_revision_no: RevisionNo(1),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("missing restore source should fail");
+    assert_eq!(error.kind(), CoreErrorKind::RevisionNotFound);
+}
+
+#[test]
+fn restore_revision_resolves_same_request_source_before_durable_content_validation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+
+    let first = store_bytes_as_content(&store, &namespace_id(), b"first").expect("stage first");
+    let create = commit_operations(
+        &store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "resolve-before-durable-check-create".to_owned(),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(0),
+            }],
+            ops: vec![V0CommitOp::CreateFile {
+                parent_inode: InodeId(1),
+                display_name: "restore.txt".to_owned(),
+                content_manifest_digest: first.content_manifest_digest.clone(),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect("create file");
+    let inode_id = match &create.results[0] {
+        loon_api::v0::CommitOpResult::CreateFile { inode_id, .. } => *inode_id,
+        other => panic!("unexpected create result: {other:?}"),
+    };
+
+    let second = store_bytes_as_content(&store, &namespace_id(), b"second").expect("stage second");
+    store
+        .delete(&content_manifest(
+            namespace_id().as_str(),
+            &second.content_manifest_digest,
+        ))
+        .expect("delete second manifest");
+
+    let error = commit_operations(
+        &store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "resolve-before-durable-check-commit".to_owned(),
+            planned_head_seq: ChangeSeq(1),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(1),
+            }],
+            ops: vec![
+                V0CommitOp::ReplaceFile {
+                    inode_id,
+                    base_revision_no: RevisionNo(1),
+                    content_manifest_digest: second.content_manifest_digest.clone(),
+                },
+                V0CommitOp::RestoreRevision {
+                    inode_id,
+                    source_revision_no: RevisionNo(2),
+                    base_revision_no: RevisionNo(2),
+                },
+            ],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("missing same-request manifest should fail durable-content validation");
     assert!(matches!(
         error,
         CoreError::DurableContent(

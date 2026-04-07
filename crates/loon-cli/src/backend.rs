@@ -244,6 +244,7 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::InvalidPath => "invalid_path",
         CoreErrorKind::NamespaceNotFound => "namespace_not_found",
         CoreErrorKind::PathNotFound => "path_not_found",
+        CoreErrorKind::RevisionNotFound => "revision_not_found",
         CoreErrorKind::PathConflict => "path_conflict",
         CoreErrorKind::StaleHead => "stale_head",
         CoreErrorKind::StaleRevision => "stale_revision",
@@ -386,5 +387,24 @@ impl RemoteTarget {
         Ok(Self {
             backend: RemoteBackend { client },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_core_error;
+    use loon_api::{InodeId, RevisionNo};
+    use loon_core::{commit::CommitValidationError, CoreError};
+
+    #[test]
+    fn map_core_error_uses_revision_not_found_code() {
+        let error = map_core_error(CoreError::CommitValidation(
+            CommitValidationError::RestoreRevisionSourceRevisionMissing {
+                inode_id: InodeId(42),
+                source_revision: RevisionNo(7),
+            },
+        ));
+
+        assert_eq!(error.code, "revision_not_found");
     }
 }
