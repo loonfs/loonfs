@@ -106,7 +106,8 @@ Supported release targets today:
 - Linux arm64 GNU
 - Linux x86_64 GNU
 
-Source installs remain the normal development path, and `loond` is still installed from source:
+Source installs remain the normal development path, and `loon-server` is still installed from
+source:
 
 ```bash
 cargo install --path crates/loon-cli

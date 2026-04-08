@@ -58,8 +58,6 @@ rm -rf "$stage_dir"/*
 
 cp "$binary_path" "$stage_dir/loon"
 cp "$repo_root/README.md" "$stage_dir/README.md"
-cp "$repo_root/LICENSE-APACHE" "$stage_dir/LICENSE-APACHE"
-cp "$repo_root/LICENSE-MIT" "$stage_dir/LICENSE-MIT"
 printf '%s\n' "$version" > "$stage_dir/VERSION"
 
 mkdir -p "$artifact_dir"
