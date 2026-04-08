@@ -1,7 +1,8 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::commit::{
-    build_commit_plan, prepare_commit_head_publish, publish_commit_head, CommitOp,
-    CommitRequest as CoreCommitRequest, CommitValidationContext, Precondition,
+    build_commit_plan, prepare_commit_head_publish, publish_commit_head,
+    resolve_restore_content_manifest_digests, CommitOp, CommitRequest as CoreCommitRequest,
+    CommitValidationContext, Precondition,
 };
 use crate::content::validate_durable_content_reference;
 use crate::services::{derive_commit_results, write_immutable_object, CoreError, MutationContext};
@@ -344,16 +345,30 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
         }
     }
 
-    validate_commit_content_references(store, namespace_id, &request)?;
-
     let validation = CommitValidationContext {
         head: basis.head.clone(),
         lease: basis.lease.clone(),
         now_ms: context.now_ms,
         metadata_state: basis.metadata_state.clone(),
     };
+    let resolved_restore_content_manifest_digests =
+        resolve_restore_content_manifest_digests(&request, &validation);
+    validate_commit_content_references(
+        store,
+        namespace_id,
+        &request,
+        &resolved_restore_content_manifest_digests,
+    )?;
     let plan = build_commit_plan(&request, &validation)?;
-    let results = derive_commit_results(&request.ops, &plan.allocated_inode_ids);
+    debug_assert_eq!(
+        plan.resolved_restore_content_manifest_digests,
+        resolved_restore_content_manifest_digests
+    );
+    let results = derive_commit_results(
+        &request.ops,
+        &plan.allocated_inode_ids,
+        &plan.resolved_restore_content_manifest_digests,
+    );
     let wal = prepare_wal_commit(&request, &plan, results.clone(), &context.writer_version)?;
     let _applied = basis
         .metadata_state
@@ -499,6 +514,15 @@ fn map_commit_op(op: V0CommitOp) -> CommitOp {
             base_revision: base_revision_no,
             content_manifest_digest,
         },
+        V0CommitOp::RestoreRevision {
+            inode_id,
+            source_revision_no,
+            base_revision_no,
+        } => CommitOp::RestoreRevision {
+            inode_id,
+            source_revision: source_revision_no,
+            base_revision: base_revision_no,
+        },
         V0CommitOp::DeleteFile { inode_id } => CommitOp::DeleteFile { inode_id },
         V0CommitOp::Rename {
             inode_id,
@@ -566,6 +590,16 @@ fn map_wal_op(op: loon_api::WalOp) -> V0CommitOp {
             base_revision_no: base_revision,
             content_manifest_digest,
         },
+        loon_api::WalOp::RestoreRevision {
+            inode_id,
+            source_revision_no,
+            base_revision,
+            ..
+        } => V0CommitOp::RestoreRevision {
+            inode_id,
+            source_revision_no,
+            base_revision_no: base_revision,
+        },
         loon_api::WalOp::DeleteFile { inode_id, .. } => V0CommitOp::DeleteFile { inode_id },
         loon_api::WalOp::Rename {
             inode_id,
@@ -611,8 +645,9 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: &CoreCommitRequest,
+    resolved_restore_content_manifest_digests: &[Option<String>],
 ) -> Result<(), CoreError> {
-    for op in &request.ops {
+    for (index, op) in request.ops.iter().enumerate() {
         match op {
             CommitOp::CreateFile {
                 content_manifest_digest,
@@ -623,6 +658,18 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
                 ..
             } => {
                 validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
+            }
+            CommitOp::RestoreRevision { .. } => {
+                if let Some(content_manifest_digest) = resolved_restore_content_manifest_digests
+                    .get(index)
+                    .and_then(|digest| digest.as_deref())
+                {
+                    validate_durable_content_reference(
+                        store,
+                        namespace_id,
+                        content_manifest_digest,
+                    )?;
+                }
             }
             _ => {}
         }

@@ -4,7 +4,7 @@ use loon_api::{
         CommitAnnotations, CommitOp, CommitOpResult, CommitPrecondition,
         CommitRequest as V0CommitRequest, CompleteUploadRequest,
     },
-    AdvanceRetentionResponse, ApiError, ChangeSeq, CreateCheckpointResponse, InodeId,
+    AdvanceRetentionResponse, ApiError, ChangeSeq, CreateCheckpointResponse, InodeId, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_objectstore::keys::snapshot_manifest;
@@ -225,6 +225,210 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .list_changes(namespace, commit.committed_seq)
             .expect("list changes after head");
         assert_eq!(empty.changes, Vec::new());
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-restore",
+        "http-restore",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        let target = NamespacePath::parse("demo:/restore.txt").expect("target");
+        harness
+            .client
+            .create_namespace(namespace)
+            .expect("create namespace");
+
+        let first_manifest = stage_uploaded_manifest(&harness.client, namespace, b"first bytes\n");
+        let create = harness
+            .client
+            .commit_operations(
+                namespace,
+                &V0CommitRequest {
+                    request_id: "req-restore-create".to_owned(),
+                    planned_head_seq: ChangeSeq(0),
+                    preconditions: vec![CommitPrecondition::HeadSeqIs {
+                        expected_seq: ChangeSeq(0),
+                    }],
+                    ops: vec![CommitOp::CreateFile {
+                        parent_inode: InodeId(1),
+                        display_name: "restore.txt".to_owned(),
+                        content_manifest_digest: first_manifest.clone(),
+                    }],
+                    message: None,
+                    annotations: None,
+                },
+            )
+            .expect("create file");
+        let inode_id = match &create.results[0] {
+            CommitOpResult::CreateFile { inode_id, .. } => *inode_id,
+            other => panic!("unexpected create result: {other:?}"),
+        };
+
+        let second_manifest =
+            stage_uploaded_manifest(&harness.client, namespace, b"second bytes\n");
+        let replace = harness
+            .client
+            .commit_operations(
+                namespace,
+                &V0CommitRequest {
+                    request_id: "req-restore-replace".to_owned(),
+                    planned_head_seq: ChangeSeq(1),
+                    preconditions: vec![CommitPrecondition::HeadSeqIs {
+                        expected_seq: ChangeSeq(1),
+                    }],
+                    ops: vec![CommitOp::ReplaceFile {
+                        inode_id,
+                        base_revision_no: RevisionNo(1),
+                        content_manifest_digest: second_manifest.clone(),
+                    }],
+                    message: None,
+                    annotations: None,
+                },
+            )
+            .expect("replace file");
+        assert_eq!(replace.committed_seq, ChangeSeq(2));
+
+        let restore = harness
+            .client
+            .commit_operations(
+                namespace,
+                &V0CommitRequest {
+                    request_id: "req-restore-restore".to_owned(),
+                    planned_head_seq: ChangeSeq(2),
+                    preconditions: vec![CommitPrecondition::HeadSeqIs {
+                        expected_seq: ChangeSeq(2),
+                    }],
+                    ops: vec![CommitOp::RestoreRevision {
+                        inode_id,
+                        source_revision_no: RevisionNo(1),
+                        base_revision_no: RevisionNo(2),
+                    }],
+                    message: Some("restore revision".to_owned()),
+                    annotations: None,
+                },
+            )
+            .expect("restore revision");
+        assert_eq!(restore.committed_seq, ChangeSeq(3));
+        assert_eq!(
+            restore.results,
+            vec![CommitOpResult::RestoreRevision {
+                op_index: 0,
+                inode_id,
+                source_revision_no: RevisionNo(1),
+                revision_no: RevisionNo(3),
+                content_manifest_digest: first_manifest.clone(),
+            }]
+        );
+
+        let entry = harness
+            .client
+            .stat_path(&target)
+            .expect("stat restored file");
+        assert_eq!(entry.inode_id, inode_id);
+        assert_eq!(
+            entry.content_manifest_digest.as_deref(),
+            Some(first_manifest.as_str())
+        );
+        let bytes = harness
+            .client
+            .read_file_bytes(&target)
+            .expect("read restored file");
+        assert_eq!(bytes, b"first bytes\n");
+
+        let changes = harness
+            .client
+            .list_changes(namespace, ChangeSeq(0))
+            .expect("list changes");
+        assert_eq!(changes.changes.len(), 3);
+        assert_eq!(changes.changes[2].request_id, "req-restore-restore");
+        assert_eq!(changes.changes[2].ops, restore.results);
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_commit_restore_revision_missing_source_returns_revision_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loond-restore-missing-source",
+        "http-restore-missing-source",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        harness
+            .client
+            .create_namespace(namespace)
+            .expect("create namespace");
+
+        let first_manifest = stage_uploaded_manifest(&harness.client, namespace, b"first bytes\n");
+        let create = harness
+            .client
+            .commit_operations(
+                namespace,
+                &V0CommitRequest {
+                    request_id: "req-restore-missing-source-create".to_owned(),
+                    planned_head_seq: ChangeSeq(0),
+                    preconditions: vec![CommitPrecondition::HeadSeqIs {
+                        expected_seq: ChangeSeq(0),
+                    }],
+                    ops: vec![CommitOp::CreateFile {
+                        parent_inode: InodeId(1),
+                        display_name: "restore.txt".to_owned(),
+                        content_manifest_digest: first_manifest,
+                    }],
+                    message: None,
+                    annotations: None,
+                },
+            )
+            .expect("create file");
+        let inode_id = match &create.results[0] {
+            CommitOpResult::CreateFile { inode_id, .. } => *inode_id,
+            other => panic!("unexpected create result: {other:?}"),
+        };
+
+        match harness.client.commit_operations(
+            namespace,
+            &V0CommitRequest {
+                request_id: "req-restore-missing-source-restore".to_owned(),
+                planned_head_seq: ChangeSeq(1),
+                preconditions: vec![CommitPrecondition::HeadSeqIs {
+                    expected_seq: ChangeSeq(1),
+                }],
+                ops: vec![CommitOp::RestoreRevision {
+                    inode_id,
+                    source_revision_no: RevisionNo(99),
+                    base_revision_no: RevisionNo(1),
+                }],
+                message: None,
+                annotations: None,
+            },
+        ) {
+            Err(ClientError::Api { status, code, .. }) => {
+                assert_eq!(status, 409);
+                assert_eq!(code, "revision_not_found");
+            }
+            other => panic!("expected revision_not_found, got {other:?}"),
+        }
     })
     .await
     .expect("join blocking task");

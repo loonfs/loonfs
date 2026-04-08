@@ -23,9 +23,10 @@ Before evaluating any mutation, the server reconstructs the current metadata sta
 
 The server validates the mutation against the reconstructed state:
 
-1. Verify that all referenced content (manifests and blocks) is already durable in object storage, and that digests and sizes match.
-2. Evaluate preconditions in order (see §6 for the precondition catalogue).
-3. Resolve inode references and allocate new inode ids monotonically from the head's `next_inode_id`.
+1. Resolve any operation-local references needed to identify referenced content.
+2. Verify that all referenced content (manifests and blocks) is already durable in object storage, and that digests and sizes match.
+3. Evaluate preconditions in order (see §6 for the precondition catalogue).
+4. Resolve inode references and allocate new inode ids monotonically from the head's `next_inode_id`.
 
 If a request contains multiple operations, they are evaluated sequentially against ephemeral state advanced by earlier operations in the same request.
 

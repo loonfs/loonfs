@@ -89,6 +89,64 @@ fn metadata_apply_matches_model_for_rename() {
 }
 
 #[test]
+fn metadata_apply_matches_model_for_restore_revision() {
+    assert_states_match(&[
+        vec![WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+        vec![WalOp::ReplaceFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            base_revision: RevisionNo(1),
+            content_manifest_digest: "sha256:manifest-2".to_owned(),
+        }],
+        vec![WalOp::RestoreRevision {
+            op_index: 0,
+            inode_id: InodeId(3),
+            source_revision_no: RevisionNo(1),
+            base_revision: RevisionNo(2),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+    ]);
+}
+
+#[test]
+fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
+    assert_states_match(&[
+        vec![WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+        vec![WalOp::RestoreRevision {
+            op_index: 0,
+            inode_id: InodeId(3),
+            source_revision_no: RevisionNo(1),
+            base_revision: RevisionNo(1),
+            content_manifest_digest: "sha256:manifest-1".to_owned(),
+        }],
+    ]);
+}
+
+#[test]
 fn metadata_apply_matches_model_for_delete_file() {
     assert_states_match(&[
         vec![WalOp::CreateDir {

@@ -185,6 +185,31 @@ impl MetadataState {
                         "replace_file_appends_new_revision_head",
                     );
                 }
+                WalOp::RestoreRevision {
+                    op_index,
+                    inode_id,
+                    base_revision,
+                    content_manifest_digest,
+                    ..
+                } => {
+                    let next_revision = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
+                        MetadataApplyError::RevisionOverflow {
+                            inode_id: *inode_id,
+                            base_revision: *base_revision,
+                        },
+                    )?;
+                    metadata_state.revisions.push(RevisionRecord {
+                        inode_id: *inode_id,
+                        revision_no: next_revision,
+                        committed_seq,
+                        revision_op_index: *op_index,
+                        content_manifest_digest: content_manifest_digest.clone(),
+                    });
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        "restore_creates_new_revision_head",
+                    );
+                }
                 WalOp::DeleteFile { op_index, inode_id } => {
                     metadata_state
                         .subtree_tombstones
@@ -271,6 +296,23 @@ impl MetadataState {
                     revision.revision_op_index,
                 )
             })
+            .cloned()
+    }
+
+    pub fn revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        self.revisions
+            .iter()
+            .filter(|revision| {
+                revision.inode_id == inode_id
+                    && revision.revision_no == revision_no
+                    && revision.committed_seq <= base_seq
+            })
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_op_index))
             .cloned()
     }
 

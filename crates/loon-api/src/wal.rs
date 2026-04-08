@@ -37,6 +37,14 @@ pub enum WalOp {
         base_revision: RevisionNo,
         content_manifest_digest: String,
     },
+    RestoreRevision {
+        #[serde(default)]
+        op_index: u32,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        base_revision: RevisionNo,
+        content_manifest_digest: String,
+    },
     DeleteFile {
         #[serde(default)]
         op_index: u32,

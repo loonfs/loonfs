@@ -79,6 +79,11 @@ pub enum CommitOp {
         base_revision_no: RevisionNo,
         content_manifest_digest: String,
     },
+    RestoreRevision {
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        base_revision_no: RevisionNo,
+    },
     DeleteFile {
         inode_id: InodeId,
     },
@@ -127,6 +132,13 @@ pub enum CommitOpResult {
     ReplaceFile {
         op_index: u32,
         inode_id: InodeId,
+        revision_no: RevisionNo,
+        content_manifest_digest: String,
+    },
+    RestoreRevision {
+        op_index: u32,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
         revision_no: RevisionNo,
         content_manifest_digest: String,
     },
