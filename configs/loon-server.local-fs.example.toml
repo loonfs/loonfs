@@ -1,7 +1,7 @@
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
-writer_id = "loond-local"
-writer_version = "loond/0.1.0"
+writer_id = "loon-server-local"
+writer_version = "loon-server/0.1.0"
 lease_duration_ms = 60000
 
 [store]

@@ -5,4 +5,4 @@ active_profile = "local"
 mode = "local"
 
 [profiles.local.local]
-server_config_path = "./loond.local-fs.example.toml"
+server_config_path = "./loon-server.local-fs.example.toml"
