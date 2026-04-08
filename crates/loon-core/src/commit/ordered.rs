@@ -8,6 +8,7 @@ use crate::metadata::MetadataState;
 use loon_api::{
     name_key_for_display_name, ChangeSeq, InodeId, InodeKind, NamePolicy, RevisionNo, WalOp,
 };
+use std::collections::BTreeMap;
 
 struct CommitShape {
     next_seq: ChangeSeq,
@@ -18,17 +19,50 @@ struct CommitShape {
 pub(crate) fn resolve_restore_content_manifest_digests(
     request: &CommitRequest,
     context: &CommitValidationContext,
-) -> Result<Vec<Option<String>>, CommitValidationError> {
-    validate_commit_request_frame(request, context)?;
-    let shape = compute_commit_shape(request, context)?;
+) -> Vec<Option<String>> {
+    let mut resolved_request_revisions = BTreeMap::<(InodeId, RevisionNo), String>::new();
 
-    validate_metadata_preconditions(
-        request,
-        &context.metadata_state,
-        shape.next_seq,
-        &shape.allocated_inode_ids,
-        &mut Vec::new(),
-    )
+    request
+        .ops
+        .iter()
+        .map(|op| match op {
+            CommitOp::ReplaceFile {
+                inode_id,
+                base_revision,
+                content_manifest_digest,
+            } => {
+                if let Some(next_revision) = base_revision.0.checked_add(1).map(RevisionNo) {
+                    resolved_request_revisions
+                        .insert((*inode_id, next_revision), content_manifest_digest.clone());
+                }
+                None
+            }
+            CommitOp::RestoreRevision {
+                inode_id,
+                source_revision,
+                base_revision,
+            } => {
+                let resolved = resolved_request_revisions
+                    .get(&(*inode_id, *source_revision))
+                    .cloned()
+                    .or_else(|| {
+                        context
+                            .metadata_state
+                            .revision_at_seq(*inode_id, *source_revision, context.head.seq)
+                            .map(|revision| revision.content_manifest_digest)
+                    });
+                if let (Some(next_revision), Some(content_manifest_digest)) = (
+                    base_revision.0.checked_add(1).map(RevisionNo),
+                    resolved.clone(),
+                ) {
+                    resolved_request_revisions
+                        .insert((*inode_id, next_revision), content_manifest_digest);
+                }
+                resolved
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn build_commit_plan(

@@ -352,8 +352,7 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
         metadata_state: basis.metadata_state.clone(),
     };
     let resolved_restore_content_manifest_digests =
-        resolve_restore_content_manifest_digests(&request, &validation)
-            .map_err(CoreError::CommitValidation)?;
+        resolve_restore_content_manifest_digests(&request, &validation);
     validate_commit_content_references(
         store,
         namespace_id,
@@ -660,21 +659,17 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
             } => {
                 validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
             }
-            CommitOp::RestoreRevision {
-                inode_id,
-                source_revision,
-                ..
-            } => {
-                let content_manifest_digest = resolved_restore_content_manifest_digests
+            CommitOp::RestoreRevision { .. } => {
+                if let Some(content_manifest_digest) = resolved_restore_content_manifest_digests
                     .get(index)
                     .and_then(|digest| digest.as_deref())
-                    .ok_or_else(|| {
-                        CoreError::Store(format!(
-                            "missing resolved restore manifest digest for inode {:?} source revision {:?}",
-                            inode_id, source_revision
-                        ))
-                    })?;
-                validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
+                {
+                    validate_durable_content_reference(
+                        store,
+                        namespace_id,
+                        content_manifest_digest,
+                    )?;
+                }
             }
             _ => {}
         }

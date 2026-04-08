@@ -662,6 +662,88 @@ fn restore_revision_revalidates_durable_content_before_publish() {
 }
 
 #[test]
+fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+
+    let error = commit_operations(
+        &store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "create-missing-parent-missing-manifest".to_owned(),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(0),
+            }],
+            ops: vec![V0CommitOp::CreateFile {
+                parent_inode: InodeId(99),
+                display_name: "missing.txt".to_owned(),
+                content_manifest_digest: "sha256:missing-manifest".to_owned(),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("missing manifest should win before missing parent");
+    assert!(matches!(
+        error,
+        CoreError::DurableContent(
+            loon_core::content::DurableContentValidationError::MissingManifestObject { .. }
+        )
+    ));
+}
+
+#[test]
+fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/replace.txt",
+        b"first",
+        &context,
+        Some("seed-replace"),
+    )
+    .expect("seed replace target");
+    let inode_id = resolve_path(&store, &namespace_id(), "/docs/replace.txt")
+        .expect("resolve path")
+        .inode_id;
+
+    let error = commit_operations(
+        &store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "replace-stale-missing-manifest".to_owned(),
+            planned_head_seq: ChangeSeq(1),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(1),
+            }],
+            ops: vec![V0CommitOp::ReplaceFile {
+                inode_id,
+                base_revision_no: RevisionNo(99),
+                content_manifest_digest: "sha256:missing-manifest".to_owned(),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("missing manifest should win before stale revision");
+    assert!(matches!(
+        error,
+        CoreError::DurableContent(
+            loon_core::content::DurableContentValidationError::MissingManifestObject { .. }
+        )
+    ));
+}
+
+#[test]
 fn restore_revision_missing_source_is_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
