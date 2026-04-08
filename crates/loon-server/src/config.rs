@@ -268,13 +268,13 @@ mod tests {
             r#"
 bind = "bad-bind"
 auth_token = "dev-token"
-writer_id = "loond"
-writer_version = "loond/0.1.0"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
 lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
-root = "/tmp/loond"
+root = "/tmp/loon-server"
 "#,
         );
 
@@ -289,13 +289,13 @@ root = "/tmp/loond"
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
-writer_id = "loond"
-writer_version = "loond/0.1.0"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
 lease_duration_ms = 0
 
 [store]
 kind = "local-fs"
-root = "/tmp/loond"
+root = "/tmp/loon-server"
 "#,
         );
 
@@ -311,12 +311,12 @@ root = "/tmp/loond"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "   "
-writer_version = "loond/0.1.0"
+writer_version = "loon-server/0.1.0"
 lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
-root = "/tmp/loond"
+root = "/tmp/loon-server"
 "#,
         );
 
@@ -331,13 +331,13 @@ root = "/tmp/loond"
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
-writer_id = "loond"
+writer_id = "loon-server"
 writer_version = "   "
 lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
-root = "/tmp/loond"
+root = "/tmp/loon-server"
 "#,
         );
 
@@ -352,8 +352,8 @@ root = "/tmp/loond"
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
-writer_id = "loond"
-writer_version = "loond/0.1.0"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
 lease_duration_ms = 60000
 
 [store]
@@ -377,8 +377,8 @@ secret_access_key = "secret"
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
-writer_id = "loond"
-writer_version = "loond/0.1.0"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
 lease_duration_ms = 60000
 
 [store]
@@ -396,8 +396,8 @@ force_path_style = false
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
-writer_id = "loond"
-writer_version = "loond/0.1.0"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
 lease_duration_ms = 60000
 
 [store]
@@ -424,13 +424,13 @@ key_prefix = "demo"
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "   "
-writer_id = "loond"
-writer_version = "loond/0.1.0"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
 lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
-root = "/tmp/loond"
+root = "/tmp/loon-server"
 "#,
         );
 

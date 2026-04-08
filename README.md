@@ -11,20 +11,21 @@ state.
 
 The current implementation exposes two public surfaces over the same core model:
 
-- a path-oriented user surface through `loon` and `loond`
-- a lower-level `/v0` upload, explicit-commit, and ordered change-feed surface through `loond`
-  and `loon-client`
+- a path-oriented user surface through the `loon` CLI (`loon-cli`)
+- a lower-level `/v0` upload, explicit-commit, and ordered change-feed surface through
+  `loon-server` and `loon-client`
 
-The current runtime path is:
+The current runtime path depends on the selected profile mode:
 
-`loon -> loon-client -> loond -> loon-core -> loon-objectstore`
+- local profile: `loon-cli -> loon-core -> loon-objectstore`
+- remote profile: `loon-cli -> loon-client -> loon-server -> loon-core -> loon-objectstore`
 
 Current product rules:
 
-- every CLI operation goes through `loond`, even in local mode
 - profile `mode` is `local` or `remote`
-- `local` means `loon` points at or manages a local `loond`
-- `remote` means `loon` points at an already-running `loond`
+- local profiles execute directly against the configured object store through `loon-core`
+- remote profiles execute through an already-running `loon-server`
+- `loon-client` is the HTTP transport client used for the remote path
 - canonical sibling-name comparison uses `NamePolicy = nfc_casefold_v0`
 
 Not implemented yet relative to the current spec set:
@@ -49,7 +50,7 @@ crates/
   loon-objectstore/  object-store trait, providers, key builders, conformance surface
   loon-core/         authoritative metadata, lease, replay, and mutation logic
   loon-model/        pure metadata replay/model helpers for differential tests
-  loon-server/       `loond` HTTP server over core + object storage
+  loon-server/       `loon-server` HTTP server over core + object storage
   loon-client/       thin HTTP transport client
   loon-cli/          profile-based `loon` CLI
 xtask/
@@ -58,27 +59,27 @@ xtask/
 
 ## Config Ownership
 
-`loon` and `loond` do not share a config file.
+`loon` and `loon-server` do not share a config file.
 
-- `loon` owns CLI-managed profile state
-- `loond` owns operator-authored server configuration
+- `loon` owns CLI-managed profile state for local and remote profiles
+- `loon-server` owns operator-authored server configuration
 
 `loon` always uses:
 
 - `~/.loonfs/config.toml`
 
-`loond` has no code-level default path. You pass a server config path explicitly when you start
-`loond` or when you create a local `loon` profile.
+`loon-server` has no code-level default path. You pass a server config path explicitly when you
+start `loon-server`.
 
 Sanitized example configs live in [`configs/`](configs/):
 
 - [`configs/loon.local.example.toml`](configs/loon.local.example.toml)
 - [`configs/loon.remote.example.toml`](configs/loon.remote.example.toml)
-- [`configs/loond.local-fs.example.toml`](configs/loond.local-fs.example.toml)
-- [`configs/loond.aws-s3.example.toml`](configs/loond.aws-s3.example.toml)
-- [`configs/loond.cloudflare-r2.example.toml`](configs/loond.cloudflare-r2.example.toml)
+- [`configs/loon-server.local-fs.example.toml`](configs/loon-server.local-fs.example.toml)
+- [`configs/loon-server.aws-s3.example.toml`](configs/loon-server.aws-s3.example.toml)
+- [`configs/loon-server.cloudflare-r2.example.toml`](configs/loon-server.cloudflare-r2.example.toml)
 
-Copy example `loond` configs to a user-owned path outside the repository for real use.
+Copy example configs to user-owned paths outside the repository for real use.
 
 The current CLI schema is `config_version = 1`. JSON command envelopes use `format_version = 1`.
 
@@ -168,7 +169,7 @@ Smoke acceptance:
 
 ```bash
 cargo run -p xtask -- smoke local \
-  --server-config ./configs/loond.local-fs.example.toml \
+  --server-config ./configs/loon-server.local-fs.example.toml \
   --namespace demo
 ```
 
