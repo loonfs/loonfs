@@ -1,15 +1,6 @@
 /target/
 crates/loon-objectstore/tests/provider-conformance.env.local
-/.loondb-demo/
 configs/*.local.toml
 
 # macOS Finder metadata
 .DS_Store
-
-# Xcode sample artifacts
-native/macos/LoonFileProviderSample/Vendor/libloon_macos.a
-native/macos/LoonFileProviderSample/.build/
-native/macos/LoonFileProviderSample/.swiftpm/
-native/macos/LoonFileProviderSample/**/*.xcuserdata/
-native/macos/LoonFileProviderSample/**/xcuserdata/
-native/macos/LoonFileProviderSample/**/project.xcworkspace/xcuserdata/
