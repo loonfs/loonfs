@@ -120,3 +120,4 @@ jobs:
             dist/loon-x86_64-apple-darwin.tar.gz
             dist/loon-x86_64-unknown-linux-gnu.tar.gz
             dist/SHA256SUMS
+          fail_on_unmatched_files: true
