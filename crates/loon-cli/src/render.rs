@@ -213,8 +213,8 @@ mod tests {
     use super::{human_success, json_error};
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
-    use crate::error::CliError;
     use crate::config::{ProfileConfig, StoreConfig};
+    use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
     use loon_api::NamespaceSummary;
