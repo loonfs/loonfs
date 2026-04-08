@@ -14,7 +14,7 @@ members = [
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
-license = "Apache-2.0 OR MIT"
+license = "Apache-2.0"
 rust-version = "1.83"
 description = "Spec-locked object-store-backed file service"
 repository = "https://github.com/loonfs/loonfs"
