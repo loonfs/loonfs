@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            asset: loon-darwin-aarch64.tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            asset: loon-darwin-x86_64.tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            asset: loon-linux-x86_64.tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            asset: loon-linux-aarch64.tar.gz
+            cross: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: release-${{ matrix.target }}-
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+            cargo build --release --target ${{ matrix.target }} -p loon-cli
+          else
+            cargo build --release -p loon-cli
+          fi
+
+      - name: Package
+        run: |
+          STAGING="$RUNNER_TEMP/staging"
+          mkdir -p "$STAGING/bin"
+
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            BIN_DIR="target/${{ matrix.target }}/release"
+          else
+            BIN_DIR="target/release"
+          fi
+
+          cp "$BIN_DIR/loon" "$STAGING/bin/loon"
+          chmod 755 "$STAGING/bin/loon"
+
+          tar -C "$STAGING" -czf "$RUNNER_TEMP/${{ matrix.asset }}" .
+
+          cd "$RUNNER_TEMP"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ runner.temp }}/${{ matrix.asset }}
+            ${{ runner.temp }}/${{ matrix.asset }}.sha256
+
+  release:
+    name: Upload release assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Consolidate checksums
+        run: cat artifacts/*.sha256 > artifacts/SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/loon-*.tar.gz
+            artifacts/SHA256SUMS
+          fail_on_unmatched_files: true
