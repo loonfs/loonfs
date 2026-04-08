@@ -85,7 +85,29 @@ The current CLI schema is `config_version = 1`. JSON command envelopes use `form
 
 ## Install And Run
 
-Until a packaged installer lands, the normal user path is to install the binaries from source:
+The easiest end-user path for the CLI is the install script, which downloads the latest GitHub
+release for supported platforms and verifies checksums before installing:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loon.sh | sh
+```
+
+To install a pinned release instead of the latest one:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loon.sh | \
+  sh -s -- --version v0.1.0
+```
+
+Supported release targets today:
+
+- macOS arm64
+- macOS x86_64
+- Linux arm64 GNU
+- Linux x86_64 GNU
+
+Source installs remain the normal development path, and `loon-server` is still installed from
+source:
 
 ```bash
 cargo install --path crates/loon-cli
