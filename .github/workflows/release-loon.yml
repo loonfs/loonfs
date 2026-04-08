@@ -1,0 +1,122 @@
+name: Release Loon CLI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  prepare:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve workspace version
+        id: version
+        run: echo "version=$(cargo pkgid -p loon-cli | sed 's/.*#//')" >> "$GITHUB_OUTPUT"
+
+      - name: Validate tag matches workspace version
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          expected_tag="v$VERSION"
+          if [ "$TAG_NAME" != "$expected_tag" ]; then
+            echo "release tag $TAG_NAME does not match workspace version $expected_tag" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-loon-${{ matrix.target }}
+
+      - name: Build loon release binary
+        run: cargo build --release -p loon-cli --target ${{ matrix.target }}
+
+      - name: Package release artifact
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: scripts/package-loon-release.sh --target "${{ matrix.target }}" --version "$VERSION" --artifact-dir dist
+
+      - name: Sanity check packaged binary
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: |
+          tmpdir="$(mktemp -d)"
+          tar -xzf "dist/loon-${{ matrix.target }}.tar.gz" -C "$tmpdir"
+          actual="$("$tmpdir/loon" version)"
+          if [ "$actual" != "$VERSION" ]; then
+            echo "expected loon version $VERSION, got $actual" >&2
+            exit 1
+          fi
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loon-${{ matrix.target }}
+          path: dist/loon-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: loon-*
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum loon-*.tar.gz > SHA256SUMS
+
+      - name: Upload assets to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: |
+            dist/loon-aarch64-apple-darwin.tar.gz
+            dist/loon-aarch64-unknown-linux-gnu.tar.gz
+            dist/loon-x86_64-apple-darwin.tar.gz
+            dist/loon-x86_64-unknown-linux-gnu.tar.gz
+            dist/SHA256SUMS
