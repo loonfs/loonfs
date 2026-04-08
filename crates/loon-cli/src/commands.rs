@@ -153,7 +153,7 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
         Command::Namespace { command } => run_namespace_command(kind, command),
         Command::Use(args) => run_namespace_use(kind, args),
         Command::Current(args) => run_current(kind, args),
-        Command::Ls(args) => run_filesystem_ls(kind, args, runtime),
+        Command::Ls(args) => run_filesystem_ls(kind, args),
         Command::Stat(args) => run_filesystem_stat(kind, args),
         Command::Cat(args) => run_filesystem_cat(kind, args),
         Command::Get(args) => run_filesystem_get(kind, args, runtime),
@@ -564,25 +564,17 @@ fn run_current(kind: CommandKind, args: CurrentArgs) -> Result<CommandOutput, Co
     let explicit_profile = args.profile.profile.as_deref();
     let loaded = load_cli_config()
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let resolved = resolve_target_profile_from_config(&loaded.config, explicit_profile)
-        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
-    let (_, profile) =
-        crate::profiles::resolve_profile(&loaded.config, explicit_profile).map_err(|error| {
-            fail(
-                kind,
-                Some(resolved.profile_name.clone()),
-                Some(mode.clone()),
-                error,
-            )
-        })?;
+    let (profile_name, profile) =
+        crate::profiles::resolve_profile(&loaded.config, explicit_profile)
+            .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = profile.mode_str().to_owned();
 
     Ok(CommandOutput {
         kind,
-        profile: Some(resolved.profile_name.clone()),
+        profile: Some(profile_name.to_owned()),
         mode: Some(mode),
         data: CommandData::Current {
-            profile: resolved.profile_name,
+            profile: profile_name.to_owned(),
             namespace: default_namespace(profile).map(ToOwned::to_owned),
         },
     })
@@ -593,7 +585,6 @@ fn run_current(kind: CommandKind, args: CurrentArgs) -> Result<CommandOutput, Co
 fn run_filesystem_ls(
     kind: CommandKind,
     args: FilesystemLsArgs,
-    _runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target)?;
     let spec = namespace_path(

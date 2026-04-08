@@ -636,6 +636,31 @@ fn current_reports_profile_specific_namespace() {
 }
 
 #[test]
+fn current_does_not_require_backend_resolution() {
+    let harness = Harness::new();
+    harness.write_cli_config(format!(
+        r#"config_version = 1
+default_profile = "broken"
+
+[broken]
+mode = "local"
+default_namespace = "demo"
+
+[broken.store]
+kind = "local-fs"
+root = "{}"
+key_prefix = "../bad"
+"#,
+        harness.store_root("broken").display()
+    ));
+
+    let current = harness.run(&["--json", "current"]);
+    assert_success(&current);
+    assert_eq!(json_data(&current)["profile"], "broken");
+    assert_eq!(json_data(&current)["namespace"], "demo");
+}
+
+#[test]
 fn legacy_commands_are_rejected() {
     let harness = Harness::new();
 
