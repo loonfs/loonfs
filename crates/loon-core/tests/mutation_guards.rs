@@ -576,7 +576,8 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
 
     let first = store_bytes_as_content(&store, &namespace_id(), b"first").expect("stage first");
     let create = commit_operations(
@@ -666,7 +667,8 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
 
     let error = commit_operations(
         &store,
@@ -701,7 +703,8 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -748,7 +751,8 @@ fn restore_revision_missing_source_is_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -790,7 +794,8 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), namespace_name(), &context, false)
+        .expect("bootstrap namespace");
 
     let first = store_bytes_as_content(&store, &namespace_id(), b"first").expect("stage first");
     let create = commit_operations(

@@ -1031,7 +1031,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::from("demo");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, namespace_name(), &context, false)
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -1079,7 +1080,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::from("demo");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, namespace_name(), &context, false)
+            .expect("bootstrap");
 
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
@@ -1092,7 +1094,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::from("demo");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, namespace_name(), &context, false)
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -1126,7 +1129,8 @@ mod tests {
             manifest_key,
             br#"{"bad":"json"}"#.to_vec(),
         );
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, namespace_name(), &context, false)
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -1154,7 +1158,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::from("demo");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, namespace_name(), &context, false)
+            .expect("bootstrap");
 
         match advance_retention_floor(&store, &namespace_id, &context) {
             Err(CoreError::CheckpointUnavailable(_)) => {}
@@ -1196,7 +1201,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::from("demo");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, namespace_name(), &context, false)
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -1230,7 +1236,8 @@ mod tests {
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::from("demo");
         let context = test_context();
-        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        bootstrap_namespace(&store, &namespace_id, namespace_name(), &context, false)
+            .expect("bootstrap");
         write_file_bytes(
             &store,
             &namespace_id,
@@ -1297,6 +1304,10 @@ mod tests {
             now_ms: 1_000,
             lease_duration_ms: 60_000,
         }
+    }
+
+    fn namespace_name() -> &'static str {
+        "demo"
     }
 
     struct ConflictOnManifestCreateStore {

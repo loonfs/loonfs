@@ -1006,9 +1006,10 @@ async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
     tokio::task::spawn_blocking(move || {
         let namespace = "demo";
         let target = NamespacePath::parse("demo:/docs/hello.txt").expect("target");
-        client
+        let created = client
             .create_namespace(namespace)
             .expect("create namespace");
+        let namespace_id = created.namespace_id;
         client
             .write_file_bytes(&target, b"hello\n")
             .expect("write file");
@@ -1017,7 +1018,10 @@ async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
         let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
             .expect("construct store");
         store
-            .put_overwrite(&snapshot_manifest(namespace, 1), br#"{"bad":"json"}"#)
+            .put_overwrite(
+                &snapshot_manifest(namespace_id.as_str(), 1),
+                br#"{"bad":"json"}"#,
+            )
             .expect("corrupt manifest");
 
         match client.stat_path(&target) {
