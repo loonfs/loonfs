@@ -1,10 +1,18 @@
 #!/bin/sh
 
-if (return 0 2>/dev/null); then
+if [ -n "${BASH_VERSION:-}" ] && [ "${BASH_SOURCE:-$0}" != "$0" ]; then
     echo "error: install-loon.sh must be executed, not sourced" >&2
     echo "run it with: curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loon.sh | sh" >&2
     return 1
 fi
+
+case "${ZSH_EVAL_CONTEXT:-}" in
+    *:file)
+        echo "error: install-loon.sh must be executed, not sourced" >&2
+        echo "run it with: curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loon.sh | sh" >&2
+        return 1
+        ;;
+esac
 
 set -eu
 
