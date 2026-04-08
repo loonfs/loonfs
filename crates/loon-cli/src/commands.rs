@@ -1,19 +1,27 @@
 use crate::args::{
-    Cli, Command, CommandKind, ConfigCommand, FilesystemCommand, InitArgs, NamespaceCommand,
-    ProfileAddCommand, ProfileCommand, ProfileUpdateArgs, RuntimeBehavior,
+    Cli, Command, CommandKind, ConfigCommand, CurrentArgs, FilesystemGetArgs, FilesystemLsArgs,
+    FilesystemMoveArgs, FilesystemPathArgs, FilesystemPutArgs, InitArgs, NamespaceCommand,
+    NamespaceCreateArgs, NamespaceListArgs, NamespaceUseArgs, ProfileCommand, ProfileCreateArgs,
+    ProfileUpdateArgs, RuntimeBehavior, TargetSelectorArgs,
 };
 use crate::config::{
     default_config_path, load_config, load_config_if_exists, load_or_default_config, save_config,
-    ProfileConfig, StoreConfig,
+    CliConfig, ProfileConfig, StoreConfig,
 };
 use crate::error::CliError;
 use crate::profiles::{
-    add_profile, list_profiles, make_default_profile, remove_profile, show_profile, update_profile,
-    ProfileSummary,
+    add_profile, default_namespace, list_profiles, make_default_profile, remove_profile,
+    set_default_namespace, show_profile, update_profile, ProfileSummary,
 };
 use crate::prompt;
-use crate::resolve::resolve_target_profile;
-use loon_api::{AuthoritativePathEntry, NamespaceSummary};
+use crate::resolve::{
+    load_cli_config, resolve_namespace, resolve_target_profile, resolve_target_profile_from_config,
+};
+use loon_api::{AuthoritativePathEntry, InodeKind, NamespaceSummary};
+use loon_client::NamespacePath;
+use serde::Serialize;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 const AWS_REGIONS: &[&str] = &[
     "us-east-1",
@@ -45,10 +53,6 @@ const AWS_REGIONS: &[&str] = &[
     "af-south-1",
     "il-central-1",
 ];
-use loon_client::NamespacePath;
-use serde::Serialize;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 pub struct CommandOutput {
     pub kind: CommandKind,
@@ -76,6 +80,14 @@ pub enum CommandData {
     DefaultProfile {
         name: String,
     },
+    DefaultNamespace {
+        profile: String,
+        namespace: String,
+    },
+    Current {
+        profile: String,
+        namespace: Option<String>,
+    },
     NamespaceSummary(NamespaceSummary),
     NamespaceList {
         namespaces: Vec<NamespaceSummary>,
@@ -102,7 +114,7 @@ pub enum CommandData {
         path: String,
     },
     ConfigShow {
-        config: crate::config::CliConfig,
+        config: CliConfig,
     },
     Version {
         version: String,
@@ -115,7 +127,7 @@ pub fn run(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, CommandF
     if runtime.json && !kind.supports_json() {
         return Err(CommandFailure {
             kind,
-            profile: cli.profile.clone(),
+            profile: None,
             mode: None,
             error: CliError::json_not_supported_for_streaming(),
         });
@@ -138,12 +150,17 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
         Command::Init(args) => run_init(kind, args, runtime),
         Command::Config { command } => run_config_command(kind, command),
         Command::Profile { command } => run_profile_command(kind, command, runtime),
-        Command::Namespace { command } => {
-            run_namespace_command(kind, cli.profile.as_deref(), command)
-        }
-        Command::Filesystem { command } => {
-            run_filesystem_command(kind, cli.profile.as_deref(), command, runtime)
-        }
+        Command::Namespace { command } => run_namespace_command(kind, command),
+        Command::Use(args) => run_namespace_use(kind, args),
+        Command::Current(args) => run_current(kind, args),
+        Command::Ls(args) => run_filesystem_ls(kind, args),
+        Command::Stat(args) => run_filesystem_stat(kind, args),
+        Command::Cat(args) => run_filesystem_cat(kind, args),
+        Command::Get(args) => run_filesystem_get(kind, args, runtime),
+        Command::Put(args) => run_filesystem_put(kind, args),
+        Command::Rm(args) => run_filesystem_rm(kind, args),
+        Command::Mv(args) => run_filesystem_mv(kind, args),
+        Command::Cp(args) => run_filesystem_cp(kind, args),
     }
 }
 
@@ -164,18 +181,11 @@ fn run_init(
         }
 
         let name = match &args.name {
-            Some(n) => n.clone(),
+            Some(name) => name.clone(),
             None if runtime.interactive => prompt::prompt_line_default("profile name", "default")?,
             None => "default".to_owned(),
         };
-
-        let store = build_local_store_interactive(&args, runtime)?;
-        let profile = ProfileConfig::Local {
-            store,
-            writer_id: None,
-            writer_version: None,
-            lease_duration_ms: None,
-        };
+        let profile = build_profile_from_create_spec(create_profile_spec_from_init(args), runtime)?;
 
         let mut config = load_or_default_config(&config_path)?;
         let (profile_name, redacted) = add_profile(&mut config, &name, profile)?;
@@ -183,98 +193,14 @@ fn run_init(
         save_config(&config_path, &config)?;
         Ok((profile_name, redacted))
     })()
-    .map_err(|error| fail(kind, None, Some("local".to_owned()), error))?;
+    .map_err(|error| fail(kind, None, None, error))?;
 
     Ok(CommandOutput {
         kind,
         profile: Some(result.0),
-        mode: Some("local".to_owned()),
+        mode: Some(result.1.mode_str().to_owned()),
         data: CommandData::Profile(result.1),
     })
-}
-
-fn build_local_store_interactive(
-    args: &InitArgs,
-    runtime: RuntimeBehavior,
-) -> Result<StoreConfig, CliError> {
-    let store_kind = match &args.store_kind {
-        Some(k) => k.clone(),
-        None if runtime.interactive => {
-            prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])?
-        }
-        None => {
-            return Err(CliError::non_interactive_input_required("store-kind"));
-        }
-    };
-
-    match store_kind.as_str() {
-        "local-fs" => {
-            let root = require_or_prompt(&args.root, "root", runtime)?;
-            Ok(StoreConfig::LocalFs {
-                root,
-                key_prefix: args.key_prefix.clone(),
-            })
-        }
-        "aws-s3" => {
-            let bucket = require_or_prompt(&args.bucket, "bucket name", runtime)?;
-            let region = require_or_prompt_region(&args.region, runtime)?;
-            let access_key_id = require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
-            let secret_access_key =
-                require_or_prompt(&args.secret_access_key, "secret-access-key", runtime)?;
-            Ok(StoreConfig::AwsS3 {
-                bucket,
-                region,
-                endpoint_url: args.endpoint_url.clone(),
-                access_key_id,
-                secret_access_key,
-                session_token: None,
-                key_prefix: args.key_prefix.clone(),
-                force_path_style: None,
-            })
-        }
-        "cloudflare-r2" => {
-            let bucket = require_or_prompt(&args.bucket, "bucket name", runtime)?;
-            let account_id = require_or_prompt(&args.account_id, "account-id", runtime)?;
-            let endpoint_url = require_or_prompt(&args.endpoint_url, "endpoint-url", runtime)?;
-            let access_key_id = require_or_prompt(&args.access_key_id, "access-key-id", runtime)?;
-            let secret_access_key =
-                require_or_prompt(&args.secret_access_key, "secret-access-key", runtime)?;
-            Ok(StoreConfig::CloudflareR2 {
-                bucket,
-                account_id,
-                endpoint_url,
-                access_key_id,
-                secret_access_key,
-                key_prefix: args.key_prefix.clone(),
-            })
-        }
-        other => Err(CliError::invalid_input(format!(
-            "unknown store kind: `{other}` (expected local-fs, aws-s3, or cloudflare-r2)"
-        ))),
-    }
-}
-
-fn require_or_prompt(
-    value: &Option<String>,
-    field: &str,
-    runtime: RuntimeBehavior,
-) -> Result<String, CliError> {
-    match value {
-        Some(v) if !v.trim().is_empty() => Ok(v.clone()),
-        _ if runtime.interactive => prompt::prompt_line(field),
-        _ => Err(CliError::non_interactive_input_required(field)),
-    }
-}
-
-fn require_or_prompt_region(
-    value: &Option<String>,
-    runtime: RuntimeBehavior,
-) -> Result<String, CliError> {
-    match value {
-        Some(v) if !v.trim().is_empty() => Ok(v.clone()),
-        _ if runtime.interactive => prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0),
-        _ => Err(CliError::non_interactive_input_required("region")),
-    }
 }
 
 // --- config ---
@@ -317,7 +243,7 @@ fn run_profile_command(
 ) -> Result<CommandOutput, CommandFailure> {
     let config_path = default_config_path().map_err(|error| fail(kind, None, None, error))?;
     match command {
-        ProfileCommand::Add { command } => run_profile_add(kind, &config_path, command, runtime),
+        ProfileCommand::Create(args) => run_profile_create(kind, &config_path, args, runtime),
         ProfileCommand::List => {
             let config = load_config_if_exists(&config_path)
                 .map_err(|error| fail(kind, None, None, error))?;
@@ -336,174 +262,42 @@ fn run_profile_command(
                 load_config(&config_path).map_err(|error| fail(kind, name.clone(), None, error))?;
             let (profile_name, redacted) = show_profile(&config, name.as_deref())
                 .map_err(|error| fail(kind, name.clone(), None, error))?;
-            let mode = redacted.mode_str().to_owned();
             Ok(CommandOutput {
                 kind,
                 profile: Some(profile_name),
-                mode: Some(mode),
+                mode: Some(redacted.mode_str().to_owned()),
                 data: CommandData::Profile(redacted),
             })
         }
         ProfileCommand::Update(args) => run_profile_update(kind, &config_path, args, runtime),
         ProfileCommand::Remove { name } => run_profile_remove(kind, &config_path, &name, runtime),
-        ProfileCommand::MakeDefault { name } => run_profile_make_default(kind, &config_path, &name),
+        ProfileCommand::Use { name } => run_profile_use(kind, &config_path, &name),
     }
 }
 
-fn run_profile_add(
+fn run_profile_create(
     kind: CommandKind,
     config_path: &Path,
-    command: Option<ProfileAddCommand>,
+    args: ProfileCreateArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let (name, profile) = match command {
-        Some(cmd) => build_profile_from_add_command(cmd),
-        None => {
-            build_profile_interactive(runtime).map_err(|error| fail(kind, None, None, error))?
-        }
-    };
+    let name = args.name.clone();
+    let result = (|| -> Result<(String, ProfileConfig), CliError> {
+        let profile =
+            build_profile_from_create_spec(create_profile_spec_from_create(args), runtime)?;
+        let mut config = load_or_default_config(config_path)?;
+        let (profile_name, redacted) = add_profile(&mut config, &name, profile)?;
+        save_config(config_path, &config)?;
+        Ok((profile_name, redacted))
+    })()
+    .map_err(|error| fail(kind, Some(name.clone()), None, error))?;
 
-    let mode = profile.mode_str().to_owned();
-    let mut config = load_or_default_config(config_path)
-        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
-    let (profile_name, redacted) = add_profile(&mut config, &name, profile)
-        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
-    save_config(config_path, &config)
-        .map_err(|error| fail(kind, Some(name.clone()), Some(mode.clone()), error))?;
     Ok(CommandOutput {
         kind,
-        profile: Some(profile_name),
-        mode: Some(mode),
-        data: CommandData::Profile(redacted),
+        profile: Some(result.0),
+        mode: Some(result.1.mode_str().to_owned()),
+        data: CommandData::Profile(result.1),
     })
-}
-
-fn build_profile_from_add_command(command: ProfileAddCommand) -> (String, ProfileConfig) {
-    match command {
-        ProfileAddCommand::LocalFs(args) => {
-            let profile = ProfileConfig::Local {
-                store: StoreConfig::LocalFs {
-                    root: args.root,
-                    key_prefix: args.key_prefix,
-                },
-                writer_id: None,
-                writer_version: None,
-                lease_duration_ms: None,
-            };
-            (args.name, profile)
-        }
-        ProfileAddCommand::AwsS3(args) => {
-            let profile = ProfileConfig::Local {
-                store: StoreConfig::AwsS3 {
-                    bucket: args.bucket,
-                    region: args.region,
-                    endpoint_url: args.endpoint_url,
-                    access_key_id: args.access_key_id,
-                    secret_access_key: args.secret_access_key,
-                    session_token: args.session_token,
-                    key_prefix: args.key_prefix,
-                    force_path_style: if args.force_path_style {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                },
-                writer_id: None,
-                writer_version: None,
-                lease_duration_ms: None,
-            };
-            (args.name, profile)
-        }
-        ProfileAddCommand::CloudflareR2(args) => {
-            let profile = ProfileConfig::Local {
-                store: StoreConfig::CloudflareR2 {
-                    bucket: args.bucket,
-                    account_id: args.account_id,
-                    endpoint_url: args.endpoint_url,
-                    access_key_id: args.access_key_id,
-                    secret_access_key: args.secret_access_key,
-                    key_prefix: args.key_prefix,
-                },
-                writer_id: None,
-                writer_version: None,
-                lease_duration_ms: None,
-            };
-            (args.name, profile)
-        }
-        ProfileAddCommand::Remote(args) => {
-            let profile = ProfileConfig::Remote {
-                server_url: args.server_url,
-                auth_token: args.auth_token,
-            };
-            (args.name, profile)
-        }
-    }
-}
-
-fn build_profile_interactive(
-    runtime: RuntimeBehavior,
-) -> Result<(String, ProfileConfig), CliError> {
-    if !runtime.interactive {
-        return Err(CliError::non_interactive_input_required(
-            "subcommand (local-fs, aws-s3, cloudflare-r2, or remote)",
-        ));
-    }
-
-    let name = prompt::prompt_line("profile name")?;
-    let mode = prompt::prompt_choice("mode", &["local", "remote"])?;
-
-    match mode.as_str() {
-        "local" => {
-            let store_kind =
-                prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])?;
-            let store = match store_kind.as_str() {
-                "local-fs" => StoreConfig::LocalFs {
-                    root: prompt::prompt_line("root")?,
-                    key_prefix: prompt::prompt_optional("key prefix", None)?,
-                },
-                "aws-s3" => StoreConfig::AwsS3 {
-                    bucket: prompt::prompt_line("bucket name")?,
-                    region: prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0)?,
-                    access_key_id: prompt::prompt_line("access key id")?,
-                    secret_access_key: prompt::prompt_line("secret access key")?,
-                    endpoint_url: prompt::prompt_optional("endpoint url", None)?,
-                    session_token: None,
-                    key_prefix: prompt::prompt_optional("key prefix", None)?,
-                    force_path_style: None,
-                },
-                "cloudflare-r2" => StoreConfig::CloudflareR2 {
-                    bucket: prompt::prompt_line("bucket name")?,
-                    account_id: prompt::prompt_line("account id")?,
-                    endpoint_url: prompt::prompt_line("endpoint url")?,
-                    access_key_id: prompt::prompt_line("access key id")?,
-                    secret_access_key: prompt::prompt_line("secret access key")?,
-                    key_prefix: prompt::prompt_optional("key prefix", None)?,
-                },
-                _ => unreachable!(),
-            };
-            Ok((
-                name,
-                ProfileConfig::Local {
-                    store,
-                    writer_id: None,
-                    writer_version: None,
-                    lease_duration_ms: None,
-                },
-            ))
-        }
-        "remote" => {
-            let server_url = prompt::prompt_line("server url")?;
-            let auth_token = prompt::prompt_optional("auth token", None)?;
-            Ok((
-                name,
-                ProfileConfig::Remote {
-                    server_url,
-                    auth_token,
-                },
-            ))
-        }
-        _ => unreachable!(),
-    }
 }
 
 fn run_profile_update(
@@ -557,6 +351,781 @@ fn run_profile_update(
     })
 }
 
+fn run_profile_remove(
+    kind: CommandKind,
+    config_path: &Path,
+    name: &str,
+    runtime: RuntimeBehavior,
+) -> Result<CommandOutput, CommandFailure> {
+    if runtime.interactive {
+        let confirmed = prompt::prompt_confirm(&format!("remove profile `{name}`?"))
+            .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+        if !confirmed {
+            return Err(fail(
+                kind,
+                Some(name.to_owned()),
+                None,
+                CliError::new("cancelled", "operation cancelled"),
+            ));
+        }
+    }
+
+    let mut config =
+        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    let removed = remove_profile(&mut config, name)
+        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    let mode = removed.mode.clone();
+    save_config(config_path, &config)
+        .map_err(|error| fail(kind, Some(name.to_owned()), Some(mode.clone()), error))?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(name.to_owned()),
+        mode: Some(mode),
+        data: CommandData::ProfileSummary(removed),
+    })
+}
+
+fn run_profile_use(
+    kind: CommandKind,
+    config_path: &Path,
+    name: &str,
+) -> Result<CommandOutput, CommandFailure> {
+    let mut config =
+        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    make_default_profile(&mut config, name)
+        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    save_config(config_path, &config)
+        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(name.to_owned()),
+        mode: None,
+        data: CommandData::DefaultProfile {
+            name: name.to_owned(),
+        },
+    })
+}
+
+// --- namespace ---
+
+fn run_namespace_command(
+    kind: CommandKind,
+    command: NamespaceCommand,
+) -> Result<CommandOutput, CommandFailure> {
+    match command {
+        NamespaceCommand::Create(args) => run_namespace_create(kind, args),
+        NamespaceCommand::List(args) => run_namespace_list(kind, args),
+    }
+}
+
+fn run_namespace_create(
+    kind: CommandKind,
+    args: NamespaceCreateArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let explicit_profile = args.profile.profile.as_deref();
+    let resolved = resolve_target_profile(explicit_profile)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = resolved.target.mode_str().to_owned();
+    validate_namespace_name(&args.name).map_err(|error| {
+        fail(
+            kind,
+            Some(resolved.profile_name.clone()),
+            Some(mode.clone()),
+            error,
+        )
+    })?;
+    let namespace = resolved
+        .target
+        .backend()
+        .create_namespace(&args.name)
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(resolved.profile_name.clone()),
+                Some(mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(resolved.profile_name),
+        mode: Some(mode),
+        data: CommandData::NamespaceSummary(namespace),
+    })
+}
+
+fn run_namespace_list(
+    kind: CommandKind,
+    args: NamespaceListArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let explicit_profile = args.profile.profile.as_deref();
+    let resolved = resolve_target_profile(explicit_profile)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = resolved.target.mode_str().to_owned();
+    let namespaces = resolved
+        .target
+        .backend()
+        .list_namespaces()
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(resolved.profile_name.clone()),
+                Some(mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(resolved.profile_name),
+        mode: Some(mode),
+        data: CommandData::NamespaceList { namespaces },
+    })
+}
+
+fn run_namespace_use(
+    kind: CommandKind,
+    args: NamespaceUseArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let explicit_profile = args.profile.profile.as_deref();
+    let mut loaded = load_cli_config()
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let resolved = resolve_target_profile_from_config(&loaded.config, explicit_profile)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = resolved.target.mode_str().to_owned();
+    validate_namespace_name(&args.namespace).map_err(|error| {
+        fail(
+            kind,
+            Some(resolved.profile_name.clone()),
+            Some(mode.clone()),
+            error,
+        )
+    })?;
+
+    let namespaces = resolved
+        .target
+        .backend()
+        .list_namespaces()
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(resolved.profile_name.clone()),
+                Some(mode.clone()),
+                error,
+            )
+        })?;
+    if !namespaces
+        .iter()
+        .any(|candidate| candidate.name.as_str() == args.namespace)
+    {
+        return Err(fail(
+            kind,
+            Some(resolved.profile_name.clone()),
+            Some(mode.clone()),
+            CliError::new(
+                "namespace_not_found",
+                format!("namespace `{}` does not exist", args.namespace),
+            ),
+        ));
+    }
+
+    set_default_namespace(&mut loaded.config, &resolved.profile_name, &args.namespace).map_err(
+        |error| {
+            fail(
+                kind,
+                Some(resolved.profile_name.clone()),
+                Some(mode.clone()),
+                error,
+            )
+        },
+    )?;
+    save_config(&loaded.path, &loaded.config).map_err(|error| {
+        fail(
+            kind,
+            Some(resolved.profile_name.clone()),
+            Some(mode.clone()),
+            error,
+        )
+    })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(resolved.profile_name.clone()),
+        mode: Some(mode),
+        data: CommandData::DefaultNamespace {
+            profile: resolved.profile_name,
+            namespace: args.namespace,
+        },
+    })
+}
+
+fn run_current(kind: CommandKind, args: CurrentArgs) -> Result<CommandOutput, CommandFailure> {
+    let explicit_profile = args.profile.profile.as_deref();
+    let loaded = load_cli_config()
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let (profile_name, profile) =
+        crate::profiles::resolve_profile(&loaded.config, explicit_profile)
+            .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = profile.mode_str().to_owned();
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(profile_name.to_owned()),
+        mode: Some(mode),
+        data: CommandData::Current {
+            profile: profile_name.to_owned(),
+            namespace: default_namespace(profile).map(ToOwned::to_owned),
+        },
+    })
+}
+
+// --- filesystem ---
+
+fn run_filesystem_ls(
+    kind: CommandKind,
+    args: FilesystemLsArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    let spec = namespace_path(
+        &context.namespace,
+        args.path.as_deref().unwrap_or("/"),
+        true,
+    )
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let entries = context.target.backend().list_path(&spec).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::PathEntries { entries },
+    })
+}
+
+fn run_filesystem_stat(
+    kind: CommandKind,
+    args: FilesystemPathArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    run_filesystem_path_lookup(kind, args, |backend, spec| {
+        backend.stat_path(spec).map(CommandData::PathEntry)
+    })
+}
+
+fn run_filesystem_cat(
+    kind: CommandKind,
+    args: FilesystemPathArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    run_filesystem_path_lookup(kind, args, |backend, spec| {
+        backend.read_file_bytes(spec).map(CommandData::StreamBytes)
+    })
+}
+
+fn run_filesystem_get(
+    kind: CommandKind,
+    args: FilesystemGetArgs,
+    runtime: RuntimeBehavior,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    if runtime.json && args.local_destination.as_deref() == Some("-") {
+        return Err(fail(
+            kind,
+            Some(context.profile_name),
+            Some(context.mode),
+            CliError::json_not_supported_for_streaming(),
+        ));
+    }
+
+    let spec = namespace_path(&context.namespace, &args.remote_path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let entry = context.target.backend().stat_path(&spec).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    if entry.inode_kind == InodeKind::Dir {
+        return Err(fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            CliError::invalid_input(format!(
+                "directory operations are not available for `{}`",
+                spec.absolute_path
+            )),
+        ));
+    }
+
+    let bytes = context
+        .target
+        .backend()
+        .read_file_bytes(&spec)
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+    let data = match args.local_destination.as_deref() {
+        Some("-") => CommandData::StreamBytes(bytes),
+        other => {
+            let destination =
+                destination_path_for_get(&spec.absolute_path, other).map_err(|error| {
+                    fail(
+                        kind,
+                        Some(context.profile_name.clone()),
+                        Some(context.mode.clone()),
+                        error,
+                    )
+                })?;
+            fs::write(&destination, &bytes).map_err(|error| {
+                fail(
+                    kind,
+                    Some(context.profile_name.clone()),
+                    Some(context.mode.clone()),
+                    CliError::io(error),
+                )
+            })?;
+            CommandData::FileTransfer {
+                target: render_target(&context.namespace, &spec.absolute_path),
+                destination: destination.display().to_string(),
+                bytes_written: bytes.len() as u64,
+            }
+        }
+    };
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data,
+    })
+}
+
+fn run_filesystem_put(
+    kind: CommandKind,
+    args: FilesystemPutArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    let local_path = PathBuf::from(&args.local_path);
+    if local_path == Path::new("-") {
+        return Err(fail(
+            kind,
+            Some(context.profile_name),
+            Some(context.mode),
+            CliError::invalid_input("`-` is not supported for `put`"),
+        ));
+    }
+
+    let metadata = fs::metadata(&local_path).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            CliError::io(error),
+        )
+    })?;
+    if metadata.is_dir() {
+        return Err(fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            CliError::invalid_input(format!(
+                "directory operations are not available for `{}`",
+                local_path.display()
+            )),
+        ));
+    }
+
+    let remote_path = match args.remote_path {
+        Some(path) => normalize_absolute_path(&path, false),
+        None => default_remote_put_path(&local_path),
+    }
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let spec = namespace_path(&context.namespace, &remote_path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let bytes = fs::read(&local_path).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            CliError::io(error),
+        )
+    })?;
+    let result = context
+        .target
+        .backend()
+        .put_file_bytes(&spec, &bytes, args.force)
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::FileMutation {
+            target: render_target(&context.namespace, &spec.absolute_path),
+            committed_seq: result.committed_seq.0,
+        },
+    })
+}
+
+fn run_filesystem_rm(
+    kind: CommandKind,
+    args: FilesystemPathArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let result = context
+        .target
+        .backend()
+        .delete_path(&spec)
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::FileMutation {
+            target: render_target(&context.namespace, &spec.absolute_path),
+            committed_seq: result.committed_seq.0,
+        },
+    })
+}
+
+fn run_filesystem_mv(
+    kind: CommandKind,
+    args: FilesystemMoveArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    run_filesystem_move(kind, args, false)
+}
+
+fn run_filesystem_cp(
+    kind: CommandKind,
+    args: FilesystemMoveArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    run_filesystem_move(kind, args, true)
+}
+
+// --- create/update helpers ---
+
+#[derive(Debug, Clone)]
+struct CreateProfileSpec {
+    mode: Option<String>,
+    store_kind: Option<String>,
+    root: Option<String>,
+    key_prefix: Option<String>,
+    bucket: Option<String>,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    endpoint_url: Option<String>,
+    session_token: Option<String>,
+    force_path_style: bool,
+    account_id: Option<String>,
+    server_url: Option<String>,
+    auth_token: Option<String>,
+}
+
+fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec {
+    CreateProfileSpec {
+        mode: args.mode,
+        store_kind: args.store_kind,
+        root: args.root,
+        key_prefix: args.key_prefix,
+        bucket: args.bucket,
+        region: args.region,
+        access_key_id: args.access_key_id,
+        secret_access_key: args.secret_access_key,
+        endpoint_url: args.endpoint_url,
+        session_token: args.session_token,
+        force_path_style: args.force_path_style,
+        account_id: args.account_id,
+        server_url: args.server_url,
+        auth_token: args.auth_token,
+    }
+}
+
+fn create_profile_spec_from_create(args: ProfileCreateArgs) -> CreateProfileSpec {
+    CreateProfileSpec {
+        mode: args.mode,
+        store_kind: args.store_kind,
+        root: args.root,
+        key_prefix: args.key_prefix,
+        bucket: args.bucket,
+        region: args.region,
+        access_key_id: args.access_key_id,
+        secret_access_key: args.secret_access_key,
+        endpoint_url: args.endpoint_url,
+        session_token: args.session_token,
+        force_path_style: args.force_path_style,
+        account_id: args.account_id,
+        server_url: args.server_url,
+        auth_token: args.auth_token,
+    }
+}
+
+fn build_profile_from_create_spec(
+    spec: CreateProfileSpec,
+    runtime: RuntimeBehavior,
+) -> Result<ProfileConfig, CliError> {
+    let mode = match spec.mode.as_deref() {
+        Some("local") => "local".to_owned(),
+        Some("remote") => "remote".to_owned(),
+        Some(other) => {
+            return Err(CliError::invalid_input(format!(
+                "unknown mode: `{other}` (expected local or remote)"
+            )))
+        }
+        None if runtime.interactive => prompt::prompt_choice("mode", &["local", "remote"])?,
+        None => {
+            return Err(CliError::non_interactive_input_required("mode"));
+        }
+    };
+
+    match mode.as_str() {
+        "local" => build_local_profile(spec, runtime),
+        "remote" => build_remote_profile(spec, runtime),
+        _ => unreachable!(),
+    }
+}
+
+fn build_local_profile(
+    spec: CreateProfileSpec,
+    runtime: RuntimeBehavior,
+) -> Result<ProfileConfig, CliError> {
+    reject_create_flag("server-url", spec.server_url.is_some(), "local")?;
+    reject_create_flag("auth-token", spec.auth_token.is_some(), "local")?;
+
+    let store_kind = match spec.store_kind.as_deref() {
+        Some("local-fs") => "local-fs",
+        Some("aws-s3") => "aws-s3",
+        Some("cloudflare-r2") => "cloudflare-r2",
+        Some(other) => {
+            return Err(CliError::invalid_input(format!(
+                "unknown store kind: `{other}` (expected local-fs, aws-s3, or cloudflare-r2)"
+            )))
+        }
+        None if runtime.interactive => {
+            return prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])
+                .and_then(|choice| {
+                    build_local_profile(
+                        CreateProfileSpec {
+                            store_kind: Some(choice),
+                            ..spec
+                        },
+                        runtime,
+                    )
+                });
+        }
+        None => return Err(CliError::non_interactive_input_required("store-kind")),
+    };
+
+    let store = match store_kind {
+        "local-fs" => {
+            reject_create_flag("bucket", spec.bucket.is_some(), "local-fs")?;
+            reject_create_flag("region", spec.region.is_some(), "local-fs")?;
+            reject_create_flag("access-key-id", spec.access_key_id.is_some(), "local-fs")?;
+            reject_create_flag(
+                "secret-access-key",
+                spec.secret_access_key.is_some(),
+                "local-fs",
+            )?;
+            reject_create_flag("endpoint-url", spec.endpoint_url.is_some(), "local-fs")?;
+            reject_create_flag("session-token", spec.session_token.is_some(), "local-fs")?;
+            reject_create_flag("account-id", spec.account_id.is_some(), "local-fs")?;
+            reject_create_flag("force-path-style", spec.force_path_style, "local-fs")?;
+            StoreConfig::LocalFs {
+                root: require_or_prompt(spec.root.as_ref(), "root", runtime)?,
+                key_prefix: spec.key_prefix,
+            }
+        }
+        "aws-s3" => {
+            reject_create_flag("root", spec.root.is_some(), "aws-s3")?;
+            reject_create_flag("account-id", spec.account_id.is_some(), "aws-s3")?;
+            StoreConfig::AwsS3 {
+                bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
+                region: require_or_prompt_region(spec.region.as_ref(), runtime)?,
+                endpoint_url: spec.endpoint_url,
+                access_key_id: require_or_prompt(
+                    spec.access_key_id.as_ref(),
+                    "access-key-id",
+                    runtime,
+                )?,
+                secret_access_key: require_or_prompt(
+                    spec.secret_access_key.as_ref(),
+                    "secret-access-key",
+                    runtime,
+                )?,
+                session_token: spec.session_token,
+                key_prefix: spec.key_prefix,
+                force_path_style: if spec.force_path_style {
+                    Some(true)
+                } else {
+                    None
+                },
+            }
+        }
+        "cloudflare-r2" => {
+            reject_create_flag("root", spec.root.is_some(), "cloudflare-r2")?;
+            reject_create_flag("region", spec.region.is_some(), "cloudflare-r2")?;
+            reject_create_flag(
+                "session-token",
+                spec.session_token.is_some(),
+                "cloudflare-r2",
+            )?;
+            reject_create_flag("force-path-style", spec.force_path_style, "cloudflare-r2")?;
+            StoreConfig::CloudflareR2 {
+                bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
+                account_id: require_or_prompt(spec.account_id.as_ref(), "account-id", runtime)?,
+                endpoint_url: require_or_prompt(
+                    spec.endpoint_url.as_ref(),
+                    "endpoint-url",
+                    runtime,
+                )?,
+                access_key_id: require_or_prompt(
+                    spec.access_key_id.as_ref(),
+                    "access-key-id",
+                    runtime,
+                )?,
+                secret_access_key: require_or_prompt(
+                    spec.secret_access_key.as_ref(),
+                    "secret-access-key",
+                    runtime,
+                )?,
+                key_prefix: spec.key_prefix,
+            }
+        }
+        _ => unreachable!(),
+    };
+
+    Ok(ProfileConfig::Local {
+        store,
+        default_namespace: None,
+        writer_id: None,
+        writer_version: None,
+        lease_duration_ms: None,
+    })
+}
+
+fn build_remote_profile(
+    spec: CreateProfileSpec,
+    runtime: RuntimeBehavior,
+) -> Result<ProfileConfig, CliError> {
+    reject_create_flag("store-kind", spec.store_kind.is_some(), "remote")?;
+    reject_create_flag("root", spec.root.is_some(), "remote")?;
+    reject_create_flag("key-prefix", spec.key_prefix.is_some(), "remote")?;
+    reject_create_flag("bucket", spec.bucket.is_some(), "remote")?;
+    reject_create_flag("region", spec.region.is_some(), "remote")?;
+    reject_create_flag("access-key-id", spec.access_key_id.is_some(), "remote")?;
+    reject_create_flag(
+        "secret-access-key",
+        spec.secret_access_key.is_some(),
+        "remote",
+    )?;
+    reject_create_flag("endpoint-url", spec.endpoint_url.is_some(), "remote")?;
+    reject_create_flag("session-token", spec.session_token.is_some(), "remote")?;
+    reject_create_flag("force-path-style", spec.force_path_style, "remote")?;
+    reject_create_flag("account-id", spec.account_id.is_some(), "remote")?;
+
+    Ok(ProfileConfig::Remote {
+        server_url: require_or_prompt(spec.server_url.as_ref(), "server url", runtime)?,
+        default_namespace: None,
+        auth_token: match spec.auth_token {
+            Some(token) if token.trim().is_empty() => None,
+            other => other,
+        },
+    })
+}
+
+fn require_or_prompt(
+    value: Option<&String>,
+    field: &str,
+    runtime: RuntimeBehavior,
+) -> Result<String, CliError> {
+    match value {
+        Some(v) if !v.trim().is_empty() => Ok(v.clone()),
+        _ if runtime.interactive => prompt::prompt_line(field),
+        _ => Err(CliError::non_interactive_input_required(field)),
+    }
+}
+
+fn require_or_prompt_region(
+    value: Option<&String>,
+    runtime: RuntimeBehavior,
+) -> Result<String, CliError> {
+    match value {
+        Some(v) if !v.trim().is_empty() => Ok(v.clone()),
+        _ if runtime.interactive => prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0),
+        _ => Err(CliError::non_interactive_input_required("region")),
+    }
+}
+
+fn reject_create_flag(flag: &str, present: bool, profile_kind: &str) -> Result<(), CliError> {
+    if present {
+        return Err(CliError::invalid_input(format!(
+            "`--{flag}` does not apply to {profile_kind} profiles"
+        )));
+    }
+    Ok(())
+}
+
 fn apply_update_flags(
     existing: ProfileConfig,
     args: &ProfileUpdateArgs,
@@ -602,6 +1171,7 @@ fn apply_update_flags(
     match existing {
         ProfileConfig::Local {
             store,
+            default_namespace,
             writer_id,
             writer_version,
             lease_duration_ms,
@@ -648,6 +1218,7 @@ fn apply_update_flags(
             };
             Ok(ProfileConfig::Local {
                 store,
+                default_namespace,
                 writer_id,
                 writer_version,
                 lease_duration_ms,
@@ -655,9 +1226,11 @@ fn apply_update_flags(
         }
         ProfileConfig::Remote {
             server_url,
+            default_namespace,
             auth_token,
         } => Ok(ProfileConfig::Remote {
             server_url: args.server_url.clone().unwrap_or(server_url),
+            default_namespace,
             auth_token: args.auth_token.clone().or(auth_token),
         }),
     }
@@ -676,6 +1249,7 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
     match existing {
         ProfileConfig::Local {
             store,
+            default_namespace,
             writer_id,
             writer_version,
             lease_duration_ms,
@@ -735,6 +1309,7 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
             };
             Ok(ProfileConfig::Local {
                 store,
+                default_namespace,
                 writer_id,
                 writer_version,
                 lease_duration_ms,
@@ -742,272 +1317,162 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
         }
         ProfileConfig::Remote {
             server_url,
+            default_namespace,
             auth_token,
         } => Ok(ProfileConfig::Remote {
             server_url: prompt::prompt_line_default("server url", &server_url)?,
+            default_namespace,
             auth_token: prompt::prompt_optional("auth token", auth_token.as_deref())?,
         }),
     }
 }
 
-fn run_profile_remove(
-    kind: CommandKind,
-    config_path: &Path,
-    name: &str,
-    runtime: RuntimeBehavior,
-) -> Result<CommandOutput, CommandFailure> {
-    if runtime.interactive {
-        let confirmed = prompt::prompt_confirm(&format!("remove profile `{name}`?"))
-            .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-        if !confirmed {
-            return Err(fail(
-                kind,
-                Some(name.to_owned()),
-                None,
-                CliError::new("cancelled", "operation cancelled"),
-            ));
-        }
-    }
+// --- filesystem helpers ---
 
-    let mut config =
-        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    let removed = remove_profile(&mut config, name)
-        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    let mode = removed.mode.clone();
-    save_config(config_path, &config)
-        .map_err(|error| fail(kind, Some(name.to_owned()), Some(mode.clone()), error))?;
-    Ok(CommandOutput {
-        kind,
-        profile: Some(name.to_owned()),
-        mode: Some(mode),
-        data: CommandData::ProfileSummary(removed),
+struct CommandContext {
+    profile_name: String,
+    mode: String,
+    namespace: String,
+    target: crate::backend::ResolvedTarget,
+}
+
+fn resolve_command_context(
+    kind: CommandKind,
+    target: &TargetSelectorArgs,
+) -> Result<CommandContext, CommandFailure> {
+    let explicit_profile = target.profile.profile.as_deref();
+    let loaded = load_cli_config()
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let resolved = resolve_target_profile_from_config(&loaded.config, explicit_profile)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = resolved.target.mode_str().to_owned();
+    let namespace = resolve_namespace(
+        &loaded.config,
+        explicit_profile,
+        target.namespace.as_deref(),
+    )
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(resolved.profile_name.clone()),
+            Some(mode.clone()),
+            error,
+        )
+    })?
+    .namespace;
+
+    // Keep the loaded config alive long enough for the backend borrow to remain valid within the caller.
+    Ok(CommandContext {
+        profile_name: resolved.profile_name,
+        mode,
+        namespace,
+        target: resolved.target,
     })
 }
 
-fn run_profile_make_default(
+fn run_filesystem_path_lookup<F>(
     kind: CommandKind,
-    config_path: &Path,
-    name: &str,
-) -> Result<CommandOutput, CommandFailure> {
-    let mut config =
-        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    make_default_profile(&mut config, name)
-        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    save_config(config_path, &config)
-        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    args: FilesystemPathArgs,
+    op: F,
+) -> Result<CommandOutput, CommandFailure>
+where
+    F: FnOnce(&dyn crate::backend::Backend, &NamespacePath) -> Result<CommandData, CliError>,
+{
+    let context = resolve_command_context(kind, &args.target)?;
+    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let data = op(context.target.backend(), &spec).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+
     Ok(CommandOutput {
         kind,
-        profile: Some(name.to_owned()),
-        mode: None,
-        data: CommandData::DefaultProfile {
-            name: name.to_owned(),
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data,
+    })
+}
+
+fn run_filesystem_move(
+    kind: CommandKind,
+    args: FilesystemMoveArgs,
+    copy: bool,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    let from = namespace_path(&context.namespace, &args.source_path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let to = namespace_path(&context.namespace, &args.dest_path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+
+    let result = if copy {
+        let entry = context.target.backend().stat_path(&from).map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+        if entry.inode_kind == InodeKind::Dir {
+            return Err(fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                CliError::invalid_input(format!(
+                    "directory operations are not available for `{}`",
+                    from.absolute_path
+                )),
+            ));
+        }
+        context.target.backend().copy_path(&from, &to)
+    } else {
+        context.target.backend().move_path(&from, &to)
+    }
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::PathMove {
+            from: render_target(&context.namespace, &from.absolute_path),
+            to: render_target(&context.namespace, &to.absolute_path),
+            committed_seq: result.committed_seq.0,
         },
     })
 }
 
-// --- namespace ---
-
-fn run_namespace_command(
-    kind: CommandKind,
-    global_profile: Option<&str>,
-    command: NamespaceCommand,
-) -> Result<CommandOutput, CommandFailure> {
-    let resolved = resolve_target_profile(global_profile)
-        .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
-    let backend = resolved.target.backend();
-    let output = match command {
-        NamespaceCommand::Create { name } => {
-            validate_namespace_name(&name).map_err(|error| {
-                fail(
-                    kind,
-                    Some(resolved.profile_name.clone()),
-                    Some(mode.clone()),
-                    error,
-                )
-            })?;
-            let namespace = backend.create_namespace(&name).map_err(|error| {
-                fail(
-                    kind,
-                    Some(resolved.profile_name.clone()),
-                    Some(mode.clone()),
-                    error,
-                )
-            })?;
-            CommandData::NamespaceSummary(namespace)
-        }
-        NamespaceCommand::List => {
-            let namespaces = backend.list_namespaces().map_err(|error| {
-                fail(
-                    kind,
-                    Some(resolved.profile_name.clone()),
-                    Some(mode.clone()),
-                    error,
-                )
-            })?;
-            CommandData::NamespaceList { namespaces }
-        }
-    };
-
-    Ok(CommandOutput {
-        kind,
-        profile: Some(resolved.profile_name),
-        mode: Some(mode),
-        data: output,
-    })
-}
-
-// --- filesystem ---
-
-fn run_filesystem_command(
-    kind: CommandKind,
-    global_profile: Option<&str>,
-    command: FilesystemCommand,
-    runtime: RuntimeBehavior,
-) -> Result<CommandOutput, CommandFailure> {
-    let resolved = resolve_target_profile(global_profile)
-        .map_err(|error| fail(kind, global_profile.map(ToOwned::to_owned), None, error))?;
-    let mode = resolved.target.mode_str().to_owned();
-    let backend = resolved.target.backend();
-    let profile_name = resolved.profile_name.clone();
-
-    let output = (|| -> Result<CommandData, CliError> {
-        match command {
-            FilesystemCommand::Ls { namespace, path } => {
-                let spec = namespace_path(&namespace, path.as_deref().unwrap_or("/"), true)?;
-                let entries = backend.list_path(&spec)?;
-                Ok(CommandData::PathEntries { entries })
-            }
-            FilesystemCommand::Stat { namespace, path } => {
-                let spec = namespace_path(&namespace, &path, true)?;
-                let entry = backend.stat_path(&spec)?;
-                Ok(CommandData::PathEntry(entry))
-            }
-            FilesystemCommand::Cat { namespace, path } => {
-                let spec = namespace_path(&namespace, &path, false)?;
-                let bytes = backend.read_file_bytes(&spec)?;
-                Ok(CommandData::StreamBytes(bytes))
-            }
-            FilesystemCommand::Get {
-                namespace,
-                remote_path,
-                local_destination,
-            } => {
-                if runtime.json && local_destination.as_deref() == Some("-") {
-                    return Err(CliError::json_not_supported_for_streaming());
-                }
-                let spec = namespace_path(&namespace, &remote_path, false)?;
-                let entry = backend.stat_path(&spec)?;
-                if entry.inode_kind == loon_api::InodeKind::Dir {
-                    return Err(CliError::invalid_input(format!(
-                        "directory operations are not available for `{}`",
-                        spec.absolute_path
-                    )));
-                }
-                let bytes = backend.read_file_bytes(&spec)?;
-                match local_destination.as_deref() {
-                    Some("-") => Ok(CommandData::StreamBytes(bytes)),
-                    other => {
-                        let destination = destination_path_for_get(&spec.absolute_path, other)?;
-                        fs::write(&destination, &bytes).map_err(CliError::io)?;
-                        Ok(CommandData::FileTransfer {
-                            target: render_target(&namespace, &spec.absolute_path),
-                            destination: destination.display().to_string(),
-                            bytes_written: bytes.len() as u64,
-                        })
-                    }
-                }
-            }
-            FilesystemCommand::Put {
-                namespace,
-                local_path,
-                remote_path,
-                force,
-            } => {
-                let local_path = PathBuf::from(&local_path);
-                if local_path == Path::new("-") {
-                    return Err(CliError::invalid_input(
-                        "`-` is not supported for `filesystem put`",
-                    ));
-                }
-                let metadata = fs::metadata(&local_path).map_err(CliError::io)?;
-                if metadata.is_dir() {
-                    return Err(CliError::invalid_input(format!(
-                        "directory operations are not available for `{}`",
-                        local_path.display()
-                    )));
-                }
-                let remote_path = match remote_path {
-                    Some(path) => normalize_absolute_path(&path, false)?,
-                    None => default_remote_put_path(&local_path)?,
-                };
-                let spec = namespace_path(&namespace, &remote_path, false)?;
-                let bytes = fs::read(&local_path).map_err(CliError::io)?;
-                let result = backend.put_file_bytes(&spec, &bytes, force)?;
-                Ok(CommandData::FileMutation {
-                    target: render_target(&namespace, &spec.absolute_path),
-                    committed_seq: result.committed_seq.0,
-                })
-            }
-            FilesystemCommand::Rm {
-                namespace,
-                remote_path,
-            } => {
-                let spec = namespace_path(&namespace, &remote_path, false)?;
-                let result = backend.delete_path(&spec)?;
-                Ok(CommandData::FileMutation {
-                    target: render_target(&namespace, &spec.absolute_path),
-                    committed_seq: result.committed_seq.0,
-                })
-            }
-            FilesystemCommand::Mv {
-                namespace,
-                source_path,
-                dest_path,
-            } => {
-                let from = namespace_path(&namespace, &source_path, false)?;
-                let to = namespace_path(&namespace, &dest_path, false)?;
-                let result = backend.move_path(&from, &to)?;
-                Ok(CommandData::PathMove {
-                    from: render_target(&namespace, &from.absolute_path),
-                    to: render_target(&namespace, &to.absolute_path),
-                    committed_seq: result.committed_seq.0,
-                })
-            }
-            FilesystemCommand::Cp {
-                namespace,
-                source_path,
-                dest_path,
-            } => {
-                let from = namespace_path(&namespace, &source_path, false)?;
-                let entry = backend.stat_path(&from)?;
-                if entry.inode_kind == loon_api::InodeKind::Dir {
-                    return Err(CliError::invalid_input(format!(
-                        "directory operations are not available for `{}`",
-                        from.absolute_path
-                    )));
-                }
-                let to = namespace_path(&namespace, &dest_path, false)?;
-                let result = backend.copy_path(&from, &to)?;
-                Ok(CommandData::PathMove {
-                    from: render_target(&namespace, &from.absolute_path),
-                    to: render_target(&namespace, &to.absolute_path),
-                    committed_seq: result.committed_seq.0,
-                })
-            }
-        }
-    })()
-    .map_err(|error| fail(kind, Some(profile_name.clone()), Some(mode.clone()), error))?;
-
-    Ok(CommandOutput {
-        kind,
-        profile: Some(profile_name),
-        mode: Some(mode),
-        data: output,
-    })
-}
-
-// --- helpers ---
+// --- general helpers ---
 
 fn validate_namespace_name(namespace: &str) -> Result<(), CliError> {
     if namespace.trim().is_empty() {

@@ -26,6 +26,8 @@ pub enum ProfileConfig {
     Local {
         store: StoreConfig,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_namespace: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         writer_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         writer_version: Option<String>,
@@ -34,6 +36,8 @@ pub enum ProfileConfig {
     },
     Remote {
         server_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_token: Option<String>,
     },
@@ -139,12 +143,25 @@ impl ProfileConfig {
 
     pub(crate) fn validate(&self, name: &str) -> Result<(), CliError> {
         match self {
-            ProfileConfig::Local { store, .. } => store.validate(name),
+            ProfileConfig::Local {
+                store,
+                default_namespace,
+                ..
+            } => {
+                if let Some(namespace) = default_namespace {
+                    require_non_empty(&profile_field(name, "default_namespace"), namespace)?;
+                }
+                store.validate(name)
+            }
             ProfileConfig::Remote {
                 server_url,
+                default_namespace,
                 auth_token,
                 ..
             } => {
+                if let Some(namespace) = default_namespace {
+                    require_non_empty(&profile_field(name, "default_namespace"), namespace)?;
+                }
                 validate_http_url(&profile_field(name, "server_url"), server_url)?;
                 if let Some(token) = auth_token {
                     require_non_empty(&profile_field(name, "auth_token"), token)?;
@@ -158,20 +175,24 @@ impl ProfileConfig {
         match self {
             ProfileConfig::Local {
                 store,
+                default_namespace,
                 writer_id,
                 writer_version,
                 lease_duration_ms,
             } => ProfileConfig::Local {
                 store: store.redacted(),
+                default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
                 writer_version: writer_version.clone(),
                 lease_duration_ms: *lease_duration_ms,
             },
             ProfileConfig::Remote {
                 server_url,
+                default_namespace,
                 auth_token,
             } => ProfileConfig::Remote {
                 server_url: server_url.clone(),
+                default_namespace: default_namespace.clone(),
                 auth_token: auth_token.as_ref().map(|_| "REDACTED".to_owned()),
             },
         }

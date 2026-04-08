@@ -5,8 +5,6 @@ use std::io::IsTerminal;
 #[command(name = "loon")]
 pub struct Cli {
     #[arg(long, global = true)]
-    pub profile: Option<String>,
-    #[arg(long, global = true)]
     pub json: bool,
     #[arg(long, global = true)]
     pub no_input: bool,
@@ -25,10 +23,16 @@ pub enum Command {
         #[command(subcommand)]
         command: NamespaceCommand,
     },
-    Filesystem {
-        #[command(subcommand)]
-        command: FilesystemCommand,
-    },
+    Use(NamespaceUseArgs),
+    Current(CurrentArgs),
+    Ls(FilesystemLsArgs),
+    Stat(FilesystemPathArgs),
+    Cat(FilesystemPathArgs),
+    Get(FilesystemGetArgs),
+    Put(FilesystemPutArgs),
+    Rm(FilesystemPathArgs),
+    Mv(FilesystemMoveArgs),
+    Cp(FilesystemMoveArgs),
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -39,6 +43,8 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct InitArgs {
     pub name: Option<String>,
+    #[arg(long)]
+    pub mode: Option<String>,
     #[arg(long)]
     pub store_kind: Option<String>,
     #[arg(long)]
@@ -54,90 +60,58 @@ pub struct InitArgs {
     #[arg(long)]
     pub endpoint_url: Option<String>,
     #[arg(long)]
+    pub session_token: Option<String>,
+    #[arg(long)]
     pub account_id: Option<String>,
     #[arg(long)]
     pub key_prefix: Option<String>,
+    #[arg(long)]
+    pub force_path_style: bool,
+    #[arg(long)]
+    pub server_url: Option<String>,
+    #[arg(long)]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProfileCommand {
-    Add {
-        #[command(subcommand)]
-        command: Option<ProfileAddCommand>,
-    },
+    Create(ProfileCreateArgs),
     List,
-    Show {
-        name: Option<String>,
-    },
+    Show { name: Option<String> },
     Update(ProfileUpdateArgs),
-    Remove {
-        name: String,
-    },
-    MakeDefault {
-        name: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ProfileAddCommand {
-    LocalFs(ProfileAddLocalFsArgs),
-    AwsS3(ProfileAddAwsS3Args),
-    CloudflareR2(ProfileAddCloudflareR2Args),
-    Remote(ProfileAddRemoteArgs),
+    Remove { name: String },
+    Use { name: String },
 }
 
 #[derive(Debug, Args)]
-pub struct ProfileAddLocalFsArgs {
+pub struct ProfileCreateArgs {
     pub name: String,
     #[arg(long)]
-    pub root: String,
+    pub mode: Option<String>,
+    #[arg(long)]
+    pub store_kind: Option<String>,
+    #[arg(long)]
+    pub root: Option<String>,
     #[arg(long)]
     pub key_prefix: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct ProfileAddAwsS3Args {
-    pub name: String,
     #[arg(long)]
-    pub bucket: String,
+    pub bucket: Option<String>,
     #[arg(long)]
-    pub region: String,
+    pub region: Option<String>,
     #[arg(long)]
-    pub access_key_id: String,
+    pub access_key_id: Option<String>,
     #[arg(long)]
-    pub secret_access_key: String,
+    pub secret_access_key: Option<String>,
     #[arg(long)]
     pub endpoint_url: Option<String>,
     #[arg(long)]
     pub session_token: Option<String>,
     #[arg(long)]
-    pub key_prefix: Option<String>,
-    #[arg(long)]
     pub force_path_style: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct ProfileAddCloudflareR2Args {
-    pub name: String,
     #[arg(long)]
-    pub bucket: String,
+    pub account_id: Option<String>,
     #[arg(long)]
-    pub account_id: String,
-    #[arg(long)]
-    pub endpoint_url: String,
-    #[arg(long)]
-    pub access_key_id: String,
-    #[arg(long)]
-    pub secret_access_key: String,
-    #[arg(long)]
-    pub key_prefix: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct ProfileAddRemoteArgs {
-    pub name: String,
-    #[arg(long)]
-    pub server_url: String,
+    pub server_url: Option<String>,
     #[arg(long)]
     pub auth_token: Option<String>,
 }
@@ -169,52 +143,90 @@ pub struct ProfileUpdateArgs {
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Subcommand)]
-pub enum NamespaceCommand {
-    Create { name: String },
-    List,
+#[derive(Debug, Args, Clone)]
+pub struct ProfileSelectorArgs {
+    #[arg(long)]
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct TargetSelectorArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+    #[arg(long)]
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct NamespaceUseArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+    pub namespace: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CurrentArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum FilesystemCommand {
-    Ls {
-        namespace: String,
-        path: Option<String>,
-    },
-    Stat {
-        namespace: String,
-        path: String,
-    },
-    Cat {
-        namespace: String,
-        path: String,
-    },
-    Get {
-        namespace: String,
-        remote_path: String,
-        local_destination: Option<String>,
-    },
-    Put {
-        namespace: String,
-        local_path: String,
-        remote_path: Option<String>,
-        #[arg(long)]
-        force: bool,
-    },
-    Rm {
-        namespace: String,
-        remote_path: String,
-    },
-    Mv {
-        namespace: String,
-        source_path: String,
-        dest_path: String,
-    },
-    Cp {
-        namespace: String,
-        source_path: String,
-        dest_path: String,
-    },
+pub enum NamespaceCommand {
+    Create(NamespaceCreateArgs),
+    List(NamespaceListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct NamespaceCreateArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct NamespaceListArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct FilesystemLsArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FilesystemPathArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: String,
+}
+
+#[derive(Debug, Args)]
+pub struct FilesystemGetArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub remote_path: String,
+    pub local_destination: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct FilesystemPutArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub local_path: String,
+    pub remote_path: Option<String>,
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FilesystemMoveArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub source_path: String,
+    pub dest_path: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -247,14 +259,16 @@ impl RuntimeBehavior {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandKind {
     Init,
-    ProfileAdd,
+    ProfileCreate,
     ProfileList,
     ProfileShow,
     ProfileUpdate,
     ProfileRemove,
-    ProfileMakeDefault,
+    ProfileUse,
     NamespaceCreate,
     NamespaceList,
+    NamespaceUse,
+    Current,
     FilesystemLs,
     FilesystemStat,
     FilesystemCat,
@@ -272,14 +286,16 @@ impl CommandKind {
     pub fn as_str(self) -> &'static str {
         match self {
             CommandKind::Init => "init",
-            CommandKind::ProfileAdd => "profile_add",
+            CommandKind::ProfileCreate => "profile_create",
             CommandKind::ProfileList => "profile_list",
             CommandKind::ProfileShow => "profile_show",
             CommandKind::ProfileUpdate => "profile_update",
             CommandKind::ProfileRemove => "profile_remove",
-            CommandKind::ProfileMakeDefault => "profile_make_default",
+            CommandKind::ProfileUse => "profile_use",
             CommandKind::NamespaceCreate => "namespace_create",
             CommandKind::NamespaceList => "namespace_list",
+            CommandKind::NamespaceUse => "namespace_use",
+            CommandKind::Current => "current",
             CommandKind::FilesystemLs => "filesystem_ls",
             CommandKind::FilesystemStat => "filesystem_stat",
             CommandKind::FilesystemCat => "filesystem_cat",
@@ -304,27 +320,27 @@ impl Cli {
         match &self.command {
             Command::Init(_) => CommandKind::Init,
             Command::Profile { command } => match command {
-                ProfileCommand::Add { .. } => CommandKind::ProfileAdd,
+                ProfileCommand::Create(_) => CommandKind::ProfileCreate,
                 ProfileCommand::List => CommandKind::ProfileList,
                 ProfileCommand::Show { .. } => CommandKind::ProfileShow,
-                ProfileCommand::Update { .. } => CommandKind::ProfileUpdate,
+                ProfileCommand::Update(_) => CommandKind::ProfileUpdate,
                 ProfileCommand::Remove { .. } => CommandKind::ProfileRemove,
-                ProfileCommand::MakeDefault { .. } => CommandKind::ProfileMakeDefault,
+                ProfileCommand::Use { .. } => CommandKind::ProfileUse,
             },
             Command::Namespace { command } => match command {
-                NamespaceCommand::Create { .. } => CommandKind::NamespaceCreate,
-                NamespaceCommand::List => CommandKind::NamespaceList,
+                NamespaceCommand::Create(_) => CommandKind::NamespaceCreate,
+                NamespaceCommand::List(_) => CommandKind::NamespaceList,
             },
-            Command::Filesystem { command } => match command {
-                FilesystemCommand::Ls { .. } => CommandKind::FilesystemLs,
-                FilesystemCommand::Stat { .. } => CommandKind::FilesystemStat,
-                FilesystemCommand::Cat { .. } => CommandKind::FilesystemCat,
-                FilesystemCommand::Get { .. } => CommandKind::FilesystemGet,
-                FilesystemCommand::Put { .. } => CommandKind::FilesystemPut,
-                FilesystemCommand::Rm { .. } => CommandKind::FilesystemRm,
-                FilesystemCommand::Mv { .. } => CommandKind::FilesystemMv,
-                FilesystemCommand::Cp { .. } => CommandKind::FilesystemCp,
-            },
+            Command::Use(_) => CommandKind::NamespaceUse,
+            Command::Current(_) => CommandKind::Current,
+            Command::Ls(_) => CommandKind::FilesystemLs,
+            Command::Stat(_) => CommandKind::FilesystemStat,
+            Command::Cat(_) => CommandKind::FilesystemCat,
+            Command::Get(_) => CommandKind::FilesystemGet,
+            Command::Put(_) => CommandKind::FilesystemPut,
+            Command::Rm(_) => CommandKind::FilesystemRm,
+            Command::Mv(_) => CommandKind::FilesystemMv,
+            Command::Cp(_) => CommandKind::FilesystemCp,
             Command::Config { command } => match command {
                 ConfigCommand::Path => CommandKind::ConfigPath,
                 ConfigCommand::Show => CommandKind::ConfigShow,

@@ -29,7 +29,16 @@ impl CliError {
     pub fn no_default_profile() -> Self {
         Self::new(
             "no_default_profile",
-            "no default profile is set; use `profile make-default` or `--profile`",
+            "no default profile is set; use `profile use` or `--profile`",
+        )
+    }
+
+    pub fn no_default_namespace(profile: &str) -> Self {
+        Self::new(
+            "no_default_namespace",
+            format!(
+                "no default namespace is set for profile `{profile}`; use `loon use <namespace>` or `--namespace`"
+            ),
         )
     }
 
@@ -44,7 +53,7 @@ impl CliError {
         Self::new(
             "config_already_exists",
             format!(
-                "config file already exists at `{path}`. use `loon profile add` to create a new profile, `loon profile update` to modify an existing profile, or `loon profile make-default` to change the default profile"
+                "config file already exists at `{path}`. use `loon profile create` to create a new profile, `loon profile update` to modify an existing profile, or `loon profile use` to change the default profile"
             ),
         )
     }

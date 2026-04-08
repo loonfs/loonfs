@@ -94,28 +94,26 @@ cargo install --path crates/loon-server
 Example local flow:
 
 ```bash
-cp ./configs/loond.local-fs.example.toml "$HOME/loond.local.toml"
-$EDITOR "$HOME/loond.local.toml"
+loon init local \
+  --mode local \
+  --store-kind local-fs \
+  --root "$HOME/loon-local-store"
 
-loon profile add local local \
-  --server-config "$HOME/loond.local.toml"
-
-loon --profile local local up
 loon namespace create demo
+loon use demo
 
 printf 'hello\n' > /tmp/loonfs-demo.txt
-loon filesystem put demo /tmp/loonfs-demo.txt /docs/hello.txt
-loon filesystem ls demo /docs
-loon filesystem stat demo /docs/hello.txt
-loon filesystem get demo /docs/hello.txt /tmp/loonfs-downloaded.txt
-
-loon --profile local local down
+loon put /tmp/loonfs-demo.txt /docs/hello.txt
+loon ls /docs
+loon stat /docs/hello.txt
+loon get /docs/hello.txt /tmp/loonfs-downloaded.txt
 ```
 
 Example remote profile:
 
 ```bash
-loon profile add remote prod \
+loon profile create prod \
+  --mode remote \
   --server-url http://127.0.0.1:9400 \
   --auth-token dev-token
 ```
@@ -124,36 +122,35 @@ loon profile add remote prod \
 
 Current path-oriented CLI commands:
 
-- `loon profile add local NAME --server-config <PATH>`
-- `loon profile add remote NAME --server-url <URL> [--auth-token <TOKEN>]`
+- `loon init [NAME] [--mode <MODE>] [profile creation flags]`
+- `loon profile create NAME --mode <MODE> [profile creation flags]`
 - `loon profile list`
 - `loon profile use NAME`
 - `loon profile show [NAME]`
+- `loon profile update NAME [flags]`
 - `loon profile remove NAME`
-- `loon local up`
-- `loon local status`
-- `loon local down`
-- `loon namespace create NAME`
-- `loon namespace list`
-- `loon filesystem ls NAMESPACE [PATH]`
-- `loon filesystem stat NAMESPACE PATH`
-- `loon filesystem cat NAMESPACE PATH`
-- `loon filesystem get NAMESPACE REMOTE_PATH [LOCAL_DESTINATION]`
-- `loon filesystem put NAMESPACE LOCAL_PATH [REMOTE_PATH] [--force]`
-- `loon filesystem rm NAMESPACE REMOTE_PATH`
-- `loon filesystem mv NAMESPACE SOURCE_PATH DEST_PATH`
-- `loon filesystem cp NAMESPACE SOURCE_PATH DEST_PATH`
+- `loon namespace create [--profile <NAME>] NAME`
+- `loon namespace list [--profile <NAME>]`
+- `loon use [--profile <NAME>] NAMESPACE`
+- `loon current [--profile <NAME>]`
+- `loon ls [--profile <NAME>] [--namespace <NAME>] [PATH]`
+- `loon stat [--profile <NAME>] [--namespace <NAME>] PATH`
+- `loon cat [--profile <NAME>] [--namespace <NAME>] PATH`
+- `loon get [--profile <NAME>] [--namespace <NAME>] REMOTE_PATH [LOCAL_DESTINATION]`
+- `loon put [--profile <NAME>] [--namespace <NAME>] LOCAL_PATH [REMOTE_PATH] [--force]`
+- `loon rm [--profile <NAME>] [--namespace <NAME>] REMOTE_PATH`
+- `loon mv [--profile <NAME>] [--namespace <NAME>] SOURCE_PATH DEST_PATH`
+- `loon cp [--profile <NAME>] [--namespace <NAME>] SOURCE_PATH DEST_PATH`
 - `loon config path`
 - `loon config show`
 - `loon version`
 
 Global flags:
 
-- `--profile <NAME>`
 - `--json`
 - `--no-input`
 
-`filesystem cat` and `filesystem get ... -` stream raw bytes to stdout and reject `--json`.
+`cat` and `get ... -` stream raw bytes to stdout and reject `--json`.
 
 The CLI is the current path-oriented client profile only. It does not expose first-class commands
 for the lower-level staged upload, explicit commit, or ordered change-feed surface yet.
