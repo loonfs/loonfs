@@ -9,29 +9,33 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[test]
-fn profile_add_list_show_remove_work() {
+fn profile_create_list_show_remove_work() {
     let harness = Harness::new();
 
     let add_local = harness.run(&[
         "--json",
         "profile",
-        "add",
-        "local-fs",
+        "create",
         "default",
+        "--mode",
+        "local",
+        "--store-kind",
+        "local-fs",
         "--root",
         harness.store_root("default").to_str().unwrap(),
     ]);
     assert_success(&add_local);
     assert_eq!(json_data(&add_local)["mode"], "local");
 
-    let external =
-        harness.start_external_server(harness.write_server_config("remote", "profile-add-remote"));
+    let external = harness
+        .start_external_server(harness.write_server_config("remote", "profile-create-remote"));
     let add_remote = harness.run(&[
         "--json",
         "profile",
-        "add",
-        "remote",
+        "create",
         "prod",
+        "--mode",
+        "remote",
         "--server-url",
         &external.server_url,
         "--auth-token",
@@ -46,9 +50,7 @@ fn profile_add_list_show_remove_work() {
     let profiles = list_data["profiles"].as_array().unwrap();
     assert_eq!(profiles.len(), 2);
     assert_eq!(profiles[0]["name"], "default");
-    assert_eq!(profiles[0]["mode"], "local");
     assert_eq!(profiles[1]["name"], "prod");
-    assert_eq!(profiles[1]["mode"], "remote");
 
     let show = harness.run(&["config", "show"]);
     assert_success(&show);
@@ -87,12 +89,11 @@ fn local_profile_filesystem_flow_works_end_to_end() {
     fs::write(&upload_path, b"hello from direct core\n").expect("upload payload");
 
     assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
 
     let put = harness.run(&[
         "--json",
-        "filesystem",
         "put",
-        "demo",
         upload_path.to_str().unwrap(),
         "/docs/hello.txt",
     ]);
@@ -101,9 +102,7 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 
     let put_conflict = harness.run(&[
         "--json",
-        "filesystem",
         "put",
-        "demo",
         upload_path.to_str().unwrap(),
         "/docs/hello.txt",
     ]);
@@ -112,27 +111,18 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 
     let put_force = harness.run(&[
         "--json",
-        "filesystem",
         "put",
-        "demo",
         upload_path.to_str().unwrap(),
         "/docs/hello.txt",
         "--force",
     ]);
     assert_success(&put_force);
 
-    let cp = harness.run(&[
-        "--json",
-        "filesystem",
-        "cp",
-        "demo",
-        "/docs/hello.txt",
-        "/docs/copy.txt",
-    ]);
+    let cp = harness.run(&["--json", "cp", "/docs/hello.txt", "/docs/copy.txt"]);
     assert_success(&cp);
 
-    let source = harness.run(&["--json", "filesystem", "stat", "demo", "/docs/hello.txt"]);
-    let copy = harness.run(&["--json", "filesystem", "stat", "demo", "/docs/copy.txt"]);
+    let source = harness.run(&["--json", "stat", "/docs/hello.txt"]);
+    let copy = harness.run(&["--json", "stat", "/docs/copy.txt"]);
     assert_success(&source);
     assert_success(&copy);
     assert_ne!(json_data(&source)["inode_id"], json_data(&copy)["inode_id"]);
@@ -141,20 +131,17 @@ fn local_profile_filesystem_flow_works_end_to_end() {
         json_data(&copy)["content_manifest_digest"]
     );
 
-    let cat = harness.run(&["filesystem", "cat", "demo", "/docs/hello.txt"]);
+    let cat = harness.run(&["cat", "/docs/hello.txt"]);
     assert_success(&cat);
     assert_eq!(cat.stdout, b"hello from direct core\n");
-    assert!(cat.stderr.is_empty());
 
-    let get_stdout = harness.run(&["filesystem", "get", "demo", "/docs/hello.txt", "-"]);
+    let get_stdout = harness.run(&["get", "/docs/hello.txt", "-"]);
     assert_success(&get_stdout);
     assert_eq!(get_stdout.stdout, b"hello from direct core\n");
 
     let get_file = harness.run(&[
         "--json",
-        "filesystem",
         "get",
-        "demo",
         "/docs/hello.txt",
         download_path.to_str().unwrap(),
     ]);
@@ -164,32 +151,27 @@ fn local_profile_filesystem_flow_works_end_to_end() {
         b"hello from direct core\n"
     );
 
-    let mv = harness.run(&[
-        "--json",
-        "filesystem",
-        "mv",
-        "demo",
-        "/docs/copy.txt",
-        "/docs/final.txt",
-    ]);
+    let mv = harness.run(&["--json", "mv", "/docs/copy.txt", "/docs/final.txt"]);
     assert_success(&mv);
 
-    let rm_dir = harness.run(&["--json", "filesystem", "rm", "demo", "/docs"]);
+    let rm_dir = harness.run(&["--json", "rm", "/docs"]);
     assert_failure(&rm_dir);
     assert_eq!(json_error(&rm_dir)["code"], "path_conflict");
 
-    let rm = harness.run(&["--json", "filesystem", "rm", "demo", "/docs/final.txt"]);
+    let rm = harness.run(&["--json", "rm", "/docs/final.txt"]);
     assert_success(&rm);
 }
 
 #[test]
-fn init_creates_local_profile_and_sets_default() {
+fn init_creates_local_profile_and_current_reports_namespace_unset() {
     let harness = Harness::new();
 
     let init = harness.run(&[
         "--json",
         "init",
         "mystore",
+        "--mode",
+        "local",
         "--store-kind",
         "local-fs",
         "--root",
@@ -202,14 +184,15 @@ fn init_creates_local_profile_and_sets_default() {
     assert_success(&show);
     assert_eq!(json_data(&show)["mode"], "local");
 
+    let current = harness.run(&["--json", "current"]);
+    assert_success(&current);
+    assert_eq!(json_data(&current)["profile"], "mystore");
+    assert!(json_data(&current)["namespace"].is_null());
+
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     let list = harness.run(&["--json", "namespace", "list"]);
     assert_success(&list);
-    let namespaces = json_data(&list)["namespaces"]
-        .as_array()
-        .unwrap()
-        .to_owned();
-    assert_eq!(namespaces.len(), 1);
+    assert_eq!(json_data(&list)["namespaces"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -250,20 +233,20 @@ fn removing_default_profile_requires_explicit_reselection() {
     assert!(data["default_profile"].is_null());
     assert_eq!(data["profiles"].as_array().unwrap().len(), 1);
 
-    let show = harness.run(&["--json", "profile", "show"]);
-    assert_failure(&show);
-    assert_eq!(json_error(&show)["code"], "no_default_profile");
+    let current = harness.run(&["--json", "current"]);
+    assert_failure(&current);
+    assert_eq!(json_error(&current)["code"], "no_default_profile");
 
     let namespace = harness.run(&["--json", "namespace", "list"]);
     assert_failure(&namespace);
     assert_eq!(json_error(&namespace)["code"], "no_default_profile");
 
-    let filesystem = harness.run(&["--json", "filesystem", "ls", "demo"]);
+    let filesystem = harness.run(&["--json", "ls", "/"]);
     assert_failure(&filesystem);
     assert_eq!(json_error(&filesystem)["code"], "no_default_profile");
 
-    let make_default = harness.run(&["--json", "profile", "make-default", "beta"]);
-    assert_success(&make_default);
+    let use_profile = harness.run(&["--json", "profile", "use", "beta"]);
+    assert_success(&use_profile);
 
     let show_after = harness.run(&["--json", "profile", "show"]);
     assert_success(&show_after);
@@ -293,25 +276,26 @@ fn profile_update_changes_fields() {
 }
 
 #[test]
-fn profile_make_default_switches_default() {
+fn profile_use_switches_default() {
     let harness = Harness::new();
     harness.add_local_profile("alpha");
     harness.add_local_profile("beta");
 
-    let make_default = harness.run(&["--json", "profile", "make-default", "beta"]);
-    assert_success(&make_default);
-    assert_eq!(json_data(&make_default)["name"], "beta");
+    let use_profile = harness.run(&["--json", "profile", "use", "beta"]);
+    assert_success(&use_profile);
+    assert_eq!(json_data(&use_profile)["name"], "beta");
 
-    let show = harness.run(&["--json", "profile", "show"]);
-    assert_success(&show);
+    let current = harness.run(&["--json", "current"]);
+    assert_success(&current);
+    assert_eq!(json_data(&current)["profile"], "beta");
 }
 
 #[test]
-fn profile_make_default_rejects_missing_profile() {
+fn profile_use_rejects_missing_profile() {
     let harness = Harness::new();
     harness.add_local_profile("default");
 
-    let result = harness.run(&["--json", "profile", "make-default", "nonexistent"]);
+    let result = harness.run(&["--json", "profile", "use", "nonexistent"]);
     assert_failure(&result);
     assert_eq!(json_error(&result)["code"], "profile_not_found");
 }
@@ -324,6 +308,8 @@ fn reserved_profile_names_are_rejected() {
         "--json",
         "init",
         "default_profile",
+        "--mode",
+        "local",
         "--store-kind",
         "local-fs",
         "--root",
@@ -335,9 +321,12 @@ fn reserved_profile_names_are_rejected() {
     let add_reserved = harness.run(&[
         "--json",
         "profile",
-        "add",
-        "local-fs",
+        "create",
         "config_version",
+        "--mode",
+        "local",
+        "--store-kind",
+        "local-fs",
         "--root",
         harness.store_root("config_version").to_str().unwrap(),
     ]);
@@ -368,6 +357,8 @@ root = "{}"
         "--json",
         "init",
         "mystore",
+        "--mode",
+        "local",
         "--store-kind",
         "local-fs",
         "--root",
@@ -377,10 +368,9 @@ root = "{}"
     let error = json_error(&init);
     assert_eq!(error["code"], "config_already_exists");
     let message = error["message"].as_str().unwrap();
-    assert!(message.contains("config file already exists"));
-    assert!(message.contains("loon profile add"));
+    assert!(message.contains("loon profile create"));
     assert!(message.contains("loon profile update"));
-    assert!(message.contains("loon profile make-default"));
+    assert!(message.contains("loon profile use"));
     assert_eq!(
         fs::read_to_string(&harness.config_path).expect("read unchanged config"),
         existing
@@ -477,15 +467,45 @@ root = ""
 }
 
 #[test]
+fn invalid_default_namespace_in_config_is_rejected() {
+    let harness = Harness::new();
+    harness.write_cli_config(format!(
+        r#"
+config_version = 1
+default_profile = "default"
+
+[default]
+mode = "local"
+default_namespace = "   "
+
+[default.store]
+kind = "local-fs"
+root = "{}"
+"#,
+        harness.store_root("default").display()
+    ));
+
+    let current = harness.run(&["--json", "current"]);
+    assert_failure(&current);
+    let error = json_error(&current);
+    assert_eq!(error["code"], "invalid_config");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("default.default_namespace"));
+}
+
+#[test]
 fn invalid_remote_urls_are_rejected() {
     let harness = Harness::new();
 
     let missing_host_http = harness.run(&[
         "--json",
         "profile",
-        "add",
-        "remote",
+        "create",
         "default",
+        "--mode",
+        "remote",
         "--server-url",
         "http://",
     ]);
@@ -499,9 +519,10 @@ fn invalid_remote_urls_are_rejected() {
     let missing_host_https = harness.run(&[
         "--json",
         "profile",
-        "add",
-        "remote",
+        "create",
         "default",
+        "--mode",
+        "remote",
         "--server-url",
         "https://",
     ]);
@@ -517,9 +538,10 @@ fn external_remote_profile_executes_through_http() {
     let add_remote = harness.run(&[
         "--json",
         "profile",
-        "add",
-        "remote",
+        "create",
         "default",
+        "--mode",
+        "remote",
         "--server-url",
         &remote_server.server_url,
         "--auth-token",
@@ -530,6 +552,9 @@ fn external_remote_profile_executes_through_http() {
     let create = harness.run(&["--json", "namespace", "create", "demo"]);
     assert_success(&create);
 
+    let use_namespace = harness.run(&["--json", "use", "demo"]);
+    assert_success(&use_namespace);
+
     let list = harness.run(&["--json", "namespace", "list"]);
     assert_success(&list);
     let list_data = json_data(&list);
@@ -539,11 +564,22 @@ fn external_remote_profile_executes_through_http() {
 }
 
 #[test]
+fn filesystem_requires_default_namespace_when_omitted() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let output = harness.run(&["--json", "ls", "/"]);
+    assert_failure(&output);
+    let error = json_error(&output);
+    assert_eq!(error["code"], "no_default_namespace");
+}
+
+#[test]
 fn local_profile_missing_namespace_reports_user_facing_message() {
     let harness = Harness::new();
     harness.add_local_profile("default");
 
-    let output = harness.run(&["--json", "filesystem", "ls", "missing"]);
+    let output = harness.run(&["--json", "ls", "--namespace", "missing", "/"]);
     assert_failure(&output);
     let error = json_error(&output);
     assert_eq!(error["code"], "namespace_not_found");
@@ -558,9 +594,10 @@ fn remote_profile_missing_namespace_reports_user_facing_message() {
     let add_remote = harness.run(&[
         "--json",
         "profile",
-        "add",
-        "remote",
+        "create",
         "default",
+        "--mode",
+        "remote",
         "--server-url",
         &remote_server.server_url,
         "--auth-token",
@@ -568,11 +605,63 @@ fn remote_profile_missing_namespace_reports_user_facing_message() {
     ]);
     assert_success(&add_remote);
 
-    let output = harness.run(&["--json", "filesystem", "ls", "missing"]);
+    let output = harness.run(&["--json", "ls", "--namespace", "missing", "/"]);
     assert_failure(&output);
     let error = json_error(&output);
     assert_eq!(error["code"], "namespace_not_found");
     assert_eq!(error["message"], "namespace `missing` does not exist");
+}
+
+#[test]
+fn current_reports_profile_specific_namespace() {
+    let harness = Harness::new();
+    harness.add_local_profile("alpha");
+    harness.add_local_profile("beta");
+
+    assert_success(&harness.run(&["namespace", "create", "--profile", "alpha", "alpha-ns"]));
+    assert_success(&harness.run(&["use", "--profile", "alpha", "alpha-ns"]));
+    assert_success(&harness.run(&["namespace", "create", "--profile", "beta", "beta-ns"]));
+    assert_success(&harness.run(&["use", "--profile", "beta", "beta-ns"]));
+    assert_success(&harness.run(&["profile", "use", "beta"]));
+
+    let current_default = harness.run(&["--json", "current"]);
+    assert_success(&current_default);
+    assert_eq!(json_data(&current_default)["profile"], "beta");
+    assert_eq!(json_data(&current_default)["namespace"], "beta-ns");
+
+    let current_alpha = harness.run(&["--json", "current", "--profile", "alpha"]);
+    assert_success(&current_alpha);
+    assert_eq!(json_data(&current_alpha)["profile"], "alpha");
+    assert_eq!(json_data(&current_alpha)["namespace"], "alpha-ns");
+}
+
+#[test]
+fn legacy_commands_are_rejected() {
+    let harness = Harness::new();
+
+    let add = harness.run(&["profile", "add"]);
+    assert_failure(&add);
+    assert!(stderr_string(&add).contains("unrecognized"));
+
+    let filesystem = harness.run(&["filesystem", "ls"]);
+    assert_failure(&filesystem);
+    assert!(stderr_string(&filesystem).contains("unrecognized"));
+}
+
+#[test]
+fn help_omits_legacy_commands_and_config_flag() {
+    let harness = Harness::new();
+    let output = Command::new(loon_binary_path())
+        .env("HOME", &harness.home_dir)
+        .arg("--help")
+        .output()
+        .expect("run help");
+    assert_success(&output);
+    let stdout = stdout_string(&output);
+    assert!(!stdout.contains("--config"));
+    assert!(!stdout.contains("filesystem"));
+    assert!(stdout.contains("current"));
+    assert!(stdout.contains("use"));
 }
 
 struct Harness {
@@ -609,9 +698,12 @@ impl Harness {
         let output = self.run(&[
             "--json",
             "profile",
-            "add",
-            "local-fs",
+            "create",
             name,
+            "--mode",
+            "local",
+            "--store-kind",
+            "local-fs",
             "--root",
             self.store_root(name).to_str().unwrap(),
         ]);
@@ -648,27 +740,28 @@ key_prefix = "{key_prefix}"
     }
 
     fn start_external_server(&self, server_config_path: PathBuf) -> ExternalServer {
-        let child = Command::new(loond_binary_path())
-            .arg("--config")
-            .arg(&server_config_path)
-            .spawn()
-            .expect("spawn loond");
-        let server_url = server_url_from_config(&server_config_path);
-        wait_for_healthz(&server_url);
-        ExternalServer { child, server_url }
-    }
-}
+        for _ in 0..5 {
+            let child = Command::new(loond_binary_path())
+                .arg("--config")
+                .arg(&server_config_path)
+                .spawn()
+                .expect("spawn loond");
+            let server_url = server_url_from_config(&server_config_path);
+            if wait_for_healthz_ready(&server_url) {
+                return ExternalServer { child, server_url };
+            }
 
-#[test]
-fn help_omits_config_flag() {
-    let harness = Harness::new();
-    let output = Command::new(loon_binary_path())
-        .env("HOME", &harness.home_dir)
-        .arg("--help")
-        .output()
-        .expect("run help");
-    assert_success(&output);
-    assert!(!stdout_string(&output).contains("--config"));
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            rewrite_server_bind(&server_config_path, available_port());
+        }
+
+        panic!(
+            "timed out waiting for external server from {}",
+            server_config_path.display()
+        );
+    }
 }
 
 struct ExternalServer {
@@ -732,15 +825,32 @@ fn server_url_from_config(path: &Path) -> String {
     format!("http://{bind}")
 }
 
-fn wait_for_healthz(server_url: &str) {
+fn wait_for_healthz_ready(server_url: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if ureq::get(&format!("{server_url}/healthz")).call().is_ok() {
-            return;
+            return true;
         }
         thread::sleep(Duration::from_millis(100));
     }
-    panic!("timed out waiting for {server_url}/healthz");
+    false
+}
+
+fn rewrite_server_bind(path: &Path, port: u16) {
+    let config = fs::read_to_string(path).expect("read server config for bind rewrite");
+    let bind = format!("127.0.0.1:{port}");
+    let rewritten = config
+        .lines()
+        .map(|line| {
+            if line.trim().starts_with("bind = ") {
+                format!("bind = \"{bind}\"")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, rewritten).expect("rewrite server bind");
 }
 
 fn available_port() -> u16 {

@@ -98,7 +98,7 @@ impl LoonOutput {
 }
 
 trait LoonRunner {
-    fn run(&self, args: &[String]) -> Result<LoonOutput>;
+    fn run(&self, session: &SmokeSession, args: &[String]) -> Result<LoonOutput>;
 }
 
 struct CargoLoonRunner {
@@ -121,7 +121,7 @@ impl CargoLoonRunner {
 }
 
 impl LoonRunner for CargoLoonRunner {
-    fn run(&self, args: &[String]) -> Result<LoonOutput> {
+    fn run(&self, session: &SmokeSession, args: &[String]) -> Result<LoonOutput> {
         let output = Command::new(&self.cargo)
             .arg("run")
             .arg("--quiet")
@@ -129,6 +129,7 @@ impl LoonRunner for CargoLoonRunner {
             .arg("loon-cli")
             .arg("--")
             .args(args)
+            .env("HOME", &session.home_dir)
             .current_dir(&self.workspace_root)
             .output()
             .with_context(|| format!("run loon CLI with args `{}`", args.join(" ")))?;
@@ -143,16 +144,17 @@ impl LoonRunner for CargoLoonRunner {
 #[derive(Debug)]
 struct SmokeSession {
     _temp_dir: tempfile::TempDir,
-    config_path: PathBuf,
+    home_dir: PathBuf,
 }
 
 impl SmokeSession {
     fn new() -> Result<Self> {
         let temp_dir = tempdir().context("create tempdir for smoke session")?;
-        let config_path = temp_dir.path().join("loon-smoke.toml");
+        let home_dir = temp_dir.path().join("home");
+        fs::create_dir_all(&home_dir).context("create smoke home dir")?;
         Ok(Self {
             _temp_dir: temp_dir,
-            config_path,
+            home_dir,
         })
     }
 }
@@ -204,51 +206,30 @@ fn run_local_smoke_with_id(
     smoke_id: &str,
 ) -> Result<SmokeReport> {
     let session = SmokeSession::new()?;
-    let mut local_started = false;
+    let add_result = run_json_command(
+        runner,
+        &session,
+        profile_create_local_args(&session, &args.server_config)?,
+    )?;
+    let _ = expect_success(
+        add_result,
+        "profile_create",
+        Some(PROFILE_NAME),
+        Some("local"),
+    )?;
 
-    let result = (|| -> Result<SmokeReport> {
-        let add_result = run_json_command(
-            runner,
-            profile_add_local_args(&session, &args.server_config),
-        )?;
-        let _ = expect_success(add_result, "profile_add", Some(PROFILE_NAME), Some("local"))?;
-
-        let up_result = run_json_command(runner, local_control_args(&session, "up"))?;
-        let _ = expect_success(up_result, "local_up", Some(PROFILE_NAME), Some("local"))?;
-        local_started = true;
-
-        let steps = execute_smoke_sequence(
-            runner,
-            &session,
-            SmokeMode::Local,
-            &args.namespace,
-            smoke_id,
-        )?;
-        Ok(SmokeReport {
-            mode: SmokeMode::Local,
-            namespace: args.namespace.clone(),
-            steps,
-        })
-    })();
-
-    let cleanup = if local_started {
-        run_json_command(runner, local_control_args(&session, "down"))
-            .and_then(|result| {
-                expect_success(result, "local_down", Some(PROFILE_NAME), Some("local")).map(|_| ())
-            })
-            .map_err(|error| anyhow!("local down cleanup failed: {error}"))
-    } else {
-        Ok(())
-    };
-
-    match (result, cleanup) {
-        (Ok(report), Ok(())) => Ok(report),
-        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-        (Err(main_error), Ok(())) => Err(main_error),
-        (Err(main_error), Err(cleanup_error)) => {
-            Err(anyhow!("{main_error}; additionally, {cleanup_error}"))
-        }
-    }
+    let steps = execute_smoke_sequence(
+        runner,
+        &session,
+        SmokeMode::Local,
+        &args.namespace,
+        smoke_id,
+    )?;
+    Ok(SmokeReport {
+        mode: SmokeMode::Local,
+        namespace: args.namespace.clone(),
+        steps,
+    })
 }
 
 fn run_remote_smoke_with(args: &RemoteSmokeArgs, runner: &dyn LoonRunner) -> Result<SmokeReport> {
@@ -264,11 +245,12 @@ fn run_remote_smoke_with_id(
     let session = SmokeSession::new()?;
     let add_result = run_json_command(
         runner,
-        profile_add_remote_args(&session, &args.server_url, args.auth_token.as_deref()),
+        &session,
+        profile_create_remote_args(&session, &args.server_url, args.auth_token.as_deref()),
     )?;
     let _ = expect_success(
         add_result,
-        "profile_add",
+        "profile_create",
         Some(PROFILE_NAME),
         Some("remote"),
     )?;
@@ -307,7 +289,8 @@ fn execute_smoke_sequence(
     fs::write(&upload_file, &payload)
         .with_context(|| format!("write smoke input file {}", upload_file.display()))?;
 
-    let create_result = run_json_command(runner, namespace_create_args(session, namespace))?;
+    let create_result =
+        run_json_command(runner, session, namespace_create_args(session, namespace))?;
     match create_result {
         JsonCommandResult::Success(envelope) => {
             let envelope = expect_envelope(
@@ -340,7 +323,7 @@ fn execute_smoke_sequence(
     }
 
     let list_envelope = expect_success(
-        run_json_command(runner, namespace_list_args(session))?,
+        run_json_command(runner, session, namespace_list_args(session))?,
         "namespace_list",
         Some(PROFILE_NAME),
         Some(mode.as_str()),
@@ -357,6 +340,7 @@ fn execute_smoke_sequence(
     let put_envelope = expect_success(
         run_json_command(
             runner,
+            session,
             filesystem_put_args(session, namespace, &upload_file, &uploaded_path),
         )?,
         "filesystem_put",
@@ -371,7 +355,11 @@ fn execute_smoke_sequence(
     }
 
     let ls_envelope = expect_success(
-        run_json_command(runner, filesystem_ls_args(session, namespace, &parent_path))?,
+        run_json_command(
+            runner,
+            session,
+            filesystem_ls_args(session, namespace, &parent_path),
+        )?,
         "filesystem_ls",
         Some(PROFILE_NAME),
         Some(mode.as_str()),
@@ -387,6 +375,7 @@ fn execute_smoke_sequence(
     let stat_envelope = expect_success(
         run_json_command(
             runner,
+            session,
             filesystem_stat_args(session, namespace, &uploaded_path),
         )?,
         "filesystem_stat",
@@ -409,6 +398,7 @@ fn execute_smoke_sequence(
 
     let cat_output = run_stream_command(
         runner,
+        session,
         filesystem_cat_args(session, namespace, &uploaded_path),
     )?;
     if cat_output.stdout != payload {
@@ -418,6 +408,7 @@ fn execute_smoke_sequence(
     let get_envelope = expect_success(
         run_json_command(
             runner,
+            session,
             filesystem_get_args(session, namespace, &uploaded_path, &downloaded_file),
         )?,
         "filesystem_get",
@@ -441,6 +432,7 @@ fn execute_smoke_sequence(
     let cp_envelope = expect_success(
         run_json_command(
             runner,
+            session,
             filesystem_cp_args(session, namespace, &uploaded_path, &copied_path),
         )?,
         "filesystem_cp",
@@ -461,6 +453,7 @@ fn execute_smoke_sequence(
     let copy_stat_envelope = expect_success(
         run_json_command(
             runner,
+            session,
             filesystem_stat_args(session, namespace, &copied_path),
         )?,
         "filesystem_stat",
@@ -476,6 +469,7 @@ fn execute_smoke_sequence(
     let mv_envelope = expect_success(
         run_json_command(
             runner,
+            session,
             filesystem_mv_args(session, namespace, &copied_path, &moved_path),
         )?,
         "filesystem_mv",
@@ -490,7 +484,11 @@ fn execute_smoke_sequence(
     }
 
     let rm_envelope = expect_success(
-        run_json_command(runner, filesystem_rm_args(session, namespace, &moved_path))?,
+        run_json_command(
+            runner,
+            session,
+            filesystem_rm_args(session, namespace, &moved_path),
+        )?,
         "filesystem_rm",
         Some(PROFILE_NAME),
         Some(mode.as_str()),
@@ -502,7 +500,11 @@ fn execute_smoke_sequence(
     }
 
     let final_ls_envelope = expect_success(
-        run_json_command(runner, filesystem_ls_args(session, namespace, &parent_path))?,
+        run_json_command(
+            runner,
+            session,
+            filesystem_ls_args(session, namespace, &parent_path),
+        )?,
         "filesystem_ls",
         Some(PROFILE_NAME),
         Some(mode.as_str()),
@@ -525,6 +527,7 @@ fn execute_smoke_sequence(
     let _ = expect_success(
         run_json_command(
             runner,
+            session,
             filesystem_stat_args(session, namespace, &uploaded_path),
         )?,
         "filesystem_stat",
@@ -534,6 +537,7 @@ fn execute_smoke_sequence(
 
     let removed_stat = run_json_command(
         runner,
+        session,
         filesystem_stat_args(session, namespace, &moved_path),
     )?;
     let removed_error = expect_failure(
@@ -573,8 +577,12 @@ fn render_report(report: &SmokeReport) -> String {
     )
 }
 
-fn run_json_command(runner: &dyn LoonRunner, args: Vec<String>) -> Result<JsonCommandResult> {
-    let output = runner.run(&args)?;
+fn run_json_command(
+    runner: &dyn LoonRunner,
+    session: &SmokeSession,
+    args: Vec<String>,
+) -> Result<JsonCommandResult> {
+    let output = runner.run(session, &args)?;
     if output.success() {
         Ok(JsonCommandResult::Success(parse_envelope(
             &output.stdout,
@@ -592,8 +600,12 @@ fn run_json_command(runner: &dyn LoonRunner, args: Vec<String>) -> Result<JsonCo
     }
 }
 
-fn run_stream_command(runner: &dyn LoonRunner, args: Vec<String>) -> Result<LoonOutput> {
-    let output = runner.run(&args)?;
+fn run_stream_command(
+    runner: &dyn LoonRunner,
+    session: &SmokeSession,
+    args: Vec<String>,
+) -> Result<LoonOutput> {
+    let output = runner.run(session, &args)?;
     if output.success() {
         Ok(output)
     } else {
@@ -761,15 +773,8 @@ fn id_field(value: &Value, field: &str) -> Result<u64> {
     }
 }
 
-fn base_args(session: &SmokeSession, profile: Option<&str>, json: bool) -> Vec<String> {
-    let mut args = vec![
-        "--config".to_owned(),
-        session.config_path.display().to_string(),
-    ];
-    if let Some(profile) = profile {
-        args.push("--profile".to_owned());
-        args.push(profile.to_owned());
-    }
+fn base_args(_session: &SmokeSession, json: bool) -> Vec<String> {
+    let mut args = Vec::new();
     if json {
         args.push("--json".to_owned());
     }
@@ -777,30 +782,147 @@ fn base_args(session: &SmokeSession, profile: Option<&str>, json: bool) -> Vec<S
     args
 }
 
-fn profile_add_local_args(session: &SmokeSession, server_config: &Path) -> Vec<String> {
-    let mut args = base_args(session, None, true);
-    args.extend([
-        "profile".to_owned(),
-        "add".to_owned(),
-        "local".to_owned(),
-        PROFILE_NAME.to_owned(),
-        "--server-config".to_owned(),
-        server_config.display().to_string(),
-    ]);
-    args
+#[derive(Debug, Deserialize)]
+struct SmokeServerConfig {
+    store: SmokeStoreConfig,
 }
 
-fn profile_add_remote_args(
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum SmokeStoreConfig {
+    LocalFs {
+        root: String,
+        key_prefix: Option<String>,
+    },
+    AwsS3 {
+        bucket: String,
+        region: String,
+        endpoint_url: Option<String>,
+        access_key_id: String,
+        secret_access_key: String,
+        session_token: Option<String>,
+        key_prefix: Option<String>,
+        #[serde(default)]
+        force_path_style: bool,
+    },
+    CloudflareR2 {
+        bucket: String,
+        account_id: String,
+        endpoint_url: String,
+        access_key_id: String,
+        secret_access_key: String,
+        key_prefix: Option<String>,
+    },
+}
+
+fn profile_create_local_args(session: &SmokeSession, server_config: &Path) -> Result<Vec<String>> {
+    let config: SmokeServerConfig =
+        toml::from_str(&fs::read_to_string(server_config).with_context(|| {
+            format!("read local smoke server config {}", server_config.display())
+        })?)
+        .with_context(|| {
+            format!(
+                "decode local smoke server config {}",
+                server_config.display()
+            )
+        })?;
+    let mut args = base_args(session, true);
+    args.extend([
+        "profile".to_owned(),
+        "create".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--mode".to_owned(),
+        "local".to_owned(),
+    ]);
+    match config.store {
+        SmokeStoreConfig::LocalFs { root, key_prefix } => {
+            args.extend([
+                "--store-kind".to_owned(),
+                "local-fs".to_owned(),
+                "--root".to_owned(),
+                root,
+            ]);
+            if let Some(key_prefix) = key_prefix {
+                args.extend(["--key-prefix".to_owned(), key_prefix]);
+            }
+        }
+        SmokeStoreConfig::AwsS3 {
+            bucket,
+            region,
+            endpoint_url,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            key_prefix,
+            force_path_style,
+        } => {
+            args.extend([
+                "--store-kind".to_owned(),
+                "aws-s3".to_owned(),
+                "--bucket".to_owned(),
+                bucket,
+                "--region".to_owned(),
+                region,
+                "--access-key-id".to_owned(),
+                access_key_id,
+                "--secret-access-key".to_owned(),
+                secret_access_key,
+            ]);
+            if let Some(endpoint_url) = endpoint_url {
+                args.extend(["--endpoint-url".to_owned(), endpoint_url]);
+            }
+            if let Some(session_token) = session_token {
+                args.extend(["--session-token".to_owned(), session_token]);
+            }
+            if let Some(key_prefix) = key_prefix {
+                args.extend(["--key-prefix".to_owned(), key_prefix]);
+            }
+            if force_path_style {
+                args.push("--force-path-style".to_owned());
+            }
+        }
+        SmokeStoreConfig::CloudflareR2 {
+            bucket,
+            account_id,
+            endpoint_url,
+            access_key_id,
+            secret_access_key,
+            key_prefix,
+        } => {
+            args.extend([
+                "--store-kind".to_owned(),
+                "cloudflare-r2".to_owned(),
+                "--bucket".to_owned(),
+                bucket,
+                "--account-id".to_owned(),
+                account_id,
+                "--endpoint-url".to_owned(),
+                endpoint_url,
+                "--access-key-id".to_owned(),
+                access_key_id,
+                "--secret-access-key".to_owned(),
+                secret_access_key,
+            ]);
+            if let Some(key_prefix) = key_prefix {
+                args.extend(["--key-prefix".to_owned(), key_prefix]);
+            }
+        }
+    }
+    Ok(args)
+}
+
+fn profile_create_remote_args(
     session: &SmokeSession,
     server_url: &str,
     auth_token: Option<&str>,
 ) -> Vec<String> {
-    let mut args = base_args(session, None, true);
+    let mut args = base_args(session, true);
     args.extend([
         "profile".to_owned(),
-        "add".to_owned(),
-        "remote".to_owned(),
+        "create".to_owned(),
         PROFILE_NAME.to_owned(),
+        "--mode".to_owned(),
+        "remote".to_owned(),
         "--server-url".to_owned(),
         server_url.to_owned(),
     ]);
@@ -811,25 +933,26 @@ fn profile_add_remote_args(
     args
 }
 
-fn local_control_args(session: &SmokeSession, command: &str) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
-    args.extend(["local".to_owned(), command.to_owned()]);
-    args
-}
-
 fn namespace_create_args(session: &SmokeSession, namespace: &str) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    let mut args = base_args(session, true);
     args.extend([
         "namespace".to_owned(),
         "create".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
         namespace.to_owned(),
     ]);
     args
 }
 
 fn namespace_list_args(session: &SmokeSession) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
-    args.extend(["namespace".to_owned(), "list".to_owned()]);
+    let mut args = base_args(session, true);
+    args.extend([
+        "namespace".to_owned(),
+        "list".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+    ]);
     args
 }
 
@@ -839,10 +962,12 @@ fn filesystem_put_args(
     local_path: &Path,
     remote_path: &str,
 ) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    let mut args = base_args(session, true);
     args.extend([
-        "filesystem".to_owned(),
         "put".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--namespace".to_owned(),
         namespace.to_owned(),
         local_path.display().to_string(),
         remote_path.to_owned(),
@@ -851,10 +976,12 @@ fn filesystem_put_args(
 }
 
 fn filesystem_ls_args(session: &SmokeSession, namespace: &str, path: &str) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    let mut args = base_args(session, true);
     args.extend([
-        "filesystem".to_owned(),
         "ls".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--namespace".to_owned(),
         namespace.to_owned(),
         path.to_owned(),
     ]);
@@ -862,10 +989,12 @@ fn filesystem_ls_args(session: &SmokeSession, namespace: &str, path: &str) -> Ve
 }
 
 fn filesystem_stat_args(session: &SmokeSession, namespace: &str, path: &str) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    let mut args = base_args(session, true);
     args.extend([
-        "filesystem".to_owned(),
         "stat".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--namespace".to_owned(),
         namespace.to_owned(),
         path.to_owned(),
     ]);
@@ -873,10 +1002,12 @@ fn filesystem_stat_args(session: &SmokeSession, namespace: &str, path: &str) -> 
 }
 
 fn filesystem_cat_args(session: &SmokeSession, namespace: &str, path: &str) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), false);
+    let mut args = base_args(session, false);
     args.extend([
-        "filesystem".to_owned(),
         "cat".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--namespace".to_owned(),
         namespace.to_owned(),
         path.to_owned(),
     ]);
@@ -889,10 +1020,12 @@ fn filesystem_get_args(
     remote_path: &str,
     destination: &Path,
 ) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    let mut args = base_args(session, true);
     args.extend([
-        "filesystem".to_owned(),
         "get".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--namespace".to_owned(),
         namespace.to_owned(),
         remote_path.to_owned(),
         destination.display().to_string(),
@@ -906,10 +1039,12 @@ fn filesystem_cp_args(
     source_path: &str,
     dest_path: &str,
 ) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    let mut args = base_args(session, true);
     args.extend([
-        "filesystem".to_owned(),
         "cp".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--namespace".to_owned(),
         namespace.to_owned(),
         source_path.to_owned(),
         dest_path.to_owned(),
@@ -923,10 +1058,12 @@ fn filesystem_mv_args(
     source_path: &str,
     dest_path: &str,
 ) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    let mut args = base_args(session, true);
     args.extend([
-        "filesystem".to_owned(),
         "mv".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--namespace".to_owned(),
         namespace.to_owned(),
         source_path.to_owned(),
         dest_path.to_owned(),
@@ -935,10 +1072,12 @@ fn filesystem_mv_args(
 }
 
 fn filesystem_rm_args(session: &SmokeSession, namespace: &str, path: &str) -> Vec<String> {
-    let mut args = base_args(session, Some(PROFILE_NAME), true);
+    let mut args = base_args(session, true);
     args.extend([
-        "filesystem".to_owned(),
         "rm".to_owned(),
+        "--profile".to_owned(),
+        PROFILE_NAME.to_owned(),
+        "--namespace".to_owned(),
         namespace.to_owned(),
         path.to_owned(),
     ]);
@@ -959,6 +1098,8 @@ mod tests {
     use serde_json::json;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn smoke_report_renders_compact_summary() {
@@ -979,9 +1120,9 @@ mod tests {
 
     #[test]
     fn local_smoke_runs_expected_cli_sequence() {
-        let server_config = PathBuf::from("/tmp/loond.toml");
+        let server_config = write_local_server_config();
         let args = LocalSmokeArgs {
-            server_config: server_config.clone(),
+            server_config: server_config.path().to_path_buf(),
             namespace: "demo".to_owned(),
         };
         let runner = RecordingRunner::new(local_success_outputs("demo"));
@@ -1006,34 +1147,25 @@ mod tests {
             ]
         );
         let calls = runner.calls();
-        assert_same_config_path(&calls);
         assert_command_suffix(
             &calls[0],
             &[
                 "--json",
                 "--no-input",
                 "profile",
-                "add",
-                "local",
+                "create",
                 "smoke",
-                "--server-config",
-                "/tmp/loond.toml",
+                "--mode",
+                "local",
+                "--store-kind",
+                "local-fs",
+                "--root",
+                "/tmp/xtask-loon-store",
             ],
         );
-        assert_command_suffix(
-            &calls[1],
-            &["--profile", "smoke", "--json", "--no-input", "local", "up"],
-        );
-        assert_command_suffix(
-            calls.last().expect("last call"),
-            &[
-                "--profile",
-                "smoke",
-                "--json",
-                "--no-input",
-                "local",
-                "down",
-            ],
+        assert_eq!(
+            calls.last().unwrap().first().map(String::as_str),
+            Some("--json")
         );
     }
 
@@ -1050,40 +1182,34 @@ mod tests {
 
         assert_eq!(report.mode, SmokeMode::Remote);
         let calls = runner.calls();
-        assert_same_config_path(&calls);
         assert_command_suffix(
             &calls[0],
             &[
                 "--json",
                 "--no-input",
                 "profile",
-                "add",
-                "remote",
+                "create",
                 "smoke",
+                "--mode",
+                "remote",
                 "--server-url",
                 "http://127.0.0.1:9400",
                 "--auth-token",
                 "dev-token",
             ],
         );
-        assert!(
-            !calls
-                .iter()
-                .any(|call| call.iter().any(|arg| *arg == "local")),
-            "remote smoke should not issue local lifecycle commands"
-        );
         assert_eq!(report.steps.first(), Some(&STEP_CREATE_NAMESPACE));
     }
 
     #[test]
-    fn local_smoke_always_runs_local_down_after_failure() {
-        let server_config = PathBuf::from("/tmp/loond.toml");
+    fn local_smoke_propagates_failures() {
+        let server_config = write_local_server_config();
         let args = LocalSmokeArgs {
-            server_config,
+            server_config: server_config.path().to_path_buf(),
             namespace: "demo".to_owned(),
         };
         let mut outputs = local_success_outputs("demo");
-        outputs[5] = json_failure(
+        outputs[4] = json_failure(
             "filesystem_ls",
             Some("smoke"),
             Some("local"),
@@ -1096,17 +1222,7 @@ mod tests {
 
         assert!(error.to_string().contains("boom"));
         let calls = runner.calls();
-        assert_command_suffix(
-            calls.last().expect("last call"),
-            &[
-                "--profile",
-                "smoke",
-                "--json",
-                "--no-input",
-                "local",
-                "down",
-            ],
-        );
+        assert!(calls.iter().any(|call| call.iter().any(|arg| arg == "ls")));
     }
 
     #[test]
@@ -1132,17 +1248,6 @@ mod tests {
         assert_eq!(report.steps[0], STEP_CREATE_NAMESPACE);
     }
 
-    fn assert_same_config_path(calls: &[Vec<String>]) {
-        let config_path = calls
-            .first()
-            .and_then(|call| call.get(1))
-            .expect("config path");
-        for call in calls {
-            assert_eq!(call.first().map(String::as_str), Some("--config"));
-            assert_eq!(call.get(1).map(String::as_str), Some(config_path.as_str()));
-        }
-    }
-
     fn assert_command_suffix(actual: &[String], suffix: &[&str]) {
         let actual_suffix = &actual[actual.len() - suffix.len()..];
         let expected = suffix
@@ -1152,47 +1257,36 @@ mod tests {
         assert_eq!(actual_suffix, expected.as_slice());
     }
 
+    fn write_local_server_config() -> NamedTempFile {
+        let mut file = NamedTempFile::new().expect("temp server config");
+        writeln!(
+            file,
+            r#"
+[store]
+kind = "local-fs"
+root = "/tmp/xtask-loon-store"
+"#
+        )
+        .expect("write temp server config");
+        file
+    }
+
     fn local_success_outputs(namespace: &str) -> Vec<LoonOutput> {
         let mut outputs = Vec::new();
         outputs.push(json_success(
-            "profile_add",
+            "profile_create",
             Some(PROFILE_NAME),
             Some("local"),
             json!({"type":"profile","name":"smoke","mode":"local","active":true}),
         ));
-        outputs.push(json_success(
-            "local_up",
-            Some(PROFILE_NAME),
-            Some("local"),
-            json!({
-                "type":"local_status",
-                "profile_name":"smoke",
-                "status":"running",
-                "server_url":"http://127.0.0.1:9400",
-                "server_config_path":"/tmp/loond.toml",
-                "pid":42
-            }),
-        ));
         outputs.extend(sequence_outputs(namespace, "local"));
-        outputs.push(json_success(
-            "local_down",
-            Some(PROFILE_NAME),
-            Some("local"),
-            json!({
-                "type":"local_status",
-                "profile_name":"smoke",
-                "status":"stopped",
-                "server_url":"http://127.0.0.1:9400",
-                "server_config_path":"/tmp/loond.toml"
-            }),
-        ));
         outputs
     }
 
     fn remote_success_outputs(namespace: &str) -> Vec<LoonOutput> {
         let mut outputs = Vec::new();
         outputs.push(json_success(
-            "profile_add",
+            "profile_create",
             Some(PROFILE_NAME),
             Some("remote"),
             json!({"type":"profile","name":"smoke","mode":"remote","active":true}),
@@ -1359,13 +1453,10 @@ mod tests {
     }
 
     impl LoonRunner for RecordingRunner {
-        fn run(&self, args: &[String]) -> Result<LoonOutput> {
+        fn run(&self, _session: &SmokeSession, args: &[String]) -> Result<LoonOutput> {
             self.calls.borrow_mut().push(args.to_vec());
 
-            if args
-                .windows(2)
-                .any(|window| window == ["filesystem", "get"])
-            {
+            if args.iter().any(|arg| arg == "get") {
                 let destination = args
                     .last()
                     .ok_or_else(|| anyhow!("missing get destination"))?;

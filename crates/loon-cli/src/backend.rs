@@ -320,6 +320,7 @@ impl ResolvedTarget {
                 writer_id,
                 writer_version,
                 lease_duration_ms,
+                ..
             } => Ok(Self::Local(Box::new(LocalTarget::new(
                 store,
                 writer_id.as_deref(),
@@ -329,6 +330,7 @@ impl ResolvedTarget {
             ProfileConfig::Remote {
                 server_url,
                 auth_token,
+                ..
             } => Ok(Self::Remote(RemoteTarget::new(
                 profile_name,
                 server_url,

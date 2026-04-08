@@ -1,0 +1,12 @@
+---
+source: crates/loon-cli/src/render.rs
+assertion_line: 297
+expression: human_success(&output)
+---
+name = "default"
+mode = "local"
+default_namespace = "demo"
+
+[store]
+kind = "local-fs"
+root = "/tmp/store"

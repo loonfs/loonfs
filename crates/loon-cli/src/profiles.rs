@@ -114,3 +114,36 @@ pub fn resolve_profile<'a>(
         .ok_or_else(|| CliError::profile_not_found(name))?;
     Ok((name, profile))
 }
+
+pub fn default_namespace(profile: &ProfileConfig) -> Option<&str> {
+    match profile {
+        ProfileConfig::Local {
+            default_namespace, ..
+        }
+        | ProfileConfig::Remote {
+            default_namespace, ..
+        } => default_namespace.as_deref(),
+    }
+}
+
+pub fn set_default_namespace(
+    config: &mut CliConfig,
+    profile_name: &str,
+    namespace: &str,
+) -> Result<(), CliError> {
+    let profile = config
+        .profiles
+        .get_mut(profile_name)
+        .ok_or_else(|| CliError::profile_not_found(profile_name))?;
+    match profile {
+        ProfileConfig::Local {
+            default_namespace, ..
+        }
+        | ProfileConfig::Remote {
+            default_namespace, ..
+        } => {
+            *default_namespace = Some(namespace.to_owned());
+        }
+    }
+    Ok(())
+}

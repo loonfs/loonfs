@@ -92,8 +92,16 @@ pub fn json_error(failure: &CommandFailure) -> io::Result<String> {
 
 pub fn human_success(output: &CommandOutput) -> String {
     match &output.data {
-        CommandData::Profile(profile) => toml::to_string_pretty(profile)
-            .unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode_str())),
+        CommandData::Profile(profile) => {
+            let rendered = toml::to_string_pretty(profile)
+                .unwrap_or_else(|_| format!("mode = \"{}\"", profile.mode_str()));
+            if output.kind == CommandKind::ProfileShow {
+                let name = output.profile.as_deref().unwrap_or("<unknown>");
+                format!("name = \"{name}\"\n{rendered}")
+            } else {
+                rendered
+            }
+        }
         CommandData::ProfileSummary(profile) => match output.kind {
             CommandKind::ProfileRemove => format!("removed profile {}", profile.name),
             _ => {
@@ -125,6 +133,13 @@ pub fn human_success(output: &CommandOutput) -> String {
             lines.join("\n")
         }
         CommandData::DefaultProfile { name } => format!("default profile set to `{name}`"),
+        CommandData::DefaultNamespace { profile, namespace } => {
+            format!("default namespace for `{profile}` set to `{namespace}`")
+        }
+        CommandData::Current { profile, namespace } => {
+            let namespace = namespace.as_deref().unwrap_or("-");
+            format!("profile: {profile}\nnamespace: {namespace}")
+        }
         CommandData::NamespaceSummary(namespace) => namespace.name.to_string(),
         CommandData::NamespaceList { namespaces } => {
             let mut lines = vec!["NAME".to_owned()];
@@ -199,6 +214,7 @@ mod tests {
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
     use crate::error::CliError;
+    use crate::config::{ProfileConfig, StoreConfig};
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
     use loon_api::NamespaceSummary;
@@ -257,6 +273,26 @@ mod tests {
             data: CommandData::NamespaceList {
                 namespaces: Vec::new(),
             },
+        };
+        assert_snapshot!(human_success(&output));
+    }
+
+    #[test]
+    fn human_profile_show_includes_name() {
+        let output = CommandOutput {
+            kind: CommandKind::ProfileShow,
+            profile: Some("default".to_owned()),
+            mode: Some("local".to_owned()),
+            data: CommandData::Profile(ProfileConfig::Local {
+                store: StoreConfig::LocalFs {
+                    root: "/tmp/store".to_owned(),
+                    key_prefix: None,
+                },
+                default_namespace: Some("demo".to_owned()),
+                writer_id: None,
+                writer_version: None,
+                lease_duration_ms: None,
+            }),
         };
         assert_snapshot!(human_success(&output));
     }
