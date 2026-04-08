@@ -17,8 +17,8 @@ version = "0.1.0"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.83"
 description = "Spec-locked object-store-backed file service"
-repository = "https://github.com/prequel-co/loonfs"
-homepage = "https://github.com/prequel-co/loonfs"
+repository = "https://github.com/loonfs/loonfs"
+homepage = "https://github.com/loonfs/loonfs"
 keywords = ["object-storage", "files", "r2"]
 categories = ["filesystem", "command-line-utilities"]
 
