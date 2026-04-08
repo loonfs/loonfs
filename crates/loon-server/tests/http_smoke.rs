@@ -22,7 +22,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-test",
+        "loon-server-test",
         "http-smoke",
         60_000,
     ))
@@ -56,7 +56,7 @@ async fn http_put_create_only_and_copy_preserve_cli_semantics() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-test",
+        "loon-server-test",
         "http-copy-smoke",
         60_000,
     ))
@@ -113,7 +113,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-current",
+        "loon-server-current",
         "http-current-smoke",
         60_000,
     ))
@@ -237,7 +237,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-restore",
+        "loon-server-restore",
         "http-restore",
         60_000,
     ))
@@ -367,7 +367,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-restore-missing-source",
+        "loon-server-restore-missing-source",
         "http-restore-missing-source",
         60_000,
     ))
@@ -441,7 +441,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-current-conflict",
+        "loon-server-current-conflict",
         "http-current-conflict",
         60_000,
     ))
@@ -511,7 +511,7 @@ async fn http_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-put",
+        "loon-server-put",
         "http-put",
         60_000,
     ))
@@ -563,7 +563,7 @@ async fn http_delete_move_and_copy_request_ids_are_idempotent() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-ops",
+        "loon-server-ops",
         "http-ops",
         60_000,
     ))
@@ -640,7 +640,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-admin",
+        "loon-server-admin",
         "http-admin",
         60_000,
     ))
@@ -697,7 +697,7 @@ async fn http_admin_retention_advance_preserves_checkpoint_unavailable_error() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-admin-missing-checkpoint",
+        "loon-server-admin-missing-checkpoint",
         "http-admin-missing-checkpoint",
         60_000,
     ))
@@ -727,7 +727,7 @@ async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loond-admin-corrupt",
+        "loon-server-admin-corrupt",
         "http-admin-corrupt",
         60_000,
     ))
@@ -771,12 +771,18 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
     let store_root = temp_dir.path().join("store");
     let server_a = start_server(test_config(
         store_root.clone(),
-        "loond-a",
+        "loon-server-a",
         "two-server-smoke",
         200,
     ))
     .await;
-    let server_b = start_server(test_config(store_root, "loond-b", "two-server-smoke", 200)).await;
+    let server_b = start_server(test_config(
+        store_root,
+        "loon-server-b",
+        "two-server-smoke",
+        200,
+    ))
+    .await;
     let client_a = server_a.client.clone();
     let client_b = server_b.client.clone();
 

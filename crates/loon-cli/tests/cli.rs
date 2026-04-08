@@ -743,7 +743,10 @@ impl Harness {
 
     fn write_server_config(&self, name: &str, key_prefix: &str) -> PathBuf {
         let bind = format!("127.0.0.1:{}", available_port());
-        let path = self.temp_dir.path().join(format!("{name}.loond.toml"));
+        let path = self
+            .temp_dir
+            .path()
+            .join(format!("{name}.loon-server.toml"));
         let store_root = self.store_root(name);
         let contents = format!(
             r#"
@@ -766,11 +769,11 @@ key_prefix = "{key_prefix}"
 
     fn start_external_server(&self, server_config_path: PathBuf) -> ExternalServer {
         for _ in 0..5 {
-            let child = Command::new(loond_binary_path())
+            let child = Command::new(loon_server_binary_path())
                 .arg("--config")
                 .arg(&server_config_path)
                 .spawn()
-                .expect("spawn loond");
+                .expect("spawn loon-server");
             let server_url = server_url_from_config(&server_config_path);
             if wait_for_healthz_ready(&server_url) {
                 return ExternalServer { child, server_url };
@@ -820,8 +823,8 @@ fn loon_binary_path() -> PathBuf {
     candidate
 }
 
-fn loond_binary_path() -> PathBuf {
-    if let Some(path) = env::var_os("CARGO_BIN_EXE_loond") {
+fn loon_server_binary_path() -> PathBuf {
+    if let Some(path) = env::var_os("CARGO_BIN_EXE_loon-server") {
         return PathBuf::from(path);
     }
 
@@ -830,10 +833,14 @@ fn loond_binary_path() -> PathBuf {
         .parent()
         .and_then(|path| path.parent())
         .expect("target debug dir");
-    let candidate = debug_dir.join(if cfg!(windows) { "loond.exe" } else { "loond" });
+    let candidate = debug_dir.join(if cfg!(windows) {
+        "loon-server.exe"
+    } else {
+        "loon-server"
+    });
     assert!(
         candidate.exists(),
-        "expected loond binary at {}",
+        "expected loon-server binary at {}",
         candidate.display()
     );
     candidate
