@@ -98,6 +98,7 @@ jobs:
   publish:
     name: Publish release assets
     needs: [prepare, build]
+    if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -105,6 +106,17 @@ jobs:
           path: dist
           pattern: loon-*
           merge-multiple: true
+
+      - name: Verify release artifacts exist
+        shell: bash
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          files=(loon-*.tar.gz)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no release artifacts were produced" >&2
+            exit 1
+          fi
 
       - name: Generate checksums
         working-directory: dist
@@ -115,9 +127,6 @@ jobs:
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
-            dist/loon-aarch64-apple-darwin.tar.gz
-            dist/loon-aarch64-unknown-linux-gnu.tar.gz
-            dist/loon-x86_64-apple-darwin.tar.gz
-            dist/loon-x86_64-unknown-linux-gnu.tar.gz
+            dist/loon-*.tar.gz
             dist/SHA256SUMS
           fail_on_unmatched_files: true
