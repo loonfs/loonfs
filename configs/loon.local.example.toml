@@ -1,8 +1,12 @@
 config_version = 1
-active_profile = "local"
+default_profile = "local"
 
-[profiles.local]
+[local]
 mode = "local"
+writer_id = "example-local-writer"
+writer_version = "loon/0.1.0"
 
-[profiles.local.local]
-server_config_path = "./loon-server.local-fs.example.toml"
+[local.store]
+kind = "local-fs"
+root = "./.loondb-store"
+key_prefix = "local-example"

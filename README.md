@@ -11,20 +11,21 @@ state.
 
 The current implementation exposes two public surfaces over the same core model:
 
-- a path-oriented user surface through `loon` and `loon-server`
+- a path-oriented user surface through the `loon` CLI (`loon-cli`)
 - a lower-level `/v0` upload, explicit-commit, and ordered change-feed surface through
   `loon-server` and `loon-client`
 
-The current runtime path is:
+The current runtime path depends on the selected profile mode:
 
-`loon -> loon-client -> loon-server -> loon-core -> loon-objectstore`
+- local profile: `loon-cli -> loon-core -> loon-objectstore`
+- remote profile: `loon-cli -> loon-client -> loon-server -> loon-core -> loon-objectstore`
 
 Current product rules:
 
-- every CLI operation goes through `loon-server`, even in local mode
 - profile `mode` is `local` or `remote`
-- `local` means `loon` points at or manages a local `loon-server`
-- `remote` means `loon` points at an already-running `loon-server`
+- local profiles execute directly against the configured object store through `loon-core`
+- remote profiles execute through an already-running `loon-server`
+- `loon-client` is the HTTP transport client used for the remote path
 - canonical sibling-name comparison uses `NamePolicy = nfc_casefold_v0`
 
 Not implemented yet relative to the current spec set:
@@ -60,7 +61,7 @@ xtask/
 
 `loon` and `loon-server` do not share a config file.
 
-- `loon` owns CLI-managed profile state
+- `loon` owns CLI-managed profile state for local and remote profiles
 - `loon-server` owns operator-authored server configuration
 
 `loon` always uses:
@@ -68,7 +69,7 @@ xtask/
 - `~/.loonfs/config.toml`
 
 `loon-server` has no code-level default path. You pass a server config path explicitly when you
-start `loon-server` or when you create a local `loon` profile.
+start `loon-server`.
 
 Sanitized example configs live in [`configs/`](configs/):
 
@@ -78,7 +79,7 @@ Sanitized example configs live in [`configs/`](configs/):
 - [`configs/loon-server.aws-s3.example.toml`](configs/loon-server.aws-s3.example.toml)
 - [`configs/loon-server.cloudflare-r2.example.toml`](configs/loon-server.cloudflare-r2.example.toml)
 
-Copy example `loon-server` configs to a user-owned path outside the repository for real use.
+Copy example configs to user-owned paths outside the repository for real use.
 
 The current CLI schema is `config_version = 1`. JSON command envelopes use `format_version = 1`.
 

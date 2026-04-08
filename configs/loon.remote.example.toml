@@ -1,9 +1,7 @@
 config_version = 1
-active_profile = "remote"
+default_profile = "remote"
 
-[profiles.remote]
+[remote]
 mode = "remote"
-
-[profiles.remote.remote]
 server_url = "http://127.0.0.1:9400"
 auth_token = "dev-token"
