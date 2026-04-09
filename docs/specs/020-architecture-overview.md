@@ -12,7 +12,7 @@
 
 ## 2. Data plane, metadata plane, and control plane
 
-For clarity, this spec uses three terms.
+This spec uses three terms.
 
 | Plane | Purpose | Examples | Namespace-visible history? |
 | --- | --- | --- | --- |
@@ -25,13 +25,11 @@ Two rules follow from this split:
 1. The metadata plane is authoritative for filesystem state.
 2. Control-plane objects may be durable, but they do not advance namespace `seq` and do not appear in the change feed.
 
-Control-plane state should still be durable whenever losing it on restart would violate
-correctness, restart safety, or promised resumability.
+Control-plane state should still be durable when losing it on restart would violate correctness, restart safety, or promised resumability.
 
 ## 3. Client profiles
 
-LoonFS supports more than one client profile. These profiles are defined by the protocol surface
-they use, not by whether the implementation is a CLI, desktop app, web app, or service.
+LoonFS supports multiple client profiles. These profiles are defined by the protocol surface they use, not by whether the implementation is a CLI, desktop app, web app, or service.
 
 | Client profile | Primary surface | Typical state |
 | --- | --- | --- |
@@ -52,4 +50,4 @@ Most operations fall into one of three classes.
 | **Client-driven long-running** | recursive `get`, resumable `put` | A session or intent may be used to pin a snapshot or destination across multiple requests. |
 | **Server-driven long-running** | recursive same-service `cp`, large import jobs | A job record may be used while the server continues the work. |
 
-Long-running operations use sessions or jobs only to preserve stable meaning across time. They do not create a second history model.
+Sessions and jobs preserve stable meaning across time. They do not create a second history model.

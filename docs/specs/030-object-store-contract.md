@@ -6,7 +6,7 @@ LoonFS relies on object storage as its only required durable dependency. The obj
 
 ## 2. Required guarantees
 
-A conforming object-store layer must provide the following behaviors and semantics.
+A conforming object-store layer must provide the following behavior.
 
 | Guarantee | Rationale |
 | --- | --- |
@@ -21,7 +21,7 @@ The spec deliberately avoids relying on multi-object transactions or provider-sp
 
 ## 3. Durable object families
 
-The required durable families and canonical key shapes are:
+The required durable object families and standard key patterns are:
 
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
@@ -33,12 +33,11 @@ The required durable families and canonical key shapes are:
 | **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/manifest.json` |
 | **Checkpoint segments** | Immutable | Store verified checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/tables/{family}-{segment_index}.sst.zst` |
 
-These key shapes are part of the interoperable storage contract. Implementations may add other
-control-plane objects.
+These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
 
 ## 4. Immutable content rules
 
-The content model has four important rules.
+The content model has four rules.
 
 1. Block digests are content-derived, not provider-derived.
 2. A content manifest describes one complete file revision.
@@ -57,7 +56,7 @@ Large immutable file data may use multipart upload or another provider-specific 
 
 The spec standardizes the required behaviors, not a brand name such as "S3 compatible." A provider is conforming only when those behaviors are verified by conformance tests.
 
-The practical rule is simple:
+In practice:
 
 - higher layers may depend on the LoonFS object-store contract;
 - higher layers may not depend directly on provider headers, status codes, or SDK quirks.
