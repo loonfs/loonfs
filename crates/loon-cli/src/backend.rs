@@ -10,7 +10,7 @@ use loon_core::{
 use loon_objectstore::ConfiguredObjectStore;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const DEFAULT_LEASE_DURATION_MS: u64 = 30_000;
+const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
 pub trait Backend {
     fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, CliError>;
@@ -394,9 +394,11 @@ impl RemoteTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::map_core_error;
+    use super::{map_core_error, LocalTarget, DEFAULT_LEASE_DURATION_MS};
+    use crate::config::StoreConfig;
     use loon_api::{InodeId, RevisionNo};
     use loon_core::{commit::CommitValidationError, CoreError};
+    use tempfile::tempdir;
 
     #[test]
     fn map_core_error_uses_revision_not_found_code() {
@@ -408,5 +410,33 @@ mod tests {
         ));
 
         assert_eq!(error.code, "revision_not_found");
+    }
+
+    #[test]
+    fn local_target_uses_five_second_default_lease_when_unset() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let store = StoreConfig::LocalFs {
+            root: temp_dir.path().display().to_string(),
+            key_prefix: None,
+        };
+
+        let target = LocalTarget::new(&store, None, None, None).expect("build local target");
+
+        assert_eq!(target.backend.lease_duration_ms, DEFAULT_LEASE_DURATION_MS);
+        assert_eq!(target.backend.lease_duration_ms, 5_000);
+    }
+
+    #[test]
+    fn local_target_preserves_explicit_lease_duration() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let store = StoreConfig::LocalFs {
+            root: temp_dir.path().display().to_string(),
+            key_prefix: None,
+        };
+
+        let target =
+            LocalTarget::new(&store, None, None, Some(12_345)).expect("build local target");
+
+        assert_eq!(target.backend.lease_duration_ms, 12_345);
     }
 }
