@@ -1316,7 +1316,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "loon-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ciborium",
  "serde",
@@ -1330,7 +1330,7 @@ dependencies = [
 
 [[package]]
 name = "loon-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "dialoguer",
@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "loon-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "http 0.2.12",
  "loon-api",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "loon-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "loon-api",
  "loon-model",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "loon-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "loon-api",
  "serde",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "loon-objectstore"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aws-sdk-s3",
  "http 0.2.12",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "loon-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bytes",
@@ -2814,7 +2814,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",

@@ -12,6 +12,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+expect_failure() {
+    description="$1"
+    shift
+
+    set +e
+    "$@"
+    status=$?
+    set -e
+
+    if [ "$status" -eq 0 ]; then
+        echo "expected $description" >&2
+        exit 1
+    fi
+}
+
 artifact_dir="$tmpdir/artifacts"
 latest_dir="$tmpdir/releases/latest/download"
 pinned_dir="$tmpdir/releases/download/v$version"
@@ -42,12 +57,10 @@ LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon
 "$pinned_install_dir/loon" version | grep -Fx "$version" >/dev/null
 
 printf '0000000000000000000000000000000000000000000000000000000000000000  loon-%s.tar.gz\n' "$target" > "$pinned_dir/SHA256SUMS"
-if LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --version "v$version" --install-dir "$tmpdir/install-bad"; then
-    echo "expected checksum failure" >&2
-    exit 1
-fi
+expect_failure "checksum failure" \
+    env LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" \
+    "$repo_root/scripts/install-loon.sh" --version "v$version" --install-dir "$tmpdir/install-bad"
 
-if LOON_INSTALL_OS="Linux" LOON_INSTALL_ARCH="riscv64" "$repo_root/scripts/install-loon.sh" --install-dir "$tmpdir/install-unsupported"; then
-    echo "expected unsupported platform failure" >&2
-    exit 1
-fi
+expect_failure "unsupported platform failure" \
+    env LOON_INSTALL_OS="Linux" LOON_INSTALL_ARCH="riscv64" \
+    "$repo_root/scripts/install-loon.sh" --install-dir "$tmpdir/install-unsupported"
