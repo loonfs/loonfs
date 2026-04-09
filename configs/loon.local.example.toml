@@ -1,0 +1,12 @@
+config_version = 1
+default_profile = "local"
+
+[local]
+mode = "local"
+writer_id = "example-local-writer"
+writer_version = "loon/0.1.0"
+
+[local.store]
+kind = "local-fs"
+root = "./.loondb-store"
+key_prefix = "local-example"

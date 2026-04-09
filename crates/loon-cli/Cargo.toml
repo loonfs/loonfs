@@ -1,0 +1,29 @@
+[package]
+name = "loon-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "loon"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+dialoguer = { version = "0.11", features = ["fuzzy-select"] }
+hostname = "0.4"
+http.workspace = true
+loon-api = { path = "../loon-api" }
+loon-client = { path = "../loon-client" }
+loon-core = { path = "../loon-core" }
+loon-objectstore = { path = "../loon-objectstore" }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+insta = { version = "1.39", features = ["json"] }
+tempfile.workspace = true
+ureq.workspace = true

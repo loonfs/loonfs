@@ -1,0 +1,14 @@
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loon-server-aws"
+writer_version = "loon-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "aws-s3"
+bucket = "your-bucket"
+region = "us-east-1"
+access_key_id = "YOUR_ACCESS_KEY_ID"
+secret_access_key = "YOUR_SECRET_ACCESS_KEY"
+key_prefix = "loon-demo"
+force_path_style = false

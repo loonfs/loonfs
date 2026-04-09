@@ -1,0 +1,53 @@
+#!/bin/sh
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+version=$(cargo pkgid -p loon-cli | sed 's/.*#//')
+target="${LOON_TEST_TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
+
+tmpdir=$(mktemp -d)
+cleanup() {
+    rm -rf "$tmpdir"
+}
+trap cleanup EXIT INT TERM
+
+artifact_dir="$tmpdir/artifacts"
+latest_dir="$tmpdir/releases/latest/download"
+pinned_dir="$tmpdir/releases/download/v$version"
+
+cargo build --release -p loon-cli --target "$target"
+"$repo_root/scripts/package-loon-release.sh" --target "$target" --version "$version" --artifact-dir "$artifact_dir"
+
+tar -tzf "$artifact_dir/loon-$target.tar.gz" | grep -Fx "./LICENSE" >/dev/null
+
+mkdir -p "$latest_dir" "$pinned_dir"
+cp "$artifact_dir/loon-$target.tar.gz" "$latest_dir/"
+cp "$artifact_dir/loon-$target.tar.gz" "$pinned_dir/"
+
+(
+    cd "$artifact_dir"
+    sha256sum "loon-$target.tar.gz" > SHA256SUMS
+)
+
+cp "$artifact_dir/SHA256SUMS" "$latest_dir/"
+cp "$artifact_dir/SHA256SUMS" "$pinned_dir/"
+
+latest_install_dir="$tmpdir/install-latest"
+pinned_install_dir="$tmpdir/install-pinned"
+LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --install-dir "$latest_install_dir"
+LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --version "v$version" --install-dir "$pinned_install_dir"
+
+"$latest_install_dir/loon" version | grep -Fx "$version" >/dev/null
+"$pinned_install_dir/loon" version | grep -Fx "$version" >/dev/null
+
+printf '0000000000000000000000000000000000000000000000000000000000000000  loon-%s.tar.gz\n' "$target" > "$pinned_dir/SHA256SUMS"
+if LOON_RELEASE_URL_ROOT="file://$tmpdir/releases" "$repo_root/scripts/install-loon.sh" --version "v$version" --install-dir "$tmpdir/install-bad"; then
+    echo "expected checksum failure" >&2
+    exit 1
+fi
+
+if LOON_INSTALL_OS="Linux" LOON_INSTALL_ARCH="riscv64" "$repo_root/scripts/install-loon.sh" --install-dir "$tmpdir/install-unsupported"; then
+    echo "expected unsupported platform failure" >&2
+    exit 1
+fi
