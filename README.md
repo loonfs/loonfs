@@ -29,7 +29,6 @@ loon namespace create {some_namespace}
 loon use {some_namespace}   # sets the newly created namespace as the default.
 ```
 
-
 ## Sample usage
 
 Here are the main filesystem commands. See [here](https://github.com/loonfs/loonfs/tree/main/crates/loon-cli/README.md) for a comprehensive list.
@@ -42,6 +41,8 @@ loon stat {REMOTE_FILE_PATH}
 loon get {REMOTE_FILE_PATH} {LOCAL_FILE_PATH}
 loon rm {REMOTE_FILE_PATH}
 ```
+
+The LoonFS cli has two main modes: `local` and `remote`. `local` interfaces with the store (object storage) directly. `remote` makes request to a remote LoonFS Server which is then in charge of interfacing with the store. There is no current canonical LoonFS server, as such you have to run your own in order to leverage that option. **Both modes are multi-player by default.**
 
 ## Core concepts
 
