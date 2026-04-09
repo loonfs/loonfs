@@ -434,8 +434,8 @@ mod tests {
             key_prefix: None,
         };
 
-        let target = LocalTarget::new(&store, None, None, Some(12_345))
-            .expect("build local target");
+        let target =
+            LocalTarget::new(&store, None, None, Some(12_345)).expect("build local target");
 
         assert_eq!(target.backend.lease_duration_ms, 12_345);
     }
