@@ -1,218 +1,57 @@
-# LoonFS
+![LoonFS Logo](assets/loonfs-wordmark-black.svg)
+LoonFS is an agent-native, durable file-system backed by object storage. It is multiplayer by default. It can be used across agents, sessions, and teams even when running in local mode. The Loon protocol enables version history, branching, and replays out of the box.
 
-LoonFS is an object-storage-backed filesystem and sync core where correctness, determinism, and
-rebuildability are product features.
+## Download
 
-The durable source of truth is object storage. Paths are derived views over inode-keyed metadata.
-Head, lease, WAL, content manifests, and snapshots are the durable basis for rebuilding namespace
-state.
-
-## Current Product Shape
-
-The current implementation exposes two public surfaces over the same core model:
-
-- a path-oriented user surface through the `loon` CLI (`loon-cli`)
-- a lower-level `/v0` upload, explicit-commit, and ordered change-feed surface through
-  `loon-server` and `loon-client`
-
-The current runtime path depends on the selected profile mode:
-
-- local profile: `loon-cli -> loon-core -> loon-objectstore`
-- remote profile: `loon-cli -> loon-client -> loon-server -> loon-core -> loon-objectstore`
-
-Current product rules:
-
-- profile `mode` is `local` or `remote`
-- local profiles execute directly against the configured object store through `loon-core`
-- remote profiles execute through an already-running `loon-server`
-- `loon-client` is the HTTP transport client used for the remote path
-- canonical sibling-name comparison uses `NamePolicy = nfc_casefold_v0`
-
-Not implemented yet relative to the current spec set:
-
-- long-running protocol state such as `ReadSession`, `CopyJob`, and `ImportJob`
-- ACLs, shares, and mounts as public product behavior
-
-## Spec Lock
-
-The files under [`docs/specs/`](docs/specs/) are authoritative for this repository.
-
-- implement to `docs/specs/*`
-- do not create local contracts that disagree with the current spec
-- if code and spec disagree, bring the code back into alignment or stop and escalate to the core
-  team before changing behavior
-
-## Workspace
-
-```text
-crates/
-  loon-api/          shared ids, codecs, and HTTP DTOs
-  loon-objectstore/  object-store trait, providers, key builders, conformance surface
-  loon-core/         authoritative metadata, lease, replay, and mutation logic
-  loon-model/        pure metadata replay/model helpers for differential tests
-  loon-server/       `loon-server` HTTP server over core + object storage
-  loon-client/       thin HTTP transport client
-  loon-cli/          profile-based `loon` CLI
-xtask/
-  smoke             end-to-end acceptance helper
+You can use the [install script](https://github.com/loonfs/loonfs/blob/main/scripts/install-loon.sh) by running
+```bash
+curl -fsSL https://install.loonfs.com | sh
 ```
 
-## Config Ownership
+If you use Homebrew as your package manager, you can also install it by running
+```bash
+brew install loonfs/tap/loon
+```
 
-`loon` and `loon-server` do not share a config file.
+Finally, you can compile it directly from source by checking out this repository and running
+```bash
+cargo build -p loon-cli                     # compile from source
+cp ./target/debug/loon ~/.local/bin/loon    # copy it to somewhere in your $PATH
+```
 
-- `loon` owns CLI-managed profile state for local and remote profiles
-- `loon-server` owns operator-authored server configuration
+## Quickstart
 
-`loon` always uses:
+You will need access to an object storage bucket in the form of keys in order to set up Loon. Once installed, you can get started by running the following commands. 
+```bash
+loon init       # creates your first Loon profile and sets it as the default. We recommend using 'local' mode to start, with an object storage store.
 
-- `~/.loonfs/config.toml`
+loon namespace create {some_namespace}
+loon use {some_namespace}   # sets the newly created namespace as the default.
+```
 
-`loon-server` has no code-level default path. You pass a server config path explicitly when you
-start `loon-server`.
+## Sample usage
 
-Sanitized example configs live in [`configs/`](configs/):
-
-- [`configs/loon.local.example.toml`](configs/loon.local.example.toml)
-- [`configs/loon.remote.example.toml`](configs/loon.remote.example.toml)
-- [`configs/loon-server.local-fs.example.toml`](configs/loon-server.local-fs.example.toml)
-- [`configs/loon-server.aws-s3.example.toml`](configs/loon-server.aws-s3.example.toml)
-- [`configs/loon-server.cloudflare-r2.example.toml`](configs/loon-server.cloudflare-r2.example.toml)
-
-Copy example configs to user-owned paths outside the repository for real use.
-
-The current CLI schema is `config_version = 1`. JSON command envelopes use `format_version = 1`.
-
-## Install And Run
-
-The easiest end-user path for the CLI is the install script, which downloads the latest GitHub
-release for supported platforms and verifies checksums before installing:
+Here are the main filesystem commands. See [here](https://github.com/loonfs/loonfs/tree/main/crates/loon-cli/README.md) for a comprehensive list.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loon.sh | sh
+loon put {LOCAL_FILE_PATH} {REMOTE_FILE_PATH}
+loon ls {REMOTE_DIR_PATH}
+loon cat {REMOTE_FILE_PATH}
+loon stat {REMOTE_FILE_PATH}
+loon get {REMOTE_FILE_PATH} {LOCAL_FILE_PATH}
+loon rm {REMOTE_FILE_PATH}
 ```
 
-To install a pinned release instead of the latest one:
+The LoonFS cli has two main modes: `local` and `remote`. `local` interfaces with the store (object storage) directly. `remote` makes request to a remote LoonFS Server which is then in charge of interfacing with the store. There is no current canonical LoonFS server, as such you have to run your own in order to leverage that option. **Both modes are multi-player by default.**
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loon.sh | \
-  sh -s -- --version v0.1.0
-```
+## Core concepts
 
-Supported release targets today:
+- Namespaces: a Loon namespace is the core unit of filesystem visibility, history, and durability. You can think of each namespace as a separate filesystem.
 
-- macOS arm64
-- macOS x86_64
-- Linux arm64 GNU
-- Linux x86_64 GNU
+## Design philosophy
 
-Source installs remain the normal development path, and `loon-server` is still installed from
-source:
-
-```bash
-cargo install --path crates/loon-cli
-cargo install --path crates/loon-server
-```
-
-Example local flow:
-
-```bash
-loon init local \
-  --mode local \
-  --store-kind local-fs \
-  --root "$HOME/loon-local-store"
-
-loon namespace create demo
-loon use demo
-
-printf 'hello\n' > /tmp/loonfs-demo.txt
-loon put /tmp/loonfs-demo.txt /docs/hello.txt
-loon ls /docs
-loon stat /docs/hello.txt
-loon get /docs/hello.txt /tmp/loonfs-downloaded.txt
-```
-
-Example remote profile:
-
-```bash
-loon profile create prod \
-  --mode remote \
-  --server-url http://127.0.0.1:9400 \
-  --auth-token dev-token
-```
-
-## CLI Surface
-
-Current path-oriented CLI commands:
-
-- `loon init [NAME] [--mode <MODE>] [profile creation flags]`
-- `loon profile create NAME --mode <MODE> [profile creation flags]`
-- `loon profile list`
-- `loon profile use NAME`
-- `loon profile show [NAME]`
-- `loon profile update NAME [flags]`
-- `loon profile remove NAME`
-- `loon namespace create [--profile <NAME>] NAME`
-- `loon namespace list [--profile <NAME>]`
-- `loon use [--profile <NAME>] NAMESPACE`
-- `loon current [--profile <NAME>]`
-- `loon ls [--profile <NAME>] [--namespace <NAME>] [PATH]`
-- `loon stat [--profile <NAME>] [--namespace <NAME>] PATH`
-- `loon cat [--profile <NAME>] [--namespace <NAME>] PATH`
-- `loon get [--profile <NAME>] [--namespace <NAME>] REMOTE_PATH [LOCAL_DESTINATION]`
-- `loon put [--profile <NAME>] [--namespace <NAME>] LOCAL_PATH [REMOTE_PATH] [--force]`
-- `loon rm [--profile <NAME>] [--namespace <NAME>] REMOTE_PATH`
-- `loon mv [--profile <NAME>] [--namespace <NAME>] SOURCE_PATH DEST_PATH`
-- `loon cp [--profile <NAME>] [--namespace <NAME>] SOURCE_PATH DEST_PATH`
-- `loon config path`
-- `loon config show`
-- `loon version`
-
-Global flags:
-
-- `--json`
-- `--no-input`
-
-`cat` and `get ... -` stream raw bytes to stdout and reject `--json`.
-
-The CLI is the current path-oriented client profile only. It does not expose first-class commands
-for the lower-level staged upload, explicit commit, or ordered change-feed surface yet.
-
-## Verification
-
-Repository baseline:
-
-```bash
-cargo fmt --all
-cargo test --workspace
-```
-
-Smoke acceptance:
-
-```bash
-cargo run -p xtask -- smoke local \
-  --server-config ./configs/loon-server.local-fs.example.toml \
-  --namespace demo
-```
-
-Live-provider object-store conformance:
-
-```bash
-cargo test -p loon-objectstore --test objectstore_conformance \
-  cloudflare_r2_real_provider_conformance -- --ignored --exact
-```
-
-If you are iterating inside the repository rather than using installed binaries, `cargo run -p
-loon-cli -- ...` and `cargo run -p loon-server -- ...` remain valid development workflows.
-
-## Specs To Read
-
-- [`docs/specs/000-overview.md`](docs/specs/000-overview.md)
-- [`docs/specs/020-architecture-overview.md`](docs/specs/020-architecture-overview.md)
-- [`docs/specs/030-object-store-contract.md`](docs/specs/030-object-store-contract.md)
-- [`docs/specs/040-filesystem-and-storage-model.md`](docs/specs/040-filesystem-and-storage-model.md)
-- [`docs/specs/050-write-read-protocol.md`](docs/specs/050-write-read-protocol.md)
-- [`docs/specs/060-interfaces-and-clients.md`](docs/specs/060-interfaces-and-clients.md)
-- [`docs/specs/080-background-jobs.md`](docs/specs/080-background-jobs.md)
-- [`docs/specs/090-versioning-conformance-and-extensions.md`](docs/specs/090-versioning-conformance-and-extensions.md)
-- [`docs/appendices/095-operation-statefulness-matrix.md`](docs/appendices/095-operation-statefulness-matrix.md)
+We believe that an agent-first durable file-system must have the following properties:
+- Durable: avoiding data loss is the most important property of a good file system. If a write is marked as successful, the data should not be lost, ever.
+- Immediately consistent: the latest state should be available to all readers without latency.
+- High write throughput: many agents might attempt to update various parts of the filesystem at once. It must scale elegantly to accommodate that scenario.
+- Version history: agents make mistakes. The ability to rewind to a past checkpoint is essential.
