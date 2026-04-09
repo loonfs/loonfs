@@ -1,5 +1,8 @@
 ![LoonFS Logo](assets/loonfs-wordmark-black.svg)
-LoonFS is an agent-native, durable file-system backed by object storage. It is multiplayer by default. It can be used across agents, sessions, and teams even when running in local mode. The Loon protocol enables version history, branching, and replays out of the box.
+
+LoonFS is an agent-native, durable file-system backed by object storage. It is multiplayer by default. It can be used across agents, sessions, and teams even when running in local mode.
+
+The Loon protocol enables version history, branching, and replays out of the box.
 
 ## Download
 
@@ -23,7 +26,7 @@ cp ./target/debug/loon ~/.local/bin/loon    # copy it to somewhere in your $PATH
 
 You will need access to an object storage bucket in the form of keys in order to set up Loon. Once installed, you can get started by running the following commands. 
 ```bash
-loon init       # creates your first Loon profile and sets it as the default. We recommend using 'local' mode to start, with an object storage store.
+loon init                   # creates your first Loon profile and sets it as the default. We recommend using 'local' mode to start, with an object storage store.
 
 loon namespace create {some_namespace}
 loon use {some_namespace}   # sets the newly created namespace as the default.
@@ -42,7 +45,11 @@ loon get {REMOTE_FILE_PATH} {LOCAL_FILE_PATH}
 loon rm {REMOTE_FILE_PATH}
 ```
 
-The LoonFS cli has two main modes: `local` and `remote`. `local` interfaces with the store (object storage) directly. `remote` makes request to a remote LoonFS Server which is then in charge of interfacing with the store. There is no current canonical LoonFS server, as such you have to run your own in order to leverage that option. **Both modes are multi-player by default.**
+The LoonFS cli has two main modes: `local` and `remote`:
+- `local` interfaces with the store (object storage) directly.
+- `remote` makes request to a remote LoonFS Server which is then in charge of interfacing with the store. There is no current canonical LoonFS server, as such you have to run your own in order to leverage that option.
+
+**Both modes are multi-player by default.**
 
 ## Core concepts
 
