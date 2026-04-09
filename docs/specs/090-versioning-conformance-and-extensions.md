@@ -35,7 +35,7 @@ A conforming writer or client must:
 4. tolerate commit rejection when preconditions no longer hold;
 5. re-bootstrap if its cursor falls behind the retention floor.
 
-A sync client, specifically, must also maintain durable local state for its cursor and reconciliation logic.
+A sync client must also maintain durable local state for its cursor and reconciliation logic.
 
 ## 4. Optional commit metadata
 

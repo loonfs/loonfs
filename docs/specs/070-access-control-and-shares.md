@@ -4,7 +4,7 @@
 
 ACLs and shares are a control-plane concern, not part of namespace metadata history.
 
-This keeps two kinds of change separate:
+This separates two kinds of change:
 
 - filesystem history, which changes what files and directories exist;
 - authorization state, which changes who may read or modify those files and directories.
@@ -13,7 +13,7 @@ ACL or share changes therefore do not advance namespace `seq`.
 
 ## 2. Identity of an access grant
 
-An access grant targets one of two things:
+An access grant targets either:
 
 - a whole namespace; or
 - a subtree identified by `(namespace_id, root_inode_id)`.
@@ -22,7 +22,7 @@ The grant should not be keyed only by a path string. Path text is presentation; 
 
 ## 3. Suggested role model
 
-A small role model is sufficient for the core spec.
+The core spec uses a small role model.
 
 | Role | Allowed actions |
 | --- | --- |
@@ -36,7 +36,7 @@ Implementations may add finer-grained roles, but these three capture the basic m
 
 A share grants access to a namespace or subtree.
 
-A share object includes at minimum:
+A share object includes at least:
 
 - `share_id`
 - `target_namespace_id`
@@ -52,7 +52,7 @@ Example:
 - a project subtree is shared with a user;
 - that subtree is then mounted at `/Shared/ProjectA` inside another namespace.
 
-This model keeps access and presentation separate:
+This separates access and presentation:
 
 - the share answers "who may access this subtree?";
 - the mount answers "where is that subtree shown in a tree?".

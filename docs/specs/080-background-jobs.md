@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-Background work exists to make the system cheaper to read, safer to retain, and cleaner to operate. It does not create a second truth for the filesystem.
+Background work reduces read cost, supports safe retention, and cleans up durable state. It does not create a second source of truth for the filesystem.
 
 ## 2. Required job classes
 
@@ -20,7 +20,7 @@ A retention floor may advance only when the system has enough verified material 
 
 ### 2.3 Garbage collection
 
-Delete in LoonFS is tombstone-first. Garbage collection is the separate process that eventually reclaims content or metadata that is no longer reachable and no longer protected by retention policy.
+Delete is tombstone-first. Garbage collection is the separate process that eventually reclaims content or metadata that is no longer reachable and no longer protected by retention policy.
 
 Garbage collection must be conservative. It may reclaim an object only when:
 
@@ -34,6 +34,4 @@ Implementations may clean up expired sessions, uploads, leases, or jobs. This is
 
 ## 3. Optional derived work
 
-Derived structures such as search indexes, caches, or materialized summaries are optional background work.
-
-They may improve performance or product features, but they are not authoritative. They must be rebuildable from authoritative state.
+Derived structures such as search indexes, caches, or materialized summaries are optional. They may improve performance or higher-level features, but they are not authoritative. They must be rebuildable from authoritative state.

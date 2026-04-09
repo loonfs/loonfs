@@ -17,7 +17,7 @@ Content staging is idempotent and has no effect on the visible tree. If the call
 
 ### 1.2 Basis reconstruction
 
-Before evaluating any mutation, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the checkpoint (if any), and replay the WAL tail. The server never trusts caller-supplied metadata.
+Before evaluating a mutation, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the checkpoint (if any), and replay the WAL tail. The server never trusts caller-supplied metadata.
 
 ### 1.3 Validation
 
@@ -96,7 +96,7 @@ A request may contain more than one operation, but:
 - the operations are evaluated in request order;
 - the request becomes visible as one committed step in namespace history.
 
-This gives users and downstream consumers a simple rule for visibility and replay.
+Each request has a single visibility and replay point.
 
 ## 4. Server authority
 
@@ -113,7 +113,7 @@ In particular, the server is responsible for:
 
 Clients may assist with planning, hashing, upload, or retry, but they are not the authority for visible state.
 
-NOTE: while the server is authoritative, it need not be centralized. The protocol is explicitly designed to be resilient to a multiple-writer scenario.
+The server need not be centralized. The protocol is designed for multiple writers.
 
 ## 5. Standard mutation operations
 

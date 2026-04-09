@@ -2,7 +2,7 @@
 
 ## 1. Two public operation surfaces
 
-LoonFS has two peer public surfaces.
+LoonFS has two public surfaces.
 
 | Surface | Purpose | Shape |
 | --- | --- | --- |
@@ -71,7 +71,7 @@ A representative v0 binding is shown below.
 | Publish an explicit commit | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 
-Long-running transfers may additionally expose session or job resources. The exact endpoint set is less important than the semantic rule: once a long-running operation begins, the server-issued session or job id becomes the stable in-flight identifier of that operation.
+Long-running transfers may additionally expose session or job resources. Once a long-running operation begins, the server-issued session or job id is the stable in-flight identifier of that operation.
 
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
 
@@ -175,7 +175,7 @@ A conforming implementation may support either:
 - **delegated upload**, where the service issues upload targets and the client writes blocks directly to storage;
 - **service-proxied upload**, where the client sends blocks through the service.
 
-The important semantic rule is the same in both cases:
+The semantic rule is the same in both cases:
 
 - `complete` succeeds only after the referenced blocks and manifest are durable;
 - the returned `content_manifest_digest` is then safe to reference from a commit.
@@ -297,7 +297,7 @@ Typical behavior:
 - small commands are often sessionless;
 - large or recursive commands may use server-side sessions or jobs.
 
-This client does not require a sync database or full local mirror to be a first-class client.
+This client does not require a sync database or full local mirror.
 Implementations may still keep durable local state such as auth/session state, retry journals,
 pinned snapshot ids, or inode context learned from prior responses when that improves usability,
 restart safety, or resumability.
@@ -330,8 +330,7 @@ This client uses low-level recovery or inspection surfaces that are specific to 
 
 ## 5. Statefulness summary
 
-The table below is intentionally short. It captures the core split without turning stateful transfers into the main story of the spec.
-For more detailed command-oriented guidance, see [Appendix 095: Operation Statefulness Matrix](../appendices/095-operation-statefulness-matrix.md).
+The following table summarizes the core split. For more detailed command-oriented guidance, see [Appendix 095: Operation Statefulness Matrix](../appendices/095-operation-statefulness-matrix.md).
 
 | Operation | Usual shape | Typical server-side state |
 | --- | --- | --- |

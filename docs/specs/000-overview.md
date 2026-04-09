@@ -4,7 +4,7 @@
 
 LoonFS is a filesystem built on top of object storage.
 
-Its durable truth is intentionally small:
+The durable state consists of:
 
 - immutable content blocks
 - immutable content manifests
@@ -12,7 +12,7 @@ Its durable truth is intentionally small:
 - immutable checkpoints
 - small mutable control objects such as the namespace head and leases
 
-Everything else is cache, coordination, or rebuildable acceleration.
+All other state is cache, coordination, or other rebuildable state.
 
 LoonFS can be exposed as:
 
@@ -20,18 +20,18 @@ LoonFS can be exposed as:
 - an advanced writer surface for staged upload, explicit commit, and incremental change consumption
 - a foundation for sync clients, batch writers, and operator tooling
 
-The purpose of this spec is to standardize the durable model and the rules that make implementations interoperable. It does not standardize local client databases, queue layouts, scheduler loops, or other implementation-specific mechanics.
+This spec standardizes the durable model and the rules for interoperable implementations. It does not standardize local client databases, queue layouts, scheduler loops, or other implementation-specific mechanics.
 
 ## 2. Design goals
 
-LoonFS is designed to be:
+The design goals are:
 
 | Goal | Meaning |
 | --- | --- |
 | **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content manifests, commits, and checkpoints. |
 | **Portable** | The only required durable dependency is object storage with a small set of well-defined guarantees. |
 | **Safe** | Writes are never partially visible. Metadata never points to content that is not already durable. |
-| **Readable** | A human reader should be able to understand the system from a small public spec without reading client architecture or rollout plans. |
+| **Readable** | A reader should be able to understand the system from a small public spec without reading client architecture or rollout plans. |
 | **Extensible** | The core model should support direct filesystem operations, sync engines, and future clients without changing identity or visibility rules. |
 
 ## 3. Core decisions
@@ -44,9 +44,9 @@ LoonFS is designed to be:
 | Names | Paths are lookup views built from directory bindings. They are not the identity model. |
 | Content publication | File content becomes visible only after its blocks and content manifest are already durable. |
 | Commit visibility | A metadata change becomes visible only when the namespace head advances successfully. |
-| Delete | Delete is logical first: it creates tombstones. Physical reclamation is background garbage collection. |
+| Delete | Delete is logical first and creates tombstones. Physical reclamation is background garbage collection. |
 | Recovery | Readers reconstruct state from a verified checkpoint plus the WAL tail after that checkpoint. |
-| Writes | A path-oriented filesystem API and an explicit upload/commit/change-feed API are both first-class. |
+| Writes | A path-oriented filesystem API and an explicit upload/commit/change-feed API are both part of the core model. |
 | Access control | ACLs and shares are a separate control plane keyed by namespace or subtree identity, not by path text. |
 | Long-running operations | Recursive reads, resumable uploads, and server-side copy jobs may use control-plane sessions or jobs. These do not change namespace history. |
 
@@ -78,11 +78,11 @@ The following are intentionally outside the core spec:
 - exact binary encodings for large immutable metadata objects
 - whether one implementation uses a single process or several services internally
 
-Those choices matter to an implementation, but they should not change the filesystem model.
+Those choices are implementation-specific and do not change the filesystem model.
 
 ## 6. Reading guide
 
-A new reader should start with:
+Readers should start with:
 
 1. the glossary
 2. the architecture overview

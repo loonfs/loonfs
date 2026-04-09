@@ -20,22 +20,21 @@ Two consequences follow:
 1. rename does not change identity;
 2. path is a view, not the identity model.
 
-If an item is deleted and a new item is later created at the same path, that new item receives a
-new inode identity. 
+If an item is deleted and a new item is later created at the same path, that new item receives a new inode identity.
 
 An inode is the durable namespace-local identity record for one filesystem item.
 
-It answers:
+An inode records:
 
 - what item this is;
 - what kind of item it is; and
 - when it first entered namespace history.
 
-An inode does not answer:
+An inode does not record:
 
-- what path the item currently has;
-- what parent directory currently contains it; or
-- what file bytes it currently points at.
+- the item's current path;
+- the parent directory that currently contains it; or
+- the file bytes it currently references.
 
 Those facts live in other metadata families:
 
@@ -81,7 +80,7 @@ Illustrative revision row for the current file contents:
 }
 ```
 
-Taken together, those three records mean:
+Together, those three records mean:
 
 - inode `42` is the durable identity of the file;
 - the file is currently visible under parent directory inode `9` as `Report.txt`; and
@@ -106,7 +105,7 @@ The spec does not require a larger type taxonomy in the core model. New resource
 
 ## 3. Directories, names, and paths
 
-Directories do not "contain bytes." They contain bindings from a name to a child inode.
+Directories contain bindings from a name to a child inode. They do not contain file bytes.
 
 A path is produced by walking visible directory bindings from the root inode. A path can change even when the underlying item has not.
 
@@ -124,13 +123,13 @@ Each revision points to exactly one immutable content manifest. The manifest, in
 
 Blocks and manifests belong to the owning namespace. A file revision may reference only content that is durable under that namespace's content store.
 
-This gives LoonFS a two-stage write model:
+LoonFS therefore uses a two-stage write model:
 
 ```text
 make content durable  ->  then make metadata visible
 ```
 
-That separation is one of the core design decisions of the system.
+This separation is part of the core model.
 
 ### 4.1 Immutable content storage
 
@@ -160,9 +159,7 @@ This applies to:
 
 ## 5. Tombstones and deletion
 
-Deletion is logical first.
-
-When an item is deleted, LoonFS records tombstone metadata that hides the file or subtree from visible lookups. The delete becomes visible as part of normal namespace history.
+Deletion is logical first. When an item is deleted, LoonFS records tombstone metadata that hides the file or subtree from visible lookups. The delete becomes visible as part of normal namespace history.
 
 Physical reclamation is separate background work. It may happen only when retention and reference-safety rules allow it.
 
@@ -177,7 +174,7 @@ A mount carries:
 
 This allows a composed visible tree without inventing one global namespace history underneath.
 
-Two important rules apply:
+Two rules apply:
 
 1. path resolution may cross a mount;
 2. mount loops are invalid and must be rejected.

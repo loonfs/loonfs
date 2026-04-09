@@ -1,6 +1,6 @@
 ## 095. Operation Statefulness Matrix
 
-This section defines when a LoonFS operation is sessionless, when it requires a server-side session, and when it requires a server-side job. It also defines the split of responsibility between the client and the server for common filesystem operations.
+This section defines when a LoonFS operation is sessionless, when it uses a server-side session, and when it uses a server-side job. It also defines the split of responsibility between the client and server for common filesystem operations.
 
 ### 095.1. Purpose
 
