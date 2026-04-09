@@ -19,6 +19,8 @@ pinned_dir="$tmpdir/releases/download/v$version"
 cargo build --release -p loon-cli --target "$target"
 "$repo_root/scripts/package-loon-release.sh" --target "$target" --version "$version" --artifact-dir "$artifact_dir"
 
+tar -tzf "$artifact_dir/loon-$target.tar.gz" | grep -Fx "./LICENSE" >/dev/null
+
 mkdir -p "$latest_dir" "$pinned_dir"
 cp "$artifact_dir/loon-$target.tar.gz" "$latest_dir/"
 cp "$artifact_dir/loon-$target.tar.gz" "$pinned_dir/"

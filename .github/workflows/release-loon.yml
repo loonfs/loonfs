@@ -82,6 +82,10 @@ jobs:
         run: |
           tmpdir="$(mktemp -d)"
           tar -xzf "dist/loon-${{ matrix.target }}.tar.gz" -C "$tmpdir"
+          if [ ! -f "$tmpdir/LICENSE" ]; then
+            echo "expected LICENSE in release archive" >&2
+            exit 1
+          fi
           actual="$("$tmpdir/loon" version)"
           if [ "$actual" != "$VERSION" ]; then
             echo "expected loon version $VERSION, got $actual" >&2
