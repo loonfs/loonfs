@@ -1,5 +1,5 @@
 ![LoonFS Logo](assets/loonfs-wordmark-black.svg)
-LoonFS is an agent-native, durable file-system. It is multiplayer by default, and uses object storage as its data store. It can be used across agents, sessions, and teams even when running in local mode. The Loon protocol enables version history, branching, and replays out of the box.
+LoonFS is an agent-native, durable file-system backed by object storage. It is multiplayer by default. It can be used across agents, sessions, and teams even when running in local mode. The Loon protocol enables version history, branching, and replays out of the box.
 
 ## Download
 
