@@ -32,6 +32,8 @@ loon namespace create {some_namespace}
 loon use {some_namespace}   # sets the newly created namespace as the default.
 ```
 
+You can add a `SKILL` to your agent of choice so that they know to use Loon when appropriate. See our [example `SKILL.md`](https://github.com.loonfs/loonfs/tree/main/examples/SKILL.md).
+
 ## Sample usage
 
 Here are the main filesystem commands. See [here](https://github.com/loonfs/loonfs/tree/main/crates/loon-cli/README.md) for a comprehensive list.
