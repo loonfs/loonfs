@@ -169,6 +169,8 @@ Behavior notes
 
   If `loon get -r` omits the local destination, the CLI writes to `./<remote-dirname>`
 
+  `loon get -r /` requires an explicit local destination because `/` has no natural basename to use as a local folder name
+
   `--json` is rejected for streaming output commands
 
   If `loon put` omits the remote path, the CLI uses `/<local-filename>`

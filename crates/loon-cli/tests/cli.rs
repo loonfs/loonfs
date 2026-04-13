@@ -257,6 +257,52 @@ fn local_profile_get_recursive_downloads_directory_tree() {
 }
 
 #[test]
+fn local_profile_get_recursive_downloads_namespace_root() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let upload_one = harness.temp_dir.path().join("upload-one.txt");
+    let upload_two = harness.temp_dir.path().join("upload-two.txt");
+    fs::write(&upload_one, b"hello\n").expect("upload one");
+    fs::write(&upload_two, b"nested\n").expect("upload two");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["put", upload_one.to_str().unwrap(), "/docs/hello.txt"]));
+    assert_success(&harness.run(&["put", upload_two.to_str().unwrap(), "/docs/sub/nested.txt"]));
+
+    let destination_root = harness.temp_dir.path().join("namespace-download");
+
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "-r",
+        "/",
+        destination_root.to_str().unwrap(),
+    ]);
+    assert_success(&get);
+
+    assert_eq!(
+        fs::read(destination_root.join("docs").join("hello.txt")).expect("downloaded hello"),
+        b"hello\n"
+    );
+    assert_eq!(
+        fs::read(
+            destination_root
+                .join("docs")
+                .join("sub")
+                .join("nested.txt")
+        )
+        .expect("downloaded nested"),
+        b"nested\n"
+    );
+    assert_eq!(
+        json_data(&get)["destination"],
+        destination_root.display().to_string()
+    );
+}
+
+#[test]
 fn recursive_get_cannot_stream_to_stdout() {
     let harness = Harness::new();
     harness.add_local_profile("default");

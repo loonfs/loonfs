@@ -649,7 +649,7 @@ fn run_filesystem_get(
         ));
     }
 
-    let spec = namespace_path(&context.namespace, &args.remote_path, false).map_err(|error| {
+    let spec = namespace_path(&context.namespace, &args.remote_path, args.recursive).map_err(|error| {
         fail(
             kind,
             Some(context.profile_name.clone()),
@@ -1625,6 +1625,17 @@ fn destination_root_for_recursive_get(
     remote_path: &str,
     explicit_destination: Option<&str>,
 ) -> Result<PathBuf, CliError> {
+    if remote_path == "/" {
+        let Some(path) = explicit_destination else {
+            return Err(CliError::invalid_input(
+                "recursive `get` of `/` requires an explicit local destination",
+            ));
+        };
+        let destination = PathBuf::from(path);
+        validate_recursive_get_root_destination(&destination)?;
+        return Ok(destination);
+    }
+
     let root_name = Path::new(remote_path).file_name().ok_or_else(|| {
         CliError::invalid_input(format!(
             "unable to derive local destination from `{remote_path}`"
