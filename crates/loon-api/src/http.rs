@@ -45,6 +45,8 @@ pub enum FilesystemOperation {
     },
     DeletePath {
         path: String,
+        #[serde(default)]
+        recursive: bool,
     },
     MovePath {
         from_path: String,

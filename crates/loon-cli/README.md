@@ -79,13 +79,13 @@ Filesystem operations
   loon cat [--profile <name>] [--namespace <name>] <path>
     Print file contents to stdout
 
-  loon get [--profile <name>] [--namespace <name>] <remote-path> [local-destination]
-    Download a remote file
+  loon get [--profile <name>] [--namespace <name>] [-r, --recursive] <remote-path> [local-destination]
+    Download a remote file or directory tree
 
   loon put [--profile <name>] [--namespace <name>] <local-path> [remote-path] [--force]
     Upload a local file
 
-  loon rm [--profile <name>] [--namespace <name>] <path>
+  loon rm [--profile <name>] [--namespace <name>] [-r, --recursive] <path>
     Remove a path
 
   loon mv [--profile <name>] [--namespace <name>] <source-path> <dest-path>
@@ -165,11 +165,19 @@ Behavior notes
 
   `loon get ... -` streams raw bytes to stdout
 
+  `loon get -r` downloads a pinned directory tree and cannot stream to stdout
+
+  If `loon get -r` omits the local destination, the CLI writes to `./<remote-dirname>`
+
   `--json` is rejected for streaming output commands
 
   If `loon put` omits the remote path, the CLI uses `/<local-filename>`
 
   If `loon get` omits the local destination, the CLI writes to `./<remote-filename>`
 
-  File-oriented commands do not support directory transfers
+  `loon mv` supports both file and directory moves
+
+  `loon rm -r` removes non-empty directories
+
+  `loon put` and `loon cp` are file-only
 ```

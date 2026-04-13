@@ -21,3 +21,11 @@ pub struct AuthoritativeFileBytes {
     pub entry: AuthoritativePathEntry,
     pub bytes: Vec<u8>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadSession {
+    pub namespace_id: NamespaceId,
+    pub session_id: String,
+    pub pinned_seq: ChangeSeq,
+    pub root: AuthoritativePathEntry,
+}

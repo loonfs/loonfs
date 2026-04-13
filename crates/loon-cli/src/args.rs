@@ -30,7 +30,7 @@ pub enum Command {
     Cat(FilesystemPathArgs),
     Get(FilesystemGetArgs),
     Put(FilesystemPutArgs),
-    Rm(FilesystemPathArgs),
+    Rm(FilesystemRmArgs),
     Mv(FilesystemMoveArgs),
     Cp(FilesystemMoveArgs),
     Config {
@@ -207,6 +207,8 @@ pub struct FilesystemPathArgs {
 pub struct FilesystemGetArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
     pub remote_path: String,
     pub local_destination: Option<String>,
 }
@@ -219,6 +221,15 @@ pub struct FilesystemPutArgs {
     pub remote_path: Option<String>,
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FilesystemRmArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    pub path: String,
 }
 
 #[derive(Debug, Args)]

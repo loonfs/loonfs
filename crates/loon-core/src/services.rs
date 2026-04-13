@@ -65,6 +65,8 @@ pub enum CoreErrorKind {
     UploadAlreadyCompleted,
     UploadBlockConflict,
     InvalidUploadBlock,
+    ReadSessionNotFound,
+    InvalidReadSessionTarget,
     RebootstrapRequired,
     NamespaceCorrupt,
     ServerError,
@@ -134,6 +136,16 @@ pub enum CoreError {
     UploadBlockConflict { upload_id: String, block_index: u32 },
     #[error("invalid upload block: {0}")]
     InvalidUploadBlock(String),
+    #[error("read session `{session_id}` was not found")]
+    ReadSessionNotFound { session_id: String },
+    #[error(
+        "inode `{inode_id}` is outside read session `{session_id}` rooted at inode `{root_inode_id}`"
+    )]
+    InvalidReadSessionTarget {
+        session_id: String,
+        inode_id: InodeId,
+        root_inode_id: InodeId,
+    },
     #[error(
         "change feed cursor `{after_seq:?}` is older than retention floor `{retention_floor_seq:?}`"
     )]
@@ -202,6 +214,8 @@ impl CoreError {
             CoreError::UploadAlreadyCompleted { .. } => CoreErrorKind::UploadAlreadyCompleted,
             CoreError::UploadBlockConflict { .. } => CoreErrorKind::UploadBlockConflict,
             CoreError::InvalidUploadBlock(_) => CoreErrorKind::InvalidUploadBlock,
+            CoreError::ReadSessionNotFound { .. } => CoreErrorKind::ReadSessionNotFound,
+            CoreError::InvalidReadSessionTarget { .. } => CoreErrorKind::InvalidReadSessionTarget,
             CoreError::RebootstrapRequired { .. } => CoreErrorKind::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
@@ -1115,7 +1129,7 @@ fn resolve_parent_directory(
     Ok(resolved.inode_id)
 }
 
-fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
+pub(crate) fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     head_seq: ChangeSeq,

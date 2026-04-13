@@ -17,7 +17,7 @@ use loon_api::{
 };
 use loon_core::{
     advance_retention_floor, begin_upload, bootstrap_namespace, commit_operations, complete_upload,
-    copy_file_path, create_checkpoint, delete_path_non_recursive, list_changes_after,
+    copy_file_path, create_checkpoint, delete_path, delete_path_non_recursive, list_changes_after,
     list_namespaces, list_path, move_path, put_file_manifest, read_file_bytes, resolve_path,
     upload_block, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
     PutFileBehavior,
@@ -237,13 +237,20 @@ async fn filesystem_operation(
                 &mutation_context(&config),
                 Some(&request.request_id),
             ),
-            FilesystemOperation::DeletePath { path } => delete_path_non_recursive(
-                store.as_ref(),
-                &namespace_id,
-                &path,
-                &mutation_context(&config),
-                Some(&request.request_id),
-            ),
+            FilesystemOperation::DeletePath { path, recursive } => {
+                let delete = if recursive {
+                    delete_path
+                } else {
+                    delete_path_non_recursive
+                };
+                delete(
+                    store.as_ref(),
+                    &namespace_id,
+                    &path,
+                    &mutation_context(&config),
+                    Some(&request.request_id),
+                )
+            }
             FilesystemOperation::MovePath { from_path, to_path } => move_path(
                 store.as_ref(),
                 &namespace_id,
@@ -525,6 +532,10 @@ impl ApiResponseError {
             }
             CoreErrorKind::UploadBlockConflict => (StatusCode::CONFLICT, "upload_block_conflict"),
             CoreErrorKind::InvalidUploadBlock => (StatusCode::BAD_REQUEST, "invalid_upload_block"),
+            CoreErrorKind::ReadSessionNotFound => (StatusCode::NOT_FOUND, "read_session_not_found"),
+            CoreErrorKind::InvalidReadSessionTarget => {
+                (StatusCode::CONFLICT, "invalid_read_session_target")
+            }
             CoreErrorKind::RebootstrapRequired => (StatusCode::CONFLICT, "rebootstrap_required"),
             CoreErrorKind::NamespaceCorrupt => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "namespace_corrupt")

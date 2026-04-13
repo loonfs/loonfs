@@ -4,8 +4,12 @@ use crate::commit::{
     resolve_restore_content_manifest_digests, CommitOp, CommitRequest as CoreCommitRequest,
     CommitValidationContext, Precondition,
 };
-use crate::content::validate_durable_content_reference;
-use crate::services::{derive_commit_results, write_immutable_object, CoreError, MutationContext};
+use crate::content::{read_durable_content_bytes, validate_durable_content_reference};
+use crate::metadata::ResolvedVisiblePath;
+use crate::services::{
+    build_authoritative_path_entry, derive_commit_results, write_immutable_object, CoreError,
+    MutationContext,
+};
 use crate::wal::prepare_wal_commit;
 use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitOp as V0CommitOp,
@@ -15,13 +19,15 @@ use loon_api::v0::{
 };
 use loon_api::{
     content_manifest_digest_sha256, decode_wal_commit_envelope_zstd, encode_content_manifest_json,
-    sha256_digest, ChangeSeq, CompletedUpload, ContentBlockDescriptor, ContentManifestEnvelope,
-    ContentManifestPayload, ControlObjectKind, NamespaceId, UploadSessionEnvelope,
-    UploadSessionState, UploadedBlock, CONTENT_BLOCK_SIZE_BYTES,
+    sha256_digest, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CompletedUpload,
+    ContentBlockDescriptor, ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind,
+    InodeId, InodeKind, NamespaceId, ReadSession, ReadSessionEnvelope, ReadSessionState,
+    UploadSessionEnvelope, UploadSessionState, UploadedBlock, CONTENT_BLOCK_SIZE_BYTES,
 };
-use loon_objectstore::keys::{blob, content_manifest, upload_session, wal_commit};
+use loon_objectstore::keys::{blob, content_manifest, read_session, upload_session, wal_commit};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
@@ -31,6 +37,160 @@ struct LoadedUploadSessionObject {
     object_key: String,
     metadata: ObjectMetadata,
     envelope: UploadSessionEnvelope,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedReadSessionObject {
+    envelope: ReadSessionEnvelope,
+}
+
+pub fn begin_read_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    context: &MutationContext,
+) -> Result<ReadSession, CoreError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let resolved = basis
+        .metadata_state
+        .resolve_visible_path(absolute_path, basis.head.seq)?;
+    let root = build_authoritative_path_entry(
+        store,
+        namespace_id,
+        basis.head.seq,
+        &basis.metadata_state,
+        &resolved,
+    )?;
+    let session_id = format!("rs_{}", Uuid::new_v4().simple());
+    let state = ReadSessionState {
+        namespace_id: namespace_id.clone(),
+        session_id: session_id.clone(),
+        pinned_seq: basis.head.seq,
+        root_inode_id: resolved.inode_id,
+        created_at_ms: context.now_ms,
+    };
+    let envelope = ReadSessionEnvelope::from_state(
+        ControlObjectKind::ReadSession,
+        &context.writer_version,
+        state,
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    let encoded = serde_json::to_vec(&envelope).map_err(|err| CoreError::Store(err.to_string()))?;
+    let object_key = read_session(namespace_id.as_str(), &session_id);
+    store
+        .put_if_absent(&object_key, &encoded)
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+
+    Ok(ReadSession {
+        namespace_id: namespace_id.clone(),
+        session_id,
+        pinned_seq: basis.head.seq,
+        root,
+    })
+}
+
+pub fn list_read_session_children<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    session_id: &str,
+    parent_inode_id: InodeId,
+) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+    let loaded = read_read_session_object(store, namespace_id, session_id)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    ensure_read_session_target(
+        session_id,
+        &basis,
+        parent_inode_id,
+        loaded.envelope.state.root_inode_id,
+        loaded.envelope.state.pinned_seq,
+    )?;
+    let resolved =
+        resolve_visible_path_for_inode(&basis, parent_inode_id, loaded.envelope.state.pinned_seq)?;
+    if resolved.inode_kind != InodeKind::Dir {
+        return Err(CoreError::ExpectedDirectory {
+            path: resolved.absolute_path,
+            kind: resolved.inode_kind,
+        });
+    }
+
+    basis
+        .metadata_state
+        .visible_children(parent_inode_id, loaded.envelope.state.pinned_seq)
+        .into_iter()
+        .map(|direntry| {
+            let child = basis
+                .metadata_state
+                .visible_inode(direntry.child_inode_id, loaded.envelope.state.pinned_seq)
+                .expect("visible child listing should resolve inode");
+            build_authoritative_path_entry(
+                store,
+                namespace_id,
+                loaded.envelope.state.pinned_seq,
+                &basis.metadata_state,
+                &ResolvedVisiblePath {
+                    absolute_path: join_absolute_path(
+                        &resolved.absolute_path,
+                        &direntry.display_name,
+                    ),
+                    inode_id: direntry.child_inode_id,
+                    inode_kind: child.inode_kind,
+                    parent_inode_id: Some(direntry.parent_inode_id),
+                    display_name: direntry.display_name,
+                },
+            )
+        })
+        .collect()
+}
+
+pub fn read_read_session_file<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    session_id: &str,
+    inode_id: InodeId,
+) -> Result<AuthoritativeFileBytes, CoreError> {
+    let loaded = read_read_session_object(store, namespace_id, session_id)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    ensure_read_session_target(
+        session_id,
+        &basis,
+        inode_id,
+        loaded.envelope.state.root_inode_id,
+        loaded.envelope.state.pinned_seq,
+    )?;
+    let entry = build_authoritative_path_entry(
+        store,
+        namespace_id,
+        loaded.envelope.state.pinned_seq,
+        &basis.metadata_state,
+        &resolve_visible_path_for_inode(&basis, inode_id, loaded.envelope.state.pinned_seq)?,
+    )?;
+    if entry.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            path: entry.absolute_path,
+            kind: entry.inode_kind,
+        });
+    }
+    let manifest_digest = entry
+        .content_manifest_digest
+        .clone()
+        .ok_or_else(|| CoreError::MissingPath(entry.absolute_path.clone()))?;
+    let read = read_durable_content_bytes(store, namespace_id, &manifest_digest)?;
+    Ok(AuthoritativeFileBytes {
+        entry,
+        bytes: read.bytes,
+    })
+}
+
+pub fn close_read_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    session_id: &str,
+) -> Result<(), CoreError> {
+    let object_key = read_session(namespace_id.as_str(), session_id);
+    match store.delete(&object_key) {
+        Ok(()) | Err(ObjectStoreError::NotFound) => Ok(()),
+        Err(err) => Err(CoreError::Store(err.to_string())),
+    }
 }
 
 pub fn begin_upload<S: ObjectStore + ?Sized>(
@@ -825,6 +985,139 @@ fn read_upload_session_object<S: ObjectStore + ?Sized>(
         metadata,
         envelope,
     })
+}
+
+fn read_read_session_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    session_id: &str,
+) -> Result<LoadedReadSessionObject, CoreError> {
+    let object_key = read_session(namespace_id.as_str(), session_id);
+    let encoded = store
+        .get(&object_key, None)
+        .map_err(|err| CoreError::Store(err.to_string()))?
+        .ok_or_else(|| CoreError::ReadSessionNotFound {
+            session_id: session_id.to_owned(),
+        })?;
+    let envelope: ReadSessionEnvelope =
+        serde_json::from_slice(&encoded).map_err(|err| CoreError::Store(err.to_string()))?;
+    if envelope.kind != ControlObjectKind::ReadSession {
+        return Err(CoreError::Store(format!(
+            "unexpected read session kind for `{object_key}`"
+        )));
+    }
+    if !envelope
+        .has_valid_payload_checksum()
+        .map_err(|err| CoreError::Store(err.to_string()))?
+    {
+        return Err(CoreError::Store(format!(
+            "read session checksum mismatch for `{object_key}`"
+        )));
+    }
+    if envelope.state.namespace_id != *namespace_id {
+        return Err(CoreError::Store(format!(
+            "read session namespace mismatch for `{object_key}`"
+        )));
+    }
+    if envelope.state.session_id != session_id {
+        return Err(CoreError::Store(format!(
+            "read session id mismatch for `{object_key}`"
+        )));
+    }
+
+    Ok(LoadedReadSessionObject { envelope })
+}
+
+fn ensure_read_session_target(
+    session_id: &str,
+    basis: &crate::VerifiedNamespaceBasis,
+    inode_id: InodeId,
+    root_inode_id: InodeId,
+    pinned_seq: ChangeSeq,
+) -> Result<(), CoreError> {
+    if basis
+        .metadata_state
+        .is_visible_descendant_or_self(inode_id, root_inode_id, pinned_seq)
+    {
+        return Ok(());
+    }
+
+    Err(CoreError::InvalidReadSessionTarget {
+        session_id: session_id.to_owned(),
+        inode_id,
+        root_inode_id,
+    })
+}
+
+fn resolve_visible_path_for_inode(
+    basis: &crate::VerifiedNamespaceBasis,
+    inode_id: InodeId,
+    pinned_seq: ChangeSeq,
+) -> Result<ResolvedVisiblePath, CoreError> {
+    let inode = basis
+        .metadata_state
+        .visible_inode(inode_id, pinned_seq)
+        .ok_or_else(|| CoreError::MissingPath(format!("inode `{}`", inode_id.0)))?;
+    if inode_id == InodeId(1) {
+        return Ok(ResolvedVisiblePath {
+            absolute_path: "/".to_owned(),
+            inode_id,
+            inode_kind: inode.inode_kind,
+            parent_inode_id: None,
+            display_name: String::new(),
+        });
+    }
+
+    let mut components = Vec::new();
+    let mut current_inode_id = inode_id;
+    let mut parent_inode_id = None;
+    let mut display_name = String::new();
+    let mut visited = BTreeSet::new();
+
+    while current_inode_id != InodeId(1) {
+        if !visited.insert(current_inode_id.0) {
+            return Err(CoreError::Store(format!(
+                "cycle while resolving pinned path for inode `{}`",
+                inode_id.0
+            )));
+        }
+        let binding = basis
+            .metadata_state
+            .current_parent_binding_for_child(current_inode_id, pinned_seq)
+            .ok_or_else(|| {
+                CoreError::Store(format!(
+                    "missing parent binding while resolving pinned path for inode `{}`",
+                    inode_id.0
+                ))
+            })?;
+        if current_inode_id == inode_id {
+            parent_inode_id = Some(binding.parent_inode_id);
+            display_name = binding.display_name.clone();
+        }
+        components.push(binding.display_name);
+        current_inode_id = binding.parent_inode_id;
+    }
+
+    components.reverse();
+    Ok(ResolvedVisiblePath {
+        absolute_path: if components.is_empty() {
+            "/".to_owned()
+        } else {
+            format!("/{}", components.join("/"))
+        },
+        inode_id,
+        inode_kind: inode.inode_kind,
+        parent_inode_id,
+        display_name,
+    })
+}
+
+fn join_absolute_path(base: &str, component: &str) -> String {
+    if base == "/" {
+        format!("/{component}")
+    } else {
+        format!("{base}/{component}")
+    }
 }
 
 fn load_existing_commit_payload<S: ObjectStore + ?Sized>(

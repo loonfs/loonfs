@@ -1,8 +1,8 @@
 use crate::args::{
     Cli, Command, CommandKind, ConfigCommand, CurrentArgs, FilesystemGetArgs, FilesystemLsArgs,
-    FilesystemMoveArgs, FilesystemPathArgs, FilesystemPutArgs, InitArgs, NamespaceCommand,
-    NamespaceCreateArgs, NamespaceListArgs, NamespaceUseArgs, ProfileCommand, ProfileCreateArgs,
-    ProfileUpdateArgs, RuntimeBehavior, TargetSelectorArgs,
+    FilesystemMoveArgs, FilesystemPathArgs, FilesystemPutArgs, FilesystemRmArgs, InitArgs,
+    NamespaceCommand, NamespaceCreateArgs, NamespaceListArgs, NamespaceUseArgs, ProfileCommand,
+    ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior, TargetSelectorArgs,
 };
 use crate::config::{
     default_config_path, load_config, load_config_if_exists, load_or_default_config, save_config,
@@ -17,7 +17,7 @@ use crate::prompt;
 use crate::resolve::{
     load_cli_config, resolve_namespace, resolve_target_profile, resolve_target_profile_from_config,
 };
-use loon_api::{AuthoritativePathEntry, InodeKind, NamespaceSummary};
+use loon_api::{AuthoritativePathEntry, InodeKind, NamespaceSummary, ReadSession};
 use loon_client::NamespacePath;
 use serde::Serialize;
 use std::fs;
@@ -665,13 +665,85 @@ fn run_filesystem_get(
             error,
         )
     })?;
+    if args.recursive && args.local_destination.as_deref() == Some("-") {
+        return Err(fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            CliError::invalid_input("recursive `get` cannot stream to stdout"),
+        ));
+    }
+    if args.recursive && entry.inode_kind == InodeKind::Dir {
+        let destination = destination_root_for_recursive_get(
+            &spec.absolute_path,
+            args.local_destination.as_deref(),
+        )
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+        let session = context
+            .target
+            .backend()
+            .begin_read_session(&spec)
+            .map_err(|error| {
+                fail(
+                    kind,
+                    Some(context.profile_name.clone()),
+                    Some(context.mode.clone()),
+                    error,
+                )
+            })?;
+        let download = download_read_session_tree(context.target.backend(), &session, &destination);
+        let close = context
+            .target
+            .backend()
+            .close_read_session(&session.namespace_id, &session.session_id);
+        let bytes_written = match download {
+            Ok(bytes_written) => {
+                close.map_err(|error| {
+                    fail(
+                        kind,
+                        Some(context.profile_name.clone()),
+                        Some(context.mode.clone()),
+                        error,
+                    )
+                })?;
+                bytes_written
+            }
+            Err(error) => {
+                let _ = close;
+                return Err(fail(
+                    kind,
+                    Some(context.profile_name.clone()),
+                    Some(context.mode.clone()),
+                    error,
+                ));
+            }
+        };
+
+        return Ok(CommandOutput {
+            kind,
+            profile: Some(context.profile_name),
+            mode: Some(context.mode),
+            data: CommandData::FileTransfer {
+                target: render_target(&context.namespace, &spec.absolute_path),
+                destination: destination.display().to_string(),
+                bytes_written,
+            },
+        });
+    }
     if entry.inode_kind == InodeKind::Dir {
         return Err(fail(
             kind,
             Some(context.profile_name.clone()),
             Some(context.mode.clone()),
             CliError::invalid_input(format!(
-                "directory operations are not available for `{}`",
+                "use `get -r` to download directories: `{}`",
                 spec.absolute_path
             )),
         ));
@@ -814,7 +886,7 @@ fn run_filesystem_put(
 
 fn run_filesystem_rm(
     kind: CommandKind,
-    args: FilesystemPathArgs,
+    args: FilesystemRmArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target)?;
     let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
@@ -828,7 +900,7 @@ fn run_filesystem_rm(
     let result = context
         .target
         .backend()
-        .delete_path(&spec)
+        .delete_path(&spec, args.recursive)
         .map_err(|error| {
             fail(
                 kind,
@@ -1547,6 +1619,114 @@ fn destination_path_for_get(
             Ok(PathBuf::from(file_name))
         }
     }
+}
+
+fn destination_root_for_recursive_get(
+    remote_path: &str,
+    explicit_destination: Option<&str>,
+) -> Result<PathBuf, CliError> {
+    let root_name = Path::new(remote_path).file_name().ok_or_else(|| {
+        CliError::invalid_input(format!(
+            "unable to derive local destination from `{remote_path}`"
+        ))
+    })?;
+    match explicit_destination {
+        None => {
+            let destination = PathBuf::from(root_name);
+            validate_recursive_get_root_destination(&destination)?;
+            Ok(destination)
+        }
+        Some(path) => {
+            let destination = PathBuf::from(path);
+            if !destination.exists() {
+                return Ok(destination);
+            }
+            let metadata = fs::metadata(&destination).map_err(CliError::io)?;
+            if !metadata.is_dir() {
+                return Err(CliError::invalid_input(format!(
+                    "destination exists and is not a directory: `{}`",
+                    destination.display()
+                )));
+            }
+            let destination = destination.join(root_name);
+            validate_recursive_get_root_destination(&destination)?;
+            Ok(destination)
+        }
+    }
+}
+
+fn validate_recursive_get_root_destination(path: &Path) -> Result<(), CliError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let metadata = fs::metadata(path).map_err(CliError::io)?;
+    if metadata.is_dir() {
+        return Ok(());
+    }
+    Err(CliError::invalid_input(format!(
+        "destination exists and is not a directory: `{}`",
+        path.display()
+    )))
+}
+
+fn download_read_session_tree(
+    backend: &dyn crate::backend::Backend,
+    session: &ReadSession,
+    destination_root: &Path,
+) -> Result<u64, CliError> {
+    fs::create_dir_all(destination_root).map_err(CliError::io)?;
+    download_read_session_directory(backend, session, session.root.inode_id, destination_root)
+}
+
+fn download_read_session_directory(
+    backend: &dyn crate::backend::Backend,
+    session: &ReadSession,
+    parent_inode_id: loon_api::InodeId,
+    destination: &Path,
+) -> Result<u64, CliError> {
+    fs::create_dir_all(destination).map_err(CliError::io)?;
+    let entries = backend.list_read_session_children(
+        &session.namespace_id,
+        &session.session_id,
+        parent_inode_id,
+    )?;
+    let mut bytes_written = 0u64;
+    for entry in entries {
+        let child_destination = destination.join(&entry.display_name);
+        match entry.inode_kind {
+            InodeKind::Dir => {
+                bytes_written += download_read_session_directory(
+                    backend,
+                    session,
+                    entry.inode_id,
+                    &child_destination,
+                )?;
+            }
+            InodeKind::File => {
+                let read = backend.read_read_session_file(
+                    &session.namespace_id,
+                    &session.session_id,
+                    entry.inode_id,
+                )?;
+                write_local_file(&child_destination, &read.bytes)?;
+                bytes_written = bytes_written.saturating_add(read.bytes.len() as u64);
+            }
+            kind => {
+                return Err(CliError::invalid_input(format!(
+                    "recursive `get` does not support `{kind:?}` at `{}`",
+                    entry.absolute_path
+                )));
+            }
+        }
+    }
+    Ok(bytes_written)
+}
+
+fn write_local_file(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(CliError::io)?;
+    }
+    fs::write(path, bytes).map_err(CliError::io)
 }
 
 fn render_target(namespace: &str, path: &str) -> String {

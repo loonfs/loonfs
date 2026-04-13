@@ -1,11 +1,15 @@
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
-use loon_api::{AuthoritativePathEntry, MutationResult, NamespaceId, NamespaceSummary};
+use loon_api::{
+    AuthoritativeFileBytes, AuthoritativePathEntry, InodeId, MutationResult, NamespaceId,
+    NamespaceSummary, ReadSession,
+};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_core::{
-    bootstrap_namespace, copy_file_path, delete_path_non_recursive, list_namespaces, list_path,
-    move_path, put_file_bytes, read_file_bytes, resolve_path, BootstrapNamespaceError, CoreError,
-    CoreErrorKind, MutationContext, PutFileBehavior,
+    begin_read_session, bootstrap_namespace, close_read_session, copy_file_path, delete_path,
+    delete_path_non_recursive, list_namespaces, list_path, list_read_session_children, move_path,
+    put_file_bytes, read_file_bytes, read_read_session_file, resolve_path, BootstrapNamespaceError,
+    CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::ConfiguredObjectStore;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,7 +28,11 @@ pub trait Backend {
         bytes: &[u8],
         force: bool,
     ) -> Result<MutationResult, CliError>;
-    fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError>;
+    fn delete_path(
+        &self,
+        spec: &NamespacePath,
+        recursive: bool,
+    ) -> Result<MutationResult, CliError>;
     fn move_path(
         &self,
         from: &NamespacePath,
@@ -35,6 +43,21 @@ pub trait Backend {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError>;
+    fn begin_read_session(&self, spec: &NamespacePath) -> Result<ReadSession, CliError>;
+    fn list_read_session_children(
+        &self,
+        namespace: &NamespaceId,
+        session_id: &str,
+        parent_inode_id: InodeId,
+    ) -> Result<Vec<AuthoritativePathEntry>, CliError>;
+    fn read_read_session_file(
+        &self,
+        namespace: &NamespaceId,
+        session_id: &str,
+        inode_id: InodeId,
+    ) -> Result<AuthoritativeFileBytes, CliError>;
+    fn close_read_session(&self, namespace: &NamespaceId, session_id: &str)
+        -> Result<(), CliError>;
 }
 
 // --- Remote backend (HTTP via loon-client) ---
@@ -75,8 +98,17 @@ impl Backend for RemoteBackend {
             .map_err(map_client_error)
     }
 
-    fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
-        self.client.delete_path(spec).map_err(map_client_error)
+    fn delete_path(
+        &self,
+        spec: &NamespacePath,
+        recursive: bool,
+    ) -> Result<MutationResult, CliError> {
+        let result = if recursive {
+            self.client.delete_path_recursive(spec)
+        } else {
+            self.client.delete_path(spec)
+        };
+        result.map_err(map_client_error)
     }
 
     fn move_path(
@@ -93,6 +125,36 @@ impl Backend for RemoteBackend {
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
         self.client.copy_path(from, to).map_err(map_client_error)
+    }
+
+    fn begin_read_session(&self, _spec: &NamespacePath) -> Result<ReadSession, CliError> {
+        Err(unsupported_recursive_get())
+    }
+
+    fn list_read_session_children(
+        &self,
+        _namespace: &NamespaceId,
+        _session_id: &str,
+        _parent_inode_id: InodeId,
+    ) -> Result<Vec<AuthoritativePathEntry>, CliError> {
+        Err(unsupported_recursive_get())
+    }
+
+    fn read_read_session_file(
+        &self,
+        _namespace: &NamespaceId,
+        _session_id: &str,
+        _inode_id: InodeId,
+    ) -> Result<AuthoritativeFileBytes, CliError> {
+        Err(unsupported_recursive_get())
+    }
+
+    fn close_read_session(
+        &self,
+        _namespace: &NamespaceId,
+        _session_id: &str,
+    ) -> Result<(), CliError> {
+        Err(unsupported_recursive_get())
     }
 }
 
@@ -192,9 +254,18 @@ impl Backend for DirectBackend {
         .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
-    fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
+    fn delete_path(
+        &self,
+        spec: &NamespacePath,
+        recursive: bool,
+    ) -> Result<MutationResult, CliError> {
         let ns_id = NamespaceId::from(spec.namespace.clone());
-        delete_path_non_recursive(
+        let delete = if recursive {
+            delete_path
+        } else {
+            delete_path_non_recursive
+        };
+        delete(
             &self.store,
             &ns_id,
             &spec.absolute_path,
@@ -237,6 +308,44 @@ impl Backend for DirectBackend {
         )
         .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
     }
+
+    fn begin_read_session(&self, spec: &NamespacePath) -> Result<ReadSession, CliError> {
+        let ns_id = NamespaceId::from(spec.namespace.clone());
+        begin_read_session(
+            &self.store,
+            &ns_id,
+            &spec.absolute_path,
+            &self.mutation_context(),
+        )
+        .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
+    }
+
+    fn list_read_session_children(
+        &self,
+        namespace: &NamespaceId,
+        session_id: &str,
+        parent_inode_id: InodeId,
+    ) -> Result<Vec<AuthoritativePathEntry>, CliError> {
+        list_read_session_children(&self.store, namespace, session_id, parent_inode_id)
+            .map_err(map_core_error)
+    }
+
+    fn read_read_session_file(
+        &self,
+        namespace: &NamespaceId,
+        session_id: &str,
+        inode_id: InodeId,
+    ) -> Result<AuthoritativeFileBytes, CliError> {
+        read_read_session_file(&self.store, namespace, session_id, inode_id).map_err(map_core_error)
+    }
+
+    fn close_read_session(
+        &self,
+        namespace: &NamespaceId,
+        session_id: &str,
+    ) -> Result<(), CliError> {
+        close_read_session(&self.store, namespace, session_id).map_err(map_core_error)
+    }
 }
 
 fn map_core_error(error: CoreError) -> CliError {
@@ -257,6 +366,8 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::UploadAlreadyCompleted => "upload_already_completed",
         CoreErrorKind::UploadBlockConflict => "upload_block_conflict",
         CoreErrorKind::InvalidUploadBlock => "invalid_upload_block",
+        CoreErrorKind::ReadSessionNotFound => "read_session_not_found",
+        CoreErrorKind::InvalidReadSessionTarget => "invalid_read_session_target",
         CoreErrorKind::RebootstrapRequired => "rebootstrap_required",
         CoreErrorKind::NamespaceCorrupt => "namespace_corrupt",
         CoreErrorKind::ServerError => "server_error",
@@ -295,6 +406,13 @@ fn default_writer_id() -> String {
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "loon-cli".to_owned())
+}
+
+fn unsupported_recursive_get() -> CliError {
+    CliError::new(
+        "unsupported_operation",
+        "recursive `get` is not supported for remote profiles yet",
+    )
 }
 
 // --- Target resolution ---

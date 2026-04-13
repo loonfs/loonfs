@@ -53,6 +53,14 @@ pub fn upload_session_prefix(namespace: &str) -> String {
     format!("namespaces/{namespace}/control/uploads/")
 }
 
+pub fn read_session(namespace: &str, session_id: &str) -> String {
+    format!("namespaces/{namespace}/control/read_sessions/{session_id}.json")
+}
+
+pub fn read_session_prefix(namespace: &str) -> String {
+    format!("namespaces/{namespace}/control/read_sessions/")
+}
+
 pub fn snapshot_manifest(namespace: &str, seq: u64) -> String {
     format!("namespaces/{namespace}/snapshots/{seq:020}/manifest.json")
 }
@@ -81,8 +89,9 @@ pub fn queue_shard(shard_index: u32) -> String {
 mod tests {
     use super::{
         blob, conflict_artifact, conflict_artifact_prefix, content_manifest, derived_progress,
-        namespace_head, namespace_lease, queue_shard, snapshot_manifest, snapshot_table,
-        upload_session, upload_session_prefix, wal_commit, SnapshotTableFamily,
+        namespace_head, namespace_lease, queue_shard, read_session, read_session_prefix,
+        snapshot_manifest, snapshot_table, upload_session, upload_session_prefix, wal_commit,
+        SnapshotTableFamily,
     };
 
     #[test]
@@ -129,6 +138,14 @@ mod tests {
         assert_eq!(
             upload_session_prefix("ns-1"),
             "namespaces/ns-1/control/uploads/"
+        );
+        assert_eq!(
+            read_session("ns-1", "rs_123"),
+            "namespaces/ns-1/control/read_sessions/rs_123.json"
+        );
+        assert_eq!(
+            read_session_prefix("ns-1"),
+            "namespaces/ns-1/control/read_sessions/"
         );
     }
 }

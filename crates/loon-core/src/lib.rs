@@ -20,7 +20,8 @@ pub use checkpoint::{
 };
 pub use lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
 pub use protocol::{
-    begin_upload, commit_operations, complete_upload, list_changes_after, upload_block,
+    begin_read_session, begin_upload, close_read_session, commit_operations, complete_upload,
+    list_changes_after, list_read_session_children, read_read_session_file, upload_block,
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, list_namespaces,

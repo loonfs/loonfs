@@ -582,6 +582,33 @@ impl MetadataState {
 
         false
     }
+
+    pub fn is_visible_descendant_or_self(
+        &self,
+        inode_id: InodeId,
+        ancestor_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> bool {
+        let mut current = Some(inode_id);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+            if self.visible_inode(candidate_inode_id, base_seq).is_none() {
+                return false;
+            }
+            if candidate_inode_id == ancestor_inode_id {
+                return true;
+            }
+            current = self
+                .latest_parent_binding_for_child_at_seq(candidate_inode_id, base_seq)
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        false
+    }
 }
 
 fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {

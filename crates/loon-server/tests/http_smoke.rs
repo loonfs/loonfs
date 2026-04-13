@@ -109,6 +109,50 @@ async fn http_put_create_only_and_copy_preserve_cli_semantics() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_recursive_delete_preserves_non_recursive_default_behavior() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-delete",
+        "http-delete-smoke",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let nested = NamespacePath::parse("demo:/docs/nested/file.txt").expect("nested");
+        harness
+            .client
+            .write_file_bytes(&nested, b"hello over http\n")
+            .expect("seed nested file");
+
+        let docs = NamespacePath::parse("demo:/docs").expect("docs");
+        match harness.client.delete_path(&docs) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
+            other => panic!("expected path_conflict, got {other:?}"),
+        }
+
+        harness
+            .client
+            .delete_path_recursive(&docs)
+            .expect("recursive delete");
+
+        match harness.client.stat_path(&docs) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
+            other => panic!("expected path_not_found, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_upload_commit_and_change_feed_are_idempotent() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(

@@ -323,10 +323,34 @@ impl Client {
         self.delete_path_with_request_id(spec, &Uuid::new_v4().to_string())
     }
 
+    pub fn delete_path_recursive(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<MutationResult, ClientError> {
+        self.delete_path_recursive_with_request_id(spec, &Uuid::new_v4().to_string())
+    }
+
     pub fn delete_path_with_request_id(
         &self,
         spec: &NamespacePath,
         request_id: &str,
+    ) -> Result<MutationResult, ClientError> {
+        self.delete_path_with_request_id_and_mode(spec, request_id, false)
+    }
+
+    pub fn delete_path_recursive_with_request_id(
+        &self,
+        spec: &NamespacePath,
+        request_id: &str,
+    ) -> Result<MutationResult, ClientError> {
+        self.delete_path_with_request_id_and_mode(spec, request_id, true)
+    }
+
+    fn delete_path_with_request_id_and_mode(
+        &self,
+        spec: &NamespacePath,
+        request_id: &str,
+        recursive: bool,
     ) -> Result<MutationResult, ClientError> {
         let response = self.apply_filesystem_operation(
             &spec.namespace,
@@ -334,6 +358,7 @@ impl Client {
                 request_id: request_id.to_owned(),
                 operation: FilesystemOperation::DeletePath {
                     path: spec.absolute_path.clone(),
+                    recursive,
                 },
             },
         )?;

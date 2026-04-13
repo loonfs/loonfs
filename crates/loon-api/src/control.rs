@@ -11,6 +11,7 @@ pub enum ControlObjectKind {
     NamespaceLease,
     NamespaceProgress,
     UploadSession,
+    ReadSession,
     QueueShard,
 }
 
@@ -88,6 +89,15 @@ pub struct UploadSessionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadSessionState {
+    pub namespace_id: NamespaceId,
+    pub session_id: String,
+    pub pinned_seq: ChangeSeq,
+    pub root_inode_id: InodeId,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObjectEnvelope<T> {
     pub kind: ControlObjectKind,
     pub format_version: u32,
@@ -123,6 +133,7 @@ pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 pub type LeaseStateEnvelope = ControlObjectEnvelope<LeaseState>;
 pub type ProgressStateEnvelope = ControlObjectEnvelope<ProgressState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
+pub type ReadSessionEnvelope = ControlObjectEnvelope<ReadSessionState>;
 
 pub fn payload_checksum_sha256<T>(value: &T) -> Result<String, serde_json::Error>
 where

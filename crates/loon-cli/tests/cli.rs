@@ -163,6 +163,155 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 }
 
 #[test]
+fn local_profile_rm_recursive_removes_non_empty_directory() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let upload_path = harness.temp_dir.path().join("upload.txt");
+    fs::write(&upload_path, b"hello from direct core\n").expect("upload payload");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["put", upload_path.to_str().unwrap(), "/docs/hello.txt"]));
+    assert_success(&harness.run(&["put", upload_path.to_str().unwrap(), "/docs/sub/nested.txt"]));
+
+    let non_recursive = harness.run(&["--json", "rm", "/docs"]);
+    assert_failure(&non_recursive);
+    assert_eq!(json_error(&non_recursive)["code"], "path_conflict");
+
+    let recursive = harness.run(&["--json", "rm", "-r", "/docs"]);
+    assert_success(&recursive);
+    assert_eq!(json_data(&recursive)["target"], "demo:/docs");
+
+    let stat = harness.run(&["--json", "stat", "/docs"]);
+    assert_failure(&stat);
+    assert_eq!(json_error(&stat)["code"], "path_not_found");
+}
+
+#[test]
+fn local_profile_mv_moves_directory_subtrees() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let upload_path = harness.temp_dir.path().join("upload.txt");
+    fs::write(&upload_path, b"hello from direct core\n").expect("upload payload");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["put", upload_path.to_str().unwrap(), "/docs/sub/hello.txt"]));
+
+    let mv = harness.run(&["--json", "mv", "/docs", "/archive"]);
+    assert_success(&mv);
+    assert_eq!(json_data(&mv)["from"], "demo:/docs");
+    assert_eq!(json_data(&mv)["to"], "demo:/archive");
+
+    let moved = harness.run(&["cat", "/archive/sub/hello.txt"]);
+    assert_success(&moved);
+    assert_eq!(moved.stdout, b"hello from direct core\n");
+
+    let source = harness.run(&["--json", "stat", "/docs"]);
+    assert_failure(&source);
+    assert_eq!(json_error(&source)["code"], "path_not_found");
+}
+
+#[test]
+fn local_profile_get_recursive_downloads_directory_tree() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let upload_one = harness.temp_dir.path().join("upload-one.txt");
+    let upload_two = harness.temp_dir.path().join("upload-two.txt");
+    fs::write(&upload_one, b"hello\n").expect("upload one");
+    fs::write(&upload_two, b"nested\n").expect("upload two");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["put", upload_one.to_str().unwrap(), "/docs/hello.txt"]));
+    assert_success(&harness.run(&["put", upload_two.to_str().unwrap(), "/docs/sub/nested.txt"]));
+
+    let destination_parent = harness.temp_dir.path().join("downloads");
+    fs::create_dir_all(&destination_parent).expect("create downloads dir");
+
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "-r",
+        "/docs",
+        destination_parent.to_str().unwrap(),
+    ]);
+    assert_success(&get);
+
+    let downloaded_root = destination_parent.join("docs");
+    assert_eq!(
+        fs::read(downloaded_root.join("hello.txt")).expect("downloaded hello"),
+        b"hello\n"
+    );
+    assert_eq!(
+        fs::read(downloaded_root.join("sub").join("nested.txt")).expect("downloaded nested"),
+        b"nested\n"
+    );
+    assert_eq!(
+        json_data(&get)["destination"],
+        downloaded_root.display().to_string()
+    );
+}
+
+#[test]
+fn recursive_get_cannot_stream_to_stdout() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let upload_path = harness.temp_dir.path().join("upload.txt");
+    fs::write(&upload_path, b"hello from direct core\n").expect("upload payload");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["put", upload_path.to_str().unwrap(), "/docs/hello.txt"]));
+
+    let output = harness.run(&["get", "-r", "/docs", "-"]);
+    assert_failure(&output);
+    assert!(stderr_string(&output).contains("recursive `get` cannot stream to stdout"));
+}
+
+#[test]
+fn remote_profile_recursive_get_is_unsupported() {
+    let harness = Harness::new();
+    let remote_server = harness
+        .start_external_server(harness.write_server_config("remote", "remote-recursive-get"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+
+    let upload_path = harness.temp_dir.path().join("upload.txt");
+    fs::write(&upload_path, b"hello over http\n").expect("upload payload");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["put", upload_path.to_str().unwrap(), "/docs/hello.txt"]));
+
+    let destination = harness.temp_dir.path().join("download");
+    let output = harness.run(&[
+        "--json",
+        "get",
+        "-r",
+        "/docs",
+        destination.to_str().unwrap(),
+    ]);
+    assert_failure(&output);
+    assert_eq!(json_error(&output)["code"], "unsupported_operation");
+}
+
+#[test]
 fn init_creates_local_profile_and_current_reports_namespace_unset() {
     let harness = Harness::new();
 
