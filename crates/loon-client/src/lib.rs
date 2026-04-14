@@ -241,7 +241,7 @@ impl Client {
     }
 
     fn read_bytes(&self, url: &str) -> Result<Vec<u8>, ClientError> {
-        let request = self.authenticated(self.agent.get(&url));
+        let request = self.authenticated(self.agent.get(url));
         let response = request.call().map_err(|err| self.map_error(err))?;
         let mut reader = response.into_reader();
         let mut bytes = Vec::new();

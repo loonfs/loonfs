@@ -60,6 +60,14 @@ struct RevisionCommitContext {
     annotations: Option<loon_api::v0::CommitAnnotations>,
 }
 
+struct HistoricalFileContext<'a> {
+    metadata_state: &'a MetadataState,
+    head_seq: ChangeSeq,
+    inode_id: InodeId,
+    current_absolute_path: Option<String>,
+    currently_visible: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreErrorKind {
     InvalidPath,
@@ -458,11 +466,13 @@ pub fn list_file_revisions_by_path<S: ObjectStore + ?Sized>(
     build_authoritative_file_revision_list(
         store,
         namespace_id,
-        basis.head.seq,
-        &basis.metadata_state,
-        resolved.inode_id,
-        Some(resolved.absolute_path),
-        true,
+        HistoricalFileContext {
+            metadata_state: &basis.metadata_state,
+            head_seq: basis.head.seq,
+            inode_id: resolved.inode_id,
+            current_absolute_path: Some(resolved.absolute_path),
+            currently_visible: true,
+        },
         before_revision_no,
         limit,
     )
@@ -493,11 +503,13 @@ pub fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
     build_authoritative_file_revision_list(
         store,
         namespace_id,
-        basis.head.seq,
-        &basis.metadata_state,
-        inode_id,
-        current_absolute_path,
-        currently_visible,
+        HistoricalFileContext {
+            metadata_state: &basis.metadata_state,
+            head_seq: basis.head.seq,
+            inode_id,
+            current_absolute_path,
+            currently_visible,
+        },
         before_revision_no,
         limit,
     )
@@ -523,11 +535,13 @@ pub fn read_file_bytes_at_revision<S: ObjectStore + ?Sized>(
     read_file_revision_bytes_for_inode(
         store,
         namespace_id,
-        basis.head.seq,
-        &basis.metadata_state,
-        resolved.inode_id,
-        Some(resolved.absolute_path),
-        true,
+        HistoricalFileContext {
+            metadata_state: &basis.metadata_state,
+            head_seq: basis.head.seq,
+            inode_id: resolved.inode_id,
+            current_absolute_path: Some(resolved.absolute_path),
+            currently_visible: true,
+        },
         revision_no,
     )
 }
@@ -556,11 +570,13 @@ pub fn read_file_bytes_by_inode_at_revision<S: ObjectStore + ?Sized>(
     read_file_revision_bytes_for_inode(
         store,
         namespace_id,
-        basis.head.seq,
-        &basis.metadata_state,
-        inode_id,
-        current_absolute_path,
-        currently_visible,
+        HistoricalFileContext {
+            metadata_state: &basis.metadata_state,
+            head_seq: basis.head.seq,
+            inode_id,
+            current_absolute_path,
+            currently_visible,
+        },
         revision_no,
     )
 }
@@ -1310,19 +1326,18 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
 fn build_authoritative_file_revision_list<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    head_seq: ChangeSeq,
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    current_absolute_path: Option<String>,
-    currently_visible: bool,
+    file: HistoricalFileContext<'_>,
     before_revision_no: Option<RevisionNo>,
     limit: Option<u32>,
 ) -> Result<AuthoritativeFileRevisionList, CoreError> {
     let limit = normalize_revision_page_limit(limit);
-    let mut revisions = metadata_state
+    let mut revisions = file
+        .metadata_state
         .revisions
         .iter()
-        .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= head_seq)
+        .filter(|revision| {
+            revision.inode_id == file.inode_id && revision.committed_seq <= file.head_seq
+        })
         .filter(|revision| {
             before_revision_no
                 .map(|before| revision.revision_no < before)
@@ -1361,10 +1376,10 @@ fn build_authoritative_file_revision_list<S: ObjectStore + ?Sized>(
 
     Ok(AuthoritativeFileRevisionList {
         namespace_id: namespace_id.clone(),
-        inode_id,
-        authoritative_head_seq: head_seq,
-        current_absolute_path,
-        currently_visible,
+        inode_id: file.inode_id,
+        authoritative_head_seq: file.head_seq,
+        current_absolute_path: file.current_absolute_path,
+        currently_visible: file.currently_visible,
         next_before_revision_no,
         revisions,
     })
@@ -1373,17 +1388,14 @@ fn build_authoritative_file_revision_list<S: ObjectStore + ?Sized>(
 fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    head_seq: ChangeSeq,
-    metadata_state: &MetadataState,
-    inode_id: InodeId,
-    current_absolute_path: Option<String>,
-    currently_visible: bool,
+    file: HistoricalFileContext<'_>,
     revision_no: RevisionNo,
 ) -> Result<AuthoritativeFileRevisionBytes, CoreError> {
-    let revision = metadata_state
-        .revision_at_seq(inode_id, revision_no, head_seq)
+    let revision = file
+        .metadata_state
+        .revision_at_seq(file.inode_id, revision_no, file.head_seq)
         .ok_or(CoreError::MissingRevision {
-            inode_id,
+            inode_id: file.inode_id,
             revision_no,
         })?;
     let mut wal_context_by_seq = BTreeMap::new();
@@ -1394,10 +1406,10 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
 
     Ok(AuthoritativeFileRevisionBytes {
         namespace_id: namespace_id.clone(),
-        inode_id,
-        current_absolute_path,
-        currently_visible,
-        authoritative_head_seq: head_seq,
+        inode_id: file.inode_id,
+        current_absolute_path: file.current_absolute_path,
+        currently_visible: file.currently_visible,
+        authoritative_head_seq: file.head_seq,
         revision: revision_entry,
         bytes: read.bytes,
     })
