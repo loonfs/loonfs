@@ -649,14 +649,15 @@ fn run_filesystem_get(
         ));
     }
 
-    let spec = namespace_path(&context.namespace, &args.remote_path, args.recursive).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
+    let spec =
+        namespace_path(&context.namespace, &args.remote_path, args.recursive).map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
     let entry = context.target.backend().stat_path(&spec).map_err(|error| {
         fail(
             kind,

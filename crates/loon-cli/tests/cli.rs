@@ -287,13 +287,8 @@ fn local_profile_get_recursive_downloads_namespace_root() {
         b"hello\n"
     );
     assert_eq!(
-        fs::read(
-            destination_root
-                .join("docs")
-                .join("sub")
-                .join("nested.txt")
-        )
-        .expect("downloaded nested"),
+        fs::read(destination_root.join("docs").join("sub").join("nested.txt"))
+            .expect("downloaded nested"),
         b"nested\n"
     );
     assert_eq!(
