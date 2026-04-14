@@ -123,6 +123,11 @@ Each revision points to exactly one immutable content manifest. The manifest, in
 
 Blocks and manifests belong to the owning namespace. A file revision may reference only content that is durable under that namespace's content store.
 
+Revision history is therefore inode-scoped, not path-scoped. A rename changes the current derived
+path view but does not change which prior revisions belong to the file. A deleted file may lose
+its current visible path while its prior revisions remain addressable by `(namespace_id, inode_id,
+revision_no)`.
+
 LoonFS therefore uses a two-stage write model:
 
 ```text

@@ -64,7 +64,11 @@ A representative v0 binding is shown below.
 | --- | --- |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs` |
+| List current file versions by path | `GET /v0/namespaces/{ns}/filesystem/versions?path=/docs/report.txt` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
+| Read historical file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=7` |
+| List file versions by inode | `GET /v0/namespaces/{ns}/inodes/42/revisions` |
+| Read historical file content by inode | `GET /v0/namespaces/{ns}/inodes/42/revisions/7/content` |
 | Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
@@ -119,7 +123,38 @@ A few representative requests and responses are shown below. These examples are 
 The response body is the authoritative file bytes. Metadata may be exposed in headers, but the
 body itself is raw content rather than JSON.
 
-### 3.4 `POST /filesystem/operations`
+When `revision_no` is omitted, the body is the current visible file bytes for the inode currently
+selected by `path`. When `revision_no` is present, the body is the bytes for that specific
+revision of that inode.
+
+### 3.4 `GET /filesystem/versions`
+
+```json
+{
+  "namespace_id": "demo",
+  "inode_id": 42,
+  "authoritative_head_seq": 418,
+  "current_absolute_path": "/docs/report.txt",
+  "currently_visible": true,
+  "revisions": [
+    {
+      "revision_no": 7,
+      "committed_seq": 418,
+      "content_manifest_digest": "sha256:report-v7",
+      "size_bytes": 19482,
+      "content_digest": "sha256:file-v7",
+      "commit_id": "c_01J...",
+      "request_id": "req_01J...",
+      "message": "replace report bytes"
+    }
+  ]
+}
+
+Path-oriented history lookup is head-relative: the server first resolves the current visible path,
+then lists revisions for that inode. Renamed or deleted files should use the inode-based history
+surface.
+
+### 3.5 `POST /filesystem/operations`
 
 Representative request:
 
@@ -166,7 +201,7 @@ Representative response:
 }
 ```
 
-### 3.5 Upload transport
+### 3.6 Upload transport
 
 The upload transport standardizes staged content publication, not one specific byte path.
 
@@ -200,7 +235,7 @@ Representative complete-upload response:
 }
 ```
 
-### 3.6 `POST /commits`
+### 3.7 `POST /commits`
 
 Representative request:
 
@@ -255,7 +290,7 @@ Representative response:
 }
 ```
 
-### 3.7 `GET /changes`
+### 3.8 `GET /changes`
 
 ```json
 {

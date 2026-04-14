@@ -23,8 +23,10 @@ pub use protocol::{
     begin_upload, commit_operations, complete_upload, list_changes_after, upload_block,
 };
 pub use services::{
-    bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, list_namespaces,
-    list_path, move_path, put_file_bytes, put_file_manifest, read_file_bytes, resolve_path,
-    store_bytes_as_content, write_file_bytes, BootstrapNamespaceError, CoreError, CoreErrorKind,
-    MutationContext, PutFileBehavior, StoredContent,
+    bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive,
+    list_file_revisions_by_inode, list_file_revisions_by_path, list_namespaces, list_path,
+    move_path, put_file_bytes, put_file_manifest, read_file_bytes, read_file_bytes_at_revision,
+    read_file_bytes_by_inode_at_revision, resolve_path, store_bytes_as_content, write_file_bytes,
+    BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
+    StoredContent,
 };

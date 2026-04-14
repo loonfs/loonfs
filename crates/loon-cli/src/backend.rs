@@ -1,11 +1,16 @@
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
-use loon_api::{AuthoritativePathEntry, MutationResult, NamespaceId, NamespaceSummary};
+use loon_api::{
+    AuthoritativeFileRevisionList, AuthoritativePathEntry, InodeId, MutationResult, NamespaceId,
+    NamespaceSummary, RevisionNo,
+};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_core::{
-    bootstrap_namespace, copy_file_path, delete_path_non_recursive, list_namespaces, list_path,
-    move_path, put_file_bytes, read_file_bytes, resolve_path, BootstrapNamespaceError, CoreError,
-    CoreErrorKind, MutationContext, PutFileBehavior,
+    bootstrap_namespace, copy_file_path, delete_path_non_recursive, list_file_revisions_by_inode,
+    list_file_revisions_by_path, list_namespaces, list_path, move_path, put_file_bytes,
+    read_file_bytes, read_file_bytes_at_revision, read_file_bytes_by_inode_at_revision,
+    resolve_path, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
+    PutFileBehavior,
 };
 use loon_objectstore::ConfiguredObjectStore;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +23,30 @@ pub trait Backend {
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError>;
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError>;
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError>;
+    fn list_file_revisions(
+        &self,
+        spec: &NamespacePath,
+        before_revision_no: Option<RevisionNo>,
+        limit: Option<u32>,
+    ) -> Result<AuthoritativeFileRevisionList, CliError>;
+    fn list_file_revisions_by_inode(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        before_revision_no: Option<RevisionNo>,
+        limit: Option<u32>,
+    ) -> Result<AuthoritativeFileRevisionList, CliError>;
+    fn read_file_bytes_at_revision(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError>;
+    fn read_file_bytes_by_inode_at_revision(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError>;
     fn put_file_bytes(
         &self,
         spec: &NamespacePath,
@@ -62,6 +91,50 @@ impl Backend for RemoteBackend {
 
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError> {
         self.client.read_file_bytes(spec).map_err(map_client_error)
+    }
+
+    fn list_file_revisions(
+        &self,
+        spec: &NamespacePath,
+        before_revision_no: Option<RevisionNo>,
+        limit: Option<u32>,
+    ) -> Result<AuthoritativeFileRevisionList, CliError> {
+        self.client
+            .list_file_revisions(spec, before_revision_no, limit)
+            .map_err(map_client_error)
+    }
+
+    fn list_file_revisions_by_inode(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        before_revision_no: Option<RevisionNo>,
+        limit: Option<u32>,
+    ) -> Result<AuthoritativeFileRevisionList, CliError> {
+        self.client
+            .list_inode_revisions(namespace, inode_id, before_revision_no, limit)
+            .map_err(map_client_error)
+    }
+
+    fn read_file_bytes_at_revision(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError> {
+        self.client
+            .read_file_bytes_at_revision(spec, revision_no)
+            .map_err(map_client_error)
+    }
+
+    fn read_file_bytes_by_inode_at_revision(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError> {
+        self.client
+            .read_file_bytes_by_inode_at_revision(namespace, inode_id, revision_no)
+            .map_err(map_client_error)
     }
 
     fn put_file_bytes(
@@ -168,6 +241,60 @@ impl Backend for DirectBackend {
         Ok(result.bytes)
     }
 
+    fn list_file_revisions(
+        &self,
+        spec: &NamespacePath,
+        before_revision_no: Option<RevisionNo>,
+        limit: Option<u32>,
+    ) -> Result<AuthoritativeFileRevisionList, CliError> {
+        let ns_id = NamespaceId::from(spec.namespace.clone());
+        list_file_revisions_by_path(
+            &self.store,
+            &ns_id,
+            &spec.absolute_path,
+            before_revision_no,
+            limit,
+        )
+        .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
+    }
+
+    fn list_file_revisions_by_inode(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        before_revision_no: Option<RevisionNo>,
+        limit: Option<u32>,
+    ) -> Result<AuthoritativeFileRevisionList, CliError> {
+        let ns_id = NamespaceId::from(namespace.to_owned());
+        list_file_revisions_by_inode(&self.store, &ns_id, inode_id, before_revision_no, limit)
+            .map_err(|error| map_namespace_scoped_core_error(namespace, error))
+    }
+
+    fn read_file_bytes_at_revision(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError> {
+        let ns_id = NamespaceId::from(spec.namespace.clone());
+        let result =
+            read_file_bytes_at_revision(&self.store, &ns_id, &spec.absolute_path, revision_no)
+                .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))?;
+        Ok(result.bytes)
+    }
+
+    fn read_file_bytes_by_inode_at_revision(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError> {
+        let ns_id = NamespaceId::from(namespace.to_owned());
+        let result =
+            read_file_bytes_by_inode_at_revision(&self.store, &ns_id, inode_id, revision_no)
+                .map_err(|error| map_namespace_scoped_core_error(namespace, error))?;
+        Ok(result.bytes)
+    }
+
     fn put_file_bytes(
         &self,
         spec: &NamespacePath,
@@ -244,6 +371,7 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::InvalidPath => "invalid_path",
         CoreErrorKind::NamespaceNotFound => "namespace_not_found",
         CoreErrorKind::PathNotFound => "path_not_found",
+        CoreErrorKind::InodeNotFound => "inode_not_found",
         CoreErrorKind::RevisionNotFound => "revision_not_found",
         CoreErrorKind::PathConflict => "path_conflict",
         CoreErrorKind::StaleHead => "stale_head",

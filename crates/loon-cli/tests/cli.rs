@@ -163,6 +163,73 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 }
 
 #[test]
+fn local_profile_versions_and_historical_reads_work() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let first_upload = harness.temp_dir.path().join("history-v1.txt");
+    let second_upload = harness.temp_dir.path().join("history-v2.txt");
+    let download_path = harness.temp_dir.path().join("history-v1-downloaded.txt");
+    fs::write(&first_upload, b"v1\n").expect("first upload");
+    fs::write(&second_upload, b"v2\n").expect("second upload");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    assert_success(&harness.run(&[
+        "--json",
+        "put",
+        first_upload.to_str().unwrap(),
+        "/docs/history.txt",
+    ]));
+    assert_success(&harness.run(&[
+        "--json",
+        "put",
+        second_upload.to_str().unwrap(),
+        "/docs/history.txt",
+        "--force",
+    ]));
+
+    let stat = harness.run(&["--json", "stat", "/docs/history.txt"]);
+    assert_success(&stat);
+    let inode_id = json_data(&stat)["inode_id"].as_u64().expect("inode id");
+
+    let versions = harness.run(&["--json", "versions", "/docs/history.txt"]);
+    assert_success(&versions);
+    let versions_data = json_data(&versions);
+    assert_eq!(versions_data["type"], "file_revision_list");
+    assert_eq!(versions_data["revisions"]["inode_id"], inode_id);
+    assert_eq!(
+        versions_data["revisions"]["current_absolute_path"],
+        "/docs/history.txt"
+    );
+    assert_eq!(
+        versions_data["revisions"]["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(versions_data["revisions"]["revisions"][0]["revision_no"], 2);
+    assert_eq!(versions_data["revisions"]["revisions"][1]["revision_no"], 1);
+
+    let cat_old = harness.run(&["cat", "/docs/history.txt", "--revision", "1"]);
+    assert_success(&cat_old);
+    assert_eq!(cat_old.stdout, b"v1\n");
+
+    let get_old = harness.run(&[
+        "get",
+        "--inode",
+        &inode_id.to_string(),
+        "--revision",
+        "1",
+        download_path.to_str().unwrap(),
+    ]);
+    assert_success(&get_old);
+    assert_eq!(fs::read(&download_path).expect("downloaded"), b"v1\n");
+}
+
+#[test]
 fn init_creates_local_profile_and_current_reports_namespace_unset() {
     let harness = Harness::new();
 

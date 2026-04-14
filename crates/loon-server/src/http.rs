@@ -13,14 +13,15 @@ use loon_api::{
     },
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ListNamespacesResponse, NamespaceId,
+    FilesystemPutBehavior, ListNamespacesResponse, NamespaceId, RevisionNo,
 };
 use loon_core::{
     advance_retention_floor, begin_upload, bootstrap_namespace, commit_operations, complete_upload,
     copy_file_path, create_checkpoint, delete_path_non_recursive, list_changes_after,
-    list_namespaces, list_path, move_path, put_file_manifest, read_file_bytes, resolve_path,
-    upload_block, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
-    PutFileBehavior,
+    list_file_revisions_by_inode, list_file_revisions_by_path, list_namespaces, list_path,
+    move_path, put_file_manifest, read_file_bytes, read_file_bytes_at_revision,
+    read_file_bytes_by_inode_at_revision, resolve_path, upload_block, BootstrapNamespaceError,
+    CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
@@ -39,6 +40,25 @@ struct AppState {
 #[derive(Debug, serde::Deserialize)]
 struct PathQuery {
     path: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct VersionsQuery {
+    path: String,
+    before_revision_no: Option<u64>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContentQuery {
+    path: String,
+    revision_no: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct InodeVersionsQuery {
+    before_revision_no: Option<u64>,
+    limit: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -66,10 +86,22 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
             "/v0/namespaces/:namespace/filesystem/list",
             get(list_entries),
         )
+        .route(
+            "/v0/namespaces/:namespace/filesystem/versions",
+            get(list_file_versions),
+        )
         .route("/v0/namespaces/:namespace/filesystem/stat", get(stat_entry))
         .route(
             "/v0/namespaces/:namespace/filesystem/content",
             get(get_content),
+        )
+        .route(
+            "/v0/namespaces/:namespace/inodes/:inode/revisions",
+            get(list_inode_revisions),
+        )
+        .route(
+            "/v0/namespaces/:namespace/inodes/:inode/revisions/:revision/content",
+            get(get_inode_revision_content),
         )
         .route(
             "/v0/namespaces/:namespace/filesystem/operations",
@@ -194,19 +226,96 @@ async fn stat_entry(
     Ok(Json(entry))
 }
 
+async fn list_file_versions(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+    Query(query): Query<VersionsQuery>,
+) -> Result<Json<loon_api::AuthoritativeFileRevisionList>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let before_revision_no = query.before_revision_no.map(RevisionNo);
+    let limit = query.limit;
+    let path = query.path;
+    let revisions = run_blocking(move || {
+        list_file_revisions_by_path(
+            store.as_ref(),
+            &namespace_id,
+            &path,
+            before_revision_no,
+            limit,
+        )
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+    })
+    .await?;
+    Ok(Json(revisions))
+}
+
 async fn get_content(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Query(query): Query<PathQuery>,
+    Query(query): Query<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let namespace_id = NamespaceId::from(namespace);
     let path = query.path;
+    let revision_no = query.revision_no.map(RevisionNo);
+    let bytes = run_blocking(move || {
+        match revision_no {
+            Some(revision_no) => {
+                read_file_bytes_at_revision(store.as_ref(), &namespace_id, &path, revision_no)
+                    .map(|file| file.bytes)
+            }
+            None => read_file_bytes(store.as_ref(), &namespace_id, &path).map(|file| file.bytes),
+        }
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+    })
+    .await?;
+    Ok((StatusCode::OK, bytes).into_response())
+}
+
+async fn list_inode_revisions(
+    State(state): State<AppState>,
+    AxumPath((namespace, inode)): AxumPath<(String, u64)>,
+    headers: HeaderMap,
+    Query(query): Query<InodeVersionsQuery>,
+) -> Result<Json<loon_api::AuthoritativeFileRevisionList>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let namespace_id = NamespaceId::from(namespace);
+    let revisions = run_blocking(move || {
+        list_file_revisions_by_inode(
+            store.as_ref(),
+            &namespace_id,
+            loon_api::InodeId(inode),
+            query.before_revision_no.map(RevisionNo),
+            query.limit,
+        )
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+    })
+    .await?;
+    Ok(Json(revisions))
+}
+
+async fn get_inode_revision_content(
+    State(state): State<AppState>,
+    AxumPath((namespace, inode, revision)): AxumPath<(String, u64, u64)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let namespace_id = NamespaceId::from(namespace);
     let file = run_blocking(move || {
-        read_file_bytes(store.as_ref(), &namespace_id, &path)
-            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+        read_file_bytes_by_inode_at_revision(
+            store.as_ref(),
+            &namespace_id,
+            loon_api::InodeId(inode),
+            RevisionNo(revision),
+        )
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok((StatusCode::OK, file.bytes).into_response())
@@ -508,6 +617,7 @@ impl ApiResponseError {
             CoreErrorKind::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path"),
             CoreErrorKind::NamespaceNotFound => (StatusCode::NOT_FOUND, "namespace_not_found"),
             CoreErrorKind::PathNotFound => (StatusCode::NOT_FOUND, "path_not_found"),
+            CoreErrorKind::InodeNotFound => (StatusCode::NOT_FOUND, "inode_not_found"),
             CoreErrorKind::RevisionNotFound => (StatusCode::CONFLICT, "revision_not_found"),
             CoreErrorKind::PathConflict => (StatusCode::CONFLICT, "path_conflict"),
             CoreErrorKind::StaleHead => (StatusCode::CONFLICT, "stale_head"),

@@ -80,12 +80,41 @@ Given a visible file inode at seq N:
 3. The manifest lists the file's ordered block digests. Fetch each block from `namespaces/{namespace_id}/blobs/{block_digest}`.
 4. Concatenate the blocks in manifest order to produce the file bytes.
 
+Historical file reads follow the same content procedure after selecting a specific revision:
+
+1. Identify the target file by current visible path at head or directly by `inode_id`.
+2. Resolve the desired `revision_no` for that inode at seq N.
+3. Read that revision's `content_manifest_digest`.
+4. Fetch the manifest and blocks exactly as for the current head revision.
+
+Path-based version reads are head-relative selectors: the path first resolves to the file currently
+visible there, and history is then read from that inode. Renamed or deleted files therefore
+require inode-based history lookup rather than historical-path search.
+
+### 2.4.1 File revision listing
+
+Given a file inode at seq N:
+
+1. Enumerate the inode's committed revisions with `committed_seq <= N`.
+2. Order them by descending `revision_no`.
+3. For each revision, derive size and file digest from the referenced manifest.
+4. Join the revision row back to the committed WAL entry at `(committed_seq, revision_op_index)`
+   to expose commit context such as `commit_id`, `request_id`, message, and annotations.
+
 ### 2.5 Directory listing
 
 Given a visible directory inode at seq N:
 
 1. Collect all active directory bindings whose `parent_inode_id` matches the directory.
 2. For each binding, resolve the child inode. If the child is a file, its latest revision provides size and content digest via the manifest.
+
+History-read failure modes must be explicit:
+
+- current path does not resolve to a visible item;
+- supplied inode id does not exist in namespace history;
+- supplied inode exists but is not a file;
+- supplied revision number does not exist for that inode; or
+- the referenced durable content or committed WAL object is missing or invalid.
 
 ## 3. One request, one visible sequence
 

@@ -27,7 +27,8 @@ pub enum Command {
     Current(CurrentArgs),
     Ls(FilesystemLsArgs),
     Stat(FilesystemPathArgs),
-    Cat(FilesystemPathArgs),
+    Versions(FilesystemVersionsArgs),
+    Cat(FilesystemCatArgs),
     Get(FilesystemGetArgs),
     Put(FilesystemPutArgs),
     Rm(FilesystemPathArgs),
@@ -204,10 +205,38 @@ pub struct FilesystemPathArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct FilesystemVersionsArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: Option<String>,
+    #[arg(long)]
+    pub inode: Option<u64>,
+    #[arg(long = "before-revision")]
+    pub before_revision: Option<u64>,
+    #[arg(long)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Args)]
+pub struct FilesystemCatArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: Option<String>,
+    #[arg(long)]
+    pub inode: Option<u64>,
+    #[arg(long)]
+    pub revision: Option<u64>,
+}
+
+#[derive(Debug, Args)]
 pub struct FilesystemGetArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    pub remote_path: String,
+    pub remote_path: Option<String>,
+    #[arg(long)]
+    pub inode: Option<u64>,
+    #[arg(long)]
+    pub revision: Option<u64>,
     pub local_destination: Option<String>,
 }
 
@@ -271,6 +300,7 @@ pub enum CommandKind {
     Current,
     FilesystemLs,
     FilesystemStat,
+    FilesystemVersions,
     FilesystemCat,
     FilesystemGet,
     FilesystemPut,
@@ -298,6 +328,7 @@ impl CommandKind {
             CommandKind::Current => "current",
             CommandKind::FilesystemLs => "filesystem_ls",
             CommandKind::FilesystemStat => "filesystem_stat",
+            CommandKind::FilesystemVersions => "filesystem_versions",
             CommandKind::FilesystemCat => "filesystem_cat",
             CommandKind::FilesystemGet => "filesystem_get",
             CommandKind::FilesystemPut => "filesystem_put",
@@ -335,6 +366,7 @@ impl Cli {
             Command::Current(_) => CommandKind::Current,
             Command::Ls(_) => CommandKind::FilesystemLs,
             Command::Stat(_) => CommandKind::FilesystemStat,
+            Command::Versions(_) => CommandKind::FilesystemVersions,
             Command::Cat(_) => CommandKind::FilesystemCat,
             Command::Get(_) => CommandKind::FilesystemGet,
             Command::Put(_) => CommandKind::FilesystemPut,

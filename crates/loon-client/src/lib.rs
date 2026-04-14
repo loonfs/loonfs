@@ -8,9 +8,10 @@ use loon_api::{
         CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         UploadBlockResponse,
     },
-    ApiError, AuthoritativePathEntry, ChangeSeq, CreateNamespaceRequest, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
-    ListNamespacesResponse, MutationResult, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
+    ApiError, AuthoritativeFileRevisionList, AuthoritativePathEntry, ChangeSeq,
+    CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest,
+    FilesystemOperationResponse, FilesystemPutBehavior, InodeId, ListNamespacesResponse,
+    MutationResult, NamespaceSummary, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
 use serde::Deserialize;
 use std::fs;
@@ -159,6 +160,87 @@ impl Client {
             spec.namespace,
             urlencoding::encode(&spec.absolute_path)
         );
+        self.read_bytes(&url)
+    }
+
+    pub fn list_file_revisions(
+        &self,
+        spec: &NamespacePath,
+        before_revision_no: Option<RevisionNo>,
+        limit: Option<u32>,
+    ) -> Result<AuthoritativeFileRevisionList, ClientError> {
+        let mut url = format!(
+            "{}/v0/namespaces/{}/filesystem/versions?path={}",
+            self.base_url,
+            spec.namespace,
+            urlencoding::encode(&spec.absolute_path)
+        );
+        if let Some(before_revision_no) = before_revision_no {
+            url.push_str("&before_revision_no=");
+            url.push_str(&before_revision_no.0.to_string());
+        }
+        if let Some(limit) = limit {
+            url.push_str("&limit=");
+            url.push_str(&limit.to_string());
+        }
+        self.request_json::<(), AuthoritativeFileRevisionList>(self.agent.get(&url), None)
+    }
+
+    pub fn list_inode_revisions(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        before_revision_no: Option<RevisionNo>,
+        limit: Option<u32>,
+    ) -> Result<AuthoritativeFileRevisionList, ClientError> {
+        let mut url = format!(
+            "{}/v0/namespaces/{namespace}/inodes/{}/revisions",
+            self.base_url, inode_id.0
+        );
+        let mut separator = '?';
+        if let Some(before_revision_no) = before_revision_no {
+            url.push(separator);
+            separator = '&';
+            url.push_str("before_revision_no=");
+            url.push_str(&before_revision_no.0.to_string());
+        }
+        if let Some(limit) = limit {
+            url.push(separator);
+            url.push_str("limit=");
+            url.push_str(&limit.to_string());
+        }
+        self.request_json::<(), AuthoritativeFileRevisionList>(self.agent.get(&url), None)
+    }
+
+    pub fn read_file_bytes_at_revision(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, ClientError> {
+        let url = format!(
+            "{}/v0/namespaces/{}/filesystem/content?path={}&revision_no={}",
+            self.base_url,
+            spec.namespace,
+            urlencoding::encode(&spec.absolute_path),
+            revision_no.0
+        );
+        self.read_bytes(&url)
+    }
+
+    pub fn read_file_bytes_by_inode_at_revision(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, ClientError> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/{}/content",
+            self.base_url, inode_id.0, revision_no.0
+        );
+        self.read_bytes(&url)
+    }
+
+    fn read_bytes(&self, url: &str) -> Result<Vec<u8>, ClientError> {
         let request = self.authenticated(self.agent.get(&url));
         let response = request.call().map_err(|err| self.map_error(err))?;
         let mut reader = response.into_reader();

@@ -9,20 +9,22 @@ use crate::loading::ControlObjectLoadError;
 use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, VisiblePathError};
 use crate::wal::WalBuildError;
 use loon_api::{
-    content_manifest_digest_sha256, encode_content_manifest_json, name_key_for_display_name,
-    payload_checksum_sha256,
+    content_manifest_digest_sha256, decode_wal_commit_envelope_zstd, encode_content_manifest_json,
+    name_key_for_display_name, payload_checksum_sha256,
     v0::{
         CommitOp as V0CommitOp, CommitOpResult, CommitPrecondition as V0CommitPrecondition,
         CommitRequest as V0CommitRequest, CommitResponse as V0CommitResponse,
     },
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentBlockDescriptor,
+    AuthoritativeFileBytes, AuthoritativeFileRevision, AuthoritativeFileRevisionBytes,
+    AuthoritativeFileRevisionList, AuthoritativePathEntry, ChangeSeq, ContentBlockDescriptor,
     ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, HeadState,
     HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, MutationResult,
-    NamespaceId, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
+    NamespaceId, NamespaceSummary, RevisionNo, CONTENT_BLOCK_SIZE_BYTES,
 };
 use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -47,11 +49,23 @@ pub enum PutFileBehavior {
     ReplaceExisting,
 }
 
+const DEFAULT_REVISION_PAGE_LIMIT: usize = 1_000;
+const MAX_REVISION_PAGE_LIMIT: usize = 1_000;
+
+#[derive(Debug, Clone)]
+struct RevisionCommitContext {
+    commit_id: String,
+    request_id: String,
+    message: Option<String>,
+    annotations: Option<loon_api::v0::CommitAnnotations>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreErrorKind {
     InvalidPath,
     NamespaceNotFound,
     PathNotFound,
+    InodeNotFound,
     RevisionNotFound,
     PathConflict,
     StaleHead,
@@ -112,8 +126,17 @@ pub enum CoreError {
     InvalidPath(String),
     #[error("path not found `{0}`")]
     MissingPath(String),
+    #[error("inode `{inode_id}` not found")]
+    MissingInode { inode_id: InodeId },
+    #[error("revision `{revision_no:?}` not found for inode `{inode_id}`")]
+    MissingRevision {
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    },
     #[error("expected file at `{path}` but found `{kind:?}`")]
     ExpectedFile { path: String, kind: InodeKind },
+    #[error("expected file at inode `{inode_id}` but found `{kind:?}`")]
+    ExpectedFileInode { inode_id: InodeId, kind: InodeKind },
     #[error("expected directory at `{path}` but found `{kind:?}`")]
     ExpectedDirectory { path: String, kind: InodeKind },
     #[error("directory not empty `{0}`")]
@@ -196,6 +219,8 @@ impl CoreError {
                 CoreErrorKind::InvalidPath
             }
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
+            CoreError::MissingInode { .. } => CoreErrorKind::InodeNotFound,
+            CoreError::MissingRevision { .. } => CoreErrorKind::RevisionNotFound,
             CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
             CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
@@ -204,6 +229,7 @@ impl CoreError {
             CoreError::InvalidUploadBlock(_) => CoreErrorKind::InvalidUploadBlock,
             CoreError::RebootstrapRequired { .. } => CoreErrorKind::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
+            | CoreError::ExpectedFileInode { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DirectoryNotEmpty(_)
             | CoreError::DestinationExists(_) => CoreErrorKind::PathConflict,
@@ -409,6 +435,134 @@ pub fn read_file_bytes<S: ObjectStore + ?Sized>(
         entry,
         bytes: read.bytes,
     })
+}
+
+pub fn list_file_revisions_by_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    before_revision_no: Option<RevisionNo>,
+    limit: Option<u32>,
+) -> Result<AuthoritativeFileRevisionList, CoreError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let resolved = basis
+        .metadata_state
+        .resolve_visible_path(absolute_path, basis.head.seq)?;
+    if resolved.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            path: resolved.absolute_path,
+            kind: resolved.inode_kind,
+        });
+    }
+
+    build_authoritative_file_revision_list(
+        store,
+        namespace_id,
+        basis.head.seq,
+        &basis.metadata_state,
+        resolved.inode_id,
+        Some(resolved.absolute_path),
+        true,
+        before_revision_no,
+        limit,
+    )
+}
+
+pub fn list_file_revisions_by_inode<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    before_revision_no: Option<RevisionNo>,
+    limit: Option<u32>,
+) -> Result<AuthoritativeFileRevisionList, CoreError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let inode = basis
+        .metadata_state
+        .inode_at_seq(inode_id, basis.head.seq)
+        .ok_or(CoreError::MissingInode { inode_id })?;
+    if inode.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFileInode {
+            inode_id,
+            kind: inode.inode_kind,
+        });
+    }
+
+    let current_absolute_path =
+        visible_absolute_path_for_inode(&basis.metadata_state, inode_id, basis.head.seq);
+    let currently_visible = current_absolute_path.is_some();
+    build_authoritative_file_revision_list(
+        store,
+        namespace_id,
+        basis.head.seq,
+        &basis.metadata_state,
+        inode_id,
+        current_absolute_path,
+        currently_visible,
+        before_revision_no,
+        limit,
+    )
+}
+
+pub fn read_file_bytes_at_revision<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    revision_no: RevisionNo,
+) -> Result<AuthoritativeFileRevisionBytes, CoreError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let resolved = basis
+        .metadata_state
+        .resolve_visible_path(absolute_path, basis.head.seq)?;
+    if resolved.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            path: resolved.absolute_path,
+            kind: resolved.inode_kind,
+        });
+    }
+
+    read_file_revision_bytes_for_inode(
+        store,
+        namespace_id,
+        basis.head.seq,
+        &basis.metadata_state,
+        resolved.inode_id,
+        Some(resolved.absolute_path),
+        true,
+        revision_no,
+    )
+}
+
+pub fn read_file_bytes_by_inode_at_revision<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+) -> Result<AuthoritativeFileRevisionBytes, CoreError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let inode = basis
+        .metadata_state
+        .inode_at_seq(inode_id, basis.head.seq)
+        .ok_or(CoreError::MissingInode { inode_id })?;
+    if inode.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFileInode {
+            inode_id,
+            kind: inode.inode_kind,
+        });
+    }
+
+    let current_absolute_path =
+        visible_absolute_path_for_inode(&basis.metadata_state, inode_id, basis.head.seq);
+    let currently_visible = current_absolute_path.is_some();
+    read_file_revision_bytes_for_inode(
+        store,
+        namespace_id,
+        basis.head.seq,
+        &basis.metadata_state,
+        inode_id,
+        current_absolute_path,
+        currently_visible,
+        revision_no,
+    )
 }
 
 pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
@@ -1151,6 +1305,252 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
         content_digest,
         content_manifest_digest,
     })
+}
+
+fn build_authoritative_file_revision_list<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head_seq: ChangeSeq,
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    current_absolute_path: Option<String>,
+    currently_visible: bool,
+    before_revision_no: Option<RevisionNo>,
+    limit: Option<u32>,
+) -> Result<AuthoritativeFileRevisionList, CoreError> {
+    let limit = normalize_revision_page_limit(limit);
+    let mut revisions = metadata_state
+        .revisions
+        .iter()
+        .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= head_seq)
+        .filter(|revision| {
+            before_revision_no
+                .map(|before| revision.revision_no < before)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    revisions.sort_by(|left, right| {
+        right
+            .revision_no
+            .cmp(&left.revision_no)
+            .then(right.committed_seq.cmp(&left.committed_seq))
+            .then(right.revision_op_index.cmp(&left.revision_op_index))
+    });
+
+    let has_more = revisions.len() > limit;
+    revisions.truncate(limit);
+    let next_before_revision_no = if has_more {
+        revisions.last().map(|revision| revision.revision_no)
+    } else {
+        None
+    };
+
+    let mut wal_context_by_seq = BTreeMap::new();
+    let revisions = revisions
+        .into_iter()
+        .map(|revision| {
+            build_authoritative_file_revision(
+                store,
+                namespace_id,
+                &revision,
+                &mut wal_context_by_seq,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(AuthoritativeFileRevisionList {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        authoritative_head_seq: head_seq,
+        current_absolute_path,
+        currently_visible,
+        next_before_revision_no,
+        revisions,
+    })
+}
+
+fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head_seq: ChangeSeq,
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    current_absolute_path: Option<String>,
+    currently_visible: bool,
+    revision_no: RevisionNo,
+) -> Result<AuthoritativeFileRevisionBytes, CoreError> {
+    let revision = metadata_state
+        .revision_at_seq(inode_id, revision_no, head_seq)
+        .ok_or(CoreError::MissingRevision {
+            inode_id,
+            revision_no,
+        })?;
+    let mut wal_context_by_seq = BTreeMap::new();
+    let revision_entry =
+        build_authoritative_file_revision(store, namespace_id, &revision, &mut wal_context_by_seq)?;
+    let read =
+        read_durable_content_bytes(store, namespace_id, &revision_entry.content_manifest_digest)?;
+
+    Ok(AuthoritativeFileRevisionBytes {
+        namespace_id: namespace_id.clone(),
+        inode_id,
+        current_absolute_path,
+        currently_visible,
+        authoritative_head_seq: head_seq,
+        revision: revision_entry,
+        bytes: read.bytes,
+    })
+}
+
+fn build_authoritative_file_revision<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    revision: &crate::metadata::RevisionRecord,
+    wal_context_by_seq: &mut BTreeMap<ChangeSeq, RevisionCommitContext>,
+) -> Result<AuthoritativeFileRevision, CoreError> {
+    let validated =
+        validate_durable_content_reference(store, namespace_id, &revision.content_manifest_digest)?;
+    let commit_context =
+        load_revision_commit_context(store, namespace_id, revision, wal_context_by_seq)?;
+
+    Ok(AuthoritativeFileRevision {
+        revision_no: revision.revision_no,
+        committed_seq: revision.committed_seq,
+        content_manifest_digest: revision.content_manifest_digest.clone(),
+        size_bytes: validated.file_size_bytes,
+        content_digest: validated.file_digest_sha256,
+        commit_id: commit_context.commit_id,
+        request_id: commit_context.request_id,
+        message: commit_context.message,
+        annotations: commit_context.annotations,
+    })
+}
+
+fn load_revision_commit_context<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    revision: &crate::metadata::RevisionRecord,
+    wal_context_by_seq: &mut BTreeMap<ChangeSeq, RevisionCommitContext>,
+) -> Result<RevisionCommitContext, CoreError> {
+    if let Some(existing) = wal_context_by_seq.get(&revision.committed_seq) {
+        return Ok(existing.clone());
+    }
+
+    let envelope = load_wal_commit_envelope_for_seq(store, namespace_id, revision.committed_seq)?;
+    let matched = envelope.payload.results.iter().any(|result| match result {
+        CommitOpResult::CreateFile {
+            op_index,
+            inode_id,
+            revision_no,
+            ..
+        }
+        | CommitOpResult::ReplaceFile {
+            op_index,
+            inode_id,
+            revision_no,
+            ..
+        }
+        | CommitOpResult::RestoreRevision {
+            op_index,
+            inode_id,
+            revision_no,
+            ..
+        } => {
+            *op_index == revision.revision_op_index
+                && *inode_id == revision.inode_id
+                && *revision_no == revision.revision_no
+        }
+        _ => false,
+    });
+    if !matched {
+        return Err(CoreError::Store(format!(
+            "missing revision result for inode `{}` revision `{}` at seq `{}`",
+            revision.inode_id.0, revision.revision_no.0, revision.committed_seq.0
+        )));
+    }
+
+    let context = RevisionCommitContext {
+        commit_id: envelope.payload.commit_id,
+        request_id: envelope.payload.request_id,
+        message: envelope.payload.message,
+        annotations: envelope.payload.annotations,
+    };
+    wal_context_by_seq.insert(revision.committed_seq, context.clone());
+    Ok(context)
+}
+
+fn load_wal_commit_envelope_for_seq<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    seq: ChangeSeq,
+) -> Result<loon_api::WalCommitEnvelope, CoreError> {
+    let prefix = format!("namespaces/{}/wal/{:020}-", namespace_id.as_str(), seq.0);
+    let listed = store
+        .list_prefix(&prefix)
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+    if listed.is_empty() {
+        return Err(CoreError::Store(format!(
+            "missing committed wal for seq `{}`",
+            seq.0
+        )));
+    }
+    if listed.len() > 1 {
+        return Err(CoreError::Store(format!(
+            "duplicate wal objects for seq `{}`: {}",
+            seq.0,
+            listed.join(", ")
+        )));
+    }
+
+    let object_key = listed[0].clone();
+    let encoded_bytes = store
+        .get(&object_key, None)
+        .map_err(|err| CoreError::Store(err.to_string()))?
+        .ok_or_else(|| CoreError::Store(format!("missing wal object `{object_key}` after list")))?;
+    decode_wal_commit_envelope_zstd(&encoded_bytes).map_err(|err| CoreError::Store(err.to_string()))
+}
+
+fn normalize_revision_page_limit(limit: Option<u32>) -> usize {
+    limit
+        .map(|value| value as usize)
+        .unwrap_or(DEFAULT_REVISION_PAGE_LIMIT)
+        .clamp(1, MAX_REVISION_PAGE_LIMIT)
+}
+
+fn visible_absolute_path_for_inode(
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    seq: ChangeSeq,
+) -> Option<String> {
+    metadata_state.visible_inode(inode_id, seq)?;
+    if inode_id == InodeId(1) {
+        return Some("/".to_owned());
+    }
+
+    let mut current_inode = inode_id;
+    let mut components = Vec::new();
+    let mut visited = BTreeSet::new();
+
+    while current_inode != InodeId(1) {
+        if !visited.insert(current_inode.0) {
+            return None;
+        }
+        let binding = metadata_state.current_parent_binding_for_child(current_inode, seq)?;
+        let parent = metadata_state.visible_inode(binding.parent_inode_id, seq)?;
+        if parent.inode_kind != InodeKind::Dir {
+            return None;
+        }
+        components.push(binding.display_name);
+        current_inode = binding.parent_inode_id;
+    }
+
+    components.reverse();
+    if components.is_empty() {
+        Some("/".to_owned())
+    } else {
+        Some(format!("/{}", components.join("/")))
+    }
 }
 
 pub(crate) fn write_immutable_object<S: ObjectStore + ?Sized>(

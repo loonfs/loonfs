@@ -437,6 +437,86 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_file_revision_listing_and_inode_history_reads_work() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-history",
+        "http-history",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        harness
+            .client
+            .create_namespace(namespace)
+            .expect("create namespace");
+        let original = NamespacePath::parse("demo:/docs/history.txt").expect("original");
+        let renamed = NamespacePath::parse("demo:/docs/renamed.txt").expect("renamed");
+
+        harness
+            .client
+            .put_file_bytes(&original, b"v1\n", false)
+            .expect("create");
+        harness
+            .client
+            .put_file_bytes(&original, b"v2\n", true)
+            .expect("replace");
+        harness
+            .client
+            .move_path(&original, &renamed)
+            .expect("rename");
+
+        let renamed_stat = harness.client.stat_path(&renamed).expect("stat renamed");
+        let inode_id = renamed_stat.inode_id;
+        let revisions = harness
+            .client
+            .list_file_revisions(&renamed, None, None)
+            .expect("list path revisions");
+        assert_eq!(revisions.inode_id, inode_id);
+        assert_eq!(
+            revisions.current_absolute_path.as_deref(),
+            Some("/docs/renamed.txt")
+        );
+        assert!(revisions.currently_visible);
+        assert_eq!(revisions.revisions.len(), 2);
+        assert_eq!(revisions.revisions[0].revision_no, RevisionNo(2));
+        assert_eq!(revisions.revisions[1].revision_no, RevisionNo(1));
+
+        let first_bytes = harness
+            .client
+            .read_file_bytes_at_revision(&renamed, RevisionNo(1))
+            .expect("read historical bytes");
+        assert_eq!(first_bytes, b"v1\n");
+
+        harness
+            .client
+            .delete_path(&renamed)
+            .expect("delete renamed");
+
+        let inode_revisions = harness
+            .client
+            .list_inode_revisions(namespace, inode_id, None, None)
+            .expect("list inode revisions");
+        assert!(!inode_revisions.currently_visible);
+        assert!(inode_revisions.current_absolute_path.is_none());
+        assert_eq!(inode_revisions.revisions.len(), 2);
+
+        let inode_bytes = harness
+            .client
+            .read_file_bytes_by_inode_at_revision(namespace, inode_id, RevisionNo(1))
+            .expect("read inode revision bytes");
+        assert_eq!(inode_bytes, b"v1\n");
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_commit_rejects_same_request_id_with_different_payload() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(

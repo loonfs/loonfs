@@ -1,8 +1,9 @@
 use crate::args::{
-    Cli, Command, CommandKind, ConfigCommand, CurrentArgs, FilesystemGetArgs, FilesystemLsArgs,
-    FilesystemMoveArgs, FilesystemPathArgs, FilesystemPutArgs, InitArgs, NamespaceCommand,
-    NamespaceCreateArgs, NamespaceListArgs, NamespaceUseArgs, ProfileCommand, ProfileCreateArgs,
-    ProfileUpdateArgs, RuntimeBehavior, TargetSelectorArgs,
+    Cli, Command, CommandKind, ConfigCommand, CurrentArgs, FilesystemCatArgs, FilesystemGetArgs,
+    FilesystemLsArgs, FilesystemMoveArgs, FilesystemPathArgs, FilesystemPutArgs,
+    FilesystemVersionsArgs, InitArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceListArgs,
+    NamespaceUseArgs, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior,
+    TargetSelectorArgs,
 };
 use crate::config::{
     default_config_path, load_config, load_config_if_exists, load_or_default_config, save_config,
@@ -17,7 +18,10 @@ use crate::prompt;
 use crate::resolve::{
     load_cli_config, resolve_namespace, resolve_target_profile, resolve_target_profile_from_config,
 };
-use loon_api::{AuthoritativePathEntry, InodeKind, NamespaceSummary};
+use loon_api::{
+    AuthoritativeFileRevisionList, AuthoritativePathEntry, InodeId, InodeKind, NamespaceSummary,
+    RevisionNo,
+};
 use loon_client::NamespacePath;
 use serde::Serialize;
 use std::fs;
@@ -92,6 +96,9 @@ pub enum CommandData {
     NamespaceList {
         namespaces: Vec<NamespaceSummary>,
     },
+    FileRevisionList {
+        revisions: AuthoritativeFileRevisionList,
+    },
     PathEntries {
         entries: Vec<AuthoritativePathEntry>,
     },
@@ -120,6 +127,11 @@ pub enum CommandData {
         version: String,
     },
     StreamBytes(Vec<u8>),
+}
+
+enum HistorySelector {
+    Path(NamespacePath),
+    Inode(InodeId),
 }
 
 pub fn run(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, CommandFailure> {
@@ -155,6 +167,7 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
         Command::Current(args) => run_current(kind, args),
         Command::Ls(args) => run_filesystem_ls(kind, args),
         Command::Stat(args) => run_filesystem_stat(kind, args),
+        Command::Versions(args) => run_filesystem_versions(kind, args),
         Command::Cat(args) => run_filesystem_cat(kind, args),
         Command::Get(args) => run_filesystem_get(kind, args, runtime),
         Command::Put(args) => run_filesystem_put(kind, args),
@@ -625,12 +638,97 @@ fn run_filesystem_stat(
     })
 }
 
+fn run_filesystem_versions(
+    kind: CommandKind,
+    args: FilesystemVersionsArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    let selector = resolve_history_selector(
+        &context.namespace,
+        args.path.as_deref(),
+        args.inode,
+        kind,
+        &context.profile_name,
+        &context.mode,
+    )?;
+    let before_revision = args.before_revision.map(RevisionNo);
+    let data = match selector {
+        HistorySelector::Path(spec) => context
+            .target
+            .backend()
+            .list_file_revisions(&spec, before_revision, args.limit)
+            .map(|revisions| CommandData::FileRevisionList { revisions }),
+        HistorySelector::Inode(inode_id) => context
+            .target
+            .backend()
+            .list_file_revisions_by_inode(&context.namespace, inode_id, before_revision, args.limit)
+            .map(|revisions| CommandData::FileRevisionList { revisions }),
+    }
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data,
+    })
+}
+
 fn run_filesystem_cat(
     kind: CommandKind,
-    args: FilesystemPathArgs,
+    args: FilesystemCatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_path_lookup(kind, args, |backend, spec| {
-        backend.read_file_bytes(spec).map(CommandData::StreamBytes)
+    let context = resolve_command_context(kind, &args.target)?;
+    let selector = resolve_history_selector(
+        &context.namespace,
+        args.path.as_deref(),
+        args.inode,
+        kind,
+        &context.profile_name,
+        &context.mode,
+    )?;
+    let revision = args.revision.map(RevisionNo);
+    let data = match (selector, revision) {
+        (HistorySelector::Path(spec), Some(revision_no)) => context
+            .target
+            .backend()
+            .read_file_bytes_at_revision(&spec, revision_no)
+            .map(CommandData::StreamBytes),
+        (HistorySelector::Path(spec), None) => context
+            .target
+            .backend()
+            .read_file_bytes(&spec)
+            .map(CommandData::StreamBytes),
+        (HistorySelector::Inode(inode_id), Some(revision_no)) => context
+            .target
+            .backend()
+            .read_file_bytes_by_inode_at_revision(&context.namespace, inode_id, revision_no)
+            .map(CommandData::StreamBytes),
+        (HistorySelector::Inode(_), None) => Err(CliError::invalid_input(
+            "`--revision` is required when using `--inode`",
+        )),
+    }
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data,
     })
 }
 
@@ -640,7 +738,18 @@ fn run_filesystem_get(
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target)?;
-    if runtime.json && args.local_destination.as_deref() == Some("-") {
+    let inferred_local_destination = if args.inode.is_some() && args.local_destination.is_none() {
+        args.remote_path.as_deref()
+    } else {
+        args.local_destination.as_deref()
+    };
+    let selector_path = if args.inode.is_some() && args.local_destination.is_none() {
+        None
+    } else {
+        args.remote_path.as_deref()
+    };
+
+    if runtime.json && inferred_local_destination == Some("-") {
         return Err(fail(
             kind,
             Some(context.profile_name),
@@ -649,58 +758,81 @@ fn run_filesystem_get(
         ));
     }
 
-    let spec = namespace_path(&context.namespace, &args.remote_path, false).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    let entry = context.target.backend().stat_path(&spec).map_err(|error| {
-        fail(
-            kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            error,
-        )
-    })?;
-    if entry.inode_kind == InodeKind::Dir {
+    let selector = resolve_history_selector(
+        &context.namespace,
+        selector_path,
+        args.inode,
+        kind,
+        &context.profile_name,
+        &context.mode,
+    )?;
+    if matches!(selector, HistorySelector::Inode(_)) && inferred_local_destination.is_none() {
         return Err(fail(
             kind,
-            Some(context.profile_name.clone()),
-            Some(context.mode.clone()),
-            CliError::invalid_input(format!(
-                "directory operations are not available for `{}`",
-                spec.absolute_path
-            )),
+            Some(context.profile_name),
+            Some(context.mode),
+            CliError::invalid_input("`get --inode` requires an explicit local destination or `-`"),
         ));
     }
-
-    let bytes = context
-        .target
-        .backend()
-        .read_file_bytes(&spec)
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
-    let data = match args.local_destination.as_deref() {
+    let revision = args.revision.map(RevisionNo);
+    let bytes = match (&selector, revision) {
+        (HistorySelector::Path(spec), None) => {
+            let entry = context.target.backend().stat_path(spec).map_err(|error| {
+                fail(
+                    kind,
+                    Some(context.profile_name.clone()),
+                    Some(context.mode.clone()),
+                    error,
+                )
+            })?;
+            if entry.inode_kind == InodeKind::Dir {
+                return Err(fail(
+                    kind,
+                    Some(context.profile_name.clone()),
+                    Some(context.mode.clone()),
+                    CliError::invalid_input(format!(
+                        "directory operations are not available for `{}`",
+                        spec.absolute_path
+                    )),
+                ));
+            }
+            context.target.backend().read_file_bytes(spec)
+        }
+        (HistorySelector::Path(spec), Some(revision_no)) => context
+            .target
+            .backend()
+            .read_file_bytes_at_revision(spec, revision_no),
+        (HistorySelector::Inode(inode_id), Some(revision_no)) => context
+            .target
+            .backend()
+            .read_file_bytes_by_inode_at_revision(&context.namespace, *inode_id, revision_no),
+        (HistorySelector::Inode(_), None) => Err(CliError::invalid_input(
+            "`--revision` is required when using `--inode`",
+        )),
+    }
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let data = match inferred_local_destination {
         Some("-") => CommandData::StreamBytes(bytes),
         other => {
-            let destination =
-                destination_path_for_get(&spec.absolute_path, other).map_err(|error| {
-                    fail(
-                        kind,
-                        Some(context.profile_name.clone()),
-                        Some(context.mode.clone()),
-                        error,
-                    )
-                })?;
+            let remote_label = match &selector {
+                HistorySelector::Path(spec) => spec.absolute_path.as_str(),
+                HistorySelector::Inode(_) => "inode-selected revision",
+            };
+            let destination = destination_path_for_get(remote_label, other).map_err(|error| {
+                fail(
+                    kind,
+                    Some(context.profile_name.clone()),
+                    Some(context.mode.clone()),
+                    error,
+                )
+            })?;
             fs::write(&destination, &bytes).map_err(|error| {
                 fail(
                     kind,
@@ -710,7 +842,7 @@ fn run_filesystem_get(
                 )
             })?;
             CommandData::FileTransfer {
-                target: render_target(&context.namespace, &spec.absolute_path),
+                target: render_history_target(&context.namespace, &selector, revision),
                 destination: destination.display().to_string(),
                 bytes_written: bytes.len() as u64,
             }
@@ -1522,6 +1654,41 @@ fn normalize_absolute_path(path: &str, allow_root: bool) -> Result<String, CliEr
     Ok(format!("/{}", components.join("/")))
 }
 
+fn resolve_history_selector(
+    namespace: &str,
+    path: Option<&str>,
+    inode: Option<u64>,
+    kind: CommandKind,
+    profile_name: &str,
+    mode: &str,
+) -> Result<HistorySelector, CommandFailure> {
+    match (path, inode) {
+        (Some(path), None) => namespace_path(namespace, path, false)
+            .map(HistorySelector::Path)
+            .map_err(|error| {
+                fail(
+                    kind,
+                    Some(profile_name.to_owned()),
+                    Some(mode.to_owned()),
+                    error,
+                )
+            }),
+        (None, Some(inode)) => Ok(HistorySelector::Inode(InodeId(inode))),
+        (Some(_), Some(_)) => Err(fail(
+            kind,
+            Some(profile_name.to_owned()),
+            Some(mode.to_owned()),
+            CliError::invalid_input("provide either a path or `--inode`, not both"),
+        )),
+        (None, None) => Err(fail(
+            kind,
+            Some(profile_name.to_owned()),
+            Some(mode.to_owned()),
+            CliError::invalid_input("provide a path or `--inode`"),
+        )),
+    }
+}
+
 fn default_remote_put_path(local_path: &Path) -> Result<String, CliError> {
     let file_name = local_path.file_name().ok_or_else(|| {
         CliError::invalid_input(format!(
@@ -1551,6 +1718,21 @@ fn destination_path_for_get(
 
 fn render_target(namespace: &str, path: &str) -> String {
     format!("{namespace}:{path}")
+}
+
+fn render_history_target(
+    namespace: &str,
+    selector: &HistorySelector,
+    revision: Option<RevisionNo>,
+) -> String {
+    let base = match selector {
+        HistorySelector::Path(spec) => render_target(namespace, &spec.absolute_path),
+        HistorySelector::Inode(inode_id) => format!("{namespace}:inode/{}", inode_id.0),
+    };
+    match revision {
+        Some(revision_no) => format!("{base}@r{}", revision_no.0),
+        None => base,
+    }
 }
 
 fn fail(

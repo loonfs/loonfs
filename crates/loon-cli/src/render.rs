@@ -148,6 +148,28 @@ pub fn human_success(output: &CommandOutput) -> String {
             }
             lines.join("\n")
         }
+        CommandData::FileRevisionList { revisions } => {
+            let mut lines = vec!["REVISION\tSEQ\tSIZE\tPATH\tMESSAGE".to_owned()];
+            for revision in &revisions.revisions {
+                let path = revisions.current_absolute_path.as_deref().unwrap_or("-");
+                let message = revision.message.as_deref().unwrap_or("-");
+                lines.push(format!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    revision.revision_no.0,
+                    revision.committed_seq.0,
+                    revision.size_bytes,
+                    path,
+                    message
+                ));
+            }
+            if let Some(next_before_revision_no) = revisions.next_before_revision_no {
+                lines.push(format!(
+                    "next_before_revision: {}",
+                    next_before_revision_no.0
+                ));
+            }
+            lines.join("\n")
+        }
         CommandData::PathEntries { entries } => entries
             .iter()
             .map(|entry| {
