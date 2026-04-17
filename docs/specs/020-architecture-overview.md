@@ -4,8 +4,8 @@
 
 | Part | Role |
 | --- | --- |
-| **Object store** | Holds every durable object: content blocks, content manifests, WAL entries, checkpoints, and small control objects. |
-| **Authoritative service** | Resolves paths, validates mutations, writes WAL entries, advances heads, serves reads, and issues capabilities for upload or download. |
+| **Object store** | Holds every durable object: content blocks, content manifests, WAL segments, checkpoints, and small control objects. |
+| **Authoritative service** | Resolves paths, validates mutations, writes logical commits into WAL segments, advances heads, serves reads, and issues capabilities for upload or download. |
 | **Clients** | Use either direct filesystem operations or the lower-level upload, commit, and change-feed model. |
 | **Access-control service** | Evaluates ACLs and shares, then authorizes LoonFS operations. This may be part of the authoritative service in a simple deployment. |
 | **Background workers** | Build checkpoints, advance retention safely, clean up expired control objects, and reclaim unreachable content. |
@@ -17,8 +17,8 @@ This spec uses three terms.
 | Plane | Purpose | Examples | Namespace-visible history? |
 | --- | --- | --- | --- |
 | **Data plane** | Stores and serves file bytes. | Content blocks, content manifests, download streams. | No, by itself. |
-| **Metadata plane** | Defines the filesystem's durable truth. | WAL entries, namespace head, checkpoints, inode and direntry state. | Yes. |
-| **Control plane** | Coordinates long-running work and authorization. | Upload sessions, read sessions, copy jobs, ACLs, shares, leases. | No. |
+| **Metadata plane** | Defines the filesystem's durable truth. | WAL segments, namespace head, checkpoints, inode and direntry state. | Yes. |
+| **Control plane** | Coordinates multi-request work and authorization. | Upload handles, put intents, ACLs, shares, leases. | No. |
 
 Two rules follow from this split:
 
@@ -42,12 +42,13 @@ A CLI, desktop app, web app, SDK, or service may implement one or more of these 
 
 ## 4. Operation classes
 
-Most operations fall into one of three classes.
+Most core operations fall into one of two classes.
 
 | Class | Typical examples | Server-side state |
 | --- | --- | --- |
 | **One-shot** | `ls`, `stat`, `get <file>`, `put <small file>`, `cp <file>` on one service | Usually none after the request completes. |
-| **Client-driven long-running** | recursive `get`, resumable `put` | A session or intent may be used to pin a snapshot or destination across multiple requests. |
-| **Server-driven long-running** | recursive same-service `cp`, large import jobs | A job record may be used while the server continues the work. |
+| **Client-driven long-running** | recursive `get`, resumable `put`, recursive `put`, recursive `cp` realized as several commits | A handle or intent may be used to pin a snapshot or destination across multiple requests. Other orchestration may remain client-side. |
 
-Sessions and jobs preserve stable meaning across time. They do not create a second history model.
+Implementations may additionally expose coordinator-specific helpers for recursive workflows or admin work, but those helpers are outside the interoperable core model.
+
+Control-objects and any implementation-specific helpers preserve stable meaning across time. They do not create a second history model.

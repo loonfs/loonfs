@@ -2,7 +2,7 @@
 
 ## 1. Two public operation surfaces
 
-LoonFS has two public surfaces.
+LoonFS has two peer public surfaces.
 
 | Surface | Purpose | Shape |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ The lower-level writer surface has three stages:
 This split is deliberate:
 
 - content durability is not visibility;
-- WAL durability is not visibility;
+- WAL-segment durability is not visibility by itself; and
 - head advance is the visibility point.
 
 ### 2.1 Commit request envelope
@@ -38,21 +38,19 @@ A commit request carries the following logical fields:
 | `request_id` | Client-generated stable idempotency key for this logical commit request. The same value must be reused for safe retries. |
 | `planned_head_seq` | The history point the client planned against. Preconditions are evaluated against authoritative state at this boundary. |
 | `preconditions` | Explicit checks such as `HeadSeqIs`, `InodeRevisionIs`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
-| `ops` | Ordered list of mutation operations. Operation order is preserved through validation, commit, and change-feed output. |
+| `ops` | Ordered list of mutation operations. Operation order is preserved through validation, logical commit creation, and change-feed output. |
 | `message` | Optional human-readable description of the mutation event. |
-| `annotations` | Optional structured metadata attached to the commit request. |
+| `annotations` | Optional structured metadata attached to the logical commit request. |
 
-The server validates that request against authoritative namespace state, writes one immutable WAL
-entry, advances the head with compare-and-swap, and returns success only after the head update
-succeeds.
+The server validates each request against authoritative namespace state. Each accepted request becomes one logical commit with one assigned `seq`.
 
-The change feed returns ordered committed changes after an explicit cursor. If the requested cursor
-is older than the retention floor, the caller must re-bootstrap instead of expecting older
-incremental history to remain available.
+The server may publish multiple logical commits in one WAL segment and one head update, but it must preserve per-request idempotency, ordering, and change-feed identity.
 
-The standard lower-level mutation set is defined in the mutation and visibility model. The
-path-oriented filesystem surface may compile higher-level operations into that lower-level model,
-but both surfaces preserve the same identity, content-durability, and visibility rules.
+Annotations may be used to correlate multiple logical commits that belong to one higher-level workflow, for example with fields such as `operation_id`, `operation_kind`, or `operation_part`.
+
+The change feed returns ordered committed changes after an explicit cursor. If the requested cursor is older than the retention floor, the caller must re-bootstrap instead of expecting older incremental history to remain available.
+
+The standard lower-level mutation set is defined in the mutation and visibility model. The path-oriented filesystem surface may compile higher-level operations into that lower-level model, but both surfaces preserve the same identity, content-durability, and visibility rules.
 
 ## 3. Representative HTTP binding
 
@@ -71,7 +69,7 @@ A representative v0 binding is shown below.
 | Publish an explicit commit | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 
-Long-running transfers may additionally expose session or job resources. Once a long-running operation begins, the server-issued session or job id is the stable in-flight identifier of that operation.
+Long-running transfers may additionally expose session resources. Implementations may also expose workflow helper resources, but those helpers are outside the core semantics. Once a multi-request interaction begins, the server-issued identifier is the stable in-flight identifier of that interaction.
 
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
 
@@ -116,8 +114,7 @@ A few representative requests and responses are shown below. These examples are 
 
 ### 3.3 `GET /filesystem/content`
 
-The response body is the authoritative file bytes. Metadata may be exposed in headers, but the
-body itself is raw content rather than JSON.
+The response body is the authoritative file bytes. Metadata may be exposed in headers, but the body itself is raw content rather than JSON.
 
 ### 3.4 `POST /filesystem/operations`
 
@@ -210,7 +207,8 @@ Representative request:
   "planned_head_seq": 418,
   "message": "replace report bytes",
   "annotations": {
-    "source": "sync"
+    "source": "sync",
+    "operation_id": "op_report_refresh_01"
   },
   "preconditions": [
     {
@@ -283,8 +281,7 @@ Representative response:
 
 ## 4. Client profiles
 
-These profiles are defined by the surface a client uses, not by whether the implementation is a
-CLI, desktop app, web app, SDK, or service. A single client may implement more than one profile.
+These profiles are defined by the surface a client uses, not by whether the implementation is a CLI, desktop app, web app, SDK, or service. A single client may implement more than one profile.
 
 ### 4.1 Path-oriented client
 
@@ -295,12 +292,10 @@ Typical behavior:
 - `ls`, `stat`, `get`, `put`, `mv`, and `cp` use user-visible paths;
 - the server remains authoritative for path resolution, canonical inode identity, and commit validation;
 - small commands are often sessionless;
-- large or recursive commands may use server-side sessions or jobs.
+- large or recursive commands may be realized as sequences of ordinary logical commits.
 
 This client does not require a sync database or full local mirror.
-Implementations may still keep durable local state such as auth/session state, retry journals,
-pinned snapshot ids, or inode context learned from prior responses when that improves usability,
-restart safety, or resumability.
+Implementations may still keep durable local state such as auth/session state, retry journals, pinned snapshot ids, or inode context learned from prior responses when that improves usability, restart safety, or resumability.
 
 ### 4.2 Sync client
 
@@ -315,8 +310,7 @@ Typical behavior:
 
 ### 4.3 Explicit-commit client
 
-This client uses the upload, commit, and change-feed surface more directly. It stages content and
-publishes explicit commits, but it does not necessarily maintain a long-lived local mirror.
+This client uses the upload, commit, and change-feed surface more directly. It stages content and publishes explicit commits, but it does not necessarily maintain a long-lived local mirror.
 
 Typical behavior:
 
@@ -337,9 +331,9 @@ The following table summarizes the core split. For more detailed command-oriente
 | `get <file>` | One request | None after the request completes. |
 | `get -r <dir>` | Multi-request snapshot read | A read session may pin a consistent snapshot. |
 | `put <file>` | One request for small files; staged upload for large files | A put intent and upload session may bind the destination and upload. |
-| `put -r <dir>` | Import-style operation | An import job may coordinate a large tree upload. |
+| `put -r <dir>` | Client- or coordinator-driven upload plus one or more commits | No core job is required. Implementation-specific helpers may exist outside the core model. |
 | `cp <file>` on one service | One request | Usually none after the request completes. |
-| `cp -r <dir>` on one service | Server-side job | A copy job may coordinate traversal and publication. |
+| `cp -r <dir>` on one service | Client- or coordinator-driven sequence of logical commits | No core job is required. Implementation-specific helpers may exist outside the core model. |
 
 ## 6. Client and server responsibilities
 
@@ -349,4 +343,4 @@ The following table summarizes the core split. For more detailed command-oriente
 | Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. |
 | Commit validation | Authoritative | Supplies preconditions and request ids where needed. |
 | Namespace visibility | Authoritative | Observes committed results. |
-| Long-running transfer progress | Authoritative for sessions or jobs that affect correctness | Responsible for local temp files, local progress, and retry behavior. |
+| Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |
