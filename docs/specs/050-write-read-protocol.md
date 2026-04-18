@@ -2,7 +2,7 @@
 
 ## 1. Write protocol
 
-A write has four phases: durably stage content (if a mutation contains content), reconstruct and validate, publish one or more logical commits into the WAL, and advance the head. A metadata change becomes visible only after the head advances.
+A write has four phases: durably stage content (if a mutation contains content), reconstruct and validate, publish one or more logical commits into the WAL, and advance the head. A commit request may be rejected immediately, or tentatively accepted and written to a WAL segment, but it is committed and successful only if the WAL segment is durably stored and the head advances to reference it. A metadata change becomes visible only after the head advances.
 
 ### 1.1 Content staging
 
@@ -30,21 +30,21 @@ The server validates each commit request against the reconstructed state:
 
 If a request contains multiple operations, they are evaluated sequentially against ephemeral state advanced by earlier operations in the same request.
 
-A successful client mutation request becomes one logical commit. Distinct client commit requests remain distinct logical commits even when they are published in the same WAL segment.
+Passing validation does not by itself make the request committed or successful. If a client mutation request reaches the success boundary in §1.4, it becomes one logical commit. Distinct client commit requests remain distinct logical commits even when they are published in the same WAL segment.
 
 ### 1.4 WAL segment publication and head advance
 
-This is the publication boundary.
+This is the success boundary.
 
 1. Collect one or more candidate commit requests.
-2. Choose publication order and validate those requests against ephemeral state advanced by earlier accepted logical commits in the same batch.
-3. Reject any request whose preconditions fail or whose mutation is otherwise invalid.
-4. Assign contiguous `seq` values to the accepted logical commits.
-5. Write one immutable **WAL segment** containing the accepted logical commits and the segment metadata needed to identify the visible segment chain.
+2. Choose publication order and validate those requests against ephemeral state advanced by earlier tentatively accepted requests in the same batch.
+3. Reject immediately any request whose preconditions fail or whose mutation is otherwise invalid.
+4. Tentatively accept the remaining requests and assign contiguous `seq` values.
+5. Write one immutable **WAL segment** containing logical commit records for the tentatively accepted requests and the segment metadata needed to identify the visible segment chain.
 6. **CAS-update** the namespace head to advance `seq`, `next_inode_id`, and the visible WAL tip.
-7. If the CAS fails, the publication fails. The WAL segment is orphaned and harmless.
+7. If step 5 or step 6 fails, the publication fails. A WAL segment written before a failed CAS is orphaned and harmless.
 
-Accepted logical commits become visible only after step 6 succeeds.
+A tentatively accepted request is not yet committed or successful. A request becomes committed, successful, and visible only if step 5 durably stores the WAL segment and step 6 succeeds. A request rejected at step 3 receives no `seq` and creates no durable WAL record.
 
 ### 1.5 Failure semantics inside a publication batch
 
@@ -53,9 +53,9 @@ A publication batch is not an all-or-nothing multi-client transaction.
 The server may:
 
 - reject some candidate requests before publication; and
-- publish the remaining accepted requests in the same WAL segment.
+- tentatively accept other requests into the same batch and, if publication succeeds, publish them in the same WAL segment.
 
-Each logical commit still has its own success or failure outcome.
+Each request still has its own success or failure outcome. Tentative acceptance inside a batch is not success.
 
 ## 2. Read protocol
 
@@ -113,13 +113,13 @@ A request may contain more than one operation, but:
 - the operations are evaluated in request order; and
 - the request becomes one ordered logical commit in namespace history.
 
-Each accepted logical commit receives exactly one namespace `seq`.
+Each successful logical commit receives exactly one namespace `seq`. A request that is rejected receives no `seq`. A request may be assigned a `seq` while tentatively accepted into a batch, but it is not committed or successful unless the WAL segment is durable and the head update succeeds.
 
 One head update may publish one or more contiguous logical commits.
 
 A logical commit becomes visible only when the head advances to a value at or beyond that commit's `seq` and the visible WAL chain includes that commit.
 
-This gives each request one `seq` and one replay identity without requiring one object write or one head update per request.
+This gives each successful request one `seq` and one replay identity without requiring one object write or one head update per request.
 
 ## 4. Server authority
 
@@ -132,7 +132,7 @@ In particular, the server is responsible for:
 - validating name collisions according to the namespace's `NamePolicy`;
 - validating preconditions;
 - verifying that referenced content is already durable; and
-- publishing logical commits into a WAL segment and advancing the head.
+- publishing successful logical commits by durably writing a WAL segment and advancing the head.
 
 Clients may assist with planning, hashing, upload, or retry, but they are not the authority for visible state.
 

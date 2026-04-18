@@ -20,7 +20,7 @@ Both surfaces share the same namespace, inode, content, and visibility rules.
 The lower-level writer surface has three stages:
 
 1. make content durable
-2. commit metadata visibility
+2. make metadata visible
 3. observe ordered changes through the change feed
 
 This split is deliberate:
@@ -28,6 +28,8 @@ This split is deliberate:
 - content durability is not visibility;
 - WAL-segment durability is not visibility by itself; and
 - head advance is the visibility point.
+
+A commit request may therefore be rejected immediately, or tentatively accepted into a WAL batch, without yet being a committed or successful change.
 
 ### 2.1 Commit request envelope
 
@@ -42,9 +44,9 @@ A commit request carries the following logical fields:
 | `message` | Optional human-readable description of the mutation event. |
 | `annotations` | Optional structured metadata attached to the logical commit request. |
 
-The server validates each request against authoritative namespace state. Each accepted request becomes one logical commit with one assigned `seq`.
+The server validates each request against authoritative namespace state. A request may be rejected immediately. If it is tentatively accepted into a publication batch, the server may assign it a `seq`, but the request is not yet committed or successful at that point. It becomes one committed logical commit only after its WAL segment is durably written and the head update succeeds. If the WAL segment is written but the head update fails, the segment is orphaned and the request is not committed.
 
-The server may publish multiple logical commits in one WAL segment and one head update, but it must preserve per-request idempotency, ordering, and change-feed identity.
+The server may publish multiple committed logical commits in one WAL segment and one head update, but it must preserve per-request idempotency, ordering, and change-feed identity.
 
 Annotations may be used to correlate multiple logical commits that belong to one higher-level workflow, for example with fields such as `operation_id`, `operation_kind`, or `operation_part`.
 
@@ -66,7 +68,7 @@ A representative v0 binding is shown below.
 | Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
-| Publish an explicit commit | `POST /v0/namespaces/{ns}/commits` |
+| Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 
 Long-running transfers may additionally expose session resources. Implementations may also expose workflow helper resources, but those helpers are outside the core semantics. Once a multi-request interaction begins, the server-issued identifier is the stable in-flight identifier of that interaction.
@@ -141,6 +143,8 @@ Representative request:
   ]
 }
 ```
+
+A successful response is returned only after the underlying change is actually committed: the WAL segment is durable and the head has advanced.
 
 Representative response:
 
@@ -235,6 +239,8 @@ Representative request:
   ]
 }
 ```
+
+A request may be rejected immediately. A successful response is returned only after the request is actually committed: the WAL segment is durably stored and the head has been updated to reference it.
 
 Representative response:
 
