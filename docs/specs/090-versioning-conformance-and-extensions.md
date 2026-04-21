@@ -17,13 +17,14 @@ A new version should be introduced only when an old implementation could misread
 A conforming server must:
 
 1. treat object storage as the authoritative durable foundation;
-2. publish visible metadata only through the WAL-plus-head rule;
+2. publish visible metadata only through logical commits stored in visible WAL segments plus a successful head update;
 3. validate that referenced content is already durable before publish;
 4. preserve `(namespace_id, inode_id)` as canonical identity;
 5. implement tombstone-first delete;
-6. serve replay from verified checkpoints plus the WAL tail;
+6. serve replay from verified checkpoints plus the visible WAL segment chain, replayed as logical commits;
 7. honor the namespace's `NamePolicy`;
-8. keep control-plane sessions and jobs out of namespace history and the change feed.
+8. keep control-plane sessions and any implementation-specific coordinators out of namespace history and the change feed; and
+9. preserve per-request idempotency, ordering, and change-feed identity even when physically batching logical commits in a WAL segment.
 
 ## 3. Writer and client requirements
 
@@ -32,7 +33,7 @@ A conforming writer or client must:
 1. treat paths as selectors, not as durable identity;
 2. upload or otherwise stage content before asking the server to publish it;
 3. use request ids or equivalent idempotency keys for safe retry;
-4. tolerate commit rejection when preconditions no longer hold;
+4. tolerate commit rejection when preconditions no longer hold; and
 5. re-bootstrap if its cursor falls behind the retention floor.
 
 A sync client must also maintain durable local state for its cursor and reconciliation logic.
@@ -42,10 +43,11 @@ A sync client must also maintain durable local state for its cursor and reconcil
 A commit may carry optional human or product metadata such as:
 
 - a commit message;
-- annotations or tags attached to the commit envelope; or
-- actor information.
+- annotations or tags attached to the commit envelope;
+- actor information; or
+- workflow-correlation fields such as `operation_id`, `operation_kind`, or `operation_part`.
 
-This metadata belongs to the commit, not to the resource itself.
+This metadata belongs to the logical commit, not to the resource itself.
 
 ## 5. Optional resource properties
 

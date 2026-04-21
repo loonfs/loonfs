@@ -7,7 +7,7 @@ A namespace is the unit of visible metadata history.
 Each namespace has:
 
 - a current head
-- an ordered WAL of commits
+- an ordered WAL of logical commits stored in immutable segments
 - zero or more checkpoints
 - a retention policy
 
@@ -44,8 +44,7 @@ Those facts live in other metadata families:
 
 ### 1.1 Example metadata shapes
 
-The inode itself is only one part of the metadata model. A complete visible file usually involves
-multiple logical records.
+The inode itself is only one part of the metadata model. A complete visible file usually involves multiple logical records.
 
 Illustrative inode row:
 
@@ -86,8 +85,7 @@ Together, those three records mean:
 - the file is currently visible under parent directory inode `9` as `Report.txt`; and
 - the current visible file bytes come from revision `7`.
 
-If the file is renamed, the direntry changes but the inode stays `42`. If the file contents are
-replaced, the revision row changes but the inode stays `42`.
+If the file is renamed, the direntry changes but the inode stays `42`. If the file contents are replaced, the revision row changes but the inode stays `42`.
 
 In v0, the root inode is created as `inode_id = 1` at `seq = 0`.
 
@@ -193,7 +191,7 @@ Readers reconstruct authoritative state from:
 
 1. the current head;
 2. the checkpoint named by the head, if any; and
-3. the contiguous WAL tail after that checkpoint through `head.seq`.
+3. the visible WAL segment chain after that checkpoint through `head.seq`, replayed as logical commits in ascending `seq` order.
 
 The head summarizes the current visible boundary and replay hints, including at minimum:
 
@@ -201,7 +199,8 @@ The head summarizes the current visible boundary and replay hints, including at 
 - `next_inode_id`
 - `snapshot_hint_seq`
 - `retention_floor_seq`
+- `wal_tip_segment_id` or an equivalent visible tail pointer
 
 A checkpoint is authoritative only when it has been verified against its durable objects and namespace summary. If verification fails, readers must not treat that checkpoint as authoritative.
 
-The WAL preserves ordered history. Checkpoints keep replay bounded. Together they provide recovery from durable artifacts alone without requiring unbounded WAL replay as history grows.
+The WAL preserves ordered history even when multiple logical commits are stored in one segment. Checkpoints keep replay bounded. Together they provide recovery from durable artifacts alone without requiring unbounded WAL replay as history grows.

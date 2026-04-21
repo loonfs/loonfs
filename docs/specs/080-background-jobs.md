@@ -10,7 +10,7 @@ Background work reduces read cost, supports safe retention, and cleans up durabl
 
 A checkpoint summarizes namespace metadata at one chosen `seq`.
 
-A checkpoint is useful only after it is verified. Readers must prefer verified checkpoints plus the WAL tail over unverified or partial snapshots.
+A checkpoint is useful only after it is verified. Readers must prefer verified checkpoints plus the visible WAL segment chain over unverified or partial snapshots.
 
 ### 2.2 Retention management
 
@@ -26,11 +26,11 @@ Garbage collection must be conservative. It may reclaim an object only when:
 
 - no visible metadata references it;
 - no retained historical metadata still needs it; and
-- no active session, upload, or job still depends on it.
+- no active session, upload, or other control-plane object still depends on it.
 
 ### 2.4 Expired control-object cleanup
 
-Implementations may clean up expired sessions, uploads, leases, or jobs. This is control-plane maintenance, not namespace history.
+Implementations may clean up expired sessions, uploads, intents, leases, or other control-plane objects. This is control-plane maintenance, not namespace history.
 
 ## 3. Optional derived work
 

@@ -2,7 +2,7 @@
 
 ## 1. Write protocol
 
-A write has four phases: durably stage content (if mutation contains content), reconstruct and validate, commit to the WAL, and advance the head. A metadata change becomes visible only after the head advances.
+A write has four phases: durably stage content (if a mutation contains content), reconstruct and validate, publish one or more logical commits into the WAL, and advance the head. A commit request may be rejected immediately, or tentatively accepted and written to a WAL segment, but it is committed and successful only if the WAL segment is durably stored and the head advances to reference it. A metadata change becomes visible only after the head advances.
 
 ### 1.1 Content staging
 
@@ -17,11 +17,11 @@ Content staging is idempotent and has no effect on the visible tree. If the call
 
 ### 1.2 Basis reconstruction
 
-Before evaluating a mutation, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the checkpoint (if any), and replay the WAL tail. The server never trusts caller-supplied metadata.
+Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the checkpoint (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
 
-### 1.3 Validation
+### 1.3 Validation and logical commits
 
-The server validates the mutation against the reconstructed state:
+The server validates each commit request against the reconstructed state:
 
 1. Resolve any operation-local references needed to identify referenced content.
 2. Verify that all referenced content (manifests and blocks) is already durable in object storage, and that digests and sizes match.
@@ -30,15 +30,32 @@ The server validates the mutation against the reconstructed state:
 
 If a request contains multiple operations, they are evaluated sequentially against ephemeral state advanced by earlier operations in the same request.
 
-### 1.4 WAL commit and head advance
+Passing validation does not by itself make the request committed or successful. If a client mutation request reaches the success boundary in §1.4, it becomes one logical commit. Distinct client commit requests remain distinct logical commits even when they are published in the same WAL segment.
 
-This is the atomicity boundary.
+### 1.4 WAL segment publication and head advance
 
-1. Write one immutable **WAL entry** containing the validated operations, allocated inode ids, and preconditions. The WAL key includes the next `seq`.
-2. **CAS-update** the namespace head to advance `seq` and `next_inode_id`.
-3. If the CAS fails, the commit fails. The WAL entry is orphaned and harmless.
+This is the success boundary.
 
-The change becomes visible only after step 2 succeeds.
+1. Collect one or more candidate commit requests.
+2. Choose publication order and validate those requests against ephemeral state advanced by earlier tentatively accepted requests in the same batch.
+3. Reject immediately any request whose preconditions fail or whose mutation is otherwise invalid.
+4. Tentatively accept the remaining requests and assign contiguous `seq` values.
+5. Write one immutable **WAL segment** containing logical commit records for the tentatively accepted requests and the segment metadata needed to identify the visible segment chain.
+6. **CAS-update** the namespace head to advance `seq`, `next_inode_id`, and the visible WAL tip.
+7. If step 5 or step 6 fails, the publication fails. A WAL segment written before a failed CAS is orphaned and harmless.
+
+A tentatively accepted request is not yet committed or successful. A request becomes committed, successful, and visible only if step 5 durably stores the WAL segment and step 6 succeeds. A request rejected at step 3 receives no `seq` and creates no durable WAL record.
+
+### 1.5 Failure semantics inside a publication batch
+
+A publication batch is not an all-or-nothing multi-client transaction.
+
+The server may:
+
+- reject some candidate requests before publication; and
+- tentatively accept other requests into the same batch and, if publication succeeds, publish them in the same WAL segment.
+
+Each request still has its own success or failure outcome. Tentative acceptance inside a batch is not success.
 
 ## 2. Read protocol
 
@@ -48,9 +65,9 @@ A read reconstructs the visible filesystem state from durable artifacts on objec
 
 The reader builds an in-memory metadata state from two kinds of durable object:
 
-1. Read the namespace **head** object to learn the current `seq` and `snapshot_hint_seq`.
-2. If `snapshot_hint_seq` is set, load the **verified checkpoint** at that seq. The checkpoint materializes metadata state through that seq across four append-only tables: inodes, direntries, revisions, and subtree tombstones.
-3. Load and replay every **WAL entry** contiguously after the checkpoint seq (or from genesis, if no checkpoint exists) through `head.seq`. Each WAL entry appends rows to the same four tables.
+1. Read the namespace **head** object to learn the current `seq`, `snapshot_hint_seq`, and visible WAL tip.
+2. If `snapshot_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint materializes metadata state through that `seq` across four append-only tables: inodes, direntries, revisions, and subtree tombstones.
+3. Use the visible WAL tip named by the head to identify the visible segment chain after the checkpoint `seq` (or from genesis, if no checkpoint exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends rows to the same four tables.
 
 The result is a complete metadata state pinned to one `seq`.
 
@@ -87,16 +104,22 @@ Given a visible directory inode at seq N:
 1. Collect all active directory bindings whose `parent_inode_id` matches the directory.
 2. For each binding, resolve the child inode. If the child is a file, its latest revision provides size and content digest via the manifest.
 
-## 3. One request, one visible sequence
+## 3. Logical commits, sequence numbers, and visibility
 
-A successful mutation request is published as one namespace `seq`.
+A successful client mutation request is one logical commit.
 
 A request may contain more than one operation, but:
 
-- the operations are evaluated in request order;
-- the request becomes visible as one committed step in namespace history.
+- the operations are evaluated in request order; and
+- the request becomes one ordered logical commit in namespace history.
 
-Each request has a single visibility and replay point.
+Each successful logical commit receives exactly one namespace `seq`. A request that is rejected receives no `seq`. A request may be assigned a `seq` while tentatively accepted into a batch, but it is not committed or successful unless the WAL segment is durable and the head update succeeds.
+
+One head update may publish one or more contiguous logical commits.
+
+A logical commit becomes visible only when the head advances to a value at or beyond that commit's `seq` and the visible WAL chain includes that commit.
+
+This gives each successful request one `seq` and one replay identity without requiring one object write or one head update per request.
 
 ## 4. Server authority
 
@@ -109,7 +132,7 @@ In particular, the server is responsible for:
 - validating name collisions according to the namespace's `NamePolicy`;
 - validating preconditions;
 - verifying that referenced content is already durable; and
-- publishing the final WAL entry and head update.
+- publishing successful logical commits by durably writing a WAL segment and advancing the head.
 
 Clients may assist with planning, hashing, upload, or retry, but they are not the authority for visible state.
 
@@ -126,8 +149,7 @@ The first standard lower-level mutation set includes:
 - `delete_subtree(root_inode_id)`
 - `restore_revision(inode_id, source_revision_no, base_revision_no)`
 
-The path-oriented filesystem surface may compile higher-level operations into these lower-level
-mutations.
+The path-oriented filesystem surface may compile higher-level operations into these lower-level mutations.
 
 ## 6. Preconditions
 
@@ -152,6 +174,8 @@ A namespace exposes an ordered change feed. The feed answers the question:
 
 This feed is the basis for sync engines, replication, and other incremental consumers.
 
+The change feed is ordered by logical commit, not by physical WAL segment. A segment containing N logical commits produces N ordered change events.
+
 ## 8. Retention floor
 
 A namespace may advance a retention floor to say:
@@ -168,11 +192,10 @@ Some operations are not well described by one request.
 
 Examples include:
 
-- recursive reads that need a pinned snapshot;
-- large or resumable uploads that need a stable destination binding;
-- same-service recursive copy jobs.
+- recursive reads that need a pinned snapshot; and
+- resumable uploads that need a stable destination binding.
 
-In those cases, the server may create control-plane objects such as read sessions, upload sessions, put intents, import jobs, or copy jobs.
+In those cases, the server may create control-plane objects such as read sessions, upload sessions, or put intents.
 
 Three rules apply:
 
