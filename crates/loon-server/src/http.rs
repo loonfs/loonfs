@@ -136,7 +136,7 @@ async fn create_namespace(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(request.name);
+    let namespace_id = NamespaceId::from(request.namespace_id);
     let summary = run_blocking(move || {
         bootstrap_namespace(
             store.as_ref(),

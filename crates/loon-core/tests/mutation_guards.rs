@@ -632,7 +632,7 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
         .expect("write partial namespace key");
     let listed = list_namespaces(&store).expect("list namespaces");
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].name.as_str(), "demo");
+    assert_eq!(listed[0].namespace_id.as_str(), "demo");
 
     let partial_error = bootstrap_namespace(&store, &NamespaceId::from("partial"), &context, false)
         .expect_err("partial namespace should be rejected");

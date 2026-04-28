@@ -9,7 +9,7 @@ pub struct ApiError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateNamespaceRequest {
-    pub name: String,
+    pub namespace_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,7 +19,7 @@ pub struct ForkNamespaceRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceSummary {
-    pub name: NamespaceId,
+    pub namespace_id: NamespaceId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

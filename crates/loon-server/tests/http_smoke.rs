@@ -132,7 +132,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
             .client
             .fork_namespace("demo", "clone")
             .expect("fork namespace");
-        assert_eq!(forked.name.as_str(), "clone");
+        assert_eq!(forked.namespace_id.as_str(), "clone");
 
         let source_entry = harness.client.stat_path(&source_path).expect("source stat");
         let clone_entry = harness.client.stat_path(&clone_path).expect("clone stat");

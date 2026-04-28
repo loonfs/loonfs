@@ -253,7 +253,7 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     match namespace_initialization_state(store, namespace_id)? {
         NamespaceInitializationState::Complete if allow_existing => {
             return Ok(NamespaceSummary {
-                name: namespace_id.clone(),
+                namespace_id: namespace_id.clone(),
             });
         }
         NamespaceInitializationState::Complete => {
@@ -321,7 +321,7 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     let _ = bootstrap_basis_metadata_state();
 
     Ok(NamespaceSummary {
-        name: namespace_id.clone(),
+        namespace_id: namespace_id.clone(),
     })
 }
 
@@ -513,7 +513,7 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
         .map_err(|err| CoreError::Store(err.to_string()))?;
 
     Ok(NamespaceSummary {
-        name: new_namespace_id.clone(),
+        namespace_id: new_namespace_id.clone(),
     })
 }
 
@@ -541,7 +541,7 @@ pub fn list_namespaces<S: ObjectStore + ?Sized>(
     }
     Ok(names
         .into_iter()
-        .map(|name| NamespaceSummary { name })
+        .map(|namespace_id| NamespaceSummary { namespace_id })
         .collect())
 }
 

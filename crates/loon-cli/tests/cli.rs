@@ -178,7 +178,7 @@ fn local_profile_namespace_fork_reads_shared_content_and_diverges() {
 
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "clone"]);
     assert_success(&fork);
-    assert_eq!(json_data(&fork)["name"], "clone");
+    assert_eq!(json_data(&fork)["namespace_id"], "clone");
 
     let source = harness.run(&["--json", "stat", "/docs/shared.txt"]);
     let clone = harness.run(&["--json", "stat", "--namespace", "clone", "/docs/shared.txt"]);
@@ -598,7 +598,7 @@ fn external_remote_profile_executes_through_http() {
     assert_success(&create);
     let fork = harness.run(&["--json", "namespace", "fork", "demo", "clone"]);
     assert_success(&fork);
-    assert_eq!(json_data(&fork)["name"], "clone");
+    assert_eq!(json_data(&fork)["namespace_id"], "clone");
 
     let use_namespace = harness.run(&["--json", "use", "demo"]);
     assert_success(&use_namespace);
@@ -608,8 +608,8 @@ fn external_remote_profile_executes_through_http() {
     let list_data = json_data(&list);
     let namespaces = list_data["namespaces"].as_array().unwrap();
     assert_eq!(namespaces.len(), 2);
-    assert_eq!(namespaces[0]["name"], "clone");
-    assert_eq!(namespaces[1]["name"], "demo");
+    assert_eq!(namespaces[0]["namespace_id"], "clone");
+    assert_eq!(namespaces[1]["namespace_id"], "demo");
 }
 
 #[test]

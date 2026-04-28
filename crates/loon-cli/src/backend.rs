@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
 pub trait Backend {
-    fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, CliError>;
+    fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError>;
     fn fork_namespace(
         &self,
         source: &str,
@@ -49,8 +49,10 @@ pub struct RemoteBackend {
 }
 
 impl Backend for RemoteBackend {
-    fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, CliError> {
-        self.client.create_namespace(name).map_err(map_client_error)
+    fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError> {
+        self.client
+            .create_namespace(namespace_id)
+            .map_err(map_client_error)
     }
 
     fn fork_namespace(
@@ -154,8 +156,8 @@ impl DirectBackend {
 }
 
 impl Backend for DirectBackend {
-    fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, CliError> {
-        let ns_id = NamespaceId::from(name.to_owned());
+    fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError> {
+        let ns_id = NamespaceId::from(namespace_id.to_owned());
         bootstrap_namespace(&self.store, &ns_id, &self.mutation_context(), false)
             .map_err(map_bootstrap_error)
     }
