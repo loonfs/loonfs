@@ -112,12 +112,12 @@ impl Client {
         }
     }
 
-    pub fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, ClientError> {
+    pub fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, ClientError> {
         let url = format!("{}/v0/namespaces", self.base_url);
         self.request_json::<_, NamespaceSummary>(
             self.agent.post(&url),
             Some(&CreateNamespaceRequest {
-                name: name.to_owned(),
+                namespace_id: namespace_id.to_owned(),
             }),
         )
     }

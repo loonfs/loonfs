@@ -62,6 +62,7 @@ A representative v0 binding is shown below.
 
 | Purpose | Representative HTTP shape |
 | --- | --- |
+| Create a namespace | `POST /v0/namespaces` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
@@ -74,6 +75,14 @@ A representative v0 binding is shown below.
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 
 Long-running transfers may additionally expose session resources. Implementations may also expose workflow helper resources, but those helpers are outside the core semantics. Once a multi-request interaction begins, the server-issued identifier is the stable in-flight identifier of that interaction.
+
+Namespace creation uses the namespace id directly. v0 has no namespace aliases or separate display names:
+
+```json
+{
+  "namespace_id": "demo"
+}
+```
 
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
 
@@ -341,7 +350,7 @@ Representative response:
 
 ```json
 {
-  "name": "demo-branch"
+  "namespace_id": "demo-branch"
 }
 ```
 

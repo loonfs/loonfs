@@ -2,6 +2,6 @@
 source: crates/loon-cli/src/render.rs
 expression: human_success(&output)
 ---
-NAME
+NAMESPACE_ID
 alpha
 prod

@@ -140,11 +140,11 @@ pub fn human_success(output: &CommandOutput) -> String {
             let namespace = namespace.as_deref().unwrap_or("-");
             format!("profile: {profile}\nnamespace: {namespace}")
         }
-        CommandData::NamespaceSummary(namespace) => namespace.name.to_string(),
+        CommandData::NamespaceSummary(namespace) => namespace.namespace_id.to_string(),
         CommandData::NamespaceList { namespaces } => {
-            let mut lines = vec!["NAME".to_owned()];
+            let mut lines = vec!["NAMESPACE_ID".to_owned()];
             for namespace in namespaces {
-                lines.push(namespace.name.to_string());
+                lines.push(namespace.namespace_id.to_string());
             }
             lines.join("\n")
         }
@@ -254,10 +254,10 @@ mod tests {
             data: CommandData::NamespaceList {
                 namespaces: vec![
                     NamespaceSummary {
-                        name: "alpha".into(),
+                        namespace_id: "alpha".into(),
                     },
                     NamespaceSummary {
-                        name: "prod".into(),
+                        namespace_id: "prod".into(),
                     },
                 ],
             },

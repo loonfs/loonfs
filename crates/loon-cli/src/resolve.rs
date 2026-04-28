@@ -56,7 +56,7 @@ pub fn resolve_namespace(
 
 fn validate_namespace(namespace: &str) -> Result<ResolvedNamespace, CliError> {
     if namespace.trim().is_empty() {
-        return Err(CliError::invalid_input("namespace name must not be empty"));
+        return Err(CliError::invalid_input("namespace_id must not be empty"));
     }
     Ok(ResolvedNamespace {
         namespace: namespace.to_owned(),

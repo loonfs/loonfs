@@ -427,7 +427,7 @@ fn run_namespace_create(
     let resolved = resolve_target_profile(explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_name(&args.name).map_err(|error| {
+    validate_namespace_id(&args.namespace_id).map_err(|error| {
         fail(
             kind,
             Some(resolved.profile_name.clone()),
@@ -438,7 +438,7 @@ fn run_namespace_create(
     let namespace = resolved
         .target
         .backend()
-        .create_namespace(&args.name)
+        .create_namespace(&args.namespace_id)
         .map_err(|error| {
             fail(
                 kind,
@@ -464,7 +464,7 @@ fn run_namespace_fork(
     let resolved = resolve_target_profile(explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_name(&args.source).map_err(|error| {
+    validate_namespace_id(&args.source).map_err(|error| {
         fail(
             kind,
             Some(resolved.profile_name.clone()),
@@ -472,7 +472,7 @@ fn run_namespace_fork(
             error,
         )
     })?;
-    validate_namespace_name(&args.new_namespace_id).map_err(|error| {
+    validate_namespace_id(&args.new_namespace_id).map_err(|error| {
         fail(
             kind,
             Some(resolved.profile_name.clone()),
@@ -540,7 +540,7 @@ fn run_namespace_use(
     let resolved = resolve_target_profile_from_config(&loaded.config, explicit_profile)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_name(&args.namespace).map_err(|error| {
+    validate_namespace_id(&args.namespace).map_err(|error| {
         fail(
             kind,
             Some(resolved.profile_name.clone()),
@@ -563,7 +563,7 @@ fn run_namespace_use(
         })?;
     if !namespaces
         .iter()
-        .any(|candidate| candidate.name.as_str() == args.namespace)
+        .any(|candidate| candidate.namespace_id.as_str() == args.namespace)
     {
         return Err(fail(
             kind,
@@ -1520,9 +1520,9 @@ fn run_filesystem_move(
 
 // --- general helpers ---
 
-fn validate_namespace_name(namespace: &str) -> Result<(), CliError> {
+fn validate_namespace_id(namespace: &str) -> Result<(), CliError> {
     if namespace.trim().is_empty() {
-        return Err(CliError::invalid_input("namespace name must not be empty"));
+        return Err(CliError::invalid_input("namespace_id must not be empty"));
     }
     Ok(())
 }
@@ -1532,7 +1532,7 @@ fn namespace_path(
     path: &str,
     allow_root: bool,
 ) -> Result<NamespacePath, CliError> {
-    validate_namespace_name(namespace)?;
+    validate_namespace_id(namespace)?;
     Ok(NamespacePath {
         namespace: namespace.to_owned(),
         absolute_path: normalize_absolute_path(path, allow_root)?,

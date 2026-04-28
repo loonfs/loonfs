@@ -181,7 +181,7 @@ pub enum NamespaceCommand {
 pub struct NamespaceCreateArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
-    pub name: String,
+    pub namespace_id: String,
 }
 
 #[derive(Debug, Args)]

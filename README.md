@@ -28,8 +28,8 @@ You will need access to an object storage bucket in the form of keys in order to
 ```bash
 loon init                   # creates your first Loon profile and sets it as the default. We recommend using 'local' mode to start, with an object storage store.
 
-loon namespace create {some_namespace}
-loon use {some_namespace}   # sets the newly created namespace as the default.
+loon namespace create {namespace_id}
+loon use {namespace_id}   # sets the newly created namespace as the default.
 ```
 
 You can add a `SKILL` to your agent of choice so that they know to use Loon when appropriate. See our [example `SKILL.md`](https://github.com.loonfs/loonfs/tree/main/examples/SKILL.md).
