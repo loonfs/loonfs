@@ -1,4 +1,4 @@
-use loon_api::{sha256_digest, ContentRef, ContentRefKind, NamespaceId};
+use loon_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId};
 use loon_objectstore::keys::content_blob;
 use loon_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ pub enum DurableContentValidationError {
 
 pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<ValidatedDurableContent, DurableContentValidationError> {
     if content_ref.kind != ContentRefKind::WholeFileV0 {
@@ -56,12 +56,13 @@ pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
         });
     }
 
-    let object_key = content_blob(namespace_id.as_str(), &content_ref.digest).map_err(|err| {
-        DurableContentValidationError::InvalidDigest {
-            digest: content_ref.digest.clone(),
-            message: err.to_string(),
-        }
-    })?;
+    let object_key =
+        content_blob(content_store_id.as_str(), &content_ref.digest).map_err(|err| {
+            DurableContentValidationError::InvalidDigest {
+                digest: content_ref.digest.clone(),
+                message: err.to_string(),
+            }
+        })?;
     let bytes = load_required_object(store, &object_key)?;
     let actual_size = bytes.len() as u64;
     if actual_size != content_ref.size_bytes {
@@ -97,10 +98,10 @@ pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
 
 pub fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<ReadDurableContent, DurableContentValidationError> {
-    let validated = validate_durable_content_reference(store, namespace_id, content_ref)?;
+    let validated = validate_durable_content_reference(store, content_store_id, content_ref)?;
     let bytes = load_required_object(store, &validated.object_key)?;
 
     Ok(ReadDurableContent { validated, bytes })
@@ -128,7 +129,7 @@ mod tests {
         read_durable_content_bytes, validate_durable_content_reference,
         DurableContentValidationError,
     };
-    use loon_api::{ContentRef, ContentRefKind, NamespaceId};
+    use loon_api::{ContentRef, ContentRefKind, ContentStoreId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::content_blob;
     use loon_objectstore::ObjectStore;
@@ -136,12 +137,12 @@ mod tests {
 
     #[test]
     fn validate_whole_file_content_ref_success() {
-        let (_temp_dir, store, namespace_id) = test_store();
+        let (_temp_dir, store, content_store_id) = test_store();
         let bytes = b"whole file bytes";
         let content_ref = ContentRef::whole_file_v0(bytes);
-        put_content_object(&store, &namespace_id, &content_ref, bytes);
+        put_content_object(&store, &content_store_id, &content_ref, bytes);
 
-        let validated = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+        let validated = validate_durable_content_reference(&store, &content_store_id, &content_ref)
             .expect("validate content ref");
         assert_eq!(validated.content_ref, content_ref);
         assert_eq!(validated.file_size_bytes, bytes.len() as u64);
@@ -150,12 +151,12 @@ mod tests {
 
     #[test]
     fn validate_whole_file_content_ref_accepts_empty_files() {
-        let (_temp_dir, store, namespace_id) = test_store();
+        let (_temp_dir, store, content_store_id) = test_store();
         let bytes = b"";
         let content_ref = ContentRef::whole_file_v0(bytes);
-        put_content_object(&store, &namespace_id, &content_ref, bytes);
+        put_content_object(&store, &content_store_id, &content_ref, bytes);
 
-        let read = read_durable_content_bytes(&store, &namespace_id, &content_ref)
+        let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
             .expect("read empty content ref");
         assert_eq!(read.bytes, bytes);
         assert_eq!(read.validated.file_size_bytes, 0);
@@ -163,10 +164,10 @@ mod tests {
 
     #[test]
     fn validate_whole_file_content_ref_rejects_missing_object() {
-        let (_temp_dir, store, namespace_id) = test_store();
+        let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = ContentRef::whole_file_v0(b"missing");
 
-        let err = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+        let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
             .expect_err("missing object");
         assert!(matches!(
             err,
@@ -176,12 +177,12 @@ mod tests {
 
     #[test]
     fn validate_whole_file_content_ref_rejects_size_mismatch() {
-        let (_temp_dir, store, namespace_id) = test_store();
+        let (_temp_dir, store, content_store_id) = test_store();
         let mut content_ref = ContentRef::whole_file_v0(b"abc");
-        put_content_object(&store, &namespace_id, &content_ref, b"abc");
+        put_content_object(&store, &content_store_id, &content_ref, b"abc");
         content_ref.size_bytes += 1;
 
-        let err = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+        let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
             .expect_err("size mismatch");
         assert!(matches!(
             err,
@@ -191,11 +192,11 @@ mod tests {
 
     #[test]
     fn validate_whole_file_content_ref_rejects_digest_mismatch() {
-        let (_temp_dir, store, namespace_id) = test_store();
+        let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = ContentRef::whole_file_v0(b"expected");
-        put_content_object(&store, &namespace_id, &content_ref, b"mismatch");
+        put_content_object(&store, &content_store_id, &content_ref, b"mismatch");
 
-        let err = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+        let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
             .expect_err("digest mismatch");
         assert!(matches!(
             err,
@@ -205,14 +206,14 @@ mod tests {
 
     #[test]
     fn validate_whole_file_content_ref_rejects_unsupported_kind() {
-        let (_temp_dir, store, namespace_id) = test_store();
+        let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = ContentRef {
             kind: ContentRefKind::Unsupported,
             digest: ContentRef::whole_file_v0(b"bytes").digest,
             size_bytes: 5,
         };
 
-        let err = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+        let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
             .expect_err("unsupported content ref kind");
         assert!(matches!(
             err,
@@ -220,20 +221,21 @@ mod tests {
         ));
     }
 
-    fn test_store() -> (tempfile::TempDir, LocalFsStore, NamespaceId) {
+    fn test_store() -> (tempfile::TempDir, LocalFsStore, ContentStoreId) {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("content-tests");
-        (temp_dir, store, namespace_id)
+        let content_store_id = ContentStoreId::from("content-tests");
+        (temp_dir, store, content_store_id)
     }
 
     fn put_content_object(
         store: &LocalFsStore,
-        namespace_id: &NamespaceId,
+        content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
         bytes: &[u8],
     ) {
-        let key = content_blob(namespace_id.as_str(), &content_ref.digest).expect("content key");
+        let key =
+            content_blob(content_store_id.as_str(), &content_ref.digest).expect("content key");
         store.put_if_absent(&key, bytes).expect("put content");
     }
 }

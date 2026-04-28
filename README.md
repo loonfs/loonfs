@@ -55,7 +55,8 @@ The LoonFS cli has two main modes: `local` and `remote`:
 
 ## Core concepts
 
-- Namespaces: a Loon namespace is the core unit of filesystem visibility, history, and durability. You can think of each namespace as a separate filesystem.
+- Namespaces: a Loon namespace is the core unit of filesystem visibility and history. You can think of each namespace as a separate filesystem.
+- Content stores: immutable file bytes live in content stores. A namespace points at one content store, and forked namespaces share that content store without copying bytes.
 
 ## Design philosophy
 

@@ -9,8 +9,9 @@ A write has four phases: durably stage content (if a mutation contains content),
 Content must be durable before any metadata change can reference it.
 
 1. Compute the `sha256` digest of the complete plaintext file bytes.
-2. Upload the complete byte sequence to `namespaces/{namespace_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` with create-if-absent semantics.
-3. Build a content reference:
+2. Resolve the namespace descriptor to its `content_store_id`.
+3. Upload the complete byte sequence to `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` with create-if-absent semantics.
+4. Build a content reference:
 
    ```json
    {
@@ -43,7 +44,7 @@ Content reference validation fails before metadata preconditions are evaluated w
 
 - `content_ref.kind` is unsupported;
 - `content_ref.digest` is not a valid `sha256:<64 lowercase hex>` digest;
-- the referenced object is missing from the namespace content store;
+- the referenced object is missing from the namespace's content store;
 - the object size differs from `content_ref.size_bytes`; or
 - the object bytes hash to a different digest than `content_ref.digest`.
 
@@ -80,9 +81,10 @@ A read reconstructs the visible filesystem state from durable artifacts on objec
 
 The reader builds an in-memory metadata state from two kinds of durable object:
 
-1. Read the namespace **head** object to learn the current `seq`, `snapshot_hint_seq`, and visible WAL tip.
-2. If `snapshot_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint materializes metadata state through that `seq` across four append-only tables: inodes, direntries, revisions, and subtree tombstones.
-3. Use the visible WAL tip named by the head to identify the visible segment chain after the checkpoint `seq` (or from genesis, if no checkpoint exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends rows to the same four tables.
+1. Read the namespace descriptor and content-store descriptor to learn the namespace's immutable content-store relationship.
+2. Read the namespace **head** object to learn the current `seq`, `snapshot_hint_seq`, and visible WAL tip.
+3. If `snapshot_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint materializes metadata state through that `seq` across four append-only tables: inodes, direntries, revisions, and subtree tombstones.
+4. Use the visible WAL tip named by the head to identify the visible segment chain after the checkpoint `seq` (or from genesis, if no checkpoint exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends rows to the same four tables.
 
 The result is a complete metadata state pinned to one `seq`.
 
@@ -108,9 +110,10 @@ To resolve an absolute path at seq N:
 Given a visible file inode at seq N:
 
 1. Look up the file's latest revision at N to obtain `content_ref`.
-2. Verify that `content_ref.kind` is supported by the reader.
-3. For `whole_file_v0`, fetch the object at `namespaces/{namespace_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}`, where `hex` is the digest suffix from `content_ref.digest`.
-4. Verify that the fetched bytes match `content_ref.size_bytes` and `content_ref.digest`.
+2. Resolve the namespace descriptor to its `content_store_id`.
+3. Verify that `content_ref.kind` is supported by the reader.
+4. For `whole_file_v0`, fetch the object at `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}`, where `hex` is the digest suffix from `content_ref.digest`.
+5. Verify that the fetched bytes match `content_ref.size_bytes` and `content_ref.digest`.
 
 ### 2.5 Directory listing
 
@@ -201,7 +204,22 @@ Clients older than the retention floor must re-bootstrap from a fresh snapshot i
 
 The retention floor may advance only after the system has enough verified material to keep replay safe at or after that point.
 
-## 9. Long-running operations
+## 9. Namespace forks
+
+A fork creates a new namespace from the source namespace's current head. The request supplies only the new namespace id; the server supplies the mutation context.
+
+The fork protocol is:
+
+1. Resolve and verify the source namespace descriptor, content-store descriptor, head, lease, checkpoint, and WAL basis.
+2. Create or reuse a verified source checkpoint at the current source head.
+3. Rebuild checkpoint artifacts under the new namespace id with fresh checksums and object keys.
+4. Create the new namespace descriptor with the same `content_store_id` as the source namespace.
+5. Create the new namespace head at the fork seq, with `snapshot_hint_seq` and `retention_floor_seq` set to that seq.
+6. Start the new namespace WAL independently at `fork_seq + 1`.
+
+The fork copies namespace-local checkpoint metadata only. It does not copy content-store blobs. It also does not create a durable parent/child relationship; provenance may be recorded later as audit metadata outside the core namespace model.
+
+## 10. Long-running operations
 
 Some operations are not well described by one request.
 

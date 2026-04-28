@@ -5,7 +5,10 @@ use crate::commit::{
     CommitValidationContext, Precondition,
 };
 use crate::content::validate_durable_content_reference;
-use crate::services::{derive_commit_results, write_immutable_object, CoreError, MutationContext};
+use crate::services::{
+    derive_commit_results, load_namespace_content_store_id, write_immutable_object, CoreError,
+    MutationContext,
+};
 use crate::wal::prepare_wal_commit;
 use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitOp as V0CommitOp,
@@ -70,8 +73,9 @@ pub fn upload_content<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &MutationContext,
 ) -> Result<UploadContentResponse, CoreError> {
+    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
     let content_ref = ContentRef::whole_file_v0(bytes);
-    let object_key = content_blob(namespace_id.as_str(), &content_ref.digest)
+    let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::Store(err.to_string()))?;
 
     for _attempt in 0..UPLOAD_SESSION_RETRY_LIMIT {
@@ -164,7 +168,8 @@ pub fn complete_upload<S: ObjectStore + ?Sized>(
                 "completed content ref does not match staged content".to_owned(),
             ));
         }
-        validate_durable_content_reference(store, namespace_id, &request.content_ref)?;
+        let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+        validate_durable_content_reference(store, &content_store_id, &request.content_ref)?;
 
         let mut next_state = loaded.envelope.state.clone();
         next_state.completed = Some(CompletedUpload {
@@ -592,18 +597,19 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     request: &CoreCommitRequest,
     resolved_restore_content_refs: &[Option<ContentRef>],
 ) -> Result<(), CoreError> {
+    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
     for (index, op) in request.ops.iter().enumerate() {
         match op {
             CommitOp::CreateFile { content_ref, .. }
             | CommitOp::ReplaceFile { content_ref, .. } => {
-                validate_durable_content_reference(store, namespace_id, content_ref)?;
+                validate_durable_content_reference(store, &content_store_id, content_ref)?;
             }
             CommitOp::RestoreRevision { .. } => {
                 if let Some(content_ref) = resolved_restore_content_refs
                     .get(index)
                     .and_then(|content_ref| content_ref.as_ref())
                 {
-                    validate_durable_content_reference(store, namespace_id, content_ref)?;
+                    validate_durable_content_reference(store, &content_store_id, content_ref)?;
                 }
             }
             _ => {}

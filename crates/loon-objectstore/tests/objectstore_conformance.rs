@@ -2,8 +2,9 @@ mod provider_env;
 
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    derived_progress, namespace_head, namespace_lease, queue_shard, snapshot_manifest,
-    snapshot_table, wal_commit, SnapshotTableFamily,
+    content_blob, content_store_descriptor, derived_progress, namespace_descriptor, namespace_head,
+    namespace_lease, queue_shard, snapshot_manifest, snapshot_table, wal_commit,
+    SnapshotTableFamily,
 };
 use loon_objectstore::probes::run_contract_probes;
 use loon_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
@@ -126,8 +127,24 @@ fn provider_profiles_exist() {
 
 #[test]
 fn key_builders_cover_locked_object_families() {
+    assert_eq!(
+        namespace_descriptor("ns-1"),
+        "namespaces/ns-1/descriptor.json"
+    );
     assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/head.json");
     assert_eq!(namespace_lease("ns-1"), "namespaces/ns-1/lease.json");
+    assert_eq!(
+        content_store_descriptor("cs-1"),
+        "content-stores/cs-1/descriptor.json"
+    );
+    assert_eq!(
+        content_blob(
+            "cs-1",
+            "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        )
+        .expect("content blob key"),
+        "content-stores/cs-1/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    );
     assert_eq!(
         wal_commit("ns-1", 420, "commit-1"),
         "namespaces/ns-1/wal/00000000000000000420-commit-1.cbor.zst"

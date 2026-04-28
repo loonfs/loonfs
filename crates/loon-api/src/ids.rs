@@ -5,7 +5,21 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NamespaceId(pub String);
 
+/// Unique identifier for an immutable content store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContentStoreId(pub String);
+
 impl NamespaceId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl ContentStoreId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -27,6 +41,18 @@ impl From<String> for NamespaceId {
     }
 }
 
+impl From<&str> for ContentStoreId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for ContentStoreId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 impl Serialize for NamespaceId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -36,7 +62,25 @@ impl Serialize for NamespaceId {
     }
 }
 
+impl Serialize for ContentStoreId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 impl<'de> Deserialize<'de> for NamespaceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self(String::deserialize(deserializer)?))
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentStoreId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -87,6 +131,12 @@ pub struct Identity {
 }
 
 impl fmt::Display for NamespaceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Display for ContentStoreId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
