@@ -3,9 +3,9 @@ use crate::error::CliError;
 use loon_api::{AuthoritativePathEntry, MutationResult, NamespaceId, NamespaceSummary};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_core::{
-    bootstrap_namespace, copy_file_path, delete_path_non_recursive, list_namespaces, list_path,
-    move_path, put_file_bytes, read_file_bytes, resolve_path, BootstrapNamespaceError, CoreError,
-    CoreErrorKind, MutationContext, PutFileBehavior,
+    bootstrap_namespace, copy_file_path, delete_path_non_recursive, fork_namespace,
+    list_namespaces, list_path, move_path, put_file_bytes, read_file_bytes, resolve_path,
+    BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::ConfiguredObjectStore;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,6 +14,11 @@ const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
 pub trait Backend {
     fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, CliError>;
+    fn fork_namespace(
+        &self,
+        source: &str,
+        new_namespace_id: &str,
+    ) -> Result<NamespaceSummary, CliError>;
     fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError>;
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError>;
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError>;
@@ -46,6 +51,16 @@ pub struct RemoteBackend {
 impl Backend for RemoteBackend {
     fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, CliError> {
         self.client.create_namespace(name).map_err(map_client_error)
+    }
+
+    fn fork_namespace(
+        &self,
+        source: &str,
+        new_namespace_id: &str,
+    ) -> Result<NamespaceSummary, CliError> {
+        self.client
+            .fork_namespace(source, new_namespace_id)
+            .map_err(map_client_error)
     }
 
     fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError> {
@@ -143,6 +158,22 @@ impl Backend for DirectBackend {
         let ns_id = NamespaceId::from(name.to_owned());
         bootstrap_namespace(&self.store, &ns_id, &self.mutation_context(), false)
             .map_err(map_bootstrap_error)
+    }
+
+    fn fork_namespace(
+        &self,
+        source: &str,
+        new_namespace_id: &str,
+    ) -> Result<NamespaceSummary, CliError> {
+        let source_namespace_id = NamespaceId::from(source.to_owned());
+        let new_namespace_id = NamespaceId::from(new_namespace_id.to_owned());
+        fork_namespace(
+            &self.store,
+            &source_namespace_id,
+            &new_namespace_id,
+            &self.mutation_context(),
+        )
+        .map_err(map_core_error)
     }
 
     fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError> {
@@ -243,6 +274,8 @@ fn map_core_error(error: CoreError) -> CliError {
     let code = match error.kind() {
         CoreErrorKind::InvalidPath => "invalid_path",
         CoreErrorKind::NamespaceNotFound => "namespace_not_found",
+        CoreErrorKind::NamespaceExists => "namespace_exists",
+        CoreErrorKind::NamespacePartial => "namespace_partial",
         CoreErrorKind::PathNotFound => "path_not_found",
         CoreErrorKind::RevisionNotFound => "revision_not_found",
         CoreErrorKind::PathConflict => "path_conflict",

@@ -23,8 +23,8 @@ pub use protocol::{
     begin_upload, commit_operations, complete_upload, list_changes_after, upload_content,
 };
 pub use services::{
-    bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, list_namespaces,
-    list_path, move_path, put_file_bytes, put_file_content_ref, read_file_bytes, resolve_path,
-    store_bytes_as_content, write_file_bytes, BootstrapNamespaceError, CoreError, CoreErrorKind,
-    MutationContext, PutFileBehavior, StoredContent,
+    bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, fork_namespace,
+    list_namespaces, list_path, move_path, put_file_bytes, put_file_content_ref, read_file_bytes,
+    resolve_path, store_bytes_as_content, write_file_bytes, BootstrapNamespaceError, CoreError,
+    CoreErrorKind, MutationContext, PutFileBehavior, StoredContent,
 };

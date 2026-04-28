@@ -1,7 +1,8 @@
 use loon_api::{
     sha256_digest,
     v0::{CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest},
-    ChangeSeq, ContentRef, ContentRefKind, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
+    ChangeSeq, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope, ControlObjectKind,
+    FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceDescriptorEnvelope,
     NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
@@ -11,11 +12,14 @@ use loon_core::commit::{
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
     bootstrap_namespace, commit_operations, copy_file_path, delete_path, delete_path_non_recursive,
-    move_path, put_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes, CoreError,
-    CoreErrorKind, MutationContext, PutFileBehavior,
+    fork_namespace, list_changes_after, list_namespaces, load_verified_namespace_basis, move_path,
+    put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes,
+    CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::content_blob;
+use loon_objectstore::keys::{
+    content_blob, content_store_descriptor, namespace_descriptor, namespace_head,
+};
 use loon_objectstore::ObjectStore;
 use tempfile::tempdir;
 
@@ -574,6 +578,232 @@ fn restore_revision_overflow_is_rejected() {
 }
 
 #[test]
+fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap namespace");
+
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load namespace basis");
+    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+    let descriptor_bytes = store
+        .get(&descriptor_key, None)
+        .expect("read namespace descriptor")
+        .expect("namespace descriptor exists");
+    let descriptor: NamespaceDescriptorEnvelope =
+        serde_json::from_slice(&descriptor_bytes).expect("decode namespace descriptor");
+    assert_eq!(descriptor.kind, ControlObjectKind::NamespaceDescriptor);
+    assert_eq!(descriptor.state.namespace_id, namespace_id);
+    assert_eq!(descriptor.state.content_store_id, basis.content_store_id);
+    assert!(descriptor.has_valid_payload_checksum().expect("checksum"));
+
+    let content_descriptor_key = content_store_descriptor(basis.content_store_id.as_str());
+    let content_descriptor_bytes = store
+        .get(&content_descriptor_key, None)
+        .expect("read content-store descriptor")
+        .expect("content-store descriptor exists");
+    let content_descriptor: ContentStoreDescriptorEnvelope =
+        serde_json::from_slice(&content_descriptor_bytes).expect("decode content-store descriptor");
+    assert_eq!(
+        content_descriptor.kind,
+        ControlObjectKind::ContentStoreDescriptor
+    );
+    assert_eq!(
+        content_descriptor.state.content_store_id,
+        basis.content_store_id
+    );
+    assert!(content_descriptor
+        .has_valid_payload_checksum()
+        .expect("checksum"));
+
+    let content_store_descriptors = store
+        .list_prefix("content-stores/")
+        .expect("list content stores");
+    assert_eq!(
+        content_store_descriptors,
+        vec![content_descriptor_key],
+        "new root namespace should create exactly one content store descriptor"
+    );
+
+    store
+        .put_if_absent(&namespace_head("partial"), br#"{"not":"a descriptor"}"#)
+        .expect("write partial namespace key");
+    let listed = list_namespaces(&store).expect("list namespaces");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name.as_str(), "demo");
+
+    let partial_error = bootstrap_namespace(&store, &NamespaceId::from("partial"), &context, false)
+        .expect_err("partial namespace should be rejected");
+    assert!(matches!(
+        partial_error,
+        loon_core::BootstrapNamespaceError::NamespacePartiallyInitialized { .. }
+    ));
+}
+
+#[test]
+fn namespace_descriptor_checksum_is_validated() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap namespace");
+
+    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+    let descriptor_bytes = store
+        .get(&descriptor_key, None)
+        .expect("read namespace descriptor")
+        .expect("namespace descriptor exists");
+    let mut descriptor: NamespaceDescriptorEnvelope =
+        serde_json::from_slice(&descriptor_bytes).expect("decode namespace descriptor");
+    descriptor.payload_checksum_sha256 = "not-the-payload-checksum".to_owned();
+    let corrupted = serde_json::to_vec(&descriptor).expect("encode corrupted descriptor");
+    store
+        .put_overwrite(&descriptor_key, &corrupted)
+        .expect("overwrite descriptor");
+
+    let error =
+        load_verified_namespace_basis(&store, &namespace_id).expect_err("descriptor checksum");
+    assert!(
+        error.to_string().contains("checksum mismatch"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn fork_namespace_reuses_content_store_and_isolates_metadata() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::from("clone");
+
+    bootstrap_namespace(&store, &source_namespace_id, &context, false)
+        .expect("bootstrap source namespace");
+    write_file_bytes(
+        &store,
+        &source_namespace_id,
+        "/docs/shared.txt",
+        b"base",
+        &context,
+        Some("seed-shared"),
+    )
+    .expect("seed shared file");
+
+    let source_basis =
+        load_verified_namespace_basis(&store, &source_namespace_id).expect("source basis");
+    assert_eq!(source_basis.head.seq, ChangeSeq(1));
+    let content_store_id = source_basis.content_store_id.clone();
+    let blobs_before = store
+        .list_prefix(&format!(
+            "content-stores/{}/blobs/",
+            content_store_id.as_str()
+        ))
+        .expect("list blobs before fork");
+
+    fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect("fork namespace");
+
+    let blobs_after = store
+        .list_prefix(&format!(
+            "content-stores/{}/blobs/",
+            content_store_id.as_str()
+        ))
+        .expect("list blobs after fork");
+    assert_eq!(blobs_after, blobs_before, "fork must not copy content");
+
+    let clone_basis =
+        load_verified_namespace_basis(&store, &clone_namespace_id).expect("clone basis");
+    assert_eq!(clone_basis.content_store_id, content_store_id);
+    assert_eq!(clone_basis.head.seq, ChangeSeq(1));
+    assert_eq!(clone_basis.head.snapshot_hint_seq, Some(ChangeSeq(1)));
+    assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
+
+    let source_entry =
+        resolve_path(&store, &source_namespace_id, "/docs/shared.txt").expect("source stat");
+    let clone_entry =
+        resolve_path(&store, &clone_namespace_id, "/docs/shared.txt").expect("clone stat");
+    assert_eq!(source_entry.content_ref, clone_entry.content_ref);
+    assert_eq!(
+        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .expect("read clone")
+            .bytes,
+        b"base"
+    );
+
+    let stale_clone_changes =
+        list_changes_after(&store, &clone_namespace_id, ChangeSeq(0)).expect_err("old cursor");
+    assert_eq!(
+        stale_clone_changes.kind(),
+        CoreErrorKind::RebootstrapRequired
+    );
+    let empty_clone_changes =
+        list_changes_after(&store, &clone_namespace_id, ChangeSeq(1)).expect("empty changes");
+    assert!(empty_clone_changes.changes.is_empty());
+
+    write_file_bytes(
+        &store,
+        &source_namespace_id,
+        "/docs/shared.txt",
+        b"source-after-fork",
+        &context,
+        Some("source-after-fork"),
+    )
+    .expect("source replace");
+    assert_eq!(
+        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .expect("read clone after source write")
+            .bytes,
+        b"base"
+    );
+
+    let clone_write = write_file_bytes(
+        &store,
+        &clone_namespace_id,
+        "/docs/shared.txt",
+        b"clone-after-fork",
+        &context,
+        Some("clone-after-fork"),
+    )
+    .expect("clone replace");
+    assert_eq!(clone_write.committed_seq, ChangeSeq(2));
+    assert_eq!(
+        read_file_bytes(&store, &source_namespace_id, "/docs/shared.txt")
+            .expect("read source")
+            .bytes,
+        b"source-after-fork"
+    );
+    assert_eq!(
+        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .expect("read clone")
+            .bytes,
+        b"clone-after-fork"
+    );
+
+    let clone_changes =
+        list_changes_after(&store, &clone_namespace_id, ChangeSeq(1)).expect("clone changes");
+    assert_eq!(clone_changes.changes.len(), 1);
+    assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
+
+    for key in store
+        .list_prefix(&format!("namespaces/{}/", source_namespace_id.as_str()))
+        .expect("list source namespace keys")
+    {
+        store
+            .delete(&key)
+            .expect("delete source namespace metadata");
+    }
+    assert_eq!(
+        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .expect("clone remains readable")
+            .bytes,
+        b"clone-after-fork"
+    );
+}
+
+#[test]
 fn restore_revision_revalidates_durable_content_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -630,7 +860,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
 
     store
         .delete(
-            &content_blob(namespace_id().as_str(), &first.content_ref.digest)
+            &content_blob(first.content_store_id.as_str(), &first.content_ref.digest)
                 .expect("first content key"),
         )
         .expect("delete first content");
@@ -823,7 +1053,7 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
     let second = store_bytes_as_content(&store, &namespace_id(), b"second").expect("stage second");
     store
         .delete(
-            &content_blob(namespace_id().as_str(), &second.content_ref.digest)
+            &content_blob(second.content_store_id.as_str(), &second.content_ref.digest)
                 .expect("second content key"),
         )
         .expect("delete second content");

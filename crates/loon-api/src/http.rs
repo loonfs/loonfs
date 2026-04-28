@@ -13,6 +13,11 @@ pub struct CreateNamespaceRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForkNamespaceRequest {
+    pub new_namespace_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceSummary {
     pub name: NamespaceId,
 }

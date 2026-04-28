@@ -12,6 +12,8 @@ A stable spec needs explicit versioning in three places.
 
 A new version should be introduced only when an old implementation could misread or misapply a new feature.
 
+The durable namespace descriptor and content-store descriptor are storage-format objects. The namespace descriptor is authoritative for the namespace-to-content-store relationship; a future catalog may index descriptors but must not replace their meaning.
+
 ## 2. Server requirements
 
 A conforming server must:
@@ -20,11 +22,12 @@ A conforming server must:
 2. publish visible metadata only through logical commits stored in visible WAL segments plus a successful head update;
 3. validate that referenced content is already durable before publish;
 4. preserve `(namespace_id, inode_id)` as canonical identity;
-5. implement tombstone-first delete;
-6. serve replay from verified checkpoints plus the visible WAL segment chain, replayed as logical commits;
-7. honor the namespace's `NamePolicy`;
-8. keep control-plane sessions and any implementation-specific coordinators out of namespace history and the change feed; and
-9. preserve per-request idempotency, ordering, and change-feed identity even when physically batching logical commits in a WAL segment.
+5. resolve namespace content through the immutable `content_store_id` in the namespace descriptor;
+6. implement tombstone-first delete;
+7. serve replay from verified checkpoints plus the visible WAL segment chain, replayed as logical commits;
+8. honor the namespace's `NamePolicy`;
+9. keep control-plane sessions and any implementation-specific coordinators out of namespace history and the change feed; and
+10. preserve per-request idempotency, ordering, and change-feed identity even when physically batching logical commits in a WAL segment.
 
 ## 3. Writer and client requirements
 

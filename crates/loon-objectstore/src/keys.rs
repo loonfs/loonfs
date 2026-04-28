@@ -23,6 +23,10 @@ pub fn namespace_head(namespace: &str) -> String {
     format!("namespaces/{namespace}/head.json")
 }
 
+pub fn namespace_descriptor(namespace: &str) -> String {
+    format!("namespaces/{namespace}/descriptor.json")
+}
+
 pub fn namespace_lease(namespace: &str) -> String {
     format!("namespaces/{namespace}/lease.json")
 }
@@ -31,10 +35,14 @@ pub fn wal_commit(namespace: &str, seq: u64, commit_id: &str) -> String {
     format!("namespaces/{namespace}/wal/{seq:020}-{commit_id}.cbor.zst")
 }
 
-pub fn content_blob(namespace: &str, digest: &str) -> Result<String, ObjectStoreError> {
+pub fn content_store_descriptor(content_store: &str) -> String {
+    format!("content-stores/{content_store}/descriptor.json")
+}
+
+pub fn content_blob(content_store: &str, digest: &str) -> Result<String, ObjectStoreError> {
     let hex = sha256_hex_from_digest(digest)?;
     Ok(format!(
-        "namespaces/{namespace}/blobs/sha256/{}/{}/{}",
+        "content-stores/{content_store}/blobs/sha256/{}/{}/{}",
         &hex[0..2],
         &hex[2..4],
         hex
@@ -100,15 +108,24 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        conflict_artifact, conflict_artifact_prefix, content_blob, derived_progress,
-        namespace_head, namespace_lease, queue_shard, sha256_hex_from_digest, snapshot_manifest,
-        snapshot_table, upload_session, upload_session_prefix, wal_commit, SnapshotTableFamily,
+        conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
+        derived_progress, namespace_descriptor, namespace_head, namespace_lease, queue_shard,
+        sha256_hex_from_digest, snapshot_manifest, snapshot_table, upload_session,
+        upload_session_prefix, wal_commit, SnapshotTableFamily,
     };
 
     #[test]
     fn key_builders_match_spec_examples() {
         assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/head.json");
+        assert_eq!(
+            namespace_descriptor("ns-1"),
+            "namespaces/ns-1/descriptor.json"
+        );
         assert_eq!(namespace_lease("ns-1"), "namespaces/ns-1/lease.json");
+        assert_eq!(
+            content_store_descriptor("cs-1"),
+            "content-stores/cs-1/descriptor.json"
+        );
         assert_eq!(
             wal_commit("ns-1", 420, "commit-123"),
             "namespaces/ns-1/wal/00000000000000000420-commit-123.cbor.zst"
@@ -128,11 +145,11 @@ mod tests {
         assert_eq!(queue_shard(17), "queue/shards/00017.json");
         assert_eq!(
             content_blob(
-                "ns-1",
+                "cs-1",
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
             )
             .expect("content key"),
-            "namespaces/ns-1/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            "content-stores/cs-1/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         );
         assert_eq!(
             conflict_artifact("ns-1", "conflict-deadbeef"),

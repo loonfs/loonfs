@@ -173,6 +173,7 @@ pub struct CurrentArgs {
 #[derive(Debug, Subcommand)]
 pub enum NamespaceCommand {
     Create(NamespaceCreateArgs),
+    Fork(NamespaceForkArgs),
     List(NamespaceListArgs),
 }
 
@@ -181,6 +182,14 @@ pub struct NamespaceCreateArgs {
     #[command(flatten)]
     pub profile: ProfileSelectorArgs,
     pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct NamespaceForkArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+    pub source: String,
+    pub new_namespace_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -266,6 +275,7 @@ pub enum CommandKind {
     ProfileRemove,
     ProfileUse,
     NamespaceCreate,
+    NamespaceFork,
     NamespaceList,
     NamespaceUse,
     Current,
@@ -293,6 +303,7 @@ impl CommandKind {
             CommandKind::ProfileRemove => "profile_remove",
             CommandKind::ProfileUse => "profile_use",
             CommandKind::NamespaceCreate => "namespace_create",
+            CommandKind::NamespaceFork => "namespace_fork",
             CommandKind::NamespaceList => "namespace_list",
             CommandKind::NamespaceUse => "namespace_use",
             CommandKind::Current => "current",
@@ -329,6 +340,7 @@ impl Cli {
             },
             Command::Namespace { command } => match command {
                 NamespaceCommand::Create(_) => CommandKind::NamespaceCreate,
+                NamespaceCommand::Fork(_) => CommandKind::NamespaceFork,
                 NamespaceCommand::List(_) => CommandKind::NamespaceList,
             },
             Command::Use(_) => CommandKind::NamespaceUse,

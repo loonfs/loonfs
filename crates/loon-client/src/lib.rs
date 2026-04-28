@@ -9,7 +9,8 @@ use loon_api::{
     },
     ApiError, AuthoritativePathEntry, ChangeSeq, ContentRef, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ListNamespacesResponse, MutationResult, NamespaceSummary,
+    FilesystemPutBehavior, ForkNamespaceRequest, ListNamespacesResponse, MutationResult,
+    NamespaceSummary,
 };
 use serde::Deserialize;
 use std::fs;
@@ -126,6 +127,20 @@ impl Client {
         Ok(self
             .request_json::<(), ListNamespacesResponse>(self.agent.get(&url), None)?
             .namespaces)
+    }
+
+    pub fn fork_namespace(
+        &self,
+        source_namespace: &str,
+        new_namespace_id: &str,
+    ) -> Result<NamespaceSummary, ClientError> {
+        let url = format!("{}/v0/namespaces/{source_namespace}/forks", self.base_url);
+        self.request_json::<_, NamespaceSummary>(
+            self.agent.post(&url),
+            Some(&ForkNamespaceRequest {
+                new_namespace_id: new_namespace_id.to_owned(),
+            }),
+        )
     }
 
     pub fn list_path(

@@ -1,8 +1,8 @@
 use crate::args::{
     Cli, Command, CommandKind, ConfigCommand, CurrentArgs, FilesystemGetArgs, FilesystemLsArgs,
     FilesystemMoveArgs, FilesystemPathArgs, FilesystemPutArgs, InitArgs, NamespaceCommand,
-    NamespaceCreateArgs, NamespaceListArgs, NamespaceUseArgs, ProfileCommand, ProfileCreateArgs,
-    ProfileUpdateArgs, RuntimeBehavior, TargetSelectorArgs,
+    NamespaceCreateArgs, NamespaceForkArgs, NamespaceListArgs, NamespaceUseArgs, ProfileCommand,
+    ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior, TargetSelectorArgs,
 };
 use crate::config::{
     default_config_path, load_config, load_config_if_exists, load_or_default_config, save_config,
@@ -414,6 +414,7 @@ fn run_namespace_command(
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
         NamespaceCommand::Create(args) => run_namespace_create(kind, args),
+        NamespaceCommand::Fork(args) => run_namespace_fork(kind, args),
         NamespaceCommand::List(args) => run_namespace_list(kind, args),
     }
 }
@@ -438,6 +439,51 @@ fn run_namespace_create(
         .target
         .backend()
         .create_namespace(&args.name)
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(resolved.profile_name.clone()),
+                Some(mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(resolved.profile_name),
+        mode: Some(mode),
+        data: CommandData::NamespaceSummary(namespace),
+    })
+}
+
+fn run_namespace_fork(
+    kind: CommandKind,
+    args: NamespaceForkArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let explicit_profile = args.profile.profile.as_deref();
+    let resolved = resolve_target_profile(explicit_profile)
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = resolved.target.mode_str().to_owned();
+    validate_namespace_name(&args.source).map_err(|error| {
+        fail(
+            kind,
+            Some(resolved.profile_name.clone()),
+            Some(mode.clone()),
+            error,
+        )
+    })?;
+    validate_namespace_name(&args.new_namespace_id).map_err(|error| {
+        fail(
+            kind,
+            Some(resolved.profile_name.clone()),
+            Some(mode.clone()),
+            error,
+        )
+    })?;
+    let namespace = resolved
+        .target
+        .backend()
+        .fork_namespace(&args.source, &args.new_namespace_id)
         .map_err(|error| {
             fail(
                 kind,

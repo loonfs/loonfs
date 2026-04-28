@@ -6,6 +6,7 @@ A namespace is the unit of visible metadata history.
 
 Each namespace has:
 
+- a descriptor that records its namespace id and content-store id
 - a current head
 - an ordered WAL of logical commits stored in immutable segments
 - zero or more checkpoints
@@ -14,6 +15,8 @@ Each namespace has:
 The head also carries the next monotonic inode id for that namespace. New inode ids are allocated from the head as part of commit publication.
 
 The canonical identity of an item is `(namespace_id, inode_id)`.
+
+Each namespace has exactly one immutable `content_store_id`. The content store is an immutable pool for file bytes and may be referenced by many namespaces. A new root namespace receives a new content store; a forked namespace reuses the source namespace's content store while starting an independent namespace metadata history.
 
 Two consequences follow:
 
@@ -123,7 +126,7 @@ A file is represented by one inode and a sequence of immutable revisions.
 
 Each revision points to exactly one immutable content reference. In v0, that reference names one whole-file object containing the complete plaintext file bytes.
 
-Content objects belong to the owning namespace. A file revision may reference only content that is durable under that namespace's content store.
+Content objects belong to the namespace's content store. A file revision may reference only content that is durable under the content store named by that namespace descriptor.
 
 LoonFS therefore uses a two-stage write model:
 
@@ -138,7 +141,7 @@ This separation is part of the core model.
 The stable immutable content families are:
 
 ```text
-namespaces/{namespace_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}
+content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}
 ```
 
 The core rules are:
@@ -147,6 +150,7 @@ The core rules are:
 - `content_ref.digest` uses `sha256:<64 lowercase hex>` over the complete plaintext file bytes;
 - `content_ref.size_bytes` records the complete byte length;
 - the object key leaf is the raw 64-character hex digest, while JSON keeps the full `sha256:<hex>` digest string; and
+- all content-object access resolves `namespace_id` through the namespace descriptor to its `content_store_id`;
 - future content strategies must use a new `content_ref.kind` and name their durability and validation rules before revisions may reference them.
 
 ### 4.2 Upload-before-publish
@@ -165,7 +169,15 @@ Deletion is logical first. When an item is deleted, LoonFS records tombstone met
 
 Physical reclamation is separate background work. It may happen only when retention and reference-safety rules allow it.
 
-## 6. Mounts
+Namespace deletion does not imply content-store deletion. In v0, content-store deletion and destructive content garbage collection are unsupported operator-only work.
+
+## 6. Forks
+
+Forking a namespace creates a new namespace with independent metadata history and the same `content_store_id` as the source namespace. The fork point is the source namespace's current head. The implementation creates or reuses a verified source checkpoint at that head, rewrites checkpoint artifacts under the new namespace id and object keys, creates the new namespace descriptor with the shared content-store id, and initializes the new head at the fork seq.
+
+No durable parent/child relationship is part of v0 namespace state. After fork, the clone must remain readable even if the source namespace metadata is deleted or corrupted. Source writes after the fork do not affect the clone, and clone writes do not affect the source.
+
+## 7. Mounts
 
 A mount presents another namespace, or a subtree of another namespace, inside the current tree.
 
@@ -183,13 +195,13 @@ Two rules apply:
 
 A share grants access to a subtree. A mount presents that accessible subtree at a path. The two concepts are related, but they are not the same.
 
-## 7. Cross-namespace moves
+## 8. Cross-namespace moves
 
 Identity is namespace-local. A true inode-preserving rename is therefore namespace-local as well.
 
-Across namespaces, a move is modeled as a copy plus a delete from the source namespace. Content may still be reused internally, but inode identity does not cross the namespace boundary.
+Across namespaces, a move is modeled as a copy plus a delete from the source namespace. Same-content-store copies may reuse `content_ref`. Cross-content-store copies are not supported in v0 unless the content is first imported into the destination content store. Inode identity does not cross the namespace boundary.
 
-## 8. Recovery basis
+## 9. Recovery basis
 
 Readers reconstruct authoritative state from:
 

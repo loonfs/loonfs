@@ -11,7 +11,7 @@ use loon_api::{
     AdvanceRetentionResponse, ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload,
     CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
     CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind,
-    CreateCheckpointResponse, HeadState, HeadStateEnvelope, NamespaceId,
+    CreateCheckpointResponse, FenceToken, HeadState, HeadStateEnvelope, InodeId, NamespaceId,
 };
 use loon_objectstore::keys::{
     derived_progress, snapshot_manifest, snapshot_table, SnapshotTableFamily,
@@ -233,6 +233,54 @@ pub fn create_checkpoint<S: ObjectStore + ?Sized>(
         snapshot_hint_points_at_checkpoint: resulting_head.snapshot_hint_seq
             == Some(checkpoint_seq),
     })
+}
+
+pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_seq: ChangeSeq,
+    active_fence_token: FenceToken,
+    next_inode_id: InodeId,
+    retention_floor_seq: ChangeSeq,
+    metadata_state: &MetadataState,
+    writer_version: &str,
+) -> Result<CheckpointManifestEnvelope, CoreError> {
+    let tables = build_checkpoint_tables(
+        store,
+        namespace_id,
+        checkpoint_seq,
+        metadata_state,
+        writer_version,
+    )?;
+    let materialized = load_checkpoint_materialization_from_tables(
+        store,
+        namespace_id,
+        checkpoint_seq,
+        &snapshot_manifest(namespace_id.as_str(), checkpoint_seq.0),
+        &tables,
+    )
+    .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
+    if !metadata_states_equivalent(metadata_state, &materialized) {
+        return Err(CoreError::Basis(BasisLoadError::CheckpointLoad(
+            CheckpointLoadError::MetadataMismatch,
+        )));
+    }
+
+    let manifest = CheckpointManifestEnvelope::from_payload(
+        writer_version,
+        CheckpointManifestPayload {
+            namespace_id: namespace_id.clone(),
+            checkpoint_seq,
+            active_fence_token,
+            next_inode_id,
+            retention_floor_seq,
+            verified: true,
+            tables,
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    write_checkpoint_manifest(store, &manifest).map_err(CoreError::Basis)?;
+    Ok(manifest)
 }
 
 pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
