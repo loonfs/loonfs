@@ -1,7 +1,7 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::commit::{
     build_commit_plan, prepare_commit_head_publish, publish_commit_head,
-    resolve_restore_content_manifest_digests, CommitOp, CommitRequest as CoreCommitRequest,
+    resolve_restore_content_refs, CommitOp, CommitRequest as CoreCommitRequest,
     CommitValidationContext, Precondition,
 };
 use crate::content::validate_durable_content_reference;
@@ -11,17 +11,14 @@ use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitOp as V0CommitOp,
     CommitPrecondition as V0CommitPrecondition, CommitRequest as V0CommitRequest,
     CommitResponse as V0CommitResponse, CommittedChange, CompleteUploadRequest,
-    CompleteUploadResponse, UploadBlockResponse, UploadMode,
+    CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::{
-    content_manifest_digest_sha256, decode_wal_commit_envelope_zstd, encode_content_manifest_json,
-    sha256_digest, ChangeSeq, CompletedUpload, ContentBlockDescriptor, ContentManifestEnvelope,
-    ContentManifestPayload, ControlObjectKind, NamespaceId, UploadSessionEnvelope,
-    UploadSessionState, UploadedBlock, CONTENT_BLOCK_SIZE_BYTES,
+    decode_wal_commit_envelope_zstd, ChangeSeq, CompletedUpload, ContentRef, ControlObjectKind,
+    NamespaceId, UploadSessionEnvelope, UploadSessionState,
 };
-use loon_objectstore::keys::{blob, content_manifest, upload_session, wal_commit};
+use loon_objectstore::keys::{content_blob, upload_session, wal_commit};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
@@ -43,8 +40,7 @@ pub fn begin_upload<S: ObjectStore + ?Sized>(
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
-        block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
-        uploaded_blocks: Vec::new(),
+        staged_content_ref: None,
         completed: None,
         created_at_ms: context.now_ms,
     };
@@ -63,68 +59,46 @@ pub fn begin_upload<S: ObjectStore + ?Sized>(
     Ok(BeginUploadResponse {
         namespace_id: namespace_id.clone(),
         upload_id,
-        block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
         mode: UploadMode::ServiceProxied,
     })
 }
 
-pub fn upload_block<S: ObjectStore + ?Sized>(
+pub fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &str,
-    block_index: u32,
     bytes: &[u8],
     context: &MutationContext,
-) -> Result<UploadBlockResponse, CoreError> {
-    validate_upload_block_bytes(bytes)?;
-    let descriptor = UploadedBlock {
-        block_index,
-        content_digest_sha256: sha256_digest(bytes),
-        plaintext_size_bytes: bytes.len() as u64,
-    };
+) -> Result<UploadContentResponse, CoreError> {
+    let content_ref = ContentRef::whole_file_v0(bytes);
+    let object_key = content_blob(namespace_id.as_str(), &content_ref.digest)
+        .map_err(|err| CoreError::Store(err.to_string()))?;
 
     for _attempt in 0..UPLOAD_SESSION_RETRY_LIMIT {
         let loaded = read_upload_session_object(store, namespace_id, upload_id)?;
-        if let Some(completed) = &loaded.envelope.state.completed {
-            let _ = completed;
+        if loaded.envelope.state.completed.is_some() {
             return Err(CoreError::UploadAlreadyCompleted {
                 upload_id: upload_id.to_owned(),
             });
         }
 
-        if let Some(existing) = loaded
-            .envelope
-            .state
-            .uploaded_blocks
-            .iter()
-            .find(|block| block.block_index == block_index)
-        {
-            if existing == &descriptor {
-                return Ok(UploadBlockResponse {
+        if let Some(existing) = &loaded.envelope.state.staged_content_ref {
+            if existing == &content_ref {
+                return Ok(UploadContentResponse {
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.to_owned(),
-                    block_index,
-                    content_digest_sha256: descriptor.content_digest_sha256,
-                    plaintext_size_bytes: descriptor.plaintext_size_bytes,
+                    content_ref,
                 });
             }
-            return Err(CoreError::UploadBlockConflict {
+            return Err(CoreError::UploadContentConflict {
                 upload_id: upload_id.to_owned(),
-                block_index,
             });
         }
 
-        write_immutable_object(
-            store,
-            &blob(namespace_id.as_str(), &descriptor.content_digest_sha256),
-            bytes,
-        )?;
+        write_immutable_object(store, &object_key, bytes)?;
 
         let mut next_state = loaded.envelope.state.clone();
-        next_state.uploaded_blocks.push(descriptor.clone());
-        next_state
-            .uploaded_blocks
-            .sort_by_key(|block| block.block_index);
+        next_state.staged_content_ref = Some(content_ref.clone());
 
         let envelope = UploadSessionEnvelope::from_state(
             ControlObjectKind::UploadSession,
@@ -142,12 +116,10 @@ pub fn upload_block<S: ObjectStore + ?Sized>(
 
         match store.compare_and_swap(&loaded.object_key, expected_etag, &encoded) {
             Ok(_) => {
-                return Ok(UploadBlockResponse {
+                return Ok(UploadContentResponse {
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.to_owned(),
-                    block_index,
-                    content_digest_sha256: descriptor.content_digest_sha256,
-                    plaintext_size_bytes: descriptor.plaintext_size_bytes,
+                    content_ref,
                 });
             }
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
@@ -170,13 +142,11 @@ pub fn complete_upload<S: ObjectStore + ?Sized>(
     for _attempt in 0..UPLOAD_SESSION_RETRY_LIMIT {
         let loaded = read_upload_session_object(store, namespace_id, upload_id)?;
         if let Some(completed) = &loaded.envelope.state.completed {
-            if completed.file_size_bytes == request.file_size_bytes
-                && completed.file_digest_sha256 == request.file_digest_sha256
-            {
+            if completed.content_ref == request.content_ref {
                 return Ok(CompleteUploadResponse {
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.to_owned(),
-                    content_manifest_digest: completed.content_manifest_digest.clone(),
+                    content_ref: completed.content_ref.clone(),
                 });
             }
             return Err(CoreError::UploadAlreadyCompleted {
@@ -184,45 +154,21 @@ pub fn complete_upload<S: ObjectStore + ?Sized>(
             });
         }
 
-        let blocks = build_ordered_block_descriptors(&loaded.envelope.state.uploaded_blocks)?;
-        let (actual_size, actual_digest) =
-            verify_uploaded_block_bytes(store, namespace_id, &blocks)?;
-        if actual_size != request.file_size_bytes {
-            return Err(CoreError::InvalidUploadBlock(format!(
-                "file size mismatch: expected {}, actual {}",
-                request.file_size_bytes, actual_size
-            )));
+        let Some(staged_content_ref) = loaded.envelope.state.staged_content_ref.clone() else {
+            return Err(CoreError::InvalidUploadContent(
+                "upload content has not been staged".to_owned(),
+            ));
+        };
+        if staged_content_ref != request.content_ref {
+            return Err(CoreError::InvalidUploadContent(
+                "completed content ref does not match staged content".to_owned(),
+            ));
         }
-        if actual_digest != request.file_digest_sha256 {
-            return Err(CoreError::InvalidUploadBlock(format!(
-                "file digest mismatch: expected `{}`, actual `{}`",
-                request.file_digest_sha256, actual_digest
-            )));
-        }
-
-        let manifest = ContentManifestEnvelope::from_payload(ContentManifestPayload {
-            namespace_id: namespace_id.clone(),
-            file_size_bytes: actual_size,
-            file_digest_sha256: actual_digest.clone(),
-            block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
-            blocks,
-        })
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-        let manifest_digest = content_manifest_digest_sha256(&manifest)
-            .map_err(|err| CoreError::Store(err.to_string()))?;
-        let manifest_bytes = encode_content_manifest_json(&manifest)
-            .map_err(|err| CoreError::Store(err.to_string()))?;
-        write_immutable_object(
-            store,
-            &content_manifest(namespace_id.as_str(), &manifest_digest),
-            &manifest_bytes,
-        )?;
+        validate_durable_content_reference(store, namespace_id, &request.content_ref)?;
 
         let mut next_state = loaded.envelope.state.clone();
         next_state.completed = Some(CompletedUpload {
-            file_size_bytes: actual_size,
-            file_digest_sha256: actual_digest,
-            content_manifest_digest: manifest_digest.clone(),
+            content_ref: request.content_ref.clone(),
         });
         let envelope = UploadSessionEnvelope::from_state(
             ControlObjectKind::UploadSession,
@@ -243,7 +189,7 @@ pub fn complete_upload<S: ObjectStore + ?Sized>(
                 return Ok(CompleteUploadResponse {
                     namespace_id: namespace_id.clone(),
                     upload_id: upload_id.to_owned(),
-                    content_manifest_digest: manifest_digest,
+                    content_ref: request.content_ref.clone(),
                 });
             }
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
@@ -351,23 +297,22 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
         now_ms: context.now_ms,
         metadata_state: basis.metadata_state.clone(),
     };
-    let resolved_restore_content_manifest_digests =
-        resolve_restore_content_manifest_digests(&request, &validation);
+    let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
     validate_commit_content_references(
         store,
         namespace_id,
         &request,
-        &resolved_restore_content_manifest_digests,
+        &resolved_restore_content_refs,
     )?;
     let plan = build_commit_plan(&request, &validation)?;
     debug_assert_eq!(
-        plan.resolved_restore_content_manifest_digests,
-        resolved_restore_content_manifest_digests
+        plan.resolved_restore_content_refs,
+        resolved_restore_content_refs
     );
     let results = derive_commit_results(
         &request.ops,
         &plan.allocated_inode_ids,
-        &plan.resolved_restore_content_manifest_digests,
+        &plan.resolved_restore_content_refs,
     );
     let wal = prepare_wal_commit(&request, &plan, results.clone(), &context.writer_version)?;
     let _applied = basis
@@ -499,20 +444,20 @@ fn map_commit_op(op: V0CommitOp) -> CommitOp {
         V0CommitOp::CreateFile {
             parent_inode,
             display_name,
-            content_manifest_digest,
+            content_ref,
         } => CommitOp::CreateFile {
             parent_inode,
             display_name,
-            content_manifest_digest,
+            content_ref,
         },
         V0CommitOp::ReplaceFile {
             inode_id,
             base_revision_no,
-            content_manifest_digest,
+            content_ref,
         } => CommitOp::ReplaceFile {
             inode_id,
             base_revision: base_revision_no,
-            content_manifest_digest,
+            content_ref,
         },
         V0CommitOp::RestoreRevision {
             inode_id,
@@ -573,22 +518,22 @@ fn map_wal_op(op: loon_api::WalOp) -> V0CommitOp {
         loon_api::WalOp::CreateFile {
             parent_inode,
             display_name,
-            content_manifest_digest,
+            content_ref,
             ..
         } => V0CommitOp::CreateFile {
             parent_inode,
             display_name,
-            content_manifest_digest,
+            content_ref,
         },
         loon_api::WalOp::ReplaceFile {
             inode_id,
             base_revision,
-            content_manifest_digest,
+            content_ref,
             ..
         } => V0CommitOp::ReplaceFile {
             inode_id,
             base_revision_no: base_revision,
-            content_manifest_digest,
+            content_ref,
         },
         loon_api::WalOp::RestoreRevision {
             inode_id,
@@ -645,135 +590,26 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: &CoreCommitRequest,
-    resolved_restore_content_manifest_digests: &[Option<String>],
+    resolved_restore_content_refs: &[Option<ContentRef>],
 ) -> Result<(), CoreError> {
     for (index, op) in request.ops.iter().enumerate() {
         match op {
-            CommitOp::CreateFile {
-                content_manifest_digest,
-                ..
-            }
-            | CommitOp::ReplaceFile {
-                content_manifest_digest,
-                ..
-            } => {
-                validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
+            CommitOp::CreateFile { content_ref, .. }
+            | CommitOp::ReplaceFile { content_ref, .. } => {
+                validate_durable_content_reference(store, namespace_id, content_ref)?;
             }
             CommitOp::RestoreRevision { .. } => {
-                if let Some(content_manifest_digest) = resolved_restore_content_manifest_digests
+                if let Some(content_ref) = resolved_restore_content_refs
                     .get(index)
-                    .and_then(|digest| digest.as_deref())
+                    .and_then(|content_ref| content_ref.as_ref())
                 {
-                    validate_durable_content_reference(
-                        store,
-                        namespace_id,
-                        content_manifest_digest,
-                    )?;
+                    validate_durable_content_reference(store, namespace_id, content_ref)?;
                 }
             }
             _ => {}
         }
     }
     Ok(())
-}
-
-fn validate_upload_block_bytes(bytes: &[u8]) -> Result<(), CoreError> {
-    if bytes.is_empty() {
-        return Err(CoreError::InvalidUploadBlock(
-            "block bytes must not be empty".to_owned(),
-        ));
-    }
-    if bytes.len() > CONTENT_BLOCK_SIZE_BYTES as usize {
-        return Err(CoreError::InvalidUploadBlock(format!(
-            "block exceeds {} bytes",
-            CONTENT_BLOCK_SIZE_BYTES
-        )));
-    }
-    Ok(())
-}
-
-fn build_ordered_block_descriptors(
-    uploaded_blocks: &[UploadedBlock],
-) -> Result<Vec<ContentBlockDescriptor>, CoreError> {
-    if uploaded_blocks.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut previous_index = None;
-    let mut descriptors = Vec::with_capacity(uploaded_blocks.len());
-    for (position, block) in uploaded_blocks.iter().enumerate() {
-        let expected_index = u32::try_from(position)
-            .map_err(|_| CoreError::InvalidUploadBlock("block index overflow".to_owned()))?;
-        if block.block_index != expected_index {
-            return Err(CoreError::InvalidUploadBlock(format!(
-                "missing or out-of-order block index: expected {}, got {}",
-                expected_index, block.block_index
-            )));
-        }
-        if previous_index == Some(block.block_index) {
-            return Err(CoreError::InvalidUploadBlock(format!(
-                "duplicate block index {}",
-                block.block_index
-            )));
-        }
-        let is_last = position + 1 == uploaded_blocks.len();
-        if !is_last && block.plaintext_size_bytes != CONTENT_BLOCK_SIZE_BYTES {
-            return Err(CoreError::InvalidUploadBlock(format!(
-                "non-final block {} must be exactly {} bytes",
-                block.block_index, CONTENT_BLOCK_SIZE_BYTES
-            )));
-        }
-        if block.plaintext_size_bytes == 0 || block.plaintext_size_bytes > CONTENT_BLOCK_SIZE_BYTES
-        {
-            return Err(CoreError::InvalidUploadBlock(format!(
-                "block {} has invalid size {}",
-                block.block_index, block.plaintext_size_bytes
-            )));
-        }
-        descriptors.push(ContentBlockDescriptor {
-            content_digest_sha256: block.content_digest_sha256.clone(),
-            plaintext_size_bytes: block.plaintext_size_bytes,
-        });
-        previous_index = Some(block.block_index);
-    }
-    Ok(descriptors)
-}
-
-fn verify_uploaded_block_bytes<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    blocks: &[ContentBlockDescriptor],
-) -> Result<(u64, String), CoreError> {
-    let mut total_size = 0u64;
-    let mut hasher = Sha256::new();
-
-    for block in blocks {
-        let block_key = blob(namespace_id.as_str(), &block.content_digest_sha256);
-        let bytes = store
-            .get(&block_key, None)
-            .map_err(|err| CoreError::Store(err.to_string()))?
-            .ok_or_else(|| {
-                CoreError::InvalidUploadBlock(format!("missing durable block `{block_key}`"))
-            })?;
-        let actual_size = bytes.len() as u64;
-        if actual_size != block.plaintext_size_bytes {
-            return Err(CoreError::InvalidUploadBlock(format!(
-                "block `{}` size mismatch: expected {}, actual {}",
-                block.content_digest_sha256, block.plaintext_size_bytes, actual_size
-            )));
-        }
-        let actual_digest = sha256_digest(&bytes);
-        if actual_digest != block.content_digest_sha256 {
-            return Err(CoreError::InvalidUploadBlock(format!(
-                "block `{}` digest mismatch",
-                block.content_digest_sha256
-            )));
-        }
-        total_size = total_size.saturating_add(actual_size);
-        hasher.update(&bytes);
-    }
-
-    Ok((total_size, format!("sha256:{:x}", hasher.finalize())))
 }
 
 fn read_upload_session_object<S: ObjectStore + ?Sized>(

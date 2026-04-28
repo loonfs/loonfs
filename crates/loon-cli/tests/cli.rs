@@ -127,8 +127,8 @@ fn local_profile_filesystem_flow_works_end_to_end() {
     assert_success(&copy);
     assert_ne!(json_data(&source)["inode_id"], json_data(&copy)["inode_id"]);
     assert_eq!(
-        json_data(&source)["content_manifest_digest"],
-        json_data(&copy)["content_manifest_digest"]
+        json_data(&source)["content_ref"],
+        json_data(&copy)["content_ref"]
     );
 
     let cat = harness.run(&["cat", "/docs/hello.txt"]);

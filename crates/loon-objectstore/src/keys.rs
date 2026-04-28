@@ -1,3 +1,5 @@
+use crate::ObjectStoreError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotTableFamily {
     Inodes,
@@ -29,12 +31,14 @@ pub fn wal_commit(namespace: &str, seq: u64, commit_id: &str) -> String {
     format!("namespaces/{namespace}/wal/{seq:020}-{commit_id}.cbor.zst")
 }
 
-pub fn blob(namespace: &str, digest: &str) -> String {
-    format!("namespaces/{namespace}/blobs/{digest}")
-}
-
-pub fn content_manifest(namespace: &str, digest: &str) -> String {
-    format!("namespaces/{namespace}/manifests/{digest}.json")
+pub fn content_blob(namespace: &str, digest: &str) -> Result<String, ObjectStoreError> {
+    let hex = sha256_hex_from_digest(digest)?;
+    Ok(format!(
+        "namespaces/{namespace}/blobs/sha256/{}/{}/{}",
+        &hex[0..2],
+        &hex[2..4],
+        hex
+    ))
 }
 
 pub fn conflict_artifact(namespace: &str, conflict_id: &str) -> String {
@@ -77,12 +81,28 @@ pub fn queue_shard(shard_index: u32) -> String {
     format!("queue/shards/{shard_index:05}.json")
 }
 
+pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
+    }
+    if !hex
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
+    }
+    Ok(hex)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        blob, conflict_artifact, conflict_artifact_prefix, content_manifest, derived_progress,
-        namespace_head, namespace_lease, queue_shard, snapshot_manifest, snapshot_table,
-        upload_session, upload_session_prefix, wal_commit, SnapshotTableFamily,
+        conflict_artifact, conflict_artifact_prefix, content_blob, derived_progress,
+        namespace_head, namespace_lease, queue_shard, sha256_hex_from_digest, snapshot_manifest,
+        snapshot_table, upload_session, upload_session_prefix, wal_commit, SnapshotTableFamily,
     };
 
     #[test]
@@ -107,12 +127,12 @@ mod tests {
         );
         assert_eq!(queue_shard(17), "queue/shards/00017.json");
         assert_eq!(
-            blob("ns-1", "sha256:abcd"),
-            "namespaces/ns-1/blobs/sha256:abcd"
-        );
-        assert_eq!(
-            content_manifest("ns-1", "sha256:manifest-abcd"),
-            "namespaces/ns-1/manifests/sha256:manifest-abcd.json"
+            content_blob(
+                "ns-1",
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            )
+            .expect("content key"),
+            "namespaces/ns-1/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         );
         assert_eq!(
             conflict_artifact("ns-1", "conflict-deadbeef"),
@@ -130,5 +150,16 @@ mod tests {
             upload_session_prefix("ns-1"),
             "namespaces/ns-1/control/uploads/"
         );
+    }
+
+    #[test]
+    fn content_blob_rejects_invalid_sha256_digest() {
+        assert!(sha256_hex_from_digest("sha1:abcdef").is_err());
+        assert!(sha256_hex_from_digest("sha256:abcd").is_err());
+        assert!(sha256_hex_from_digest(
+            "sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        )
+        .is_err());
+        assert!(content_blob("ns-1", "sha256:not-hex").is_err());
     }
 }

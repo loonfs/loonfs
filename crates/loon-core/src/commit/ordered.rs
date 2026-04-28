@@ -6,7 +6,8 @@ use super::{
 use crate::invariants::INVARIANTS;
 use crate::metadata::MetadataState;
 use loon_api::{
-    name_key_for_display_name, ChangeSeq, InodeId, InodeKind, NamePolicy, RevisionNo, WalOp,
+    name_key_for_display_name, ChangeSeq, ContentRef, InodeId, InodeKind, NamePolicy, RevisionNo,
+    WalOp,
 };
 use std::collections::BTreeMap;
 
@@ -16,11 +17,11 @@ struct CommitShape {
     resulting_next_inode_id: InodeId,
 }
 
-pub(crate) fn resolve_restore_content_manifest_digests(
+pub(crate) fn resolve_restore_content_refs(
     request: &CommitRequest,
     context: &CommitValidationContext,
-) -> Vec<Option<String>> {
-    let mut resolved_request_revisions = BTreeMap::<(InodeId, RevisionNo), String>::new();
+) -> Vec<Option<ContentRef>> {
+    let mut resolved_request_revisions = BTreeMap::<(InodeId, RevisionNo), ContentRef>::new();
 
     request
         .ops
@@ -29,11 +30,11 @@ pub(crate) fn resolve_restore_content_manifest_digests(
             CommitOp::ReplaceFile {
                 inode_id,
                 base_revision,
-                content_manifest_digest,
+                content_ref,
             } => {
                 if let Some(next_revision) = base_revision.0.checked_add(1).map(RevisionNo) {
                     resolved_request_revisions
-                        .insert((*inode_id, next_revision), content_manifest_digest.clone());
+                        .insert((*inode_id, next_revision), content_ref.clone());
                 }
                 None
             }
@@ -49,14 +50,13 @@ pub(crate) fn resolve_restore_content_manifest_digests(
                         context
                             .metadata_state
                             .revision_at_seq(*inode_id, *source_revision, context.head.seq)
-                            .map(|revision| revision.content_manifest_digest)
+                            .map(|revision| revision.content_ref)
                     });
-                if let (Some(next_revision), Some(content_manifest_digest)) = (
+                if let (Some(next_revision), Some(content_ref)) = (
                     base_revision.0.checked_add(1).map(RevisionNo),
                     resolved.clone(),
                 ) {
-                    resolved_request_revisions
-                        .insert((*inode_id, next_revision), content_manifest_digest);
+                    resolved_request_revisions.insert((*inode_id, next_revision), content_ref);
                 }
                 resolved
             }
@@ -85,7 +85,7 @@ pub fn build_commit_plan(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let shape = compute_commit_shape(request, context)?;
-    let resolved_restore_content_manifest_digests = validate_metadata_preconditions(
+    let resolved_restore_content_refs = validate_metadata_preconditions(
         request,
         &context.metadata_state,
         shape.next_seq,
@@ -144,7 +144,7 @@ pub fn build_commit_plan(
         base_head_seq: request.planned_head_seq,
         next_seq: shape.next_seq,
         allocated_inode_ids: shape.allocated_inode_ids,
-        resolved_restore_content_manifest_digests,
+        resolved_restore_content_refs,
         resulting_next_inode_id: shape.resulting_next_inode_id,
         durable_content_required,
         wal_object_must_be_written: true,
@@ -206,15 +206,15 @@ fn validate_metadata_preconditions(
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
     checked_invariants: &mut Vec<String>,
-) -> Result<Vec<Option<String>>, CommitValidationError> {
+) -> Result<Vec<Option<ContentRef>>, CommitValidationError> {
     let mut ephemeral_metadata_state = metadata_state.clone();
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
-    let mut resolved_restore_content_manifest_digests = Vec::with_capacity(request.ops.len());
+    let mut resolved_restore_content_refs = Vec::with_capacity(request.ops.len());
 
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
-        let resolved_restore_content_manifest_digest = match op {
+        let resolved_restore_content_ref = match op {
             CommitOp::RestoreRevision {
                 inode_id,
                 source_revision,
@@ -244,7 +244,7 @@ fn validate_metadata_preconditions(
                     committed_seq,
                     checked_invariants,
                 )?;
-                Some(source_revision.content_manifest_digest)
+                Some(source_revision.content_ref)
             }
             _ => None,
         };
@@ -352,8 +352,7 @@ fn validate_metadata_preconditions(
                 )?;
             }
         }
-        resolved_restore_content_manifest_digests
-            .push(resolved_restore_content_manifest_digest.clone());
+        resolved_restore_content_refs.push(resolved_restore_content_ref.clone());
 
         let applied_metadata = ephemeral_metadata_state
             .apply_committed_wal_ops(
@@ -361,7 +360,7 @@ fn validate_metadata_preconditions(
                 &[materialize_simulated_wal_op(
                     op,
                     op_index,
-                    resolved_restore_content_manifest_digest.as_deref(),
+                    resolved_restore_content_ref.as_ref(),
                     &mut allocated_inode_ids,
                 )?],
             )
@@ -369,13 +368,13 @@ fn validate_metadata_preconditions(
         ephemeral_metadata_state = applied_metadata.metadata_state;
     }
 
-    Ok(resolved_restore_content_manifest_digests)
+    Ok(resolved_restore_content_refs)
 }
 
 fn materialize_simulated_wal_op(
     op: &CommitOp,
     op_index: u32,
-    resolved_restore_content_manifest_digest: Option<&str>,
+    resolved_restore_content_ref: Option<&ContentRef>,
     allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
 ) -> Result<WalOp, CommitValidationError> {
     Ok(match op {
@@ -393,7 +392,7 @@ fn materialize_simulated_wal_op(
         CommitOp::CreateFile {
             parent_inode,
             display_name,
-            content_manifest_digest,
+            content_ref,
         } => WalOp::CreateFile {
             op_index,
             inode_id: allocated_inode_ids
@@ -401,17 +400,17 @@ fn materialize_simulated_wal_op(
                 .ok_or(CommitValidationError::NextInodeOverflow)?,
             parent_inode: *parent_inode,
             display_name: display_name.clone(),
-            content_manifest_digest: content_manifest_digest.clone(),
+            content_ref: content_ref.clone(),
         },
         CommitOp::ReplaceFile {
             inode_id,
             base_revision,
-            content_manifest_digest,
+            content_ref,
         } => WalOp::ReplaceFile {
             op_index,
             inode_id: *inode_id,
             base_revision: *base_revision,
-            content_manifest_digest: content_manifest_digest.clone(),
+            content_ref: content_ref.clone(),
         },
         CommitOp::RestoreRevision {
             inode_id,
@@ -422,14 +421,14 @@ fn materialize_simulated_wal_op(
             inode_id: *inode_id,
             source_revision_no: *source_revision,
             base_revision: *base_revision,
-            content_manifest_digest: resolved_restore_content_manifest_digest
+            content_ref: resolved_restore_content_ref
                 .ok_or(
                     CommitValidationError::RestoreRevisionSourceRevisionMissing {
                         inode_id: *inode_id,
                         source_revision: *source_revision,
                     },
                 )?
-                .to_owned(),
+                .clone(),
         },
         CommitOp::DeleteFile { inode_id } => WalOp::DeleteFile {
             op_index,

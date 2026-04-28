@@ -275,10 +275,10 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index = u32::try_from(op_index)
             .map_err(|_| WalBuildError::Codec("op index overflow".to_owned()))?;
-        let resolved_restore_content_manifest_digest = plan
-            .resolved_restore_content_manifest_digests
+        let resolved_restore_content_ref = plan
+            .resolved_restore_content_refs
             .get(op_index as usize)
-            .and_then(|digest| digest.as_deref());
+            .and_then(|content_ref| content_ref.as_ref());
         let wal_op = match op {
             CommitOp::CreateDir {
                 parent_inode,
@@ -297,7 +297,7 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
             CommitOp::CreateFile {
                 parent_inode,
                 display_name,
-                content_manifest_digest,
+                content_ref,
             } => WalOp::CreateFile {
                 op_index,
                 inode_id: allocated_inode_ids.next().ok_or(
@@ -308,17 +308,17 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
                 )?,
                 parent_inode: *parent_inode,
                 display_name: display_name.clone(),
-                content_manifest_digest: content_manifest_digest.clone(),
+                content_ref: content_ref.clone(),
             },
             CommitOp::ReplaceFile {
                 inode_id,
                 base_revision,
-                content_manifest_digest,
+                content_ref,
             } => WalOp::ReplaceFile {
                 op_index,
                 inode_id: *inode_id,
                 base_revision: *base_revision,
-                content_manifest_digest: content_manifest_digest.clone(),
+                content_ref: content_ref.clone(),
             },
             CommitOp::RestoreRevision {
                 inode_id,
@@ -329,13 +329,13 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
                 inode_id: *inode_id,
                 source_revision_no: *source_revision,
                 base_revision: *base_revision,
-                content_manifest_digest: resolved_restore_content_manifest_digest
+                content_ref: resolved_restore_content_ref
                     .ok_or_else(|| {
                         WalBuildError::Codec(format!(
-                            "missing resolved restore manifest digest for op index {op_index}"
+                            "missing resolved restore content ref for op index {op_index}"
                         ))
                     })?
-                    .to_owned(),
+                    .clone(),
             },
             CommitOp::DeleteFile { inode_id } => WalOp::DeleteFile {
                 op_index,

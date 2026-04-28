@@ -1,11 +1,11 @@
 use crate::digest::sha256_hex;
-use crate::{ChangeSeq, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 1;
-pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 1;
+pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,7 +79,7 @@ pub enum CheckpointRow {
         committed_seq: ChangeSeq,
         #[serde(default)]
         revision_op_index: u32,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     Tombstone {
         root_inode_id: InodeId,

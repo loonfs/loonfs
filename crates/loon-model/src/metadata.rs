@@ -1,5 +1,6 @@
 use loon_api::{
-    name_key_for_display_name, ChangeSeq, InodeId, InodeKind, NamePolicy, RevisionNo, WalOp,
+    name_key_for_display_name, ChangeSeq, ContentRef, InodeId, InodeKind, NamePolicy, RevisionNo,
+    WalOp,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -42,7 +43,7 @@ pub struct RevisionRecord {
     pub committed_seq: ChangeSeq,
     #[serde(default)]
     pub revision_op_index: u32,
-    pub content_manifest_digest: String,
+    pub content_ref: ContentRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +135,7 @@ impl MetadataState {
                     inode_id,
                     parent_inode,
                     display_name,
-                    content_manifest_digest,
+                    content_ref,
                 } => {
                     metadata_state.inodes.push(InodeRecord {
                         inode_id: *inode_id,
@@ -154,7 +155,7 @@ impl MetadataState {
                         revision_no: RevisionNo(1),
                         committed_seq,
                         revision_op_index: *op_index,
-                        content_manifest_digest: content_manifest_digest.clone(),
+                        content_ref: content_ref.clone(),
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
@@ -165,7 +166,7 @@ impl MetadataState {
                     op_index,
                     inode_id,
                     base_revision,
-                    content_manifest_digest,
+                    content_ref,
                 } => {
                     let next_revision = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
                         MetadataApplyError::RevisionOverflow {
@@ -178,7 +179,7 @@ impl MetadataState {
                         revision_no: next_revision,
                         committed_seq,
                         revision_op_index: *op_index,
-                        content_manifest_digest: content_manifest_digest.clone(),
+                        content_ref: content_ref.clone(),
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
@@ -189,7 +190,7 @@ impl MetadataState {
                     op_index,
                     inode_id,
                     base_revision,
-                    content_manifest_digest,
+                    content_ref,
                     ..
                 } => {
                     let next_revision = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
@@ -203,7 +204,7 @@ impl MetadataState {
                         revision_no: next_revision,
                         committed_seq,
                         revision_op_index: *op_index,
-                        content_manifest_digest: content_manifest_digest.clone(),
+                        content_ref: content_ref.clone(),
                     });
                     push_unique_invariant(
                         &mut checked_invariants,

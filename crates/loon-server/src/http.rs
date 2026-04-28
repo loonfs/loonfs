@@ -9,7 +9,7 @@ use loon_api::{
     v0::{
         BeginUploadResponse, ChangesResponse, CommitRequest as V0CommitRequest,
         CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        UploadBlockResponse,
+        UploadContentResponse,
     },
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
@@ -18,8 +18,8 @@ use loon_api::{
 use loon_core::{
     advance_retention_floor, begin_upload, bootstrap_namespace, commit_operations, complete_upload,
     copy_file_path, create_checkpoint, delete_path_non_recursive, list_changes_after,
-    list_namespaces, list_path, move_path, put_file_manifest, read_file_bytes, resolve_path,
-    upload_block, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
+    list_namespaces, list_path, move_path, put_file_content_ref, read_file_bytes, resolve_path,
+    upload_content, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
     PutFileBehavior,
 };
 use loon_objectstore::ObjectStore;
@@ -80,8 +80,8 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
             post(begin_upload_handler),
         )
         .route(
-            "/v0/namespaces/:namespace/uploads/:upload_id/blocks/:block_index",
-            put(upload_block_handler),
+            "/v0/namespaces/:namespace/uploads/:upload_id/content",
+            put(upload_content_handler),
         )
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/complete",
@@ -226,13 +226,13 @@ async fn filesystem_operation(
         let result = match request.operation {
             FilesystemOperation::PutFile {
                 path,
-                content_manifest_digest,
+                content_ref,
                 behavior,
-            } => put_file_manifest(
+            } => put_file_content_ref(
                 store.as_ref(),
                 &namespace_id,
                 &path,
-                &content_manifest_digest,
+                content_ref,
                 map_filesystem_put_behavior(behavior),
                 &mutation_context(&config),
                 Some(&request.request_id),
@@ -285,23 +285,22 @@ async fn begin_upload_handler(
     Ok(Json(response))
 }
 
-async fn upload_block_handler(
+async fn upload_content_handler(
     State(state): State<AppState>,
-    AxumPath((namespace, upload_id, block_index)): AxumPath<(String, String, u32)>,
+    AxumPath((namespace, upload_id)): AxumPath<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<UploadBlockResponse>, ApiResponseError> {
+) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
     let namespace_id = NamespaceId::from(namespace);
     let bytes = body.to_vec();
     let response = run_blocking(move || {
-        upload_block(
+        upload_content(
             store.as_ref(),
             &namespace_id,
             &upload_id,
-            block_index,
             &bytes,
             &mutation_context(&config),
         )
@@ -523,8 +522,12 @@ impl ApiResponseError {
             CoreErrorKind::UploadAlreadyCompleted => {
                 (StatusCode::CONFLICT, "upload_already_completed")
             }
-            CoreErrorKind::UploadBlockConflict => (StatusCode::CONFLICT, "upload_block_conflict"),
-            CoreErrorKind::InvalidUploadBlock => (StatusCode::BAD_REQUEST, "invalid_upload_block"),
+            CoreErrorKind::UploadContentConflict => {
+                (StatusCode::CONFLICT, "upload_content_conflict")
+            }
+            CoreErrorKind::InvalidUploadContent => {
+                (StatusCode::BAD_REQUEST, "invalid_upload_content")
+            }
             CoreErrorKind::RebootstrapRequired => (StatusCode::CONFLICT, "rebootstrap_required"),
             CoreErrorKind::NamespaceCorrupt => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "namespace_corrupt")

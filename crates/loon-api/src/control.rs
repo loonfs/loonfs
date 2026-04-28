@@ -1,8 +1,8 @@
 use crate::digest::sha256_hex;
-use crate::{ChangeSeq, FenceToken, InodeId, NamePolicy, NamespaceId};
+use crate::{ChangeSeq, ContentRef, FenceToken, InodeId, NamePolicy, NamespaceId};
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
+pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,26 +62,16 @@ pub struct ProgressState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UploadedBlock {
-    pub block_index: u32,
-    pub content_digest_sha256: String,
-    pub plaintext_size_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedUpload {
-    pub file_size_bytes: u64,
-    pub file_digest_sha256: String,
-    pub content_manifest_digest: String,
+    pub content_ref: ContentRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadSessionState {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
-    pub block_size_bytes: u64,
-    #[serde(default)]
-    pub uploaded_blocks: Vec<UploadedBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_content_ref: Option<ContentRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed: Option<CompletedUpload>,
     pub created_at_ms: u64,

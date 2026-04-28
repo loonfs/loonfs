@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, NamespaceId};
+use crate::{ChangeSeq, ContentRef, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ pub enum FilesystemPutBehavior {
 pub enum FilesystemOperation {
     PutFile {
         path: String,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
         behavior: FilesystemPutBehavior,
     },
     DeletePath {

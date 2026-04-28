@@ -2,15 +2,14 @@
 
 use http::Uri;
 use loon_api::{
-    sha256_digest,
     v0::{
         BeginUploadResponse, ChangesResponse, CommitRequest as V0CommitRequest,
         CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        UploadBlockResponse,
+        UploadContentResponse,
     },
-    ApiError, AuthoritativePathEntry, ChangeSeq, CreateNamespaceRequest, FilesystemOperation,
-    FilesystemOperationRequest, FilesystemOperationResponse, FilesystemPutBehavior,
-    ListNamespacesResponse, MutationResult, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
+    ApiError, AuthoritativePathEntry, ChangeSeq, ContentRef, CreateNamespaceRequest,
+    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
+    FilesystemPutBehavior, ListNamespacesResponse, MutationResult, NamespaceSummary,
 };
 use serde::Deserialize;
 use std::fs;
@@ -180,15 +179,14 @@ impl Client {
         self.request_json::<(), BeginUploadResponse>(self.agent.post(&url), None)
     }
 
-    pub fn upload_block(
+    pub fn upload_content(
         &self,
         namespace: &str,
         upload_id: &str,
-        block_index: u32,
         bytes: &[u8],
-    ) -> Result<UploadBlockResponse, ClientError> {
+    ) -> Result<UploadContentResponse, ClientError> {
         let url = format!(
-            "{}/v0/namespaces/{namespace}/uploads/{upload_id}/blocks/{block_index}",
+            "{}/v0/namespaces/{namespace}/uploads/{upload_id}/content",
             self.base_url
         );
         let request = self
@@ -247,24 +245,21 @@ impl Client {
         self.request_json::<_, FilesystemOperationResponse>(self.agent.post(&url), Some(request))
     }
 
-    fn stage_bytes_as_manifest(
+    fn stage_bytes_as_content_ref(
         &self,
         namespace: &str,
         bytes: &[u8],
-    ) -> Result<String, ClientError> {
+    ) -> Result<ContentRef, ClientError> {
         let upload = self.begin_upload(namespace)?;
-        for (index, chunk) in bytes.chunks(CONTENT_BLOCK_SIZE_BYTES as usize).enumerate() {
-            self.upload_block(namespace, &upload.upload_id, index as u32, chunk)?;
-        }
+        let staged = self.upload_content(namespace, &upload.upload_id, bytes)?;
         let response = self.complete_upload(
             namespace,
             &upload.upload_id,
             &CompleteUploadRequest {
-                file_size_bytes: bytes.len() as u64,
-                file_digest_sha256: sha256_digest(bytes),
+                content_ref: staged.content_ref,
             },
         )?;
-        Ok(response.content_manifest_digest)
+        Ok(response.content_ref)
     }
 
     pub fn put_file_bytes(
@@ -283,14 +278,14 @@ impl Client {
         force: bool,
         request_id: &str,
     ) -> Result<MutationResult, ClientError> {
-        let content_manifest_digest = self.stage_bytes_as_manifest(&spec.namespace, bytes)?;
+        let content_ref = self.stage_bytes_as_content_ref(&spec.namespace, bytes)?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
             &FilesystemOperationRequest {
                 request_id: request_id.to_owned(),
                 operation: FilesystemOperation::PutFile {
                     path: spec.absolute_path.clone(),
-                    content_manifest_digest,
+                    content_ref,
                     behavior: if force {
                         FilesystemPutBehavior::ReplaceExisting
                     } else {

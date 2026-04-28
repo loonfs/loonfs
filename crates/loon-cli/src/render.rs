@@ -172,8 +172,9 @@ pub fn human_success(output: &CommandOutput) -> String {
             if let Some(revision) = entry.revision_no {
                 lines.push(format!("revision: {}", revision.0));
             }
-            if let Some(manifest) = &entry.content_manifest_digest {
-                lines.push(format!("content_manifest: {manifest}"));
+            if let Some(content_ref) = &entry.content_ref {
+                lines.push(format!("content_ref: {}", content_ref.digest));
+                lines.push(format!("content_kind: {:?}", content_ref.kind));
             }
             lines.join("\n")
         }

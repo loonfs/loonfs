@@ -1,4 +1,6 @@
-use loon_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WalOp};
+use loon_api::{
+    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo, WalOp,
+};
 use loon_core::metadata::{InodeRecord, MetadataState as CoreMetadataState};
 use loon_model::metadata::MetadataState as ModelMetadataState;
 
@@ -12,6 +14,14 @@ type NormalizedMetadata = (
     NormalizedRevisions,
     NormalizedTombstones,
 );
+
+fn content_ref(seed: &str) -> ContentRef {
+    ContentRef {
+        kind: ContentRefKind::WholeFileV0,
+        digest: sha256_digest(seed.as_bytes()),
+        size_bytes: seed.len() as u64,
+    }
+}
 
 #[test]
 fn metadata_apply_matches_model_for_basic_commit_sequence() {
@@ -29,13 +39,13 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
         inode_id: InodeId(3),
         parent_inode: InodeId(2),
         display_name: "readme.txt".to_owned(),
-        content_manifest_digest: "sha256:manifest-1".to_owned(),
+        content_ref: content_ref("content-1"),
     }];
     let replace_file = vec![WalOp::ReplaceFile {
         op_index: 0,
         inode_id: InodeId(3),
         base_revision: RevisionNo(1),
-        content_manifest_digest: "sha256:manifest-2".to_owned(),
+        content_ref: content_ref("content-2"),
     }];
 
     let core_state = core_state
@@ -77,7 +87,7 @@ fn metadata_apply_matches_model_for_rename() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![WalOp::Rename {
             op_index: 0,
@@ -102,20 +112,20 @@ fn metadata_apply_matches_model_for_restore_revision() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![WalOp::ReplaceFile {
             op_index: 0,
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
-            content_manifest_digest: "sha256:manifest-2".to_owned(),
+            content_ref: content_ref("content-2"),
         }],
         vec![WalOp::RestoreRevision {
             op_index: 0,
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(1),
             base_revision: RevisionNo(2),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
     ]);
 }
@@ -134,14 +144,14 @@ fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![WalOp::RestoreRevision {
             op_index: 0,
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(1),
             base_revision: RevisionNo(1),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
     ]);
 }
@@ -160,7 +170,7 @@ fn metadata_apply_matches_model_for_delete_file() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![WalOp::DeleteFile {
             op_index: 0,
@@ -262,7 +272,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     revision.revision_no.0,
                     revision.committed_seq.0,
                     revision.revision_op_index,
-                    revision.content_manifest_digest.clone(),
+                    revision.content_ref.digest.clone(),
                 )
             })
             .collect(),
@@ -315,7 +325,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     revision.revision_no.0,
                     revision.committed_seq.0,
                     revision.revision_op_index,
-                    revision.content_manifest_digest.clone(),
+                    revision.content_ref.digest.clone(),
                 )
             })
             .collect(),

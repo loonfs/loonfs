@@ -6,8 +6,7 @@ LoonFS is a filesystem built on top of object storage.
 
 The durable state consists of:
 
-- immutable content blocks
-- immutable content manifests
+- immutable content objects referenced by `content_ref`
 - immutable metadata commits recorded in a write-ahead log (WAL)
 - immutable checkpoints
 - small mutable control objects such as the namespace head and leases
@@ -28,7 +27,7 @@ The design goals are:
 
 | Goal | Meaning |
 | --- | --- |
-| **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content manifests, logical commits, WAL segments, and checkpoints. |
+| **Simple** | The durable model should fit in a small number of concepts: namespaces, inodes, revisions, content refs, logical commits, WAL segments, and checkpoints. |
 | **Portable** | The only required durable dependency is object storage with a small set of well-defined guarantees. |
 | **Safe** | Writes are never partially visible. Metadata never points to content that is not already durable. |
 | **Readable** | A reader should be able to understand the system from a small public spec without reading client architecture or rollout plans. |
@@ -42,7 +41,7 @@ The design goals are:
 | Unit of history | Each namespace has its own ordered metadata history. |
 | Identity | The canonical identity of an item is `(namespace_id, inode_id)`. |
 | Names | Paths are lookup views built from directory bindings. They are not the identity model. |
-| Content publication | File content becomes visible only after its blocks and content manifest are already durable. |
+| Content publication | File content becomes visible only after the object named by its `content_ref` is already durable. |
 | Commit visibility | A logical commit becomes visible only when the namespace head advances successfully to a `seq` at or beyond that commit. |
 | Delete | Delete is logical first and creates tombstones. Physical reclamation is background garbage collection. |
 | Recovery | Readers reconstruct state from a verified checkpoint plus the visible WAL segment chain after that checkpoint. |
@@ -63,7 +62,7 @@ The design goals are:
             /                     |                  \
            v                      v                   v
   object-storage content   metadata history      control objects,
-  blocks and manifests     WAL segments, head,    shares, leases
+  content ref objects      WAL segments, head,    shares, leases
                            checkpoints           
 ```
 

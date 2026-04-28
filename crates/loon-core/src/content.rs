@@ -1,15 +1,13 @@
-use loon_api::{decode_content_manifest_json, sha256_digest, ContentManifestEnvelope, NamespaceId};
-use loon_objectstore::keys::{blob, content_manifest};
+use loon_api::{sha256_digest, ContentRef, ContentRefKind, NamespaceId};
+use loon_objectstore::keys::content_blob;
 use loon_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatedDurableContent {
-    pub content_manifest_digest: String,
-    pub manifest_object_key: String,
-    pub manifest_envelope: ContentManifestEnvelope,
+    pub content_ref: ContentRef,
+    pub object_key: String,
     pub file_size_bytes: u64,
     pub file_digest_sha256: String,
     pub checked_invariants: Vec<String>,
@@ -23,56 +21,22 @@ pub struct ReadDurableContent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum DurableContentValidationError {
-    #[error("missing content manifest object `{object_key}`")]
-    MissingManifestObject { object_key: String },
-    #[error("content manifest codec error for `{object_key}`: {message}")]
-    ManifestCodec { object_key: String, message: String },
-    #[error(
-        "content manifest digest mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    ManifestDigestMismatch {
-        object_key: String,
-        expected: String,
-        actual: String,
-    },
-    #[error(
-        "content manifest namespace mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    ManifestNamespaceMismatch {
-        object_key: String,
-        expected: NamespaceId,
-        actual: NamespaceId,
-    },
-    #[error("missing content block object `{object_key}`")]
-    MissingBlockObject { object_key: String },
-    #[error(
-        "content block length mismatch for `{object_key}`: expected {expected}, actual {actual}"
-    )]
-    BlockLengthMismatch {
+    #[error("unsupported content ref kind `{kind:?}`")]
+    UnsupportedContentRefKind { kind: ContentRefKind },
+    #[error("invalid content digest `{digest}`: {message}")]
+    InvalidDigest { digest: String, message: String },
+    #[error("missing content object `{object_key}`")]
+    MissingContentObject { object_key: String },
+    #[error("content length mismatch for `{object_key}`: expected {expected}, actual {actual}")]
+    ContentLengthMismatch {
         object_key: String,
         expected: u64,
         actual: u64,
     },
     #[error(
-        "content block digest mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
+        "content digest mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
-    BlockDigestMismatch {
-        object_key: String,
-        expected: String,
-        actual: String,
-    },
-    #[error(
-        "content manifest file size mismatch for `{object_key}`: expected {expected}, actual {actual}"
-    )]
-    FileSizeMismatch {
-        object_key: String,
-        expected: u64,
-        actual: u64,
-    },
-    #[error(
-        "content manifest file digest mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    FileDigestMismatch {
+    ContentDigestMismatch {
         object_key: String,
         expected: String,
         actual: String,
@@ -84,112 +48,60 @@ pub enum DurableContentValidationError {
 pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    content_manifest_digest: &str,
+    content_ref: &ContentRef,
 ) -> Result<ValidatedDurableContent, DurableContentValidationError> {
-    let manifest_object_key = content_manifest(namespace_id.as_str(), content_manifest_digest);
-    let manifest_bytes = load_required_object(store, &manifest_object_key, true)?;
-    let manifest_envelope = decode_content_manifest_json(&manifest_bytes).map_err(|err| {
-        DurableContentValidationError::ManifestCodec {
-            object_key: manifest_object_key.clone(),
+    if content_ref.kind != ContentRefKind::WholeFileV0 {
+        return Err(DurableContentValidationError::UnsupportedContentRefKind {
+            kind: content_ref.kind,
+        });
+    }
+
+    let object_key = content_blob(namespace_id.as_str(), &content_ref.digest).map_err(|err| {
+        DurableContentValidationError::InvalidDigest {
+            digest: content_ref.digest.clone(),
             message: err.to_string(),
         }
     })?;
-
-    let mut checked_invariants = vec!["content_manifest_checksum_matches_payload".to_owned()];
-    let actual_manifest_digest = sha256_digest(&manifest_bytes);
-    if actual_manifest_digest != content_manifest_digest {
-        return Err(DurableContentValidationError::ManifestDigestMismatch {
-            object_key: manifest_object_key,
-            expected: content_manifest_digest.to_owned(),
-            actual: actual_manifest_digest,
-        });
-    }
-    checked_invariants.push("content_manifest_digest_matches_object".to_owned());
-
-    if manifest_envelope.payload.namespace_id != *namespace_id {
-        return Err(DurableContentValidationError::ManifestNamespaceMismatch {
-            object_key: manifest_object_key,
-            expected: namespace_id.clone(),
-            actual: manifest_envelope.payload.namespace_id.clone(),
-        });
-    }
-    checked_invariants.push("content_manifest_namespace_matches_request".to_owned());
-
-    let mut file_hasher = Sha256::new();
-    let mut actual_file_size = 0u64;
-    for block_descriptor in &manifest_envelope.payload.blocks {
-        let block_object_key = blob(
-            namespace_id.as_str(),
-            &block_descriptor.content_digest_sha256,
-        );
-        let block_bytes = load_required_object(store, &block_object_key, false)?;
-        let actual_block_size = block_bytes.len() as u64;
-        if actual_block_size != block_descriptor.plaintext_size_bytes {
-            return Err(DurableContentValidationError::BlockLengthMismatch {
-                object_key: block_object_key,
-                expected: block_descriptor.plaintext_size_bytes,
-                actual: actual_block_size,
-            });
-        }
-
-        let actual_block_digest = sha256_digest(&block_bytes);
-        if actual_block_digest != block_descriptor.content_digest_sha256 {
-            return Err(DurableContentValidationError::BlockDigestMismatch {
-                object_key: block_object_key,
-                expected: block_descriptor.content_digest_sha256.clone(),
-                actual: actual_block_digest,
-            });
-        }
-
-        actual_file_size = actual_file_size.saturating_add(actual_block_size);
-        file_hasher.update(&block_bytes);
-    }
-    checked_invariants.push("content_manifest_blocks_match_descriptors".to_owned());
-
-    if actual_file_size != manifest_envelope.payload.file_size_bytes {
-        return Err(DurableContentValidationError::FileSizeMismatch {
-            object_key: manifest_object_key,
-            expected: manifest_envelope.payload.file_size_bytes,
-            actual: actual_file_size,
+    let bytes = load_required_object(store, &object_key)?;
+    let actual_size = bytes.len() as u64;
+    if actual_size != content_ref.size_bytes {
+        return Err(DurableContentValidationError::ContentLengthMismatch {
+            object_key,
+            expected: content_ref.size_bytes,
+            actual: actual_size,
         });
     }
 
-    let actual_file_digest = format!("sha256:{:x}", file_hasher.finalize());
-    if actual_file_digest != manifest_envelope.payload.file_digest_sha256 {
-        return Err(DurableContentValidationError::FileDigestMismatch {
-            object_key: manifest_object_key,
-            expected: manifest_envelope.payload.file_digest_sha256.clone(),
-            actual: actual_file_digest,
+    let actual_digest = sha256_digest(&bytes);
+    if actual_digest != content_ref.digest {
+        return Err(DurableContentValidationError::ContentDigestMismatch {
+            object_key,
+            expected: content_ref.digest.clone(),
+            actual: actual_digest,
         });
     }
-    checked_invariants.push("content_manifest_file_digest_matches_blocks".to_owned());
 
     Ok(ValidatedDurableContent {
-        content_manifest_digest: content_manifest_digest.to_owned(),
-        manifest_object_key,
-        manifest_envelope,
-        file_size_bytes: actual_file_size,
-        file_digest_sha256: actual_file_digest,
-        checked_invariants,
+        content_ref: content_ref.clone(),
+        object_key,
+        file_size_bytes: actual_size,
+        file_digest_sha256: actual_digest,
+        checked_invariants: vec![
+            "whole_file_content_ref_kind_is_supported".to_owned(),
+            "whole_file_content_object_key_matches_digest".to_owned(),
+            "whole_file_content_size_matches_ref".to_owned(),
+            "whole_file_content_digest_matches_ref".to_owned(),
+        ],
     })
 }
 
 pub fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    content_manifest_digest: &str,
+    content_ref: &ContentRef,
 ) -> Result<ReadDurableContent, DurableContentValidationError> {
-    let validated =
-        validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
-    let mut bytes = Vec::with_capacity(usize::try_from(validated.file_size_bytes).unwrap_or(0));
-    for block_descriptor in &validated.manifest_envelope.payload.blocks {
-        let block_object_key = blob(
-            namespace_id.as_str(),
-            &block_descriptor.content_digest_sha256,
-        );
-        let block_bytes = load_required_object(store, &block_object_key, false)?;
-        bytes.extend_from_slice(&block_bytes);
-    }
+    let validated = validate_durable_content_reference(store, namespace_id, content_ref)?;
+    let bytes = load_required_object(store, &validated.object_key)?;
 
     Ok(ReadDurableContent { validated, bytes })
 }
@@ -197,19 +109,131 @@ pub fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
 fn load_required_object<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
-    manifest: bool,
 ) -> Result<Vec<u8>, DurableContentValidationError> {
     match store.get(object_key, None) {
         Ok(Some(bytes)) => Ok(bytes),
-        Ok(None) if manifest => Err(DurableContentValidationError::MissingManifestObject {
-            object_key: object_key.to_owned(),
-        }),
-        Ok(None) => Err(DurableContentValidationError::MissingBlockObject {
+        Ok(None) => Err(DurableContentValidationError::MissingContentObject {
             object_key: object_key.to_owned(),
         }),
         Err(err) => Err(DurableContentValidationError::Store {
             object_key: object_key.to_owned(),
             message: err.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        read_durable_content_bytes, validate_durable_content_reference,
+        DurableContentValidationError,
+    };
+    use loon_api::{ContentRef, ContentRefKind, NamespaceId};
+    use loon_objectstore::fs::LocalFsStore;
+    use loon_objectstore::keys::content_blob;
+    use loon_objectstore::ObjectStore;
+    use tempfile::tempdir;
+
+    #[test]
+    fn validate_whole_file_content_ref_success() {
+        let (_temp_dir, store, namespace_id) = test_store();
+        let bytes = b"whole file bytes";
+        let content_ref = ContentRef::whole_file_v0(bytes);
+        put_content_object(&store, &namespace_id, &content_ref, bytes);
+
+        let validated = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+            .expect("validate content ref");
+        assert_eq!(validated.content_ref, content_ref);
+        assert_eq!(validated.file_size_bytes, bytes.len() as u64);
+        assert_eq!(validated.file_digest_sha256, content_ref.digest);
+    }
+
+    #[test]
+    fn validate_whole_file_content_ref_accepts_empty_files() {
+        let (_temp_dir, store, namespace_id) = test_store();
+        let bytes = b"";
+        let content_ref = ContentRef::whole_file_v0(bytes);
+        put_content_object(&store, &namespace_id, &content_ref, bytes);
+
+        let read = read_durable_content_bytes(&store, &namespace_id, &content_ref)
+            .expect("read empty content ref");
+        assert_eq!(read.bytes, bytes);
+        assert_eq!(read.validated.file_size_bytes, 0);
+    }
+
+    #[test]
+    fn validate_whole_file_content_ref_rejects_missing_object() {
+        let (_temp_dir, store, namespace_id) = test_store();
+        let content_ref = ContentRef::whole_file_v0(b"missing");
+
+        let err = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+            .expect_err("missing object");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::MissingContentObject { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_whole_file_content_ref_rejects_size_mismatch() {
+        let (_temp_dir, store, namespace_id) = test_store();
+        let mut content_ref = ContentRef::whole_file_v0(b"abc");
+        put_content_object(&store, &namespace_id, &content_ref, b"abc");
+        content_ref.size_bytes += 1;
+
+        let err = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+            .expect_err("size mismatch");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::ContentLengthMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_whole_file_content_ref_rejects_digest_mismatch() {
+        let (_temp_dir, store, namespace_id) = test_store();
+        let content_ref = ContentRef::whole_file_v0(b"expected");
+        put_content_object(&store, &namespace_id, &content_ref, b"mismatch");
+
+        let err = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+            .expect_err("digest mismatch");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::ContentDigestMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_whole_file_content_ref_rejects_unsupported_kind() {
+        let (_temp_dir, store, namespace_id) = test_store();
+        let content_ref = ContentRef {
+            kind: ContentRefKind::Unsupported,
+            digest: ContentRef::whole_file_v0(b"bytes").digest,
+            size_bytes: 5,
+        };
+
+        let err = validate_durable_content_reference(&store, &namespace_id, &content_ref)
+            .expect_err("unsupported content ref kind");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::UnsupportedContentRefKind { .. }
+        ));
+    }
+
+    fn test_store() -> (tempfile::TempDir, LocalFsStore, NamespaceId) {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::from("content-tests");
+        (temp_dir, store, namespace_id)
+    }
+
+    fn put_content_object(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        content_ref: &ContentRef,
+        bytes: &[u8],
+    ) {
+        let key = content_blob(namespace_id.as_str(), &content_ref.digest).expect("content key");
+        store.put_if_absent(&key, bytes).expect("put content");
     }
 }
