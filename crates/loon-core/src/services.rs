@@ -1,7 +1,7 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::checkpoint::{
     create_checkpoint, load_verified_checkpoint_materialization,
-    write_verified_checkpoint_from_metadata,
+    write_verified_checkpoint_from_metadata, CheckpointMetadataWriteRequest,
 };
 use crate::commit::{CommitHeadPublishError, CommitOp, CommitValidationError};
 use crate::content::{
@@ -443,13 +443,15 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
 
     write_verified_checkpoint_from_metadata(
         store,
-        new_namespace_id,
-        fork_seq,
-        FenceToken(0),
-        source_checkpoint.manifest.payload.next_inode_id,
-        fork_seq,
-        &source_checkpoint.metadata_state,
-        &context.writer_version,
+        CheckpointMetadataWriteRequest {
+            namespace_id: new_namespace_id,
+            checkpoint_seq: fork_seq,
+            active_fence_token: FenceToken(0),
+            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
+            retention_floor_seq: fork_seq,
+            metadata_state: &source_checkpoint.metadata_state,
+            writer_version: &context.writer_version,
+        },
     )?;
 
     let initial_head = HeadState {

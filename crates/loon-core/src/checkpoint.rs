@@ -235,45 +235,49 @@ pub fn create_checkpoint<S: ObjectStore + ?Sized>(
     })
 }
 
+pub(crate) struct CheckpointMetadataWriteRequest<'a> {
+    pub(crate) namespace_id: &'a NamespaceId,
+    pub(crate) checkpoint_seq: ChangeSeq,
+    pub(crate) active_fence_token: FenceToken,
+    pub(crate) next_inode_id: InodeId,
+    pub(crate) retention_floor_seq: ChangeSeq,
+    pub(crate) metadata_state: &'a MetadataState,
+    pub(crate) writer_version: &'a str,
+}
+
 pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
-    active_fence_token: FenceToken,
-    next_inode_id: InodeId,
-    retention_floor_seq: ChangeSeq,
-    metadata_state: &MetadataState,
-    writer_version: &str,
+    request: CheckpointMetadataWriteRequest<'_>,
 ) -> Result<CheckpointManifestEnvelope, CoreError> {
     let tables = build_checkpoint_tables(
         store,
-        namespace_id,
-        checkpoint_seq,
-        metadata_state,
-        writer_version,
+        request.namespace_id,
+        request.checkpoint_seq,
+        request.metadata_state,
+        request.writer_version,
     )?;
     let materialized = load_checkpoint_materialization_from_tables(
         store,
-        namespace_id,
-        checkpoint_seq,
-        &snapshot_manifest(namespace_id.as_str(), checkpoint_seq.0),
+        request.namespace_id,
+        request.checkpoint_seq,
+        &snapshot_manifest(request.namespace_id.as_str(), request.checkpoint_seq.0),
         &tables,
     )
     .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
-    if !metadata_states_equivalent(metadata_state, &materialized) {
+    if !metadata_states_equivalent(request.metadata_state, &materialized) {
         return Err(CoreError::Basis(BasisLoadError::CheckpointLoad(
             CheckpointLoadError::MetadataMismatch,
         )));
     }
 
     let manifest = CheckpointManifestEnvelope::from_payload(
-        writer_version,
+        request.writer_version,
         CheckpointManifestPayload {
-            namespace_id: namespace_id.clone(),
-            checkpoint_seq,
-            active_fence_token,
-            next_inode_id,
-            retention_floor_seq,
+            namespace_id: request.namespace_id.clone(),
+            checkpoint_seq: request.checkpoint_seq,
+            active_fence_token: request.active_fence_token,
+            next_inode_id: request.next_inode_id,
+            retention_floor_seq: request.retention_floor_seq,
             verified: true,
             tables,
         },
