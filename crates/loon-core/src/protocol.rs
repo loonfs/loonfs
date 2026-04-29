@@ -22,6 +22,7 @@ use loon_api::{
 };
 use loon_objectstore::keys::{content_blob, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
@@ -31,6 +32,12 @@ struct LoadedUploadSessionObject {
     object_key: String,
     metadata: ObjectMetadata,
     envelope: UploadSessionEnvelope,
+}
+
+#[derive(Debug, Clone)]
+struct InBatchRequest {
+    primary_index: usize,
+    semantic_fingerprint_sha256: String,
 }
 
 pub fn begin_upload<S: ObjectStore + ?Sized>(
@@ -312,6 +319,8 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
     let mut current_head = basis.head.clone();
     let mut current_metadata_state = basis.metadata_state.clone();
     let mut accepted: Vec<(usize, PreparedWalRecord)> = Vec::new();
+    let mut in_batch_requests: HashMap<String, InBatchRequest> = HashMap::new();
+    let mut aliases: Vec<(usize, usize)> = Vec::new();
 
     for (index, (request, source_request_checksum_sha256)) in requests.into_iter().enumerate() {
         let request = map_commit_request(
@@ -338,6 +347,23 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
             );
             continue;
         }
+        if let Some(existing) = in_batch_requests.get(&request.request_id) {
+            if existing.semantic_fingerprint_sha256 != semantic_fingerprint {
+                outcomes[index] = Some(Err(CoreError::RequestIdConflict(
+                    request.request_id.clone(),
+                )));
+            } else {
+                aliases.push((index, existing.primary_index));
+            }
+            continue;
+        }
+        in_batch_requests.insert(
+            request.request_id.clone(),
+            InBatchRequest {
+                primary_index: index,
+                semantic_fingerprint_sha256: semantic_fingerprint,
+            },
+        );
 
         let validation = CommitValidationContext {
             head: current_head.clone(),
@@ -396,7 +422,7 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
     }
 
     if accepted.is_empty() {
-        return finish_batch_outcomes(outcomes);
+        return finish_batch_outcomes_with_aliases(outcomes, &aliases);
     }
     let records = accepted
         .iter()
@@ -414,7 +440,7 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::Store(message.clone())));
             }
-            return finish_batch_outcomes(outcomes);
+            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
         }
     };
     match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
@@ -428,13 +454,13 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
                             "conflicting WAL segment object already exists".to_owned(),
                         )));
                     }
-                    return finish_batch_outcomes(outcomes);
+                    return finish_batch_outcomes_with_aliases(outcomes, &aliases);
                 }
                 Err(err) => {
                     for (index, _) in accepted {
                         outcomes[index] = Some(Err(CoreError::WalWrite(err.to_string())));
                     }
-                    return finish_batch_outcomes(outcomes);
+                    return finish_batch_outcomes_with_aliases(outcomes, &aliases);
                 }
             }
         }
@@ -442,7 +468,7 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::WalWrite(err.to_string())));
             }
-            return finish_batch_outcomes(outcomes);
+            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
         }
     }
 
@@ -460,14 +486,14 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::Store(message.clone())));
             }
-            return finish_batch_outcomes(outcomes);
+            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
         }
     };
     if let Err(error) = publish_commit_head(store, &basis.head_etag, &head_publish) {
         for (index, _) in accepted {
             outcomes[index] = Some(Err(error.clone().into()));
         }
-        return finish_batch_outcomes(outcomes);
+        return finish_batch_outcomes_with_aliases(outcomes, &aliases);
     }
 
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
@@ -478,7 +504,7 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
             results: record.results,
         }));
     }
-    finish_batch_outcomes(outcomes)
+    finish_batch_outcomes_with_aliases(outcomes, &aliases)
 }
 
 pub fn list_changes_after<S: ObjectStore + ?Sized>(
@@ -872,4 +898,18 @@ fn finish_batch_outcomes(
             outcome.unwrap_or_else(|| Err(CoreError::Store("missing batch outcome".to_owned())))
         })
         .collect()
+}
+
+fn finish_batch_outcomes_with_aliases(
+    mut outcomes: Vec<Option<Result<V0CommitResponse, CoreError>>>,
+    aliases: &[(usize, usize)],
+) -> Vec<Result<V0CommitResponse, CoreError>> {
+    for (alias_index, primary_index) in aliases {
+        let primary_outcome = outcomes
+            .get(*primary_index)
+            .and_then(Clone::clone)
+            .unwrap_or_else(|| Err(CoreError::Store("missing primary batch outcome".to_owned())));
+        outcomes[*alias_index] = Some(primary_outcome);
+    }
+    finish_batch_outcomes(outcomes)
 }
