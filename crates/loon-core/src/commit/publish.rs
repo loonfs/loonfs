@@ -1,5 +1,5 @@
 use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan, PreparedCommitHeadPublish};
-use loon_api::{ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope};
+use loon_api::{ControlObjectKind, HeadState, HeadStateEnvelope, WalSegmentPointer};
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::ObjectStoreError;
 use loon_objectstore::{ObjectMetadata, ObjectStore};
@@ -7,6 +7,7 @@ use loon_objectstore::{ObjectMetadata, ObjectStore};
 pub fn prepare_commit_head_publish(
     current_head: &HeadState,
     plan: &CommitPlan,
+    visible_wal_tip: WalSegmentPointer,
     writer_version: &str,
 ) -> Result<PreparedCommitHeadPublish, CommitHeadPublishError> {
     if writer_version.trim().is_empty() {
@@ -20,14 +21,14 @@ pub fn prepare_commit_head_publish(
         });
     }
 
-    if current_head.seq != plan.base_head_seq {
+    if plan.base_head_seq < current_head.seq {
         return Err(CommitHeadPublishError::PlanBaseHeadSeqMismatch {
             head: current_head.seq,
             plan: plan.base_head_seq,
         });
     }
 
-    if current_head.seq.0.checked_add(1).map(ChangeSeq) != Some(plan.next_seq) {
+    if plan.next_seq <= current_head.seq {
         return Err(CommitHeadPublishError::PlanNextSeqMismatch {
             head: current_head.seq,
             plan: plan.next_seq,
@@ -42,6 +43,7 @@ pub fn prepare_commit_head_publish(
         name_policy: current_head.name_policy,
         snapshot_hint_seq: current_head.snapshot_hint_seq,
         retention_floor_seq: current_head.retention_floor_seq,
+        visible_wal_tip: Some(visible_wal_tip),
     };
     let envelope = HeadStateEnvelope::from_state(
         ControlObjectKind::NamespaceHead,

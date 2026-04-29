@@ -6,7 +6,10 @@ use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError
 use crate::metadata::MetadataState;
 use crate::namespace::catalog::{load_namespace_catalog_entry, NamespaceCatalogLoadError};
 use crate::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
-use loon_api::{ContentStoreId, HeadState, NamespaceDescriptorState, NamespaceId};
+use loon_api::{
+    decode_wal_segment_envelope_zstd, ChangeSeq, ContentStoreId, HeadState,
+    NamespaceDescriptorState, NamespaceId, WalSegmentPointer,
+};
 use loon_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -116,6 +119,7 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
         expected_namespace,
         initial_head.seq,
         loaded_head.envelope.state.seq,
+        loaded_head.envelope.state.visible_wal_tip.clone(),
     )?;
     let replayed = replay_wal_tail_with_metadata(&initial_head, &initial_metadata_state, &wal_tail)
         .map_err(BasisLoadError::WalReplay)?;
@@ -143,6 +147,8 @@ fn ensure_reconstructed_head_matches(
         || current_head.name_policy != reconstructed.name_policy
         || current_head.snapshot_hint_seq != reconstructed.snapshot_hint_seq
         || current_head.retention_floor_seq != reconstructed.retention_floor_seq
+        || (reconstructed.visible_wal_tip.is_some()
+            && current_head.visible_wal_tip != reconstructed.visible_wal_tip)
     {
         return Err(BasisLoadError::ReconstructedHeadMismatch {
             expected: Box::new(current_head.clone()),
@@ -155,67 +161,64 @@ fn ensure_reconstructed_head_matches(
 fn load_stored_wal_tail<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
-    from_seq_exclusive: loon_api::ChangeSeq,
-    through_seq_inclusive: loon_api::ChangeSeq,
+    from_seq_exclusive: ChangeSeq,
+    through_seq_inclusive: ChangeSeq,
+    visible_wal_tip: Option<WalSegmentPointer>,
 ) -> Result<Vec<StoredWalObject>, BasisLoadError> {
-    let prefix = format!("namespaces/{}/wal/", expected_namespace.as_str());
-    let listed = store
-        .list_prefix(&prefix)
-        .map_err(|err| BasisLoadError::ListWal {
-            prefix: prefix.clone(),
-            message: err.to_string(),
-        })?;
-
-    let mut wal_by_seq = std::collections::BTreeMap::new();
-    for object_key in listed {
-        let Some(seq) = wal_seq_from_key(&prefix, &object_key) else {
-            return Err(BasisLoadError::InvalidWalObjectKey { object_key });
-        };
-        if seq <= from_seq_exclusive || seq > through_seq_inclusive {
-            continue;
-        }
-        if let Some(existing) = wal_by_seq.insert(seq, object_key.clone()) {
-            return Err(BasisLoadError::DuplicateWalSeq {
-                seq,
-                first: existing,
-                second: object_key,
-            });
-        }
+    if through_seq_inclusive <= from_seq_exclusive {
+        return Ok(Vec::new());
     }
 
-    let mut wal_tail = Vec::new();
-    let mut expected = from_seq_exclusive.0.saturating_add(1);
-    while expected <= through_seq_inclusive.0 {
-        let seq = loon_api::ChangeSeq(expected);
-        let object_key =
-            wal_by_seq
-                .remove(&seq)
-                .ok_or_else(|| BasisLoadError::MissingWalObject {
-                    prefix: prefix.clone(),
-                    seq,
-                })?;
+    let prefix = format!("namespaces/{}/wal/", expected_namespace.as_str());
+    let mut pointer = visible_wal_tip.ok_or_else(|| BasisLoadError::MissingWalObject {
+        prefix: prefix.clone(),
+        seq: through_seq_inclusive,
+    })?;
+    let mut reversed = Vec::new();
+
+    loop {
+        if pointer.end_seq <= from_seq_exclusive {
+            break;
+        }
         let encoded_bytes = store
-            .get(&object_key, None)
+            .get(&pointer.object_key, None)
             .map_err(|err| BasisLoadError::ReadWal {
-                object_key: object_key.clone(),
+                object_key: pointer.object_key.clone(),
                 message: err.to_string(),
             })?
             .ok_or_else(|| BasisLoadError::MissingWalObjectAfterList {
-                object_key: object_key.clone(),
+                object_key: pointer.object_key.clone(),
             })?;
-        wal_tail.push(StoredWalObject {
-            object_key,
+        let envelope = decode_wal_segment_envelope_zstd(&encoded_bytes)
+            .map_err(|err| BasisLoadError::WalReplay(WalReplayError::Codec(err.to_string())))?;
+        if envelope.payload.namespace_id != *expected_namespace {
+            return Err(BasisLoadError::WalReplay(
+                WalReplayError::NamespaceMismatch {
+                    expected: expected_namespace.clone(),
+                    actual: envelope.payload.namespace_id.clone(),
+                },
+            ));
+        }
+        if envelope.payload.segment_id != pointer.segment_id
+            || envelope.payload.start_seq != pointer.start_seq
+            || envelope.payload.end_seq != pointer.end_seq
+            || envelope.payload_checksum_sha256 != pointer.payload_checksum_sha256
+        {
+            return Err(BasisLoadError::WalReplay(
+                WalReplayError::SegmentSummaryMismatch,
+            ));
+        }
+        let prev = envelope.payload.prev_visible_segment.clone();
+        reversed.push(StoredWalObject {
+            object_key: pointer.object_key.clone(),
             encoded_bytes,
         });
-        expected = expected.saturating_add(1);
+        let Some(prev) = prev else {
+            break;
+        };
+        pointer = prev;
     }
 
-    Ok(wal_tail)
-}
-
-fn wal_seq_from_key(prefix: &str, object_key: &str) -> Option<loon_api::ChangeSeq> {
-    let suffix = object_key.strip_prefix(prefix)?;
-    let (seq_part, _) = suffix.split_once('-')?;
-    let seq = seq_part.parse::<u64>().ok()?;
-    Some(loon_api::ChangeSeq(seq))
+    reversed.reverse();
+    Ok(reversed)
 }

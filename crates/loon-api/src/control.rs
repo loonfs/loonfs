@@ -2,7 +2,7 @@ use crate::digest::sha256_hex;
 use crate::{ChangeSeq, ContentRef, ContentStoreId, FenceToken, InodeId, NamePolicy, NamespaceId};
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
+pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +28,15 @@ pub struct ContentStoreDescriptorState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalSegmentPointer {
+    pub object_key: String,
+    pub segment_id: String,
+    pub start_seq: ChangeSeq,
+    pub end_seq: ChangeSeq,
+    pub payload_checksum_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeadState {
     pub namespace_id: NamespaceId,
     pub seq: ChangeSeq,
@@ -37,6 +46,8 @@ pub struct HeadState {
     pub name_policy: NamePolicy,
     pub snapshot_hint_seq: Option<ChangeSeq>,
     pub retention_floor_seq: ChangeSeq,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_wal_tip: Option<WalSegmentPointer>,
 }
 
 impl HeadState {
@@ -49,6 +60,7 @@ impl HeadState {
             name_policy: NamePolicy::default(),
             snapshot_hint_seq: None,
             retention_floor_seq: ChangeSeq(0),
+            visible_wal_tip: None,
         }
     }
 }

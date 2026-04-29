@@ -1,26 +1,37 @@
 use crate::commit::{CommitOp, CommitPlan, CommitRequest, Precondition};
 use crate::metadata::{MetadataApplyError, MetadataState};
 use loon_api::{
-    decode_wal_commit_envelope_zstd, encode_wal_commit_envelope_zstd, v0::CommitOpResult,
-    ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitEnvelope, WalCommitPayload, WalOp,
-    WalPrecondition,
+    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, v0::CommitOpResult,
+    ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitPayload, WalOp, WalPrecondition,
+    WalSegmentEnvelope, WalSegmentPayload, WalSegmentPointer,
 };
-use loon_objectstore::keys::wal_commit;
+use loon_objectstore::keys::wal_segment;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedWalCommit {
+pub struct PreparedWalRecord {
+    pub request: CommitRequest,
+    pub plan: CommitPlan,
+    pub results: Vec<CommitOpResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedWalSegment {
     pub object_key: String,
-    pub commit_id: String,
-    pub envelope: WalCommitEnvelope,
+    pub segment_id: String,
+    pub envelope: WalSegmentEnvelope,
     pub encoded_bytes: Vec<u8>,
     pub checked_invariants: Vec<String>,
 }
+
+pub type PreparedWalCommit = PreparedWalSegment;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalBuildError {
     EmptyWriterVersion,
     WalWriteNotRequired,
+    EmptySegment,
     NamespaceMismatch {
         request: NamespaceId,
         plan: NamespaceId,
@@ -33,6 +44,10 @@ pub enum WalBuildError {
         request_create_ops: usize,
         plan_allocated_count: usize,
     },
+    NonContiguousSeq {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
     Codec(String),
 }
 
@@ -43,21 +58,25 @@ pub struct StoredWalObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplayedWalCommit {
+pub struct ReplayedWalSegment {
     pub object_key: String,
-    pub envelope: WalCommitEnvelope,
+    pub envelope: WalSegmentEnvelope,
     pub resulting_head: HeadState,
     pub checked_invariants: Vec<String>,
 }
 
+pub type ReplayedWalCommit = ReplayedWalSegment;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplayedWalCommitWithMetadata {
+pub struct ReplayedWalSegmentWithMetadata {
     pub object_key: String,
-    pub envelope: WalCommitEnvelope,
+    pub envelope: WalSegmentEnvelope,
     pub resulting_head: HeadState,
     pub resulting_metadata_state: MetadataState,
     pub checked_invariants: Vec<String>,
 }
+
+pub type ReplayedWalCommitWithMetadata = ReplayedWalSegmentWithMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayedWalTail {
@@ -85,6 +104,8 @@ pub enum WalReplayError {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
+    EmptySegment,
+    SegmentSummaryMismatch,
     MetadataApply(MetadataApplyError),
     SeqOverflow,
 }
@@ -95,63 +116,135 @@ pub fn prepare_wal_commit(
     results: Vec<CommitOpResult>,
     writer_version: &str,
 ) -> Result<PreparedWalCommit, WalBuildError> {
+    prepare_wal_segment(
+        plan.namespace_id.clone(),
+        None,
+        &[PreparedWalRecord {
+            request: request.clone(),
+            plan: plan.clone(),
+            results,
+        }],
+        writer_version,
+    )
+}
+
+pub fn prepare_wal_segment(
+    namespace_id: NamespaceId,
+    prev_visible_segment: Option<WalSegmentPointer>,
+    records: &[PreparedWalRecord],
+    writer_version: &str,
+) -> Result<PreparedWalSegment, WalBuildError> {
     if writer_version.trim().is_empty() {
         return Err(WalBuildError::EmptyWriterVersion);
     }
-
-    if !plan.wal_object_must_be_written {
-        return Err(WalBuildError::WalWriteNotRequired);
+    if records.is_empty() {
+        return Err(WalBuildError::EmptySegment);
     }
 
-    if request.namespace_id != plan.namespace_id {
-        return Err(WalBuildError::NamespaceMismatch {
-            request: request.namespace_id.clone(),
-            plan: plan.namespace_id.clone(),
+    let mut payload_records: Vec<WalCommitPayload> = Vec::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        if !record.plan.wal_object_must_be_written {
+            return Err(WalBuildError::WalWriteNotRequired);
+        }
+        if record.request.namespace_id != record.plan.namespace_id {
+            return Err(WalBuildError::NamespaceMismatch {
+                request: record.request.namespace_id.clone(),
+                plan: record.plan.namespace_id.clone(),
+            });
+        }
+        if record.plan.namespace_id != namespace_id {
+            return Err(WalBuildError::NamespaceMismatch {
+                request: record.plan.namespace_id.clone(),
+                plan: namespace_id,
+            });
+        }
+        if index > 0 {
+            let expected = payload_records[index - 1]
+                .seq
+                .0
+                .checked_add(1)
+                .map(ChangeSeq)
+                .ok_or_else(|| WalBuildError::Codec("seq overflow".to_owned()))?;
+            if record.plan.next_seq != expected {
+                return Err(WalBuildError::NonContiguousSeq {
+                    expected,
+                    actual: record.plan.next_seq,
+                });
+            }
+            if record.plan.base_head_seq != payload_records[index - 1].seq {
+                return Err(WalBuildError::BaseHeadSeqMismatch {
+                    request: record.plan.base_head_seq,
+                    plan: payload_records[index - 1].seq,
+                });
+            }
+        }
+        payload_records.push(WalCommitPayload {
+            namespace_id: record.plan.namespace_id.clone(),
+            seq: record.plan.next_seq,
+            base_head_seq: record.plan.base_head_seq,
+            commit_id: record.plan.commit_id.clone(),
+            request_id: record.request.request_id.clone(),
+            request_checksum_sha256: record
+                .request
+                .request_checksum_sha256()
+                .map_err(|err| WalBuildError::Codec(err.to_string()))?,
+            semantic_fingerprint_sha256: record
+                .request
+                .semantic_fingerprint_sha256()
+                .map_err(|err| WalBuildError::Codec(err.to_string()))?,
+            source_request_checksum_sha256: record.request.source_request_checksum_sha256.clone(),
+            writer_id: record.request.writer_id.clone(),
+            writer_fence_token: record.request.writer_fence_token,
+            message: record.request.message.clone(),
+            annotations: record.request.annotations.clone(),
+            ops: build_wal_ops(&record.request, &record.plan)?,
+            preconditions: record
+                .request
+                .preconditions
+                .iter()
+                .map(WalPrecondition::from)
+                .collect(),
+            results: record.results.clone(),
         });
     }
 
-    if request.planned_head_seq != plan.base_head_seq {
-        return Err(WalBuildError::BaseHeadSeqMismatch {
-            request: request.planned_head_seq,
-            plan: plan.base_head_seq,
-        });
-    }
-
-    let payload = WalCommitPayload {
-        namespace_id: plan.namespace_id.clone(),
-        seq: plan.next_seq,
-        base_head_seq: plan.base_head_seq,
-        commit_id: plan.commit_id.clone(),
-        request_id: request.request_id.clone(),
-        request_checksum_sha256: request
-            .request_checksum_sha256()
-            .map_err(|err| WalBuildError::Codec(err.to_string()))?,
-        source_request_checksum_sha256: request.source_request_checksum_sha256.clone(),
-        writer_id: request.writer_id.clone(),
-        writer_fence_token: request.writer_fence_token,
-        message: request.message.clone(),
-        annotations: request.annotations.clone(),
-        ops: build_wal_ops(request, plan)?,
-        preconditions: request
-            .preconditions
-            .iter()
-            .map(WalPrecondition::from)
-            .collect(),
-        results,
+    let start_seq = payload_records
+        .first()
+        .map(|record| record.seq)
+        .ok_or(WalBuildError::EmptySegment)?;
+    let end_seq = payload_records
+        .last()
+        .map(|record| record.seq)
+        .ok_or(WalBuildError::EmptySegment)?;
+    let segment_id = format!("seg_{}", Uuid::new_v4().simple());
+    let payload = WalSegmentPayload {
+        namespace_id,
+        segment_id: segment_id.clone(),
+        prev_visible_segment,
+        base_head_seq: payload_records[0].base_head_seq,
+        start_seq,
+        end_seq,
+        records: payload_records,
     };
-    let envelope = WalCommitEnvelope::from_payload(writer_version, payload)
+    let envelope = WalSegmentEnvelope::from_payload(writer_version, payload)
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
-    let encoded_bytes = encode_wal_commit_envelope_zstd(&envelope)
+    let encoded_bytes = encode_wal_segment_envelope_zstd(&envelope)
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
+    let object_key = wal_segment(
+        envelope.payload.namespace_id.as_str(),
+        start_seq.0,
+        end_seq.0,
+        &segment_id,
+    );
 
-    Ok(PreparedWalCommit {
-        object_key: wal_commit(plan.namespace_id.as_str(), plan.next_seq.0, &plan.commit_id),
-        commit_id: plan.commit_id.clone(),
+    Ok(PreparedWalSegment {
+        object_key,
+        segment_id,
         envelope,
         encoded_bytes,
         checked_invariants: vec![
             "wal_payload_checksum_matches_payload".to_owned(),
-            "wal_key_matches_committed_seq".to_owned(),
+            "wal_key_matches_segment_seq_range".to_owned(),
             "head_publish_requires_durable_wal".to_owned(),
         ],
     })
@@ -161,23 +254,29 @@ pub fn replay_wal_commit(
     current_head: &HeadState,
     wal_object: &StoredWalObject,
 ) -> Result<ReplayedWalCommit, WalReplayError> {
-    let envelope = decode_and_validate_replayed_wal(current_head, wal_object)?;
+    replay_wal_segment(current_head, wal_object)
+}
 
-    Ok(ReplayedWalCommit {
+pub fn replay_wal_segment(
+    current_head: &HeadState,
+    wal_object: &StoredWalObject,
+) -> Result<ReplayedWalSegment, WalReplayError> {
+    let envelope = decode_and_validate_replayed_wal(current_head, wal_object)?;
+    let mut resulting_head = current_head.clone();
+    for record in &envelope.payload.records {
+        resulting_head.seq = record.seq;
+        resulting_head.next_inode_id =
+            replay_next_inode_id(resulting_head.next_inode_id, &record.ops);
+    }
+    resulting_head.visible_wal_tip = Some(envelope.pointer(wal_object.object_key.clone()));
+
+    Ok(ReplayedWalSegment {
         object_key: wal_object.object_key.clone(),
-        envelope: envelope.clone(),
-        resulting_head: HeadState {
-            namespace_id: current_head.namespace_id.clone(),
-            seq: envelope.payload.seq,
-            active_fence_token: envelope.payload.writer_fence_token,
-            next_inode_id: replay_next_inode_id(current_head.next_inode_id, &envelope.payload.ops),
-            name_policy: current_head.name_policy,
-            snapshot_hint_seq: current_head.snapshot_hint_seq,
-            retention_floor_seq: current_head.retention_floor_seq,
-        },
+        envelope,
+        resulting_head,
         checked_invariants: vec![
             "wal_payload_checksum_matches_payload".to_owned(),
-            "wal_key_matches_committed_seq".to_owned(),
+            "wal_key_matches_segment_seq_range".to_owned(),
             "wal_replay_requires_matching_namespace".to_owned(),
             "wal_replay_requires_matching_base_head_seq".to_owned(),
             "wal_tail_seq_is_contiguous".to_owned(),
@@ -190,22 +289,31 @@ pub fn replay_wal_commit_with_metadata(
     current_metadata_state: &MetadataState,
     wal_object: &StoredWalObject,
 ) -> Result<ReplayedWalCommitWithMetadata, WalReplayError> {
-    let replayed = replay_wal_commit(current_head, wal_object)?;
-    let applied_metadata = current_metadata_state
-        .apply_committed_wal_ops(replayed.resulting_head.seq, &replayed.envelope.payload.ops)
-        .map_err(WalReplayError::MetadataApply)?;
-    let mut checked_invariants = replayed.checked_invariants.clone();
-    push_invariant(&mut checked_invariants, "wal_replay_applies_metadata_rows");
-    extend_invariants(
-        &mut checked_invariants,
-        &applied_metadata.checked_invariants,
-    );
+    replay_wal_segment_with_metadata(current_head, current_metadata_state, wal_object)
+}
 
-    Ok(ReplayedWalCommitWithMetadata {
+pub fn replay_wal_segment_with_metadata(
+    current_head: &HeadState,
+    current_metadata_state: &MetadataState,
+    wal_object: &StoredWalObject,
+) -> Result<ReplayedWalSegmentWithMetadata, WalReplayError> {
+    let replayed = replay_wal_segment(current_head, wal_object)?;
+    let mut current_metadata_state = current_metadata_state.clone();
+    let mut checked_invariants = replayed.checked_invariants.clone();
+    for record in &replayed.envelope.payload.records {
+        let applied = current_metadata_state
+            .apply_committed_wal_record(record)
+            .map_err(WalReplayError::MetadataApply)?;
+        current_metadata_state = applied.metadata_state;
+        push_invariant(&mut checked_invariants, "wal_replay_applies_metadata_rows");
+        extend_invariants(&mut checked_invariants, &applied.checked_invariants);
+    }
+
+    Ok(ReplayedWalSegmentWithMetadata {
         object_key: replayed.object_key,
         envelope: replayed.envelope,
         resulting_head: replayed.resulting_head,
-        resulting_metadata_state: applied_metadata.metadata_state,
+        resulting_metadata_state: current_metadata_state,
         checked_invariants,
     })
 }
@@ -217,7 +325,7 @@ pub fn replay_wal_tail(
     let mut current_head = basis_head.clone();
 
     for wal_object in wal_tail {
-        current_head = replay_wal_commit(&current_head, wal_object)?.resulting_head;
+        current_head = replay_wal_segment(&current_head, wal_object)?.resulting_head;
     }
 
     Ok(current_head)
@@ -234,7 +342,7 @@ pub fn replay_wal_tail_with_metadata(
 
     for wal_object in wal_tail {
         let replayed =
-            replay_wal_commit_with_metadata(&current_head, &current_metadata_state, wal_object)?;
+            replay_wal_segment_with_metadata(&current_head, &current_metadata_state, wal_object)?;
         current_head = replayed.resulting_head;
         current_metadata_state = replayed.resulting_metadata_state;
         extend_invariants(&mut checked_invariants, &replayed.checked_invariants);
@@ -247,8 +355,8 @@ pub fn replay_wal_tail_with_metadata(
     })
 }
 
-impl From<&PreparedWalCommit> for StoredWalObject {
-    fn from(value: &PreparedWalCommit) -> Self {
+impl From<&PreparedWalSegment> for StoredWalObject {
+    fn from(value: &PreparedWalSegment) -> Self {
         Self {
             object_key: value.object_key.clone(),
             encoded_bytes: value.encoded_bytes.clone(),
@@ -365,13 +473,14 @@ fn build_wal_ops(request: &CommitRequest, plan: &CommitPlan) -> Result<Vec<WalOp
 fn decode_and_validate_replayed_wal(
     current_head: &HeadState,
     wal_object: &StoredWalObject,
-) -> Result<WalCommitEnvelope, WalReplayError> {
-    let envelope = decode_wal_commit_envelope_zstd(&wal_object.encoded_bytes)
+) -> Result<WalSegmentEnvelope, WalReplayError> {
+    let envelope = decode_wal_segment_envelope_zstd(&wal_object.encoded_bytes)
         .map_err(|err| WalReplayError::Codec(err.to_string()))?;
-    let expected_object_key = wal_commit(
+    let expected_object_key = wal_segment(
         envelope.payload.namespace_id.as_str(),
-        envelope.payload.seq.0,
-        &envelope.payload.commit_id,
+        envelope.payload.start_seq.0,
+        envelope.payload.end_seq.0,
+        &envelope.payload.segment_id,
     );
 
     if wal_object.object_key != expected_object_key {
@@ -395,18 +504,48 @@ fn decode_and_validate_replayed_wal(
         });
     }
 
-    let expected_seq = current_head
+    let expected_start = current_head
         .seq
         .0
         .checked_add(1)
         .map(ChangeSeq)
         .ok_or(WalReplayError::SeqOverflow)?;
 
-    if envelope.payload.seq != expected_seq {
+    if envelope.payload.start_seq != expected_start {
         return Err(WalReplayError::NonContiguousSeq {
-            expected: expected_seq,
-            actual: envelope.payload.seq,
+            expected: expected_start,
+            actual: envelope.payload.start_seq,
         });
+    }
+    if envelope.payload.records.is_empty() {
+        return Err(WalReplayError::EmptySegment);
+    }
+    if envelope.payload.records.first().map(|record| record.seq) != Some(envelope.payload.start_seq)
+        || envelope.payload.records.last().map(|record| record.seq)
+            != Some(envelope.payload.end_seq)
+    {
+        return Err(WalReplayError::SegmentSummaryMismatch);
+    }
+    for (offset, record) in envelope.payload.records.iter().enumerate() {
+        let expected = envelope
+            .payload
+            .start_seq
+            .0
+            .checked_add(offset as u64)
+            .map(ChangeSeq)
+            .ok_or(WalReplayError::SeqOverflow)?;
+        if record.seq != expected {
+            return Err(WalReplayError::NonContiguousSeq {
+                expected,
+                actual: record.seq,
+            });
+        }
+        if record.namespace_id != current_head.namespace_id {
+            return Err(WalReplayError::NamespaceMismatch {
+                expected: current_head.namespace_id.clone(),
+                actual: record.namespace_id.clone(),
+            });
+        }
     }
 
     Ok(envelope)

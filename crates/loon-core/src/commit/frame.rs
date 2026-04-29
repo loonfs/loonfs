@@ -27,14 +27,7 @@ pub(super) fn validate_commit_request_frame(
         });
     }
 
-    if request.planned_head_seq != context.head.seq {
-        return Err(CommitValidationError::PlannedHeadSeqMismatch {
-            expected: context.head.seq,
-            actual: request.planned_head_seq,
-        });
-    }
-
-    validate_head_seq_preconditions(&request.preconditions, request.planned_head_seq)?;
+    validate_head_seq_preconditions(&request.preconditions, context.head.seq)?;
 
     if request.writer_fence_token != context.head.active_fence_token {
         return Err(CommitValidationError::StaleWriterFenceToken {
@@ -62,26 +55,17 @@ pub(super) fn validate_commit_request_frame(
 
 fn validate_head_seq_preconditions(
     preconditions: &[Precondition],
-    planned_head_seq: ChangeSeq,
+    current_head_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
-    let mut saw_head_seq_precondition = false;
-
     for precondition in preconditions {
         if let Precondition::HeadSeqIs(actual) = precondition {
-            saw_head_seq_precondition = true;
-            if *actual != planned_head_seq {
+            if *actual != current_head_seq {
                 return Err(CommitValidationError::ConflictingHeadSeqPrecondition {
-                    expected: planned_head_seq,
+                    expected: current_head_seq,
                     actual: *actual,
                 });
             }
         }
-    }
-
-    if !saw_head_seq_precondition {
-        return Err(CommitValidationError::MissingHeadSeqPrecondition {
-            expected: planned_head_seq,
-        });
     }
 
     Ok(())

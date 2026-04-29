@@ -302,4 +302,31 @@ impl CommitRequest {
         let bytes = serde_json::to_vec(self)?;
         Ok(loon_api::sha256_digest(&bytes))
     }
+
+    pub fn semantic_fingerprint_sha256(&self) -> Result<String, serde_json::Error> {
+        if let Some(source) = &self.source_request_checksum_sha256 {
+            return Ok(source.clone());
+        }
+        #[derive(Serialize)]
+        struct SemanticCommit<'a> {
+            namespace_id: &'a NamespaceId,
+            request_id: &'a str,
+            planned_head_seq: ChangeSeq,
+            ops: &'a [CommitOp],
+            preconditions: &'a [Precondition],
+            message: &'a Option<String>,
+            annotations: &'a Option<CommitAnnotations>,
+        }
+        let semantic = SemanticCommit {
+            namespace_id: &self.namespace_id,
+            request_id: &self.request_id,
+            planned_head_seq: self.planned_head_seq,
+            ops: &self.ops,
+            preconditions: &self.preconditions,
+            message: &self.message,
+            annotations: &self.annotations,
+        };
+        let bytes = serde_json::to_vec(&semantic)?;
+        Ok(loon_api::sha256_digest(&bytes))
+    }
 }

@@ -36,7 +36,7 @@ sha2 = "0.10"
 sysinfo = "0.30"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
 ureq = { version = "2.10", features = ["json"] }
 urlencoding = "2"

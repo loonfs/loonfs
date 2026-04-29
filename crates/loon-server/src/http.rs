@@ -1,4 +1,5 @@
 use crate::config::{ServerConfig, ServerConfigError};
+use crate::publisher::PublisherRegistry;
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -17,11 +18,11 @@ use loon_api::{
     NamespaceIdValidationError,
 };
 use loon_core::{
-    advance_retention_floor, begin_upload, bootstrap_namespace, commit_operations, complete_upload,
-    copy_file_path, create_checkpoint, delete_path_non_recursive, fork_namespace,
-    list_changes_after, list_namespaces, list_path, move_path, put_file_content_ref,
-    read_file_bytes, resolve_path, upload_content, BootstrapNamespaceError, CoreError,
-    CoreErrorKind, MutationContext, PutFileBehavior,
+    advance_retention_floor, begin_upload, bootstrap_namespace, complete_upload, copy_file_path,
+    create_checkpoint, delete_path_non_recursive, fork_namespace, list_changes_after,
+    list_namespaces, list_path, move_path, put_file_content_ref, read_file_bytes, resolve_path,
+    upload_content, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
+    PutFileBehavior,
 };
 use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
@@ -35,6 +36,7 @@ type SharedStore = Arc<dyn ObjectStore + Send + Sync>;
 struct AppState {
     config: Arc<ServerConfig>,
     store: SharedStore,
+    publisher: PublisherRegistry,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -53,9 +55,12 @@ pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
 }
 
 fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
+    let config = Arc::new(config);
+    let publisher = PublisherRegistry::new(store.clone(), config.clone());
     let state = AppState {
-        config: Arc::new(config),
+        config,
         store,
+        publisher,
     };
     Router::new()
         .route("/healthz", get(healthz))
@@ -370,19 +375,12 @@ async fn commit_operations_handler(
     Json(request): Json<V0CommitRequest>,
 ) -> Result<Json<V0CommitResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
     let namespace_id = parse_namespace_id(namespace)?;
-    let response = run_blocking(move || {
-        commit_operations(
-            store.as_ref(),
-            &namespace_id,
-            request,
-            &mutation_context(&config),
-        )
-        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
-    })
-    .await?;
+    let response = state
+        .publisher
+        .submit_commit(namespace_id.clone(), request)
+        .await
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -559,7 +557,10 @@ impl ApiResponseError {
             CoreErrorKind::TombstoneConflict => (StatusCode::CONFLICT, "tombstone_conflict"),
             CoreErrorKind::LeaseConflict => (StatusCode::CONFLICT, "lease_conflict"),
             CoreErrorKind::WouldCycle => (StatusCode::CONFLICT, "would_cycle"),
-            CoreErrorKind::RequestIdConflict => (StatusCode::CONFLICT, "request_id_conflict"),
+            CoreErrorKind::RequestIdConflict => (StatusCode::CONFLICT, "idempotency_key_conflict"),
+            CoreErrorKind::CommitQueueFull => {
+                (StatusCode::SERVICE_UNAVAILABLE, "commit_queue_full")
+            }
             CoreErrorKind::CheckpointUnavailable => {
                 (StatusCode::CONFLICT, "checkpoint_unavailable")
             }

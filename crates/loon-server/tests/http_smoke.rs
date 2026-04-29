@@ -635,8 +635,10 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
             .client
             .commit_operations(namespace, &conflicting_request)
         {
-            Err(ClientError::Api { code, .. }) => assert_eq!(code, "request_id_conflict"),
-            other => panic!("expected request_id_conflict, got {other:?}"),
+            Err(ClientError::Api { code, .. }) => {
+                assert_eq!(code, "idempotency_key_conflict")
+            }
+            other => panic!("expected idempotency_key_conflict, got {other:?}"),
         }
     })
     .await
@@ -687,8 +689,10 @@ async fn http_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
             false,
             request_id,
         ) {
-            Err(ClientError::Api { code, .. }) => assert_eq!(code, "request_id_conflict"),
-            other => panic!("expected request_id_conflict, got {other:?}"),
+            Err(ClientError::Api { code, .. }) => {
+                assert_eq!(code, "idempotency_key_conflict")
+            }
+            other => panic!("expected idempotency_key_conflict, got {other:?}"),
         }
     })
     .await

@@ -296,6 +296,7 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::LeaseConflict => "lease_conflict",
         CoreErrorKind::WouldCycle => "would_cycle",
         CoreErrorKind::RequestIdConflict => "request_id_conflict",
+        CoreErrorKind::CommitQueueFull => "commit_queue_full",
         CoreErrorKind::CheckpointUnavailable => "checkpoint_unavailable",
         CoreErrorKind::UploadNotFound => "upload_not_found",
         CoreErrorKind::UploadAlreadyCompleted => "upload_already_completed",

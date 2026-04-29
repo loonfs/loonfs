@@ -254,6 +254,7 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
         name_policy: source_basis.head.name_policy,
         snapshot_hint_seq: Some(fork_seq),
         retention_floor_seq: fork_seq,
+        visible_wal_tip: None,
     };
     let initial_lease = LeaseState {
         namespace_id: new_namespace_id.clone(),

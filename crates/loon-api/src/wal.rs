@@ -5,12 +5,12 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const WAL_FORMAT_VERSION: u32 = 1;
+pub const WAL_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WalEnvelopeKind {
-    NamespaceWalCommit,
+    NamespaceWalSegment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +88,7 @@ pub struct WalCommitPayload {
     pub commit_id: String,
     pub request_id: String,
     pub request_checksum_sha256: String,
+    pub semantic_fingerprint_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_request_checksum_sha256: Option<String>,
     pub writer_id: String,
@@ -103,21 +104,35 @@ pub struct WalCommitPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WalCommitEnvelope {
+pub struct WalSegmentPayload {
+    pub namespace_id: NamespaceId,
+    pub segment_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_visible_segment: Option<crate::WalSegmentPointer>,
+    pub base_head_seq: ChangeSeq,
+    pub start_seq: ChangeSeq,
+    pub end_seq: ChangeSeq,
+    pub records: Vec<WalCommitPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalSegmentEnvelope {
     pub kind: WalEnvelopeKind,
     pub format_version: u32,
     pub writer_version: String,
     pub payload_checksum_sha256: String,
-    pub payload: WalCommitPayload,
+    pub payload: WalSegmentPayload,
 }
 
-impl WalCommitEnvelope {
+pub type WalCommitEnvelope = WalSegmentEnvelope;
+
+impl WalSegmentEnvelope {
     pub fn from_payload(
         writer_version: impl Into<String>,
-        payload: WalCommitPayload,
+        payload: WalSegmentPayload,
     ) -> Result<Self, WalCodecError> {
         Ok(Self {
-            kind: WalEnvelopeKind::NamespaceWalCommit,
+            kind: WalEnvelopeKind::NamespaceWalSegment,
             format_version: WAL_FORMAT_VERSION,
             writer_version: writer_version.into(),
             payload_checksum_sha256: wal_payload_checksum_sha256(&payload)?,
@@ -127,6 +142,16 @@ impl WalCommitEnvelope {
 
     pub fn has_valid_payload_checksum(&self) -> Result<bool, WalCodecError> {
         Ok(self.payload_checksum_sha256 == wal_payload_checksum_sha256(&self.payload)?)
+    }
+
+    pub fn pointer(&self, object_key: String) -> crate::WalSegmentPointer {
+        crate::WalSegmentPointer {
+            object_key,
+            segment_id: self.payload.segment_id.clone(),
+            start_seq: self.payload.start_seq,
+            end_seq: self.payload.end_seq,
+            payload_checksum_sha256: self.payload_checksum_sha256.clone(),
+        }
     }
 }
 
@@ -142,23 +167,25 @@ pub enum WalCodecError {
     Compress(String),
     #[error("failed to decompress WAL envelope: {0}")]
     Decompress(String),
+    #[error("unsupported WAL format version `{0}`")]
+    UnsupportedFormatVersion(u32),
     #[error("WAL payload checksum mismatch: expected {expected}, actual {actual}")]
     ChecksumMismatch { expected: String, actual: String },
 }
 
-pub fn wal_payload_checksum_sha256(payload: &WalCommitPayload) -> Result<String, WalCodecError> {
+pub fn wal_payload_checksum_sha256(payload: &WalSegmentPayload) -> Result<String, WalCodecError> {
     Ok(sha256_hex(&encode_wal_payload_cbor(payload)?))
 }
 
-pub fn encode_wal_payload_cbor(payload: &WalCommitPayload) -> Result<Vec<u8>, WalCodecError> {
+pub fn encode_wal_payload_cbor(payload: &WalSegmentPayload) -> Result<Vec<u8>, WalCodecError> {
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
         .map_err(|err| WalCodecError::PayloadEncode(err.to_string()))?;
     Ok(encoded)
 }
 
-pub fn encode_wal_commit_envelope_zstd(
-    envelope: &WalCommitEnvelope,
+pub fn encode_wal_segment_envelope_zstd(
+    envelope: &WalSegmentEnvelope,
 ) -> Result<Vec<u8>, WalCodecError> {
     let mut encoded = Vec::new();
     into_writer(envelope, &mut encoded)
@@ -167,11 +194,17 @@ pub fn encode_wal_commit_envelope_zstd(
         .map_err(|err| WalCodecError::Compress(err.to_string()))
 }
 
-pub fn decode_wal_commit_envelope_zstd(bytes: &[u8]) -> Result<WalCommitEnvelope, WalCodecError> {
+pub fn decode_wal_segment_envelope_zstd(bytes: &[u8]) -> Result<WalSegmentEnvelope, WalCodecError> {
     let decompressed = zstd::stream::decode_all(bytes)
         .map_err(|err| WalCodecError::Decompress(err.to_string()))?;
-    let envelope: WalCommitEnvelope = from_reader(decompressed.as_slice())
+    let envelope: WalSegmentEnvelope = from_reader(decompressed.as_slice())
         .map_err(|err| WalCodecError::EnvelopeDecode(err.to_string()))?;
+
+    if envelope.format_version != WAL_FORMAT_VERSION {
+        return Err(WalCodecError::UnsupportedFormatVersion(
+            envelope.format_version,
+        ));
+    }
 
     let actual = wal_payload_checksum_sha256(&envelope.payload)?;
     if actual != envelope.payload_checksum_sha256 {
@@ -182,4 +215,14 @@ pub fn decode_wal_commit_envelope_zstd(bytes: &[u8]) -> Result<WalCommitEnvelope
     }
 
     Ok(envelope)
+}
+
+pub fn encode_wal_commit_envelope_zstd(
+    envelope: &WalCommitEnvelope,
+) -> Result<Vec<u8>, WalCodecError> {
+    encode_wal_segment_envelope_zstd(envelope)
+}
+
+pub fn decode_wal_commit_envelope_zstd(bytes: &[u8]) -> Result<WalCommitEnvelope, WalCodecError> {
+    decode_wal_segment_envelope_zstd(bytes)
 }

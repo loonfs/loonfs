@@ -25,6 +25,7 @@ pub enum CoreErrorKind {
     LeaseConflict,
     WouldCycle,
     RequestIdConflict,
+    CommitQueueFull,
     CheckpointUnavailable,
     UploadNotFound,
     UploadAlreadyCompleted,
@@ -35,7 +36,7 @@ pub enum CoreErrorKind {
     ServerError,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum CoreError {
     #[error(transparent)]
     Basis(#[from] BasisLoadError),
@@ -73,6 +74,8 @@ pub enum CoreError {
     DestinationExists(String),
     #[error("request id conflict for `{0}`")]
     RequestIdConflict(String),
+    #[error("commit queue is full; slow down and retry")]
+    CommitQueueFull,
     #[error("{0}")]
     CheckpointUnavailable(String),
     #[error("upload session `{upload_id}` was not found")]
@@ -165,6 +168,7 @@ impl CoreError {
             CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
             CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,
             CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
+            CoreError::CommitQueueFull => CoreErrorKind::CommitQueueFull,
             CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => CoreErrorKind::UploadAlreadyCompleted,

@@ -1,5 +1,5 @@
 use loon_api::{
-    sha256_digest,
+    decode_wal_segment_envelope_zstd, sha256_digest,
     v0::{
         CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest,
         CompleteUploadRequest,
@@ -14,11 +14,11 @@ use loon_core::commit::{
 };
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
-    bootstrap_namespace, commit_operations, complete_upload, copy_file_path, delete_path,
-    delete_path_non_recursive, fork_namespace, list_changes_after, list_namespaces,
-    load_verified_namespace_basis, move_path, put_file_bytes, read_file_bytes, resolve_path,
-    store_bytes_as_content, write_file_bytes, CoreError, CoreErrorKind, MutationContext,
-    PutFileBehavior,
+    bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
+    copy_file_path, delete_path, delete_path_non_recursive, fork_namespace, list_changes_after,
+    list_namespaces, load_verified_namespace_basis, move_path, put_file_bytes, read_file_bytes,
+    resolve_path, store_bytes_as_content, write_file_bytes, CoreError, CoreErrorKind,
+    MutationContext, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -555,6 +555,7 @@ fn restore_revision_overflow_is_rejected() {
             content_ref: content_ref("content-max"),
         }],
         subtree_tombstones: Vec::new(),
+        request_receipts: Vec::new(),
     };
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
@@ -733,6 +734,71 @@ fn public_namespace_operations_reject_invalid_namespace_id_before_key_constructi
             .expect("list namespace objects"),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn batch_commit_writes_one_segment_and_expands_change_feed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            V0CommitRequest {
+                request_id: "req-batch-a".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: Vec::new(),
+                ops: vec![V0CommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "alpha".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+            V0CommitRequest {
+                request_id: "req-batch-b".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: Vec::new(),
+                ops: vec![V0CommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "beta".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+        ],
+        &context,
+    );
+    let first = responses[0].as_ref().expect("first commit");
+    let second = responses[1].as_ref().expect("second commit");
+    assert_eq!(first.committed_seq, ChangeSeq(1));
+    assert_eq!(second.committed_seq, ChangeSeq(2));
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.start_seq, ChangeSeq(1));
+    assert_eq!(segment.payload.end_seq, ChangeSeq(2));
+    assert_eq!(segment.payload.records.len(), 2);
+    store
+        .put_if_absent(
+            "namespaces/demo/wal/00000000000000000999-00000000000000000999-orphan.cbor.zst",
+            &wal_bytes,
+        )
+        .expect("write unreachable orphan");
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    assert_eq!(changes.changes.len(), 2);
+    assert_eq!(changes.changes[0].request_id, "req-batch-a");
+    assert_eq!(changes.changes[1].request_id, "req-batch-b");
 }
 
 #[test]
@@ -1843,6 +1909,7 @@ fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {
         direntries: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
+        request_receipts: Vec::new(),
     };
 
     for (index, ops) in sequences.iter().enumerate() {
@@ -1869,6 +1936,7 @@ fn validation_context(
         name_policy: loon_api::NamePolicy::default(),
         snapshot_hint_seq: Some(ChangeSeq(0)),
         retention_floor_seq: ChangeSeq(0),
+        visible_wal_tip: None,
     };
     let lease = LeaseState {
         namespace_id,

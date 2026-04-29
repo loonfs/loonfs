@@ -1,6 +1,7 @@
 use loon_api::{
     payload_checksum_sha256, ContentStoreDescriptorEnvelope, ContentStoreId, ControlObjectKind,
     HeadStateEnvelope, LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceId,
+    CONTROL_OBJECT_FORMAT_VERSION,
 };
 use loon_objectstore::keys::{
     content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
@@ -231,6 +232,7 @@ fn validate_namespace_descriptor_envelope(
     object_key: &str,
     envelope: &NamespaceDescriptorEnvelope,
 ) -> Result<(), ControlObjectLoadError> {
+    validate_control_format_version(object_key, envelope.format_version)?;
     if envelope.kind != ControlObjectKind::NamespaceDescriptor {
         return Err(ControlObjectLoadError::KindMismatch {
             object_key: object_key.to_owned(),
@@ -257,6 +259,7 @@ fn validate_content_store_descriptor_envelope(
     object_key: &str,
     envelope: &ContentStoreDescriptorEnvelope,
 ) -> Result<(), ControlObjectLoadError> {
+    validate_control_format_version(object_key, envelope.format_version)?;
     if envelope.kind != ControlObjectKind::ContentStoreDescriptor {
         return Err(ControlObjectLoadError::KindMismatch {
             object_key: object_key.to_owned(),
@@ -283,6 +286,7 @@ fn validate_head_envelope(
     object_key: &str,
     envelope: &HeadStateEnvelope,
 ) -> Result<(), ControlObjectLoadError> {
+    validate_control_format_version(object_key, envelope.format_version)?;
     if envelope.kind != ControlObjectKind::NamespaceHead {
         return Err(ControlObjectLoadError::KindMismatch {
             object_key: object_key.to_owned(),
@@ -313,6 +317,7 @@ fn validate_lease_envelope(
     object_key: &str,
     envelope: &LeaseStateEnvelope,
 ) -> Result<(), ControlObjectLoadError> {
+    validate_control_format_version(object_key, envelope.format_version)?;
     if envelope.kind != ControlObjectKind::NamespaceLease {
         return Err(ControlObjectLoadError::KindMismatch {
             object_key: object_key.to_owned(),
@@ -335,6 +340,19 @@ fn validate_lease_envelope(
         });
     }
 
+    Ok(())
+}
+
+fn validate_control_format_version(
+    object_key: &str,
+    format_version: u32,
+) -> Result<(), ControlObjectLoadError> {
+    if format_version != CONTROL_OBJECT_FORMAT_VERSION {
+        return Err(ControlObjectLoadError::Codec {
+            object_key: object_key.to_owned(),
+            message: format!("unsupported control object format version `{format_version}`"),
+        });
+    }
     Ok(())
 }
 

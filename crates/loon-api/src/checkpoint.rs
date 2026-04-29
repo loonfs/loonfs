@@ -1,11 +1,12 @@
 use crate::digest::sha256_hex;
+use crate::v0::CommitOpResult;
 use crate::{ChangeSeq, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 1;
-pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 1;
+pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 2;
+pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +27,7 @@ pub enum CheckpointTableFamily {
     Direntries,
     Revisions,
     Tombstones,
+    RequestReceipts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +89,13 @@ pub enum CheckpointRow {
         #[serde(default)]
         tombstone_op_index: u32,
     },
+    RequestReceipt {
+        request_id: String,
+        semantic_fingerprint_sha256: String,
+        committed_seq: ChangeSeq,
+        commit_id: String,
+        results: Vec<CommitOpResult>,
+    },
 }
 
 impl CheckpointRow {
@@ -141,6 +150,11 @@ impl CheckpointRow {
                     )
                 }
             }
+            Self::RequestReceipt {
+                request_id,
+                committed_seq,
+                ..
+            } => format!("request-receipt-{request_id}-{:020}", committed_seq.0),
         }
     }
 }
@@ -315,6 +329,12 @@ pub fn decode_checkpoint_manifest_json(
 ) -> Result<CheckpointManifestEnvelope, CheckpointManifestCodecError> {
     let envelope: CheckpointManifestEnvelope = serde_json::from_slice(bytes)
         .map_err(|err| CheckpointManifestCodecError::EnvelopeDecode(err.to_string()))?;
+    if envelope.format_version != CHECKPOINT_MANIFEST_FORMAT_VERSION {
+        return Err(CheckpointManifestCodecError::EnvelopeDecode(format!(
+            "unsupported checkpoint manifest format version `{}`",
+            envelope.format_version
+        )));
+    }
     let actual = checkpoint_manifest_payload_checksum_sha256(&envelope.payload)?;
 
     if actual != envelope.payload_checksum_sha256 {
@@ -344,6 +364,12 @@ pub fn decode_checkpoint_segment_envelope_zstd(
         .map_err(|err| CheckpointSegmentCodecError::Decompress(err.to_string()))?;
     let envelope: CheckpointSegmentEnvelope = from_reader(decompressed.as_slice())
         .map_err(|err| CheckpointSegmentCodecError::EnvelopeDecode(err.to_string()))?;
+    if envelope.format_version != CHECKPOINT_SEGMENT_FORMAT_VERSION {
+        return Err(CheckpointSegmentCodecError::EnvelopeDecode(format!(
+            "unsupported checkpoint segment format version `{}`",
+            envelope.format_version
+        )));
+    }
 
     let actual = checkpoint_segment_payload_checksum_sha256(&envelope.payload)?;
     if actual != envelope.payload_checksum_sha256 {
