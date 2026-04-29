@@ -25,8 +25,6 @@ pub struct PreparedWalSegment {
     pub checked_invariants: Vec<String>,
 }
 
-pub type PreparedWalCommit = PreparedWalSegment;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalBuildError {
     EmptyWriterVersion,
@@ -65,8 +63,6 @@ pub struct ReplayedWalSegment {
     pub checked_invariants: Vec<String>,
 }
 
-pub type ReplayedWalCommit = ReplayedWalSegment;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayedWalSegmentWithMetadata {
     pub object_key: String,
@@ -75,8 +71,6 @@ pub struct ReplayedWalSegmentWithMetadata {
     pub resulting_metadata_state: MetadataState,
     pub checked_invariants: Vec<String>,
 }
-
-pub type ReplayedWalCommitWithMetadata = ReplayedWalSegmentWithMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayedWalTail {
@@ -108,24 +102,6 @@ pub enum WalReplayError {
     SegmentSummaryMismatch,
     MetadataApply(MetadataApplyError),
     SeqOverflow,
-}
-
-pub fn prepare_wal_commit(
-    request: &CommitRequest,
-    plan: &CommitPlan,
-    results: Vec<CommitOpResult>,
-    writer_version: &str,
-) -> Result<PreparedWalCommit, WalBuildError> {
-    prepare_wal_segment(
-        plan.namespace_id.clone(),
-        None,
-        &[PreparedWalRecord {
-            request: request.clone(),
-            plan: plan.clone(),
-            results,
-        }],
-        writer_version,
-    )
 }
 
 pub fn prepare_wal_segment(
@@ -250,13 +226,6 @@ pub fn prepare_wal_segment(
     })
 }
 
-pub fn replay_wal_commit(
-    current_head: &HeadState,
-    wal_object: &StoredWalObject,
-) -> Result<ReplayedWalCommit, WalReplayError> {
-    replay_wal_segment(current_head, wal_object)
-}
-
 pub fn replay_wal_segment(
     current_head: &HeadState,
     wal_object: &StoredWalObject,
@@ -282,14 +251,6 @@ pub fn replay_wal_segment(
             "wal_tail_seq_is_contiguous".to_owned(),
         ],
     })
-}
-
-pub fn replay_wal_commit_with_metadata(
-    current_head: &HeadState,
-    current_metadata_state: &MetadataState,
-    wal_object: &StoredWalObject,
-) -> Result<ReplayedWalCommitWithMetadata, WalReplayError> {
-    replay_wal_segment_with_metadata(current_head, current_metadata_state, wal_object)
 }
 
 pub fn replay_wal_segment_with_metadata(

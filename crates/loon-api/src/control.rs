@@ -2,7 +2,7 @@ use crate::digest::sha256_hex;
 use crate::{ChangeSeq, ContentRef, ContentStoreId, FenceToken, InodeId, NamePolicy, NamespaceId};
 use serde::{Deserialize, Serialize};
 
-pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 2;
+pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -5,8 +5,8 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 2;
-pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 2;
+pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 1;
+pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

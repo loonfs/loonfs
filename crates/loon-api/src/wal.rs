@@ -5,7 +5,7 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const WAL_FORMAT_VERSION: u32 = 2;
+pub const WAL_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,8 +124,6 @@ pub struct WalSegmentEnvelope {
     pub payload: WalSegmentPayload,
 }
 
-pub type WalCommitEnvelope = WalSegmentEnvelope;
-
 impl WalSegmentEnvelope {
     pub fn from_payload(
         writer_version: impl Into<String>,
@@ -215,14 +213,4 @@ pub fn decode_wal_segment_envelope_zstd(bytes: &[u8]) -> Result<WalSegmentEnvelo
     }
 
     Ok(envelope)
-}
-
-pub fn encode_wal_commit_envelope_zstd(
-    envelope: &WalCommitEnvelope,
-) -> Result<Vec<u8>, WalCodecError> {
-    encode_wal_segment_envelope_zstd(envelope)
-}
-
-pub fn decode_wal_commit_envelope_zstd(bytes: &[u8]) -> Result<WalCommitEnvelope, WalCodecError> {
-    decode_wal_segment_envelope_zstd(bytes)
 }

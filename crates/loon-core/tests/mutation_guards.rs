@@ -802,6 +802,109 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 }
 
 #[test]
+fn batch_commit_aliases_duplicate_request_id_with_same_fingerprint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let request = V0CommitRequest {
+        request_id: "req-duplicate".to_owned(),
+        planned_head_seq: ChangeSeq(0),
+        preconditions: Vec::new(),
+        ops: vec![V0CommitOp::CreateDir {
+            parent_inode: InodeId(1),
+            display_name: "alpha".to_owned(),
+        }],
+        message: None,
+        annotations: None,
+    };
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![request.clone(), request],
+        &context,
+    );
+    let first = responses[0].as_ref().expect("primary commit");
+    let duplicate = responses[1].as_ref().expect("duplicate commit");
+    assert_eq!(first, duplicate);
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.records.len(), 1);
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.changes[0].request_id, "req-duplicate");
+}
+
+#[test]
+fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            V0CommitRequest {
+                request_id: "req-conflict".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: Vec::new(),
+                ops: vec![V0CommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "alpha".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+            V0CommitRequest {
+                request_id: "req-conflict".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: Vec::new(),
+                ops: vec![V0CommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "beta".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+        ],
+        &context,
+    );
+
+    responses[0].as_ref().expect("primary commit");
+    let error = responses[1].as_ref().expect_err("duplicate conflict");
+    assert!(matches!(
+        error,
+        CoreError::RequestIdConflict(request_id) if request_id == "req-conflict"
+    ));
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.records.len(), 1);
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.changes[0].request_id, "req-conflict");
+}
+
+#[test]
 fn namespace_descriptor_checksum_is_validated() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
