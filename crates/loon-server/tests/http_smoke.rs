@@ -1,10 +1,10 @@
 use loon_api::{
-    sha256_digest,
     v0::{
         CommitAnnotations, CommitOp, CommitOpResult, CommitPrecondition,
         CommitRequest as V0CommitRequest, CompleteUploadRequest,
     },
-    AdvanceRetentionResponse, ApiError, ChangeSeq, CreateCheckpointResponse, InodeId, RevisionNo,
+    AdvanceRetentionResponse, ApiError, ChangeSeq, ContentRef, CreateCheckpointResponse, InodeId,
+    RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_objectstore::keys::snapshot_manifest;
@@ -92,10 +92,7 @@ async fn http_put_create_only_and_copy_preserve_cli_semantics() {
         let source_entry = harness.client.stat_path(&source).expect("source stat");
         let dest_entry = harness.client.stat_path(&destination).expect("dest stat");
         assert_ne!(source_entry.inode_id, dest_entry.inode_id);
-        assert_eq!(
-            source_entry.content_manifest_digest,
-            dest_entry.content_manifest_digest
-        );
+        assert_eq!(source_entry.content_ref, dest_entry.content_ref);
         let dest_bytes = harness
             .client
             .read_file_bytes(&destination)
@@ -132,23 +129,47 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .client
             .begin_upload(namespace)
             .expect("begin upload");
-        let first_block = harness
+        let first_content = harness
             .client
-            .upload_block(namespace, &begin.upload_id, 0, file_bytes)
-            .expect("upload block");
-        let repeated_block = harness
+            .upload_content(namespace, &begin.upload_id, file_bytes)
+            .expect("upload content");
+        let repeated_content = harness
             .client
-            .upload_block(namespace, &begin.upload_id, 0, file_bytes)
-            .expect("repeat upload block");
-        assert_eq!(first_block, repeated_block);
+            .upload_content(namespace, &begin.upload_id, file_bytes)
+            .expect("repeat upload content");
+        assert_eq!(first_content, repeated_content);
         match harness
             .client
-            .upload_block(namespace, &begin.upload_id, 0, b"different bytes")
+            .upload_content(namespace, &begin.upload_id, b"different bytes")
         {
-            Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_block_conflict"),
-            other => panic!("expected upload_block_conflict, got {other:?}"),
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
+            other => panic!("expected upload_content_conflict, got {other:?}"),
         }
-        let manifest_digest = stage_uploaded_manifest(&harness.client, namespace, file_bytes);
+
+        let mismatch_upload = harness
+            .client
+            .begin_upload(namespace)
+            .expect("begin mismatch upload");
+        let staged = harness
+            .client
+            .upload_content(namespace, &mismatch_upload.upload_id, file_bytes)
+            .expect("stage mismatch upload content");
+        assert_ne!(
+            staged.content_ref,
+            ContentRef::whole_file_v0(b"other bytes")
+        );
+        match harness.client.complete_upload(
+            namespace,
+            &mismatch_upload.upload_id,
+            &CompleteUploadRequest {
+                content_ref: ContentRef::whole_file_v0(b"other bytes"),
+            },
+        ) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "invalid_upload_content"),
+            other => panic!("expected invalid_upload_content, got {other:?}"),
+        }
+
+        let content_ref = stage_uploaded_content_ref(&harness.client, namespace, file_bytes);
 
         let mut annotations = CommitAnnotations::new();
         annotations.insert("source".to_owned(), json!("http-smoke"));
@@ -162,7 +183,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "uploaded.txt".to_owned(),
-                content_manifest_digest: manifest_digest.clone(),
+                content_ref: content_ref.clone(),
             }],
             message: Some("upload over http".to_owned()),
             annotations: Some(annotations.clone()),
@@ -179,7 +200,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
                 op_index: 0,
                 inode_id: InodeId(2),
                 revision_no: loon_api::RevisionNo(1),
-                content_manifest_digest: manifest_digest.clone(),
+                content_ref: content_ref.clone(),
             }]
         );
 
@@ -194,10 +215,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .stat_path(&target)
             .expect("stat committed file");
         assert_eq!(stat.inode_id, InodeId(2));
-        assert_eq!(
-            stat.content_manifest_digest.as_deref(),
-            Some(manifest_digest.as_str())
-        );
+        assert_eq!(stat.content_ref.as_ref(), Some(&content_ref));
         let read_back = harness
             .client
             .read_file_bytes(&target)
@@ -251,7 +269,8 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .create_namespace(namespace)
             .expect("create namespace");
 
-        let first_manifest = stage_uploaded_manifest(&harness.client, namespace, b"first bytes\n");
+        let first_content_ref =
+            stage_uploaded_content_ref(&harness.client, namespace, b"first bytes\n");
         let create = harness
             .client
             .commit_operations(
@@ -265,7 +284,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                     ops: vec![CommitOp::CreateFile {
                         parent_inode: InodeId(1),
                         display_name: "restore.txt".to_owned(),
-                        content_manifest_digest: first_manifest.clone(),
+                        content_ref: first_content_ref.clone(),
                     }],
                     message: None,
                     annotations: None,
@@ -277,8 +296,8 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             other => panic!("unexpected create result: {other:?}"),
         };
 
-        let second_manifest =
-            stage_uploaded_manifest(&harness.client, namespace, b"second bytes\n");
+        let second_content_ref =
+            stage_uploaded_content_ref(&harness.client, namespace, b"second bytes\n");
         let replace = harness
             .client
             .commit_operations(
@@ -292,7 +311,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                     ops: vec![CommitOp::ReplaceFile {
                         inode_id,
                         base_revision_no: RevisionNo(1),
-                        content_manifest_digest: second_manifest.clone(),
+                        content_ref: second_content_ref.clone(),
                     }],
                     message: None,
                     annotations: None,
@@ -329,7 +348,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                 inode_id,
                 source_revision_no: RevisionNo(1),
                 revision_no: RevisionNo(3),
-                content_manifest_digest: first_manifest.clone(),
+                content_ref: first_content_ref.clone(),
             }]
         );
 
@@ -338,10 +357,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .stat_path(&target)
             .expect("stat restored file");
         assert_eq!(entry.inode_id, inode_id);
-        assert_eq!(
-            entry.content_manifest_digest.as_deref(),
-            Some(first_manifest.as_str())
-        );
+        assert_eq!(entry.content_ref.as_ref(), Some(&first_content_ref));
         let bytes = harness
             .client
             .read_file_bytes(&target)
@@ -380,7 +396,8 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
             .create_namespace(namespace)
             .expect("create namespace");
 
-        let first_manifest = stage_uploaded_manifest(&harness.client, namespace, b"first bytes\n");
+        let first_content_ref =
+            stage_uploaded_content_ref(&harness.client, namespace, b"first bytes\n");
         let create = harness
             .client
             .commit_operations(
@@ -394,7 +411,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
                     ops: vec![CommitOp::CreateFile {
                         parent_inode: InodeId(1),
                         display_name: "restore.txt".to_owned(),
-                        content_manifest_digest: first_manifest,
+                        content_ref: first_content_ref,
                     }],
                     message: None,
                     annotations: None,
@@ -454,8 +471,8 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
             .create_namespace(namespace)
             .expect("create namespace");
 
-        let first_manifest =
-            stage_uploaded_manifest(&harness.client, namespace, b"first payload\n");
+        let first_content_ref =
+            stage_uploaded_content_ref(&harness.client, namespace, b"first payload\n");
         let first_request = V0CommitRequest {
             request_id: "req-phase-2a-conflict".to_owned(),
             planned_head_seq: ChangeSeq(0),
@@ -465,7 +482,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "first.txt".to_owned(),
-                content_manifest_digest: first_manifest,
+                content_ref: first_content_ref,
             }],
             message: Some("first commit".to_owned()),
             annotations: None,
@@ -475,8 +492,8 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
             .commit_operations(namespace, &first_request)
             .expect("first commit");
 
-        let second_manifest =
-            stage_uploaded_manifest(&harness.client, namespace, b"second payload\n");
+        let second_content_ref =
+            stage_uploaded_content_ref(&harness.client, namespace, b"second payload\n");
         let mut changed_annotations = BTreeMap::new();
         changed_annotations.insert("source".to_owned(), json!("changed"));
         let conflicting_request = V0CommitRequest {
@@ -486,7 +503,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "second.txt".to_owned(),
-                content_manifest_digest: second_manifest,
+                content_ref: second_content_ref,
             }],
             message: Some("second commit".to_owned()),
             annotations: Some(changed_annotations),
@@ -593,10 +610,7 @@ async fn http_delete_move_and_copy_request_ids_are_idempotent() {
         let source_entry = harness.client.stat_path(&source).expect("source stat");
         let copied_entry = harness.client.stat_path(&copied).expect("copied stat");
         assert_ne!(source_entry.inode_id, copied_entry.inode_id);
-        assert_eq!(
-            source_entry.content_manifest_digest,
-            copied_entry.content_manifest_digest
-        );
+        assert_eq!(source_entry.content_ref, copied_entry.content_ref);
 
         let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
         let move_first = harness
@@ -932,14 +946,13 @@ fn retry_until_lease_handoff(client: &Client, from: &NamespacePath, to: &Namespa
     panic!("timed out waiting for lease handoff");
 }
 
-fn stage_uploaded_manifest(client: &Client, namespace: &str, file_bytes: &[u8]) -> String {
+fn stage_uploaded_content_ref(client: &Client, namespace: &str, file_bytes: &[u8]) -> ContentRef {
     let begin = client.begin_upload(namespace).expect("begin upload");
-    client
-        .upload_block(namespace, &begin.upload_id, 0, file_bytes)
-        .expect("upload single block");
+    let staged = client
+        .upload_content(namespace, &begin.upload_id, file_bytes)
+        .expect("upload content");
     let complete_request = CompleteUploadRequest {
-        file_size_bytes: file_bytes.len() as u64,
-        file_digest_sha256: sha256_digest(file_bytes),
+        content_ref: staged.content_ref,
     };
     let complete = client
         .complete_upload(namespace, &begin.upload_id, &complete_request)
@@ -948,5 +961,5 @@ fn stage_uploaded_manifest(client: &Client, namespace: &str, file_bytes: &[u8]) 
         .complete_upload(namespace, &begin.upload_id, &complete_request)
         .expect("repeat complete upload");
     assert_eq!(repeated, complete);
-    complete.content_manifest_digest
+    complete.content_ref
 }

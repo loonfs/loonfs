@@ -897,14 +897,14 @@ fn append_rows_to_metadata(
                     revision_no,
                     committed_seq,
                     revision_op_index,
-                    content_manifest_digest,
+                    content_ref,
                 },
             ) => metadata_state.revisions.push(RevisionRecord {
                 inode_id: *inode_id,
                 revision_no: *revision_no,
                 committed_seq: *committed_seq,
                 revision_op_index: *revision_op_index,
-                content_manifest_digest: content_manifest_digest.clone(),
+                content_ref: content_ref.clone(),
             }),
             (
                 CheckpointTableFamily::Tombstones,
@@ -972,7 +972,7 @@ fn checkpoint_rows_for_family(
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
                 revision_op_index: revision.revision_op_index,
-                content_manifest_digest: revision.content_manifest_digest.clone(),
+                content_ref: revision.content_ref.clone(),
             })
             .collect::<Vec<_>>(),
         CheckpointTableFamily::Tombstones => metadata_state

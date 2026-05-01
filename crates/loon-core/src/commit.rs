@@ -1,7 +1,7 @@
 use crate::metadata::MetadataState;
 use loon_api::{
-    v0::CommitAnnotations, ChangeSeq, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
-    LeaseState, NamespaceId, RevisionNo,
+    v0::CommitAnnotations, ChangeSeq, ContentRef, FenceToken, HeadState, HeadStateEnvelope,
+    InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,7 @@ mod ordered;
 mod publish;
 
 pub use self::ordered::build_commit_plan;
-pub(crate) use self::ordered::resolve_restore_content_manifest_digests;
+pub(crate) use self::ordered::resolve_restore_content_refs;
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,12 +39,12 @@ pub enum CommitOp {
     CreateFile {
         parent_inode: InodeId,
         display_name: String,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     ReplaceFile {
         inode_id: InodeId,
         base_revision: RevisionNo,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     RestoreRevision {
         inode_id: InodeId,
@@ -87,7 +87,7 @@ pub struct CommitPlan {
     pub base_head_seq: ChangeSeq,
     pub next_seq: ChangeSeq,
     pub allocated_inode_ids: Vec<InodeId>,
-    pub resolved_restore_content_manifest_digests: Vec<Option<String>>,
+    pub resolved_restore_content_refs: Vec<Option<ContentRef>>,
     pub resulting_next_inode_id: InodeId,
     pub durable_content_required: bool,
     pub wal_object_must_be_written: bool,

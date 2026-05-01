@@ -75,7 +75,11 @@ Illustrative revision row for the current file contents:
   "inode_id": 42,
   "revision_no": 7,
   "committed_seq": 91,
-  "content_manifest_digest": "sha256:manifest..."
+  "content_ref": {
+    "kind": "whole_file_v0",
+    "digest": "sha256:42d...",
+    "size_bytes": 19482
+  }
 }
 ```
 
@@ -117,9 +121,9 @@ The v0 policy is `nfc_casefold_v0`, which defines sibling-name comparison by Uni
 
 A file is represented by one inode and a sequence of immutable revisions.
 
-Each revision points to exactly one immutable content manifest. The manifest, in turn, describes the ordered list of immutable content blocks that reconstruct the file bytes.
+Each revision points to exactly one immutable content reference. In v0, that reference names one whole-file object containing the complete plaintext file bytes.
 
-Blocks and manifests belong to the owning namespace. A file revision may reference only content that is durable under that namespace's content store.
+Content objects belong to the owning namespace. A file revision may reference only content that is durable under that namespace's content store.
 
 LoonFS therefore uses a two-stage write model:
 
@@ -134,16 +138,16 @@ This separation is part of the core model.
 The stable immutable content families are:
 
 ```text
-namespaces/{namespace_id}/blobs/{block_digest_sha256}
-namespaces/{namespace_id}/manifests/{content_manifest_digest}.json
+namespaces/{namespace_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}
 ```
 
 The core rules are:
 
-- block digests use `sha256:<hex>` over plaintext block bytes;
-- blocks are fixed at `16 MiB`, except the final block may be shorter;
-- the content manifest records `namespace_id`, `file_size_bytes`, `file_digest_sha256`, `block_size_bytes`, and the ordered block digests and block sizes; and
-- `content_manifest_digest` is the digest of the canonical manifest bytes.
+- `content_ref.kind` is `whole_file_v0` for the v0 content strategy;
+- `content_ref.digest` uses `sha256:<64 lowercase hex>` over the complete plaintext file bytes;
+- `content_ref.size_bytes` records the complete byte length;
+- the object key leaf is the raw 64-character hex digest, while JSON keeps the full `sha256:<hex>` digest string; and
+- future content strategies must use a new `content_ref.kind` and name their durability and validation rules before revisions may reference them.
 
 ### 4.2 Upload-before-publish
 
@@ -153,7 +157,7 @@ This applies to:
 
 - file create;
 - file replace; and
-- file restore, when the restore introduces a newly referenced manifest.
+- file restore, when the restore introduces a newly referenced content object.
 
 ## 5. Tombstones and deletion
 

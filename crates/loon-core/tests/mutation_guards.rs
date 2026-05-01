@@ -1,6 +1,8 @@
 use loon_api::{
+    sha256_digest,
     v0::{CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest},
-    ChangeSeq, FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
+    ChangeSeq, ContentRef, ContentRefKind, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
+    NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
@@ -13,7 +15,7 @@ use loon_core::{
     CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::content_manifest;
+use loon_objectstore::keys::content_blob;
 use loon_objectstore::ObjectStore;
 use tempfile::tempdir;
 
@@ -31,7 +33,7 @@ fn stale_head_precondition_is_rejected() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
     ]);
     let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
@@ -74,13 +76,13 @@ fn stale_revision_precondition_is_rejected() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![loon_api::WalOp::ReplaceFile {
             op_index: 0,
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
-            content_manifest_digest: "sha256:manifest-2".to_owned(),
+            content_ref: content_ref("content-2"),
         }],
     ]);
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
@@ -94,7 +96,7 @@ fn stale_revision_precondition_is_rejected() {
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
-            content_manifest_digest: "sha256:manifest-3".to_owned(),
+            content_ref: content_ref("content-3"),
         }],
         preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
         message: None,
@@ -126,7 +128,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![loon_api::WalOp::DeleteSubtree {
             op_index: 0,
@@ -146,7 +148,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(2),
                 display_name: "new.txt".to_owned(),
-                content_manifest_digest: "sha256:manifest-2".to_owned(),
+                content_ref: content_ref("content-2"),
             }],
             preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
             message: None,
@@ -174,7 +176,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
                 base_revision: RevisionNo(1),
-                content_manifest_digest: "sha256:manifest-2".to_owned(),
+                content_ref: content_ref("content-2"),
             }],
             preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
             message: None,
@@ -277,13 +279,13 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![loon_api::WalOp::ReplaceFile {
             op_index: 0,
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
-            content_manifest_digest: "sha256:manifest-2".to_owned(),
+            content_ref: content_ref("content-2"),
         }],
     ]);
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
@@ -360,7 +362,7 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
     ]);
     let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
@@ -377,7 +379,7 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
                 CommitOp::ReplaceFile {
                     inode_id: InodeId(3),
                     base_revision: RevisionNo(1),
-                    content_manifest_digest: "sha256:manifest-2".to_owned(),
+                    content_ref: content_ref("content-2"),
                 },
                 CommitOp::RestoreRevision {
                     inode_id: InodeId(3),
@@ -393,8 +395,8 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     )
     .expect("replace then restore in same request should validate");
     assert_eq!(
-        plan.resolved_restore_content_manifest_digests,
-        vec![None, Some("sha256:manifest-2".to_owned())]
+        plan.resolved_restore_content_refs,
+        vec![None, Some(content_ref("content-2"))]
     );
 }
 
@@ -412,13 +414,13 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![loon_api::WalOp::ReplaceFile {
             op_index: 0,
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
-            content_manifest_digest: "sha256:manifest-2".to_owned(),
+            content_ref: content_ref("content-2"),
         }],
     ]);
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
@@ -451,10 +453,10 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     )
     .expect("restore then restore in same request should validate");
     assert_eq!(
-        plan.resolved_restore_content_manifest_digests,
+        plan.resolved_restore_content_refs,
         vec![
-            Some("sha256:manifest-1".to_owned()),
-            Some("sha256:manifest-1".to_owned())
+            Some(content_ref("content-1")),
+            Some(content_ref("content-1"))
         ]
     );
 }
@@ -473,7 +475,7 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             inode_id: InodeId(3),
             parent_inode: InodeId(2),
             display_name: "readme.txt".to_owned(),
-            content_manifest_digest: "sha256:manifest-1".to_owned(),
+            content_ref: content_ref("content-1"),
         }],
         vec![loon_api::WalOp::DeleteSubtree {
             op_index: 0,
@@ -539,7 +541,7 @@ fn restore_revision_overflow_is_rejected() {
             revision_no: RevisionNo(u64::MAX),
             committed_seq: ChangeSeq(1),
             revision_op_index: 0,
-            content_manifest_digest: "sha256:manifest-max".to_owned(),
+            content_ref: content_ref("content-max"),
         }],
         subtree_tombstones: Vec::new(),
     };
@@ -591,7 +593,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
             ops: vec![V0CommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "restore.txt".to_owned(),
-                content_manifest_digest: first.content_manifest_digest.clone(),
+                content_ref: first.content_ref.clone(),
             }],
             message: None,
             annotations: None,
@@ -617,7 +619,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
             ops: vec![V0CommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(1),
-                content_manifest_digest: second.content_manifest_digest,
+                content_ref: second.content_ref,
             }],
             message: None,
             annotations: None,
@@ -627,17 +629,17 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     .expect("replace file");
 
     store
-        .delete(&content_manifest(
-            namespace_id().as_str(),
-            &first.content_manifest_digest,
-        ))
-        .expect("delete first manifest");
+        .delete(
+            &content_blob(namespace_id().as_str(), &first.content_ref.digest)
+                .expect("first content key"),
+        )
+        .expect("delete first content");
 
     let error = commit_operations(
         &store,
         &namespace_id(),
         V0CommitRequest {
-            request_id: "restore-missing-manifest".to_owned(),
+            request_id: "restore-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(2),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(2),
@@ -656,7 +658,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     assert!(matches!(
         error,
         CoreError::DurableContent(
-            loon_core::content::DurableContentValidationError::MissingManifestObject { .. }
+            loon_core::content::DurableContentValidationError::MissingContentObject { .. }
         )
     ));
 }
@@ -672,7 +674,7 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
         &store,
         &namespace_id(),
         V0CommitRequest {
-            request_id: "create-missing-parent-missing-manifest".to_owned(),
+            request_id: "create-missing-parent-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
@@ -680,18 +682,18 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
             ops: vec![V0CommitOp::CreateFile {
                 parent_inode: InodeId(99),
                 display_name: "missing.txt".to_owned(),
-                content_manifest_digest: "sha256:missing-manifest".to_owned(),
+                content_ref: content_ref("missing-content"),
             }],
             message: None,
             annotations: None,
         },
         &context,
     )
-    .expect_err("missing manifest should win before missing parent");
+    .expect_err("missing content should win before missing parent");
     assert!(matches!(
         error,
         CoreError::DurableContent(
-            loon_core::content::DurableContentValidationError::MissingManifestObject { .. }
+            loon_core::content::DurableContentValidationError::MissingContentObject { .. }
         )
     ));
 }
@@ -719,7 +721,7 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
         &store,
         &namespace_id(),
         V0CommitRequest {
-            request_id: "replace-stale-missing-manifest".to_owned(),
+            request_id: "replace-stale-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
@@ -727,18 +729,18 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
             ops: vec![V0CommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(99),
-                content_manifest_digest: "sha256:missing-manifest".to_owned(),
+                content_ref: content_ref("missing-content"),
             }],
             message: None,
             annotations: None,
         },
         &context,
     )
-    .expect_err("missing manifest should win before stale revision");
+    .expect_err("missing content should win before stale revision");
     assert!(matches!(
         error,
         CoreError::DurableContent(
-            loon_core::content::DurableContentValidationError::MissingManifestObject { .. }
+            loon_core::content::DurableContentValidationError::MissingContentObject { .. }
         )
     ));
 }
@@ -805,7 +807,7 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
             ops: vec![V0CommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "restore.txt".to_owned(),
-                content_manifest_digest: first.content_manifest_digest.clone(),
+                content_ref: first.content_ref.clone(),
             }],
             message: None,
             annotations: None,
@@ -820,11 +822,11 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
 
     let second = store_bytes_as_content(&store, &namespace_id(), b"second").expect("stage second");
     store
-        .delete(&content_manifest(
-            namespace_id().as_str(),
-            &second.content_manifest_digest,
-        ))
-        .expect("delete second manifest");
+        .delete(
+            &content_blob(namespace_id().as_str(), &second.content_ref.digest)
+                .expect("second content key"),
+        )
+        .expect("delete second content");
 
     let error = commit_operations(
         &store,
@@ -839,7 +841,7 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
                 V0CommitOp::ReplaceFile {
                     inode_id,
                     base_revision_no: RevisionNo(1),
-                    content_manifest_digest: second.content_manifest_digest.clone(),
+                    content_ref: second.content_ref.clone(),
                 },
                 V0CommitOp::RestoreRevision {
                     inode_id,
@@ -852,11 +854,11 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
         },
         &context,
     )
-    .expect_err("missing same-request manifest should fail durable-content validation");
+    .expect_err("missing same-request content should fail durable-content validation");
     assert!(matches!(
         error,
         CoreError::DurableContent(
-            loon_core::content::DurableContentValidationError::MissingManifestObject { .. }
+            loon_core::content::DurableContentValidationError::MissingContentObject { .. }
         )
     ));
 }
@@ -1039,7 +1041,7 @@ fn delete_path_non_recursive_rejects_non_empty_directory() {
 }
 
 #[test]
-fn copy_file_path_creates_new_inode_and_reuses_content_manifest() {
+fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1068,8 +1070,8 @@ fn copy_file_path_creates_new_inode_and_reuses_content_manifest() {
     let copy = resolve_path(&store, &namespace_id(), "/docs/copy.txt").expect("copy stat");
     assert_ne!(source.inode_id, copy.inode_id);
     assert_eq!(
-        source.content_manifest_digest, copy.content_manifest_digest,
-        "copy should reuse stored content manifest"
+        source.content_ref, copy.content_ref,
+        "copy should reuse stored content ref"
     );
 }
 
@@ -1188,4 +1190,12 @@ fn mutation_context() -> MutationContext {
 
 fn namespace_id() -> NamespaceId {
     NamespaceId::from("demo".to_owned())
+}
+
+fn content_ref(seed: &str) -> ContentRef {
+    ContentRef {
+        kind: ContentRefKind::WholeFileV0,
+        digest: sha256_digest(seed.as_bytes()),
+        size_bytes: seed.len() as u64,
+    }
 }

@@ -10,7 +10,7 @@ A conforming object-store layer must provide the following behavior.
 
 | Guarantee | Rationale |
 | --- | --- |
-| **Create-if-absent** for immutable objects | Content blocks, manifests, WAL segments, and checkpoints must never be silently overwritten. |
+| **Create-if-absent** for immutable objects | File content objects, WAL segments, and checkpoints must never be silently overwritten. |
 | **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
 | **Strong consistency** | A successful put/delete operation must become authoritative immediately after it succeeds. |
 | **Prefix enumeration** | Checkpoint discovery, WAL segment discovery for repair and cleanup, and general namespace inspection need a reliable way to enumerate objects by prefix. |
@@ -27,8 +27,7 @@ The required durable object families and standard key patterns are:
 | --- | --- | --- | --- |
 | **Namespace head** | Mutable | Record the current visible boundary, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/head.json` |
 | **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/lease.json` |
-| **Content blocks** | Immutable | Store file bytes. | `namespaces/{namespace_id}/blobs/{block_digest_sha256}` |
-| **Content manifests** | Immutable | Describe file size, digest, block size, and the ordered block list. | `namespaces/{namespace_id}/manifests/{content_manifest_digest}.json` |
+| **Content objects** | Immutable | Store whole-file v0 bytes. | `namespaces/{namespace_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq}-{end_seq}-{segment_id}.cbor.zst` |
 | **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/manifest.json` |
 | **Checkpoint segments** | Immutable | Store verified checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/tables/{family}-{segment_index}.sst.zst` |
@@ -49,12 +48,12 @@ The metadata log has five important rules.
 
 The content model has four rules.
 
-1. Block digests are content-derived, not provider-derived.
-2. A content manifest describes one complete file revision.
+1. Content digests are content-derived, not provider-derived.
+2. A `content_ref` describes one complete file revision.
 3. Immutable content objects are written with create-if-absent semantics.
-4. A metadata commit may reference a content manifest only after that manifest and all referenced blocks are already durable.
+4. A metadata commit may reference a `content_ref` only after the referenced object is already durable.
 
-In v0, file content is stored as fixed-size 16 MiB blocks, except for the final block which may be smaller.
+In v0, file content is stored as one whole-file object whose `content_ref.kind` is `whole_file_v0`. The digest remains serialized as `sha256:<64hex>`, while the object key partitions the hex as `sha256/ab/cd/<hex>`.
 
 ## 6. Mutable control-object rules
 

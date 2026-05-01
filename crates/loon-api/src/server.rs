@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, InodeId, InodeKind, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,8 +12,7 @@ pub struct AuthoritativePathEntry {
     pub display_name: String,
     pub revision_no: Option<RevisionNo>,
     pub size_bytes: Option<u64>,
-    pub content_digest: Option<String>,
-    pub content_manifest_digest: Option<String>,
+    pub content_ref: Option<ContentRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

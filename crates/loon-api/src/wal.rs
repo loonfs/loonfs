@@ -1,6 +1,6 @@
 use crate::digest::sha256_hex;
 use crate::v0::{CommitAnnotations, CommitOpResult};
-use crate::{ChangeSeq, FenceToken, InodeId, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, ContentRef, FenceToken, InodeId, NamespaceId, RevisionNo};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -28,14 +28,14 @@ pub enum WalOp {
         inode_id: InodeId,
         parent_inode: InodeId,
         display_name: String,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     ReplaceFile {
         #[serde(default)]
         op_index: u32,
         inode_id: InodeId,
         base_revision: RevisionNo,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     RestoreRevision {
         #[serde(default)]
@@ -43,7 +43,7 @@ pub enum WalOp {
         inode_id: InodeId,
         source_revision_no: RevisionNo,
         base_revision: RevisionNo,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     DeleteFile {
         #[serde(default)]

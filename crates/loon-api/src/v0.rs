@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, ContentRef, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -15,30 +15,26 @@ pub enum UploadMode {
 pub struct BeginUploadResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
-    pub block_size_bytes: u64,
     pub mode: UploadMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UploadBlockResponse {
+pub struct UploadContentResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
-    pub block_index: u32,
-    pub content_digest_sha256: String,
-    pub plaintext_size_bytes: u64,
+    pub content_ref: ContentRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompleteUploadRequest {
-    pub file_size_bytes: u64,
-    pub file_digest_sha256: String,
+    pub content_ref: ContentRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompleteUploadResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
-    pub content_manifest_digest: String,
+    pub content_ref: ContentRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,12 +68,12 @@ pub enum CommitOp {
     CreateFile {
         parent_inode: InodeId,
         display_name: String,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     ReplaceFile {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     RestoreRevision {
         inode_id: InodeId,
@@ -127,20 +123,20 @@ pub enum CommitOpResult {
         op_index: u32,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     ReplaceFile {
         op_index: u32,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     RestoreRevision {
         op_index: u32,
         inode_id: InodeId,
         source_revision_no: RevisionNo,
         revision_no: RevisionNo,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     DeleteFile {
         op_index: u32,

@@ -67,6 +67,7 @@ A representative v0 binding is shown below.
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
+| Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
@@ -86,7 +87,11 @@ A few representative requests and responses are shown below. These examples are 
   "head_seq": 418,
   "revision_no": 7,
   "size_bytes": 19482,
-  "content_manifest_digest": "sha256:report-v7"
+  "content_ref": {
+    "kind": "whole_file_v0",
+    "digest": "sha256:42d...",
+    "size_bytes": 19482
+  }
 }
 ```
 
@@ -133,7 +138,11 @@ Representative request:
     {
       "op": "put",
       "path": "/docs/report.txt",
-      "content_manifest_digest": "sha256:report-v8"
+      "content_ref": {
+        "kind": "whole_file_v0",
+        "digest": "sha256:7ab...",
+        "size_bytes": 20591
+      }
     },
     {
       "op": "mv",
@@ -169,25 +178,49 @@ Representative response:
 
 ### 3.5 Upload transport
 
-The upload transport standardizes staged content publication, not one specific byte path.
+The upload transport standardizes staged content publication, not one specific byte path. In v0, uploads are whole-file uploads: the staged body is the complete file content, not a separate metadata document or multipart strategy.
 
-A conforming implementation may support either:
+The semantic rule is:
 
-- **delegated upload**, where the service issues upload targets and the client writes blocks directly to storage;
-- **service-proxied upload**, where the client sends blocks through the service.
+- `PUT /content` stores the immutable whole-file object and records the staged `content_ref`;
+- `complete` succeeds only after the expected `content_ref` is durable and matches the staged upload; and
+- the returned `content_ref` is then safe to reference from a commit.
 
-The semantic rule is the same in both cases:
-
-- `complete` succeeds only after the referenced blocks and manifest are durable;
-- the returned `content_manifest_digest` is then safe to reference from a commit.
+Repeating `PUT /content` with the same bytes for the same upload id is idempotent. Repeating it with different bytes is a conflict. Completing an upload fails if no content was staged, if the expected `content_ref` differs from the staged one, or if the durable content validation rules from the write protocol fail.
 
 Representative begin-upload response:
 
 ```json
 {
+  "namespace_id": "demo",
   "upload_id": "upl_01J...",
-  "block_size_bytes": 16777216,
-  "mode": "delegated"
+  "mode": "service_proxied"
+}
+```
+
+Representative content-upload response:
+
+```json
+{
+  "namespace_id": "demo",
+  "upload_id": "upl_01J...",
+  "content_ref": {
+    "kind": "whole_file_v0",
+    "digest": "sha256:7ab...",
+    "size_bytes": 20591
+  }
+}
+```
+
+Representative complete-upload request:
+
+```json
+{
+  "content_ref": {
+    "kind": "whole_file_v0",
+    "digest": "sha256:7ab...",
+    "size_bytes": 20591
+  }
 }
 ```
 
@@ -197,7 +230,11 @@ Representative complete-upload response:
 {
   "namespace_id": "demo",
   "upload_id": "upl_01J...",
-  "content_manifest_digest": "sha256:report-v8"
+  "content_ref": {
+    "kind": "whole_file_v0",
+    "digest": "sha256:7ab...",
+    "size_bytes": 20591
+  }
 }
 ```
 
@@ -234,7 +271,11 @@ Representative request:
       "op": "replace_file",
       "inode_id": 42,
       "base_revision_no": 7,
-      "content_manifest_digest": "sha256:report-v8"
+      "content_ref": {
+        "kind": "whole_file_v0",
+        "digest": "sha256:7ab...",
+        "size_bytes": 20591
+      }
     }
   ]
 }

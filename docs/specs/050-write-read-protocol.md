@@ -8,12 +8,19 @@ A write has four phases: durably stage content (if a mutation contains content),
 
 Content must be durable before any metadata change can reference it.
 
-1. Split the file into fixed **16 MiB blocks** (the final block may be shorter). Compute the `sha256` digest of each block.
-2. Upload each block to `namespaces/{namespace_id}/blobs/{block_digest}` with create-if-absent semantics.
-3. Build a content manifest listing `file_size_bytes`, `file_digest_sha256`, `block_size_bytes`, and the ordered block digests and sizes.
-4. Upload the manifest to `namespaces/{namespace_id}/manifests/{content_manifest_digest}.json` with create-if-absent semantics.
+1. Compute the `sha256` digest of the complete plaintext file bytes.
+2. Upload the complete byte sequence to `namespaces/{namespace_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` with create-if-absent semantics.
+3. Build a content reference:
 
-Content staging is idempotent and has no effect on the visible tree. If the caller crashes mid-upload, orphaned blocks are harmless.
+   ```json
+   {
+     "kind": "whole_file_v0",
+     "digest": "sha256:<64hex>",
+     "size_bytes": 123
+   }
+   ```
+
+Content staging is idempotent and has no effect on the visible tree. If the caller crashes mid-upload, orphaned content objects are harmless.
 
 ### 1.2 Basis reconstruction
 
@@ -24,13 +31,21 @@ Before evaluating commit requests, the server reconstructs the current metadata 
 The server validates each commit request against the reconstructed state:
 
 1. Resolve any operation-local references needed to identify referenced content.
-2. Verify that all referenced content (manifests and blocks) is already durable in object storage, and that digests and sizes match.
+2. Verify that all referenced content objects are already durable in object storage, and that `content_ref.kind`, digest, and size match.
 3. Evaluate preconditions in order (see §6 for the precondition catalogue).
 4. Resolve inode references and allocate new inode ids monotonically from the head's `next_inode_id`.
 
 If a request contains multiple operations, they are evaluated sequentially against ephemeral state advanced by earlier operations in the same request.
 
 Passing validation does not by itself make the request committed or successful. If a client mutation request reaches the success boundary in §1.4, it becomes one logical commit. Distinct client commit requests remain distinct logical commits even when they are published in the same WAL segment.
+
+Content reference validation fails before metadata preconditions are evaluated when:
+
+- `content_ref.kind` is unsupported;
+- `content_ref.digest` is not a valid `sha256:<64 lowercase hex>` digest;
+- the referenced object is missing from the namespace content store;
+- the object size differs from `content_ref.size_bytes`; or
+- the object bytes hash to a different digest than `content_ref.digest`.
 
 ### 1.4 WAL segment publication and head advance
 
@@ -92,17 +107,17 @@ To resolve an absolute path at seq N:
 
 Given a visible file inode at seq N:
 
-1. Look up the file's latest revision at N to obtain `content_manifest_digest`.
-2. Fetch the content manifest from object storage at `namespaces/{namespace_id}/manifests/{content_manifest_digest}.json`.
-3. The manifest lists the file's ordered block digests. Fetch each block from `namespaces/{namespace_id}/blobs/{block_digest}`.
-4. Concatenate the blocks in manifest order to produce the file bytes.
+1. Look up the file's latest revision at N to obtain `content_ref`.
+2. Verify that `content_ref.kind` is supported by the reader.
+3. For `whole_file_v0`, fetch the object at `namespaces/{namespace_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}`, where `hex` is the digest suffix from `content_ref.digest`.
+4. Verify that the fetched bytes match `content_ref.size_bytes` and `content_ref.digest`.
 
 ### 2.5 Directory listing
 
 Given a visible directory inode at seq N:
 
 1. Collect all active directory bindings whose `parent_inode_id` matches the directory.
-2. For each binding, resolve the child inode. If the child is a file, its latest revision provides size and content digest via the manifest.
+2. For each binding, resolve the child inode. If the child is a file, its latest revision provides size and content identity through `content_ref`.
 
 ## 3. Logical commits, sequence numbers, and visibility
 
@@ -143,8 +158,8 @@ The server need not be centralized. The protocol is designed for multiple writer
 The first standard lower-level mutation set includes:
 
 - `create_dir(parent_inode_id, display_name)`
-- `create_file(parent_inode_id, display_name, content_manifest_digest)`
-- `replace_file(inode_id, base_revision_no, content_manifest_digest)`
+- `create_file(parent_inode_id, display_name, content_ref)`
+- `replace_file(inode_id, base_revision_no, content_ref)`
 - `rename(inode_id, new_parent_inode_id, new_display_name)`
 - `delete_subtree(root_inode_id)`
 - `restore_revision(inode_id, source_revision_no, base_revision_no)`

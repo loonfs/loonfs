@@ -4,7 +4,7 @@
 
 | Part | Role |
 | --- | --- |
-| **Object store** | Holds every durable object: content blocks, content manifests, WAL segments, checkpoints, and small control objects. |
+| **Object store** | Holds every durable object: file content objects, WAL segments, checkpoints, and small control objects. |
 | **Authoritative service** | Resolves paths, validates mutations, writes logical commits into WAL segments, advances heads, serves reads, and issues capabilities for upload or download. |
 | **Clients** | Use either direct filesystem operations or the lower-level upload, commit, and change-feed model. |
 | **Access-control service** | Evaluates ACLs and shares, then authorizes LoonFS operations. This may be part of the authoritative service in a simple deployment. |
@@ -16,7 +16,7 @@ This spec uses three terms.
 
 | Plane | Purpose | Examples | Namespace-visible history? |
 | --- | --- | --- | --- |
-| **Data plane** | Stores and serves file bytes. | Content blocks, content manifests, download streams. | No, by itself. |
+| **Data plane** | Stores and serves file bytes. | Whole-file content objects and download streams. | No, by itself. |
 | **Metadata plane** | Defines the filesystem's durable truth. | WAL segments, namespace head, checkpoints, inode and direntry state. | Yes. |
 | **Control plane** | Coordinates multi-request work and authorization. | Upload handles, put intents, ACLs, shares, leases. | No. |
 

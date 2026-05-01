@@ -9,18 +9,16 @@ use crate::loading::ControlObjectLoadError;
 use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, VisiblePathError};
 use crate::wal::WalBuildError;
 use loon_api::{
-    content_manifest_digest_sha256, encode_content_manifest_json, name_key_for_display_name,
-    payload_checksum_sha256,
+    name_key_for_display_name, payload_checksum_sha256,
     v0::{
         CommitOp as V0CommitOp, CommitOpResult, CommitPrecondition as V0CommitPrecondition,
         CommitRequest as V0CommitRequest, CommitResponse as V0CommitResponse,
     },
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentBlockDescriptor,
-    ContentManifestEnvelope, ContentManifestPayload, ControlObjectKind, HeadState,
-    HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope, MutationResult,
-    NamespaceId, NamespaceSummary, CONTENT_BLOCK_SIZE_BYTES,
+    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef, ControlObjectKind,
+    HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope,
+    MutationResult, NamespaceId, NamespaceSummary,
 };
-use loon_objectstore::keys::{blob, content_manifest, namespace_head, namespace_lease};
+use loon_objectstore::keys::{content_blob, namespace_head, namespace_lease};
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -36,7 +34,7 @@ pub struct MutationContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredContent {
-    pub content_manifest_digest: String,
+    pub content_ref: ContentRef,
     pub file_digest_sha256: String,
     pub file_size_bytes: u64,
 }
@@ -63,8 +61,8 @@ pub enum CoreErrorKind {
     CheckpointUnavailable,
     UploadNotFound,
     UploadAlreadyCompleted,
-    UploadBlockConflict,
-    InvalidUploadBlock,
+    UploadContentConflict,
+    InvalidUploadContent,
     RebootstrapRequired,
     NamespaceCorrupt,
     ServerError,
@@ -130,10 +128,10 @@ pub enum CoreError {
     UploadNotFound { upload_id: String },
     #[error("upload session `{upload_id}` is already completed")]
     UploadAlreadyCompleted { upload_id: String },
-    #[error("upload session `{upload_id}` block `{block_index}` conflicts with prior content")]
-    UploadBlockConflict { upload_id: String, block_index: u32 },
-    #[error("invalid upload block: {0}")]
-    InvalidUploadBlock(String),
+    #[error("upload session `{upload_id}` content conflicts with prior content")]
+    UploadContentConflict { upload_id: String },
+    #[error("invalid upload content: {0}")]
+    InvalidUploadContent(String),
     #[error(
         "change feed cursor `{after_seq:?}` is older than retention floor `{retention_floor_seq:?}`"
     )]
@@ -200,8 +198,8 @@ impl CoreError {
             CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => CoreErrorKind::UploadAlreadyCompleted,
-            CoreError::UploadBlockConflict { .. } => CoreErrorKind::UploadBlockConflict,
-            CoreError::InvalidUploadBlock(_) => CoreErrorKind::InvalidUploadBlock,
+            CoreError::UploadContentConflict { .. } => CoreErrorKind::UploadContentConflict,
+            CoreError::InvalidUploadContent(_) => CoreErrorKind::InvalidUploadContent,
             CoreError::RebootstrapRequired { .. } => CoreErrorKind::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
@@ -400,11 +398,11 @@ pub fn read_file_bytes<S: ObjectStore + ?Sized>(
             kind: entry.inode_kind,
         });
     }
-    let manifest_digest = entry
-        .content_manifest_digest
+    let content_ref = entry
+        .content_ref
         .clone()
         .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-    let read = read_durable_content_bytes(store, namespace_id, &manifest_digest)?;
+    let read = read_durable_content_bytes(store, namespace_id, &content_ref)?;
     Ok(AuthoritativeFileBytes {
         entry,
         bytes: read.bytes,
@@ -416,39 +414,15 @@ pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    let mut blocks = Vec::new();
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let end = std::cmp::min(offset + CONTENT_BLOCK_SIZE_BYTES as usize, bytes.len());
-        let block = &bytes[offset..end];
-        let digest = loon_api::sha256_digest(block);
-        write_immutable_object(store, &blob(namespace_id.as_str(), &digest), block)?;
-        blocks.push(ContentBlockDescriptor {
-            content_digest_sha256: digest,
-            plaintext_size_bytes: block.len() as u64,
-        });
-        offset = end;
-    }
-
-    let manifest = ContentManifestEnvelope::from_payload(ContentManifestPayload {
-        namespace_id: namespace_id.clone(),
-        file_size_bytes: bytes.len() as u64,
-        file_digest_sha256: loon_api::sha256_digest(bytes),
-        block_size_bytes: CONTENT_BLOCK_SIZE_BYTES,
-        blocks,
-    })
-    .map_err(|err| CoreError::Store(err.to_string()))?;
-    let manifest_digest = content_manifest_digest_sha256(&manifest)
+    let content_ref = ContentRef::whole_file_v0(bytes);
+    let object_key = content_blob(namespace_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::Store(err.to_string()))?;
-    let manifest_key = content_manifest(namespace_id.as_str(), &manifest_digest);
-    let manifest_bytes =
-        encode_content_manifest_json(&manifest).map_err(|err| CoreError::Store(err.to_string()))?;
-    write_immutable_object(store, &manifest_key, &manifest_bytes)?;
+    write_immutable_object(store, &object_key, bytes)?;
 
     Ok(StoredContent {
-        content_manifest_digest: manifest_digest,
-        file_digest_sha256: loon_api::sha256_digest(bytes),
-        file_size_bytes: bytes.len() as u64,
+        file_digest_sha256: content_ref.digest.clone(),
+        file_size_bytes: content_ref.size_bytes,
+        content_ref,
     })
 }
 
@@ -459,7 +433,7 @@ enum PathRequestIdentity {
         namespace_id: NamespaceId,
         absolute_path: String,
         behavior: PutFileBehavior,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     DeletePath {
         namespace_id: NamespaceId,
@@ -517,13 +491,12 @@ pub fn put_file_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(absolute_path)?;
     let stored = store_bytes_as_content(store, namespace_id, bytes)?;
-    let _validated =
-        validate_durable_content_reference(store, namespace_id, &stored.content_manifest_digest)?;
-    put_file_manifest(
+    let _validated = validate_durable_content_reference(store, namespace_id, &stored.content_ref)?;
+    put_file_content_ref(
         store,
         namespace_id,
         absolute_path,
-        &stored.content_manifest_digest,
+        stored.content_ref,
         behavior,
         context,
         request_id,
@@ -549,33 +522,32 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn put_file_manifest<S: ObjectStore + ?Sized>(
+pub fn put_file_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-    content_manifest_digest: &str,
+    content_ref: ContentRef,
     behavior: PutFileBehavior,
     context: &MutationContext,
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    let _validated =
-        validate_durable_content_reference(store, namespace_id, content_manifest_digest)?;
-    commit_file_manifest(
+    let _validated = validate_durable_content_reference(store, namespace_id, &content_ref)?;
+    commit_file_content_ref(
         store,
         namespace_id,
         absolute_path,
-        content_manifest_digest,
+        content_ref,
         behavior,
         context,
         request_id,
     )
 }
 
-fn commit_file_manifest<S: ObjectStore + ?Sized>(
+fn commit_file_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-    content_manifest_digest: &str,
+    content_ref: ContentRef,
     behavior: PutFileBehavior,
     context: &MutationContext,
     request_id: Option<&str>,
@@ -586,7 +558,7 @@ fn commit_file_manifest<S: ObjectStore + ?Sized>(
         namespace_id: namespace_id.clone(),
         absolute_path: absolute_path.to_owned(),
         behavior,
-        content_manifest_digest: content_manifest_digest.to_owned(),
+        content_ref: content_ref.clone(),
     })?;
     if let Some(existing) = maybe_retry_existing_path_request(
         store,
@@ -637,7 +609,7 @@ fn commit_file_manifest<S: ObjectStore + ?Sized>(
             ops.push(V0CommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision_no: revision.revision_no,
-                content_manifest_digest: content_manifest_digest.to_owned(),
+                content_ref: content_ref.clone(),
             });
             preconditions.push(V0CommitPrecondition::InodeRevisionIs {
                 inode_id: existing.inode_id,
@@ -651,7 +623,7 @@ fn commit_file_manifest<S: ObjectStore + ?Sized>(
             ops.push(V0CommitOp::CreateFile {
                 parent_inode: final_parent_inode,
                 display_name: final_name.clone(),
-                content_manifest_digest: content_manifest_digest.to_owned(),
+                content_ref,
             });
             preconditions.push(V0CommitPrecondition::ChildNameAbsent {
                 parent_inode: final_parent_inode,
@@ -924,7 +896,7 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
         .latest_revision_head_at_seq(source.inode_id, basis.head.seq)
         .ok_or_else(|| CoreError::MissingPath(from_path.to_owned()))?;
     let _validated =
-        validate_durable_content_reference(store, namespace_id, &revision.content_manifest_digest)?;
+        validate_durable_content_reference(store, namespace_id, &revision.content_ref)?;
 
     let target_parent = resolve_parent_directory(&basis.metadata_state, to_path, basis.head.seq)?;
     let target_name = final_component(to_path)?;
@@ -938,7 +910,7 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
             ops: vec![V0CommitOp::CreateFile {
                 parent_inode: target_parent,
                 display_name: target_name.clone(),
-                content_manifest_digest: revision.content_manifest_digest,
+                content_ref: revision.content_ref,
             }],
             preconditions: vec![
                 V0CommitPrecondition::HeadSeqIs {
@@ -971,7 +943,7 @@ fn mutation_result_from_commit_response(response: V0CommitResponse) -> MutationR
 pub(crate) fn derive_commit_results(
     ops: &[CommitOp],
     allocated_inode_ids: &[InodeId],
-    resolved_restore_content_manifest_digests: &[Option<String>],
+    resolved_restore_content_refs: &[Option<ContentRef>],
 ) -> Vec<CommitOpResult> {
     let mut allocated = allocated_inode_ids.iter().copied();
     ops.iter()
@@ -985,21 +957,18 @@ pub(crate) fn derive_commit_results(
                         .next()
                         .expect("allocated inode ids should cover create ops"),
                 },
-                CommitOp::CreateFile {
-                    content_manifest_digest,
-                    ..
-                } => CommitOpResult::CreateFile {
+                CommitOp::CreateFile { content_ref, .. } => CommitOpResult::CreateFile {
                     op_index,
                     inode_id: allocated
                         .next()
                         .expect("allocated inode ids should cover create ops"),
                     revision_no: loon_api::RevisionNo(1),
-                    content_manifest_digest: content_manifest_digest.clone(),
+                    content_ref: content_ref.clone(),
                 },
                 CommitOp::ReplaceFile {
                     inode_id,
                     base_revision,
-                    content_manifest_digest,
+                    content_ref,
                 } => CommitOpResult::ReplaceFile {
                     op_index,
                     inode_id: *inode_id,
@@ -1009,7 +978,7 @@ pub(crate) fn derive_commit_results(
                             .checked_add(1)
                             .expect("replace_file revision increment validated"),
                     ),
-                    content_manifest_digest: content_manifest_digest.clone(),
+                    content_ref: content_ref.clone(),
                 },
                 CommitOp::RestoreRevision {
                     inode_id,
@@ -1025,9 +994,9 @@ pub(crate) fn derive_commit_results(
                             .checked_add(1)
                             .expect("restore_revision increment validated"),
                     ),
-                    content_manifest_digest: resolved_restore_content_manifest_digests[index]
+                    content_ref: resolved_restore_content_refs[index]
                         .as_ref()
-                        .expect("resolved restore manifest digest should be present")
+                        .expect("resolved restore content ref should be present")
                         .clone(),
                 },
                 CommitOp::DeleteFile { inode_id } => CommitOpResult::DeleteFile {
@@ -1123,19 +1092,15 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
     resolved: &ResolvedVisiblePath,
 ) -> Result<AuthoritativePathEntry, CoreError> {
     let revision = metadata_state.latest_revision_head_at_seq(resolved.inode_id, head_seq);
-    let content_manifest_digest = revision
+    let content_ref = revision
         .as_ref()
-        .map(|revision| revision.content_manifest_digest.clone());
-    let (size_bytes, content_digest) = match content_manifest_digest.as_deref() {
-        Some(manifest_digest) => {
-            let validated =
-                validate_durable_content_reference(store, namespace_id, manifest_digest)?;
-            (
-                Some(validated.file_size_bytes),
-                Some(validated.file_digest_sha256),
-            )
+        .map(|revision| revision.content_ref.clone());
+    let size_bytes = match content_ref.as_ref() {
+        Some(content_ref) => {
+            let validated = validate_durable_content_reference(store, namespace_id, content_ref)?;
+            Some(validated.file_size_bytes)
         }
-        None => (None, None),
+        None => None,
     };
 
     Ok(AuthoritativePathEntry {
@@ -1148,8 +1113,7 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
         display_name: resolved.display_name.clone(),
         revision_no: revision.as_ref().map(|revision| revision.revision_no),
         size_bytes,
-        content_digest,
-        content_manifest_digest,
+        content_ref,
     })
 }
 
@@ -1343,15 +1307,11 @@ fn classify_visible_path_error(error: &VisiblePathError) -> CoreErrorKind {
 
 fn classify_durable_content_error(error: &DurableContentValidationError) -> CoreErrorKind {
     match error {
-        DurableContentValidationError::MissingManifestObject { .. }
-        | DurableContentValidationError::ManifestCodec { .. }
-        | DurableContentValidationError::ManifestDigestMismatch { .. }
-        | DurableContentValidationError::ManifestNamespaceMismatch { .. }
-        | DurableContentValidationError::MissingBlockObject { .. }
-        | DurableContentValidationError::BlockLengthMismatch { .. }
-        | DurableContentValidationError::BlockDigestMismatch { .. }
-        | DurableContentValidationError::FileSizeMismatch { .. }
-        | DurableContentValidationError::FileDigestMismatch { .. } => {
+        DurableContentValidationError::UnsupportedContentRefKind { .. }
+        | DurableContentValidationError::InvalidDigest { .. }
+        | DurableContentValidationError::MissingContentObject { .. }
+        | DurableContentValidationError::ContentLengthMismatch { .. }
+        | DurableContentValidationError::ContentDigestMismatch { .. } => {
             CoreErrorKind::NamespaceCorrupt
         }
         DurableContentValidationError::Store { .. } => CoreErrorKind::ServerError,

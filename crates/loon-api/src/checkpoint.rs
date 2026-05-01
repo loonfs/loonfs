@@ -1,5 +1,5 @@
 use crate::digest::sha256_hex;
-use crate::{ChangeSeq, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -79,7 +79,7 @@ pub enum CheckpointRow {
         committed_seq: ChangeSeq,
         #[serde(default)]
         revision_op_index: u32,
-        content_manifest_digest: String,
+        content_ref: ContentRef,
     },
     Tombstone {
         root_inode_id: InodeId,

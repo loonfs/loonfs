@@ -13,8 +13,8 @@
 | **Path** | A human-friendly name built by walking visible directory bindings. Paths can change; inode identity does not. |
 | **Revision** | One immutable committed version of a file's content. Revisions are ordered by `revision_no` within an inode. |
 | **Checkpoint** | A verified snapshot of namespace metadata at one chosen `seq`. It lets readers avoid replaying the entire WAL history. |
-| **Content block** | One immutable block of file bytes. In v0, blocks are fixed-size except for the final partial block. |
-| **Content manifest** | The immutable object that describes a file's size, digest, block size, and ordered list of content blocks. |
+| **Content object** | One immutable object containing file bytes. In v0, each file revision stores the whole file as one object. |
+| **Content ref** | The metadata pointer for a file revision. In v0 it has `kind: "whole_file_v0"`, a `sha256:<hex>` digest, and `size_bytes`. |
 | **NamePolicy** | The versioned rule that decides how sibling names are compared for collisions. |
 | **Tombstone** | A metadata record that hides a deleted inode or subtree without erasing history. |
 | **Retention floor** | The oldest sequence number from which the system still promises incremental replay. Older clients must re-bootstrap. |
