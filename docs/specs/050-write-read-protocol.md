@@ -210,14 +210,17 @@ A fork creates a new namespace from the source namespace's current head. The req
 
 The fork protocol is:
 
-1. Resolve and verify the source namespace descriptor, content-store descriptor, head, lease, checkpoint, and WAL basis.
-2. Create or reuse a verified source checkpoint at the current source head.
-3. Rebuild checkpoint artifacts under the new namespace id with fresh checksums and object keys.
-4. Create the new namespace descriptor with the same `content_store_id` as the source namespace.
-5. Create the new namespace head at the fork seq, with `snapshot_hint_seq` and `retention_floor_seq` set to that seq.
-6. Start the new namespace WAL independently at `fork_seq + 1`.
+1. Check the target namespace initialization state. A complete target is rejected as existing, and a partial target is rejected as partially initialized.
+2. Resolve and verify the source namespace descriptor, content-store descriptor, head, lease, checkpoint, and WAL basis.
+3. Create or reuse a verified source checkpoint at the current source head.
+4. Build the target head, lease, and descriptor using the source namespace's `content_store_id`.
+5. Write the target `head.json` first to reserve the namespace.
+6. Rebuild checkpoint artifacts under the new namespace id with fresh checksums and object keys.
+7. Write the target `lease.json`.
+8. Write the target `descriptor.json` last as the publish/list marker.
+9. Start the new namespace WAL independently at `fork_seq + 1`.
 
-The fork copies namespace-local checkpoint metadata only. It does not copy content-store blobs. It also does not create a durable parent/child relationship; provenance may be recorded later as audit metadata outside the core namespace model.
+The fork copies namespace-local checkpoint metadata only. It does not copy content-store blobs. If initialization fails after the target head exists but before the descriptor is published, the target is partial. A successful fork has independent namespace history from the fork point. It also does not create a durable parent/child relationship; provenance may be recorded later as audit metadata outside the core namespace model.
 
 ## 10. Long-running operations
 
