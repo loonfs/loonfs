@@ -6,7 +6,7 @@ use loon_api::{
     },
     ChangeSeq, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope, ControlObjectKind,
     FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceDescriptorEnvelope,
-    NamespaceId, RevisionNo,
+    NamespaceDescriptorState, NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
@@ -814,6 +814,11 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_basis.head.snapshot_hint_seq, Some(ChangeSeq(1)));
     assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
 
+    let duplicate_error =
+        fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+            .expect_err("duplicate fork target");
+    assert_eq!(duplicate_error.kind(), CoreErrorKind::NamespaceExists);
+
     let source_entry =
         resolve_path(&store, &source_namespace_id, "/docs/shared.txt").expect("source stat");
     let clone_entry =
@@ -1025,7 +1030,7 @@ fn fork_target_control_conflict_rechecks_complete_namespace() {
     let descriptor = NamespaceDescriptorEnvelope::from_state(
         ControlObjectKind::NamespaceDescriptor,
         &context.writer_version,
-        loon_api::NamespaceDescriptorState {
+        NamespaceDescriptorState {
             namespace_id: clone_namespace_id.clone(),
             content_store_id,
         },
