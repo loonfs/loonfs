@@ -1,5 +1,6 @@
 use crate::error::CliError;
 use http::Uri;
+use loon_api::NamespaceId;
 use loon_objectstore::r2::R2StoreConfig;
 use loon_objectstore::s3::AwsS3StoreConfig;
 use loon_objectstore::ConfiguredObjectStore;
@@ -149,7 +150,10 @@ impl ProfileConfig {
                 ..
             } => {
                 if let Some(namespace) = default_namespace {
-                    require_non_empty(&profile_field(name, "default_namespace"), namespace)?;
+                    validate_default_namespace(
+                        &profile_field(name, "default_namespace"),
+                        namespace,
+                    )?;
                 }
                 store.validate(name)
             }
@@ -160,7 +164,10 @@ impl ProfileConfig {
                 ..
             } => {
                 if let Some(namespace) = default_namespace {
-                    require_non_empty(&profile_field(name, "default_namespace"), namespace)?;
+                    validate_default_namespace(
+                        &profile_field(name, "default_namespace"),
+                        namespace,
+                    )?;
                 }
                 validate_http_url(&profile_field(name, "server_url"), server_url)?;
                 if let Some(token) = auth_token {
@@ -453,6 +460,12 @@ fn require_non_empty(field: &str, value: &str) -> Result<(), CliError> {
         return Err(CliError::invalid_config(format!("missing `{field}`")));
     }
     Ok(())
+}
+
+fn validate_default_namespace(field: &str, value: &str) -> Result<(), CliError> {
+    NamespaceId::parse(value)
+        .map(|_| ())
+        .map_err(|err| CliError::invalid_config(format!("invalid `{field}`: {err}")))
 }
 
 fn validate_http_url(field: &str, value: &str) -> Result<(), CliError> {

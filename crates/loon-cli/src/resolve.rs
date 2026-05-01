@@ -2,6 +2,7 @@ use crate::backend::ResolvedTarget;
 use crate::config::{default_config_path, load_config, CliConfig};
 use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
+use loon_api::NamespaceId;
 
 pub struct LoadedConfig {
     pub path: std::path::PathBuf,
@@ -55,9 +56,7 @@ pub fn resolve_namespace(
 }
 
 fn validate_namespace(namespace: &str) -> Result<ResolvedNamespace, CliError> {
-    if namespace.trim().is_empty() {
-        return Err(CliError::invalid_input("namespace_id must not be empty"));
-    }
+    NamespaceId::parse(namespace).map_err(|error| CliError::invalid_input(error.to_string()))?;
     Ok(ResolvedNamespace {
         namespace: namespace.to_owned(),
     })

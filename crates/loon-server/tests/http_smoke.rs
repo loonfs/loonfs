@@ -52,6 +52,39 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-test",
+        "http-invalid-ns",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        assert_invalid_namespace_response(
+            ureq::post(&format!("{}/v0/namespaces", harness.server_url))
+                .set("authorization", "Bearer test-token")
+                .send_json(json!({ "namespace_id": "bad/name" })),
+        );
+
+        assert_invalid_namespace_response(
+            ureq::get(&format!(
+                "{}/v0/namespaces/bad%25/filesystem/list?path=/",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .call(),
+        );
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_create_only_and_copy_preserve_cli_semantics() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -1018,6 +1051,19 @@ fn post_admin_json<T: serde::de::DeserializeOwned>(
             code: "transport".to_owned(),
             message: error.to_string(),
         }),
+    }
+}
+
+fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>) {
+    match result {
+        Err(ureq::Error::Status(status, response)) => {
+            assert_eq!(status, 400);
+            let error: ApiError =
+                serde_json::from_reader(response.into_reader()).expect("decode api error");
+            assert_eq!(error.code, "invalid_namespace_id");
+            assert!(error.message.contains("invalid namespace_id"));
+        }
+        other => panic!("expected invalid_namespace_id response, got {other:?}"),
     }
 }
 

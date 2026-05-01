@@ -17,7 +17,7 @@ use crate::prompt;
 use crate::resolve::{
     load_cli_config, resolve_namespace, resolve_target_profile, resolve_target_profile_from_config,
 };
-use loon_api::{AuthoritativePathEntry, InodeKind, NamespaceSummary};
+use loon_api::{AuthoritativePathEntry, InodeKind, NamespaceId, NamespaceSummary};
 use loon_client::NamespacePath;
 use serde::Serialize;
 use std::fs;
@@ -1521,10 +1521,9 @@ fn run_filesystem_move(
 // --- general helpers ---
 
 fn validate_namespace_id(namespace: &str) -> Result<(), CliError> {
-    if namespace.trim().is_empty() {
-        return Err(CliError::invalid_input("namespace_id must not be empty"));
-    }
-    Ok(())
+    NamespaceId::parse(namespace)
+        .map(|_| ())
+        .map_err(|error| CliError::invalid_input(error.to_string()))
 }
 
 fn namespace_path(

@@ -521,7 +521,7 @@ default_profile = "default"
 
 [default]
 mode = "local"
-default_namespace = "   "
+default_namespace = "bad/name"
 
 [default.store]
 kind = "local-fs"
@@ -538,6 +538,57 @@ root = "{}"
         .as_str()
         .unwrap()
         .contains("default.default_namespace"));
+}
+
+#[test]
+fn local_namespace_commands_reject_invalid_namespace_ids() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
+    assert_failure(&create);
+    assert_eq!(json_error(&create)["code"], "invalid_input");
+    assert!(json_error(&create)["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid namespace_id"));
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
+    assert_failure(&fork);
+    assert_eq!(json_error(&fork)["code"], "invalid_input");
+
+    let use_namespace = harness.run(&["--json", "use", "bad/name"]);
+    assert_failure(&use_namespace);
+    assert_eq!(json_error(&use_namespace)["code"], "invalid_input");
+}
+
+#[test]
+fn remote_namespace_commands_reject_invalid_namespace_ids_before_http() {
+    let harness = Harness::new();
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        "http://127.0.0.1:9",
+    ]);
+    assert_success(&add_remote);
+
+    let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
+    assert_failure(&create);
+    assert_eq!(json_error(&create)["code"], "invalid_input");
+
+    let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
+    assert_failure(&fork);
+    assert_eq!(json_error(&fork)["code"], "invalid_input");
+
+    let use_namespace = harness.run(&["--json", "use", "bad/name"]);
+    assert_failure(&use_namespace);
+    assert_eq!(json_error(&use_namespace)["code"], "invalid_input");
 }
 
 #[test]

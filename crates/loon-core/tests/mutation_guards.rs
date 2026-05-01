@@ -1,6 +1,9 @@
 use loon_api::{
     sha256_digest,
-    v0::{CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest},
+    v0::{
+        CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest,
+        CompleteUploadRequest,
+    },
     ChangeSeq, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope, ControlObjectKind,
     FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceDescriptorEnvelope,
     NamespaceDescriptorState, NamespaceId, RevisionNo,
@@ -11,10 +14,11 @@ use loon_core::commit::{
 };
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
-    bootstrap_namespace, commit_operations, copy_file_path, delete_path, delete_path_non_recursive,
-    fork_namespace, list_changes_after, list_namespaces, load_verified_namespace_basis, move_path,
-    put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes,
-    CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
+    bootstrap_namespace, commit_operations, complete_upload, copy_file_path, delete_path,
+    delete_path_non_recursive, fork_namespace, list_changes_after, list_namespaces,
+    load_verified_namespace_basis, move_path, put_file_bytes, read_file_bytes, resolve_path,
+    store_bytes_as_content, write_file_bytes, CoreError, CoreErrorKind, MutationContext,
+    PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -641,6 +645,62 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
         partial_error,
         loon_core::BootstrapNamespaceError::NamespacePartiallyInitialized { .. }
     ));
+}
+
+#[test]
+fn public_namespace_operations_reject_invalid_namespace_id_before_key_construction() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let invalid_namespace = NamespaceId::from("bad/name");
+
+    let bootstrap_error = bootstrap_namespace(&store, &invalid_namespace, &context, false)
+        .expect_err("invalid namespace_id");
+    match bootstrap_error {
+        loon_core::BootstrapNamespaceError::InvalidNamespaceId(error) => {
+            assert_eq!(error.value(), "bad/name");
+        }
+        other => panic!("expected invalid namespace_id, got {other:?}"),
+    }
+    assert_eq!(
+        store
+            .list_prefix("namespaces/")
+            .expect("list namespace objects"),
+        Vec::<String>::new()
+    );
+
+    let read_error = resolve_path(&store, &invalid_namespace, "/")
+        .expect_err("invalid namespace_id should be rejected before lookup");
+    assert_eq!(read_error.kind(), CoreErrorKind::InvalidNamespaceId);
+
+    let delete_error = delete_path_non_recursive(
+        &store,
+        &invalid_namespace,
+        "/missing.txt",
+        &context,
+        Some("invalid-delete"),
+    )
+    .expect_err("invalid namespace_id should be rejected before retry lookup");
+    assert_eq!(delete_error.kind(), CoreErrorKind::InvalidNamespaceId);
+
+    let complete_error = complete_upload(
+        &store,
+        &invalid_namespace,
+        "upl_invalid",
+        &CompleteUploadRequest {
+            content_ref: ContentRef::whole_file_v0(b""),
+        },
+        &context,
+    )
+    .expect_err("invalid namespace_id should be rejected before upload key lookup");
+    assert_eq!(complete_error.kind(), CoreErrorKind::InvalidNamespaceId);
+
+    assert_eq!(
+        store
+            .list_prefix("namespaces/")
+            .expect("list namespace objects"),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
