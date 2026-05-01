@@ -1,9 +1,11 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::content::write_immutable_object;
+use crate::context::MutationContext;
+use crate::error::CoreError;
 use crate::loading::read_head_object;
 use crate::metadata::{
     DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
 };
-use crate::services::{write_immutable_object, CoreError};
 use loon_api::{
     checkpoint_page_checksum_sha256, checkpoint_segment_payload_checksum_sha256,
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
@@ -174,7 +176,7 @@ impl CheckpointLoadError {
 pub fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &crate::services::MutationContext,
+    context: &MutationContext,
 ) -> Result<CreateCheckpointResponse, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     let checkpoint_seq = basis.head.seq;
@@ -290,7 +292,7 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
 pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &crate::services::MutationContext,
+    context: &MutationContext,
 ) -> Result<AdvanceRetentionResponse, CoreError> {
     for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)

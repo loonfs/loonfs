@@ -1,6 +1,6 @@
 use loon_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId};
 use loon_objectstore::keys::content_blob;
-use loon_objectstore::ObjectStore;
+use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -43,6 +43,12 @@ pub enum DurableContentValidationError {
     },
     #[error("object store error for `{object_key}`: {message}")]
     Store { object_key: String, message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub(crate) enum ImmutableObjectWriteError {
+    #[error("{0}")]
+    Store(String),
 }
 
 pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
@@ -105,6 +111,34 @@ pub fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     let bytes = load_required_object(store, &validated.object_key)?;
 
     Ok(ReadDurableContent { validated, bytes })
+}
+
+pub(crate) fn write_immutable_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    expected_bytes: &[u8],
+) -> Result<(), ImmutableObjectWriteError> {
+    match store.put_if_absent(object_key, expected_bytes) {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed) => {
+            let existing = store
+                .get(object_key, None)
+                .map_err(|err| ImmutableObjectWriteError::Store(err.to_string()))?
+                .ok_or_else(|| {
+                    ImmutableObjectWriteError::Store(format!(
+                        "missing immutable object `{object_key}` after precondition failure"
+                    ))
+                })?;
+            if existing == expected_bytes {
+                Ok(())
+            } else {
+                Err(ImmutableObjectWriteError::Store(format!(
+                    "immutable object `{object_key}` already exists with different bytes"
+                )))
+            }
+        }
+        Err(err) => Err(ImmutableObjectWriteError::Store(err.to_string())),
+    }
 }
 
 fn load_required_object<S: ObjectStore + ?Sized>(

@@ -2,11 +2,9 @@ use crate::checkpoint::{
     checkpoint_basis_head, load_verified_checkpoint_materialization, CheckpointLoadError,
 };
 use crate::genesis::bootstrap_basis_metadata_state;
-use crate::loading::{
-    read_content_store_descriptor_object, read_head_object, read_lease_object,
-    read_namespace_descriptor_object, ControlObjectLoadError,
-};
+use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::metadata::MetadataState;
+use crate::namespace::catalog::{load_namespace_catalog_entry, NamespaceCatalogLoadError};
 use crate::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
 use loon_api::{ContentStoreId, HeadState, NamespaceDescriptorState, NamespaceId};
 use loon_objectstore::ObjectStore;
@@ -67,15 +65,24 @@ pub enum BasisLoadError {
     },
 }
 
+impl From<NamespaceCatalogLoadError> for BasisLoadError {
+    fn from(value: NamespaceCatalogLoadError) -> Self {
+        match value {
+            NamespaceCatalogLoadError::LoadNamespaceDescriptor(error) => {
+                Self::LoadNamespaceDescriptor(error)
+            }
+            NamespaceCatalogLoadError::LoadContentStoreDescriptor(error) => {
+                Self::LoadContentStoreDescriptor(error)
+            }
+        }
+    }
+}
+
 pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
-    let loaded_descriptor = read_namespace_descriptor_object(store, expected_namespace)
-        .map_err(BasisLoadError::LoadNamespaceDescriptor)?;
-    let content_store_id = loaded_descriptor.envelope.state.content_store_id.clone();
-    read_content_store_descriptor_object(store, &content_store_id)
-        .map_err(BasisLoadError::LoadContentStoreDescriptor)?;
+    let catalog_entry = load_namespace_catalog_entry(store, expected_namespace)?;
 
     let loaded_head = read_head_object(store, expected_namespace)?;
     let loaded_lease =
@@ -115,8 +122,8 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
     ensure_reconstructed_head_matches(&loaded_head.envelope.state, &replayed.resulting_head)?;
 
     Ok(VerifiedNamespaceBasis {
-        namespace_descriptor: loaded_descriptor.envelope.state,
-        content_store_id,
+        namespace_descriptor: catalog_entry.namespace_descriptor,
+        content_store_id: catalog_entry.content_store_id,
         head: loaded_head.envelope.state,
         head_etag,
         lease: loaded_lease.envelope.state,

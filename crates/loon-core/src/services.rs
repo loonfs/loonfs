@@ -3,28 +3,27 @@ use crate::checkpoint::{
     create_checkpoint, load_verified_checkpoint_materialization,
     write_verified_checkpoint_from_metadata, CheckpointMetadataWriteRequest,
 };
-use crate::commit::{CommitHeadPublishError, CommitOp, CommitValidationError};
 use crate::content::{
-    read_durable_content_bytes, validate_durable_content_reference, DurableContentValidationError,
+    read_durable_content_bytes, validate_durable_content_reference, write_immutable_object,
 };
 use crate::genesis::bootstrap_basis_metadata_state;
-use crate::lease::LeaseAcquireError;
-use crate::loading::{
-    read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
+use crate::loading::ControlObjectLoadError;
+use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use crate::namespace::catalog::{
+    load_namespace_content_store_id, load_namespace_descriptor, namespace_initialization_state,
+    NamespaceInitializationError, NamespaceInitializationState,
 };
-use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, VisiblePathError};
-use crate::wal::WalBuildError;
 use loon_api::{
     name_key_for_display_name, payload_checksum_sha256,
     v0::{
-        CommitOp as V0CommitOp, CommitOpResult, CommitPrecondition as V0CommitPrecondition,
+        CommitOp as V0CommitOp, CommitPrecondition as V0CommitPrecondition,
         CommitRequest as V0CommitRequest, CommitResponse as V0CommitResponse,
     },
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
     ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
     FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope,
     MutationResult, NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId,
-    NamespaceIdValidationError, NamespaceSummary,
+    NamespaceSummary,
 };
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
@@ -34,13 +33,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MutationContext {
-    pub writer_id: String,
-    pub writer_version: String,
-    pub now_ms: u64,
-    pub lease_duration_ms: u64,
-}
+pub use crate::context::MutationContext;
+pub use crate::error::{CoreError, CoreErrorKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredContent {
@@ -57,36 +51,8 @@ pub enum PutFileBehavior {
     ReplaceExisting,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoreErrorKind {
-    InvalidPath,
-    InvalidNamespaceId,
-    NamespaceNotFound,
-    NamespaceExists,
-    NamespacePartial,
-    PathNotFound,
-    RevisionNotFound,
-    PathConflict,
-    StaleHead,
-    StaleRevision,
-    TombstoneConflict,
-    LeaseConflict,
-    WouldCycle,
-    RequestIdConflict,
-    CheckpointUnavailable,
-    UploadNotFound,
-    UploadAlreadyCompleted,
-    UploadContentConflict,
-    InvalidUploadContent,
-    RebootstrapRequired,
-    NamespaceCorrupt,
-    ServerError,
-}
-
 #[derive(Debug, Error)]
 pub enum BootstrapNamespaceError {
-    #[error(transparent)]
-    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("holder id must not be empty")]
     EmptyHolderId,
     #[error("writer version must not be empty")]
@@ -109,136 +75,20 @@ pub enum BootstrapNamespaceError {
     LeaseWrite(String),
 }
 
-#[derive(Debug, Error)]
-pub enum CoreError {
-    #[error(transparent)]
-    InvalidNamespaceId(#[from] NamespaceIdValidationError),
-    #[error(transparent)]
-    Basis(#[from] BasisLoadError),
-    #[error(transparent)]
-    VisiblePath(#[from] VisiblePathError),
-    #[error(transparent)]
-    DurableContent(#[from] DurableContentValidationError),
-    #[error(transparent)]
-    Lease(#[from] LeaseAcquireError),
-    #[error("commit validation failed: {0:?}")]
-    CommitValidation(CommitValidationError),
-    #[error("wal build failed: {0:?}")]
-    WalBuild(WalBuildError),
-    #[error("metadata apply failed: {0:?}")]
-    MetadataApply(MetadataApplyError),
-    #[error("head publish failed: {0:?}")]
-    HeadPublish(CommitHeadPublishError),
-    #[error("failed to write wal object: {0}")]
-    WalWrite(String),
-    #[error("invalid absolute path `{0}`")]
-    InvalidPath(String),
-    #[error("path not found `{0}`")]
-    MissingPath(String),
-    #[error("expected file at `{path}` but found `{kind:?}`")]
-    ExpectedFile { path: String, kind: InodeKind },
-    #[error("expected directory at `{path}` but found `{kind:?}`")]
-    ExpectedDirectory { path: String, kind: InodeKind },
-    #[error("directory not empty `{0}`")]
-    DirectoryNotEmpty(String),
-    #[error("cannot mutate root path")]
-    RootMutationForbidden,
-    #[error("destination already exists at `{0}`")]
-    DestinationExists(String),
-    #[error("request id conflict for `{0}`")]
-    RequestIdConflict(String),
-    #[error("{0}")]
-    CheckpointUnavailable(String),
-    #[error("upload session `{upload_id}` was not found")]
-    UploadNotFound { upload_id: String },
-    #[error("upload session `{upload_id}` is already completed")]
-    UploadAlreadyCompleted { upload_id: String },
-    #[error("upload session `{upload_id}` content conflicts with prior content")]
-    UploadContentConflict { upload_id: String },
-    #[error("invalid upload content: {0}")]
-    InvalidUploadContent(String),
-    #[error(
-        "change feed cursor `{after_seq:?}` is older than retention floor `{retention_floor_seq:?}`"
-    )]
-    RebootstrapRequired {
-        after_seq: ChangeSeq,
-        retention_floor_seq: ChangeSeq,
-    },
-    #[error(
-        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode}` from seq `{tombstone_seq:?}`"
-    )]
-    TombstoneConflict {
-        path: String,
-        root_inode: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error("path component `{0}` is not a directory")]
-    NonDirectoryPathComponent(String),
-    #[error("object store error: {0}")]
-    Store(String),
-    #[error("namespace `{namespace_id}` already exists")]
-    NamespaceAlreadyExists { namespace_id: NamespaceId },
-    #[error("namespace `{namespace_id}` is partially initialized")]
-    NamespacePartiallyInitialized { namespace_id: NamespaceId },
-}
-
-impl From<CommitValidationError> for CoreError {
-    fn from(value: CommitValidationError) -> Self {
-        Self::CommitValidation(value)
-    }
-}
-
-impl From<WalBuildError> for CoreError {
-    fn from(value: WalBuildError) -> Self {
-        Self::WalBuild(value)
-    }
-}
-
-impl From<MetadataApplyError> for CoreError {
-    fn from(value: MetadataApplyError) -> Self {
-        Self::MetadataApply(value)
-    }
-}
-
-impl From<CommitHeadPublishError> for CoreError {
-    fn from(value: CommitHeadPublishError) -> Self {
-        Self::HeadPublish(value)
-    }
-}
-
-impl CoreError {
-    pub fn kind(&self) -> CoreErrorKind {
-        match self {
-            CoreError::InvalidNamespaceId(_) => CoreErrorKind::InvalidNamespaceId,
-            CoreError::Basis(error) => classify_basis_load_error(error),
-            CoreError::VisiblePath(error) => classify_visible_path_error(error),
-            CoreError::DurableContent(error) => classify_durable_content_error(error),
-            CoreError::Lease(error) => classify_lease_acquire_error(error),
-            CoreError::CommitValidation(error) => classify_commit_validation_error(error),
-            CoreError::WalBuild(_)
-            | CoreError::MetadataApply(_)
-            | CoreError::WalWrite(_)
-            | CoreError::Store(_) => CoreErrorKind::ServerError,
-            CoreError::HeadPublish(error) => classify_head_publish_error(error),
-            CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
-                CoreErrorKind::InvalidPath
+impl From<NamespaceInitializationError> for BootstrapNamespaceError {
+    fn from(value: NamespaceInitializationError) -> Self {
+        match value {
+            NamespaceInitializationError::InspectNamespaceDescriptor(message) => {
+                Self::DescriptorWrite(message)
             }
-            CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
-            CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
-            CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,
-            CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
-            CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
-            CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
-            CoreError::UploadAlreadyCompleted { .. } => CoreErrorKind::UploadAlreadyCompleted,
-            CoreError::UploadContentConflict { .. } => CoreErrorKind::UploadContentConflict,
-            CoreError::InvalidUploadContent(_) => CoreErrorKind::InvalidUploadContent,
-            CoreError::RebootstrapRequired { .. } => CoreErrorKind::RebootstrapRequired,
-            CoreError::ExpectedFile { .. }
-            | CoreError::ExpectedDirectory { .. }
-            | CoreError::DirectoryNotEmpty(_)
-            | CoreError::DestinationExists(_) => CoreErrorKind::PathConflict,
-            CoreError::TombstoneConflict { .. } => CoreErrorKind::TombstoneConflict,
-            CoreError::NonDirectoryPathComponent(_) => CoreErrorKind::InvalidPath,
+            NamespaceInitializationError::InspectNamespaceHead(message) => Self::HeadWrite(message),
+            NamespaceInitializationError::InspectNamespaceLease(message) => {
+                Self::LeaseWrite(message)
+            }
+            NamespaceInitializationError::LoadNamespaceDescriptor(error)
+            | NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
+                Self::Descriptor(error)
+            }
         }
     }
 }
@@ -275,6 +125,7 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         NamespaceInitializationState::Absent => {}
     }
 
+    let content_store_id = create_new_content_store(store, context)?;
     let initial_head = HeadState::initial(namespace_id.clone());
     let initial_lease = LeaseState {
         namespace_id: namespace_id.clone(),
@@ -298,18 +149,6 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
     let lease_bytes = serde_json::to_vec(&lease_envelope)
         .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
-
-    let head_key = namespace_head(namespace_id.as_str());
-    let lease_key = namespace_lease(namespace_id.as_str());
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
-    store
-        .put_if_absent(&head_key, &head_bytes)
-        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
-    store
-        .put_if_absent(&lease_key, &lease_bytes)
-        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
-
-    let content_store_id = create_new_content_store(store, context)?;
     let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(
         ControlObjectKind::NamespaceDescriptor,
         &context.writer_version,
@@ -321,6 +160,16 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
     let namespace_descriptor_bytes = serde_json::to_vec(&namespace_descriptor_envelope)
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
+
+    let head_key = namespace_head(namespace_id.as_str());
+    let lease_key = namespace_lease(namespace_id.as_str());
+    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+    store
+        .put_if_absent(&head_key, &head_bytes)
+        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
+    store
+        .put_if_absent(&lease_key, &lease_bytes)
+        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
     store
         .put_if_absent(&descriptor_key, &namespace_descriptor_bytes)
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
@@ -330,52 +179,6 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     Ok(NamespaceSummary {
         namespace_id: namespace_id.clone(),
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NamespaceInitializationState {
-    Absent,
-    Partial,
-    Complete,
-}
-
-fn namespace_initialization_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<NamespaceInitializationState, BootstrapNamespaceError> {
-    NamespaceId::parse(namespace_id.as_str())?;
-
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
-    let head_key = namespace_head(namespace_id.as_str());
-    let lease_key = namespace_lease(namespace_id.as_str());
-
-    let descriptor_exists = store
-        .head(&descriptor_key)
-        .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?
-        .is_some();
-    let head_exists = store
-        .head(&head_key)
-        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?
-        .is_some();
-    let lease_exists = store
-        .head(&lease_key)
-        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?
-        .is_some();
-
-    match (descriptor_exists, head_exists, lease_exists) {
-        (false, false, false) => Ok(NamespaceInitializationState::Absent),
-        (true, true, true) => {
-            let descriptor = read_namespace_descriptor_object(store, namespace_id)
-                .map_err(BootstrapNamespaceError::Descriptor)?;
-            read_content_store_descriptor_object(
-                store,
-                &descriptor.envelope.state.content_store_id,
-            )
-            .map_err(BootstrapNamespaceError::Descriptor)?;
-            Ok(NamespaceInitializationState::Complete)
-        }
-        _ => Ok(NamespaceInitializationState::Partial),
-    }
 }
 
 const CONTENT_STORE_ID_RETRY_LIMIT: usize = 8;
@@ -409,18 +212,6 @@ fn create_new_content_store<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub(crate) fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<ContentStoreId, CoreError> {
-    let descriptor = read_namespace_descriptor_object(store, namespace_id)
-        .map_err(|err| CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(err)))?;
-    let content_store_id = descriptor.envelope.state.content_store_id;
-    read_content_store_descriptor_object(store, &content_store_id)
-        .map_err(|err| CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(err)))?;
-    Ok(content_store_id)
-}
-
 pub fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
@@ -428,7 +219,8 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<NamespaceSummary, CoreError> {
     match namespace_initialization_state(store, new_namespace_id)
-        .map_err(map_namespace_initialization_error_to_core)?
+        .map_err(BootstrapNamespaceError::from)
+        .map_err(|err| CoreError::Store(err.to_string()))?
     {
         NamespaceInitializationState::Absent => {}
         NamespaceInitializationState::Complete => {
@@ -449,6 +241,19 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_checkpoint =
         load_verified_checkpoint_materialization(store, source_namespace_id, fork_seq)
             .map_err(|err| CoreError::Basis(BasisLoadError::CheckpointLoad(err)))?;
+
+    write_verified_checkpoint_from_metadata(
+        store,
+        CheckpointMetadataWriteRequest {
+            namespace_id: new_namespace_id,
+            checkpoint_seq: fork_seq,
+            active_fence_token: FenceToken(0),
+            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
+            retention_floor_seq: fork_seq,
+            metadata_state: &source_checkpoint.metadata_state,
+            writer_version: &context.writer_version,
+        },
+    )?;
 
     let initial_head = HeadState {
         namespace_id: new_namespace_id.clone(),
@@ -490,77 +295,29 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
     let head_key = namespace_head(new_namespace_id.as_str());
     let lease_key = namespace_lease(new_namespace_id.as_str());
     let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &head_key,
-        &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
-    )?;
-    write_verified_checkpoint_from_metadata(
-        store,
-        CheckpointMetadataWriteRequest {
-            namespace_id: new_namespace_id,
-            checkpoint_seq: fork_seq,
-            active_fence_token: FenceToken(0),
-            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
-            retention_floor_seq: fork_seq,
-            metadata_state: &source_checkpoint.metadata_state,
-            writer_version: &context.writer_version,
-        },
-    )?;
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &lease_key,
-        &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
-    )?;
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &descriptor_key,
-        &serde_json::to_vec(&namespace_descriptor_envelope)
-            .map_err(|err| CoreError::Store(err.to_string()))?,
-    )?;
+    store
+        .put_if_absent(
+            &head_key,
+            &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
+        )
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+    store
+        .put_if_absent(
+            &lease_key,
+            &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
+        )
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+    store
+        .put_if_absent(
+            &descriptor_key,
+            &serde_json::to_vec(&namespace_descriptor_envelope)
+                .map_err(|err| CoreError::Store(err.to_string()))?,
+        )
+        .map_err(|err| CoreError::Store(err.to_string()))?;
 
     Ok(NamespaceSummary {
         namespace_id: new_namespace_id.clone(),
     })
-}
-
-fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    object_key: &str,
-    bytes: &[u8],
-) -> Result<(), CoreError> {
-    match store.put_if_absent(object_key, bytes) {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
-            match namespace_initialization_state(store, namespace_id)
-                .map_err(map_namespace_initialization_error_to_core)?
-            {
-                NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
-                    namespace_id: namespace_id.clone(),
-                }),
-                NamespaceInitializationState::Partial => {
-                    Err(CoreError::NamespacePartiallyInitialized {
-                        namespace_id: namespace_id.clone(),
-                    })
-                }
-                NamespaceInitializationState::Absent => Err(CoreError::Store(format!(
-                    "target namespace control object `{object_key}` write failed, but namespace remains absent"
-                ))),
-            }
-        }
-        Err(err) => Err(CoreError::Store(err.to_string())),
-    }
-}
-
-fn map_namespace_initialization_error_to_core(error: BootstrapNamespaceError) -> CoreError {
-    match error {
-        BootstrapNamespaceError::InvalidNamespaceId(error) => CoreError::InvalidNamespaceId(error),
-        other => CoreError::Store(other.to_string()),
-    }
 }
 
 pub fn list_namespaces<S: ObjectStore + ?Sized>(
@@ -581,8 +338,7 @@ pub fn list_namespaces<S: ObjectStore + ?Sized>(
             continue;
         }
         let namespace_id = NamespaceId::from(namespace.to_owned());
-        read_namespace_descriptor_object(store, &namespace_id)
-            .map_err(|err| CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(err)))?;
+        load_namespace_descriptor(store, &namespace_id)?;
         names.insert(namespace_id);
     }
     Ok(names
@@ -1227,82 +983,6 @@ fn mutation_result_from_commit_response(response: V0CommitResponse) -> MutationR
     }
 }
 
-pub(crate) fn derive_commit_results(
-    ops: &[CommitOp],
-    allocated_inode_ids: &[InodeId],
-    resolved_restore_content_refs: &[Option<ContentRef>],
-) -> Vec<CommitOpResult> {
-    let mut allocated = allocated_inode_ids.iter().copied();
-    ops.iter()
-        .enumerate()
-        .map(|(index, op)| {
-            let op_index = u32::try_from(index).expect("commit op index should fit in u32");
-            match op {
-                CommitOp::CreateDir { .. } => CommitOpResult::CreateDir {
-                    op_index,
-                    inode_id: allocated
-                        .next()
-                        .expect("allocated inode ids should cover create ops"),
-                },
-                CommitOp::CreateFile { content_ref, .. } => CommitOpResult::CreateFile {
-                    op_index,
-                    inode_id: allocated
-                        .next()
-                        .expect("allocated inode ids should cover create ops"),
-                    revision_no: loon_api::RevisionNo(1),
-                    content_ref: content_ref.clone(),
-                },
-                CommitOp::ReplaceFile {
-                    inode_id,
-                    base_revision,
-                    content_ref,
-                } => CommitOpResult::ReplaceFile {
-                    op_index,
-                    inode_id: *inode_id,
-                    revision_no: loon_api::RevisionNo(
-                        base_revision
-                            .0
-                            .checked_add(1)
-                            .expect("replace_file revision increment validated"),
-                    ),
-                    content_ref: content_ref.clone(),
-                },
-                CommitOp::RestoreRevision {
-                    inode_id,
-                    source_revision,
-                    base_revision,
-                } => CommitOpResult::RestoreRevision {
-                    op_index,
-                    inode_id: *inode_id,
-                    source_revision_no: *source_revision,
-                    revision_no: loon_api::RevisionNo(
-                        base_revision
-                            .0
-                            .checked_add(1)
-                            .expect("restore_revision increment validated"),
-                    ),
-                    content_ref: resolved_restore_content_refs[index]
-                        .as_ref()
-                        .expect("resolved restore content ref should be present")
-                        .clone(),
-                },
-                CommitOp::DeleteFile { inode_id } => CommitOpResult::DeleteFile {
-                    op_index,
-                    inode_id: *inode_id,
-                },
-                CommitOp::Rename { inode_id, .. } => CommitOpResult::Rename {
-                    op_index,
-                    inode_id: *inode_id,
-                },
-                CommitOp::DeleteSubtree { root_inode } => CommitOpResult::DeleteSubtree {
-                    op_index,
-                    root_inode: *root_inode,
-                },
-            }
-        })
-        .collect()
-}
-
 fn ensure_parent_directories(
     absolute_path: &str,
     committed_seq: ChangeSeq,
@@ -1404,34 +1084,6 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
         size_bytes,
         content_ref,
     })
-}
-
-pub(crate) fn write_immutable_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    expected_bytes: &[u8],
-) -> Result<(), CoreError> {
-    match store.put_if_absent(object_key, expected_bytes) {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed) => {
-            let existing = store
-                .get(object_key, None)
-                .map_err(|err| CoreError::Store(err.to_string()))?
-                .ok_or_else(|| {
-                    CoreError::Store(format!(
-                        "missing immutable object `{object_key}` after precondition failure"
-                    ))
-                })?;
-            if existing == expected_bytes {
-                Ok(())
-            } else {
-                Err(CoreError::Store(format!(
-                    "immutable object `{object_key}` already exists with different bytes"
-                )))
-            }
-        }
-        Err(err) => Err(CoreError::Store(err.to_string())),
-    }
 }
 
 fn lookup_path(
@@ -1550,157 +1202,4 @@ fn tombstoned_path_ancestor(
     }
 
     Ok(None)
-}
-
-fn classify_control_object_load_error(error: &ControlObjectLoadError) -> CoreErrorKind {
-    match error {
-        ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
-        ControlObjectLoadError::MissingObject { .. }
-        | ControlObjectLoadError::MissingObjectAfterHead { .. } => CoreErrorKind::NamespaceNotFound,
-        ControlObjectLoadError::KindMismatch { .. }
-        | ControlObjectLoadError::NamespaceMismatch { .. }
-        | ControlObjectLoadError::ContentStoreMismatch { .. }
-        | ControlObjectLoadError::ChecksumMismatch { .. }
-        | ControlObjectLoadError::Codec { .. } => CoreErrorKind::NamespaceCorrupt,
-        ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
-    match error {
-        BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
-        BasisLoadError::LoadContentStoreDescriptor(error) => match error {
-            ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
-            _ => CoreErrorKind::NamespaceCorrupt,
-        },
-        BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => match error {
-            ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
-            ControlObjectLoadError::MissingObject { .. }
-            | ControlObjectLoadError::MissingObjectAfterHead { .. } => {
-                CoreErrorKind::NamespaceCorrupt
-            }
-            _ => classify_control_object_load_error(error),
-        },
-        BasisLoadError::InvalidWalObjectKey { .. }
-        | BasisLoadError::DuplicateWalSeq { .. }
-        | BasisLoadError::MissingWalObject { .. }
-        | BasisLoadError::MissingWalObjectAfterList { .. }
-        | BasisLoadError::WalReplay(_)
-        | BasisLoadError::ReconstructedHeadMismatch { .. } => CoreErrorKind::NamespaceCorrupt,
-        BasisLoadError::CheckpointLoad(error) => match error.kind() {
-            crate::CheckpointLoadErrorKind::Corrupt => CoreErrorKind::NamespaceCorrupt,
-            crate::CheckpointLoadErrorKind::Store => CoreErrorKind::ServerError,
-        },
-        BasisLoadError::MissingHeadEtag { .. }
-        | BasisLoadError::ListWal { .. }
-        | BasisLoadError::ReadWal { .. } => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_visible_path_error(error: &VisiblePathError) -> CoreErrorKind {
-    match error {
-        VisiblePathError::InvalidAbsolutePath { .. } => CoreErrorKind::InvalidPath,
-        VisiblePathError::RootMissing => CoreErrorKind::NamespaceCorrupt,
-        VisiblePathError::PathNotFound { .. } => CoreErrorKind::PathNotFound,
-        VisiblePathError::PathComponentNotDirectory { .. } => CoreErrorKind::PathConflict,
-    }
-}
-
-fn classify_durable_content_error(error: &DurableContentValidationError) -> CoreErrorKind {
-    match error {
-        DurableContentValidationError::UnsupportedContentRefKind { .. }
-        | DurableContentValidationError::InvalidDigest { .. }
-        | DurableContentValidationError::MissingContentObject { .. }
-        | DurableContentValidationError::ContentLengthMismatch { .. }
-        | DurableContentValidationError::ContentDigestMismatch { .. } => {
-            CoreErrorKind::NamespaceCorrupt
-        }
-        DurableContentValidationError::Store { .. } => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_lease_acquire_error(error: &LeaseAcquireError) -> CoreErrorKind {
-    match error {
-        LeaseAcquireError::LoadHead(error) | LeaseAcquireError::LoadLease(error) => {
-            classify_control_object_load_error(error)
-        }
-        LeaseAcquireError::HeldByOtherWriter { .. } => CoreErrorKind::LeaseConflict,
-        LeaseAcquireError::UnexpectedControlState { .. } => CoreErrorKind::NamespaceCorrupt,
-        LeaseAcquireError::EmptyWriterId
-        | LeaseAcquireError::ZeroLeaseDuration
-        | LeaseAcquireError::MissingHeadEtag { .. }
-        | LeaseAcquireError::MissingLeaseEtag { .. }
-        | LeaseAcquireError::HeadFenceTakeover(_)
-        | LeaseAcquireError::HeadWrite(_)
-        | LeaseAcquireError::LeaseWrite(_)
-        | LeaseAcquireError::RetryExhausted { .. } => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorKind {
-    match error {
-        CommitValidationError::PlannedHeadSeqMismatch { .. }
-        | CommitValidationError::MissingHeadSeqPrecondition { .. }
-        | CommitValidationError::ConflictingHeadSeqPrecondition { .. } => CoreErrorKind::StaleHead,
-        CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
-        | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. } => {
-            CoreErrorKind::StaleRevision
-        }
-        CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
-            CoreErrorKind::RevisionNotFound
-        }
-        CommitValidationError::CreateUnderSubtreeTombstone { .. }
-        | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }
-        | CommitValidationError::RestoreRevisionUnderSubtreeTombstone { .. }
-        | CommitValidationError::DeleteFileCoveredByTombstone { .. }
-        | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
-        | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
-        | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. } => {
-            CoreErrorKind::TombstoneConflict
-        }
-        CommitValidationError::CreateChildNameCollision { .. }
-        | CommitValidationError::CreateParentNotDirectory { .. }
-        | CommitValidationError::ReplaceFileInodeNotFile { .. }
-        | CommitValidationError::RestoreRevisionInodeNotFile { .. }
-        | CommitValidationError::DeleteFileInodeNotFile { .. }
-        | CommitValidationError::RenameTargetParentNotDirectory { .. }
-        | CommitValidationError::RenameTargetNameCollision { .. }
-        | CommitValidationError::DeleteSubtreeRootNotDirectory { .. } => {
-            CoreErrorKind::PathConflict
-        }
-        CommitValidationError::CreateParentMissing { .. }
-        | CommitValidationError::ReplaceFileInodeMissing { .. }
-        | CommitValidationError::RestoreRevisionInodeMissing { .. }
-        | CommitValidationError::DeleteFileInodeMissing { .. }
-        | CommitValidationError::RenameInodeMissing { .. }
-        | CommitValidationError::RenameSourceBindingMissing { .. }
-        | CommitValidationError::RenameTargetParentMissing { .. }
-        | CommitValidationError::DeleteSubtreeRootMissing { .. } => CoreErrorKind::PathNotFound,
-        CommitValidationError::RenameWouldCycleDirectory { .. } => CoreErrorKind::WouldCycle,
-        CommitValidationError::StaleWriterFenceToken { .. }
-        | CommitValidationError::LeaseHolderMismatch { .. }
-        | CommitValidationError::LeaseExpired { .. } => CoreErrorKind::LeaseConflict,
-        CommitValidationError::EmptyCommit
-        | CommitValidationError::NamespaceMismatch
-        | CommitValidationError::HeadLeaseNamespaceMismatch
-        | CommitValidationError::HeadLeaseFenceMismatch { .. }
-        | CommitValidationError::RestoreRevisionOverflow { .. }
-        | CommitValidationError::ReplaceFileRevisionOverflow { .. }
-        | CommitValidationError::SeqOverflow
-        | CommitValidationError::NextInodeOverflow
-        | CommitValidationError::OpIndexOverflow => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_head_publish_error(error: &CommitHeadPublishError) -> CoreErrorKind {
-    match error {
-        CommitHeadPublishError::StaleHead => CoreErrorKind::StaleHead,
-        CommitHeadPublishError::EmptyWriterVersion
-        | CommitHeadPublishError::EmptyExpectedHeadEtag
-        | CommitHeadPublishError::NamespaceMismatch { .. }
-        | CommitHeadPublishError::PlanBaseHeadSeqMismatch { .. }
-        | CommitHeadPublishError::PlanNextSeqMismatch { .. }
-        | CommitHeadPublishError::Codec(_)
-        | CommitHeadPublishError::Store(_) => CoreErrorKind::ServerError,
-    }
 }

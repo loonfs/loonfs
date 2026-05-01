@@ -4,21 +4,20 @@ use crate::commit::{
     resolve_restore_content_refs, CommitOp, CommitRequest as CoreCommitRequest,
     CommitValidationContext, Precondition,
 };
-use crate::content::validate_durable_content_reference;
-use crate::services::{
-    derive_commit_results, load_namespace_content_store_id, write_immutable_object, CoreError,
-    MutationContext,
-};
+use crate::content::{validate_durable_content_reference, write_immutable_object};
+use crate::context::MutationContext;
+use crate::error::CoreError;
+use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::wal::prepare_wal_commit;
 use loon_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitOp as V0CommitOp,
+    BeginUploadResponse, ChangesResponse, CommitOp as V0CommitOp, CommitOpResult,
     CommitPrecondition as V0CommitPrecondition, CommitRequest as V0CommitRequest,
     CommitResponse as V0CommitResponse, CommittedChange, CompleteUploadRequest,
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::{
     decode_wal_commit_envelope_zstd, ChangeSeq, CompletedUpload, ContentRef, ControlObjectKind,
-    NamespaceId, UploadSessionEnvelope, UploadSessionState,
+    InodeId, NamespaceId, UploadSessionEnvelope, UploadSessionState,
 };
 use loon_objectstore::keys::{content_blob, upload_session, wal_commit};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -396,6 +395,82 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
         through_seq: basis.head.seq,
         changes,
     })
+}
+
+fn derive_commit_results(
+    ops: &[CommitOp],
+    allocated_inode_ids: &[InodeId],
+    resolved_restore_content_refs: &[Option<ContentRef>],
+) -> Vec<CommitOpResult> {
+    let mut allocated = allocated_inode_ids.iter().copied();
+    ops.iter()
+        .enumerate()
+        .map(|(index, op)| {
+            let op_index = u32::try_from(index).expect("commit op index should fit in u32");
+            match op {
+                CommitOp::CreateDir { .. } => CommitOpResult::CreateDir {
+                    op_index,
+                    inode_id: allocated
+                        .next()
+                        .expect("allocated inode ids should cover create ops"),
+                },
+                CommitOp::CreateFile { content_ref, .. } => CommitOpResult::CreateFile {
+                    op_index,
+                    inode_id: allocated
+                        .next()
+                        .expect("allocated inode ids should cover create ops"),
+                    revision_no: loon_api::RevisionNo(1),
+                    content_ref: content_ref.clone(),
+                },
+                CommitOp::ReplaceFile {
+                    inode_id,
+                    base_revision,
+                    content_ref,
+                } => CommitOpResult::ReplaceFile {
+                    op_index,
+                    inode_id: *inode_id,
+                    revision_no: loon_api::RevisionNo(
+                        base_revision
+                            .0
+                            .checked_add(1)
+                            .expect("replace_file revision increment validated"),
+                    ),
+                    content_ref: content_ref.clone(),
+                },
+                CommitOp::RestoreRevision {
+                    inode_id,
+                    source_revision,
+                    base_revision,
+                } => CommitOpResult::RestoreRevision {
+                    op_index,
+                    inode_id: *inode_id,
+                    source_revision_no: *source_revision,
+                    revision_no: loon_api::RevisionNo(
+                        base_revision
+                            .0
+                            .checked_add(1)
+                            .expect("restore_revision increment validated"),
+                    ),
+                    content_ref: resolved_restore_content_refs[index]
+                        .as_ref()
+                        .expect("resolved restore content ref should be present")
+                        .clone(),
+                },
+                CommitOp::DeleteFile { inode_id } => CommitOpResult::DeleteFile {
+                    op_index,
+                    inode_id: *inode_id,
+                },
+                CommitOp::Rename { inode_id, .. } => CommitOpResult::Rename {
+                    op_index,
+                    inode_id: *inode_id,
+                },
+                CommitOp::DeleteSubtree { root_inode } => CommitOpResult::DeleteSubtree {
+                    op_index,
+                    root_inode: *root_inode,
+                },
+            }
+        })
+        .collect()
 }
 
 fn map_commit_request(
