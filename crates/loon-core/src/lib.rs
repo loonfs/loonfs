@@ -13,6 +13,7 @@ mod loading;
 pub mod metadata;
 pub mod namespace;
 mod protocol;
+pub mod publisher;
 pub mod services;
 pub mod wal;
 
@@ -26,6 +27,11 @@ pub use lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
 pub use protocol::{
     begin_upload, commit_operations, commit_operations_batch, complete_upload, list_changes_after,
     upload_content,
+};
+pub use publisher::{
+    publish_namespace_mutations_batch, DirectObjectStorePublisher, FlushPolicy,
+    NamespaceMutationCandidate, NamespaceMutationPublisher, PathMutationIntent,
+    PlannedNamespaceMutation, PlannedPathMutation, PublishOptions,
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, fork_namespace,

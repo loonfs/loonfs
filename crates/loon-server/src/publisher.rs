@@ -1,8 +1,9 @@
 use crate::config::ServerConfig;
-use loon_api::v0::{CommitRequest as V0CommitRequest, CommitResponse as V0CommitResponse};
+use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::{payload_checksum_sha256, NamespaceId};
 use loon_core::{
-    commit::CommitHeadPublishError, commit_operations_batch, CoreError, MutationContext,
+    commit::CommitHeadPublishError, publish_namespace_mutations_batch, CoreError, MutationContext,
+    NamespaceMutationCandidate, PathMutationIntent, PlannedNamespaceMutation,
 };
 use loon_objectstore::ObjectStore;
 use serde::Serialize;
@@ -13,7 +14,7 @@ use tokio::sync::{oneshot, Notify};
 use tokio::time::{Duration, Instant};
 
 type SharedStore = Arc<dyn ObjectStore + Send + Sync>;
-type CommitResult = Result<V0CommitResponse, CoreError>;
+type CommitResult = Result<ApiCommitResponse, CoreError>;
 
 const MAX_BATCH_CANDIDATES: usize = 1024;
 const COALESCING_DELAY: Duration = Duration::from_millis(100);
@@ -39,7 +40,25 @@ impl PublisherRegistry {
     pub(crate) async fn submit_commit(
         &self,
         namespace_id: NamespaceId,
-        request: V0CommitRequest,
+        request: ApiCommitRequest,
+    ) -> CommitResult {
+        self.submit_candidate(namespace_id, NamespaceMutationCandidate::Commit(request))
+            .await
+    }
+
+    pub(crate) async fn submit_path_intent(
+        &self,
+        namespace_id: NamespaceId,
+        intent: PathMutationIntent,
+    ) -> CommitResult {
+        self.submit_candidate(namespace_id, NamespaceMutationCandidate::Path(intent))
+            .await
+    }
+
+    async fn submit_candidate(
+        &self,
+        namespace_id: NamespaceId,
+        candidate: NamespaceMutationCandidate,
     ) -> CommitResult {
         let publisher = {
             let mut publishers = self
@@ -57,7 +76,7 @@ impl PublisherRegistry {
                 })
                 .clone()
         };
-        publisher.submit(request).await
+        publisher.submit(candidate).await
     }
 }
 
@@ -84,7 +103,7 @@ struct OpenBatch {
 #[derive(Clone)]
 struct BatchCandidate {
     request_id: String,
-    request: V0CommitRequest,
+    candidate: NamespaceMutationCandidate,
 }
 
 struct InFlightRequest {
@@ -107,11 +126,11 @@ impl NamespacePublisher {
         }
     }
 
-    async fn submit(&self, request: V0CommitRequest) -> CommitResult {
-        let fingerprint = semantic_fingerprint(&self.namespace_id, &request)
-            .map_err(|err| CoreError::Store(err.to_string()))?;
+    async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
+        let request_id = candidate_request_id(&candidate).to_owned();
+        let fingerprint = candidate_fingerprint(&self.namespace_id, &candidate)?;
         let (sender, receiver) = oneshot::channel();
-        self.admit(request, fingerprint, sender)?;
+        self.admit(request_id, candidate, fingerprint, sender)?;
         receiver
             .await
             .unwrap_or_else(|_| Err(CoreError::Store("publisher task stopped".to_owned())))
@@ -119,7 +138,8 @@ impl NamespacePublisher {
 
     fn admit(
         &self,
-        request: V0CommitRequest,
+        request_id: String,
+        candidate: NamespaceMutationCandidate,
         fingerprint: String,
         waiter: oneshot::Sender<CommitResult>,
     ) -> Result<(), CoreError> {
@@ -130,9 +150,9 @@ impl NamespacePublisher {
                 .state
                 .lock()
                 .expect("namespace publisher mutex poisoned");
-            if let Some(existing) = state.in_flight.get_mut(&request.request_id) {
+            if let Some(existing) = state.in_flight.get_mut(&request_id) {
                 if existing.fingerprint != fingerprint {
-                    return Err(CoreError::RequestIdConflict(request.request_id));
+                    return Err(CoreError::RequestIdConflict(request_id));
                 }
                 existing.waiters.push(waiter);
                 return Ok(());
@@ -156,13 +176,13 @@ impl NamespacePublisher {
                     return Err(CoreError::CommitQueueFull);
                 }
                 batch.candidates.push(BatchCandidate {
-                    request_id: request.request_id.clone(),
-                    request: request.clone(),
+                    request_id: request_id.clone(),
+                    candidate: candidate.clone(),
                 });
                 (batch.candidates.len(), batch.notify.clone())
             };
             state.in_flight.insert(
-                request.request_id,
+                request_id,
                 InFlightRequest {
                     fingerprint,
                     waiters: vec![waiter],
@@ -234,15 +254,20 @@ impl NamespacePublisher {
 
         let mut results = Vec::new();
         for attempt in 0..HEAD_CAS_RETRY_LIMIT {
-            let requests = candidates
+            let batch_candidates = candidates
                 .iter()
-                .map(|candidate| candidate.request.clone())
+                .map(|candidate| candidate.candidate.clone())
                 .collect::<Vec<_>>();
             let namespace_id = self.namespace_id.clone();
             let store = self.store.clone();
             let context = mutation_context(&self.config);
             results = tokio::task::spawn_blocking(move || {
-                commit_operations_batch(store.as_ref(), &namespace_id, requests, &context)
+                publish_namespace_mutations_batch(
+                    store.as_ref(),
+                    &namespace_id,
+                    batch_candidates,
+                    &context,
+                )
             })
             .await
             .unwrap_or_else(|err| vec![Err(CoreError::Store(err.to_string())); candidates.len()]);
@@ -310,6 +335,38 @@ fn is_head_publish_stale(result: &CommitResult) -> bool {
     )
 }
 
+fn candidate_request_id(candidate: &NamespaceMutationCandidate) -> &str {
+    match candidate {
+        NamespaceMutationCandidate::Commit(request) => &request.request_id,
+        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
+            commit_request, ..
+        }) => &commit_request.request_id,
+        NamespaceMutationCandidate::Path(intent) => intent.request_id(),
+    }
+}
+
+fn candidate_fingerprint(
+    namespace_id: &NamespaceId,
+    candidate: &NamespaceMutationCandidate,
+) -> Result<String, CoreError> {
+    match candidate {
+        NamespaceMutationCandidate::Commit(request) => semantic_fingerprint(namespace_id, request)
+            .map_err(|err| CoreError::Store(err.to_string())),
+        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
+            source_request_checksum_sha256: Some(source),
+            ..
+        }) => Ok(source.clone()),
+        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
+            commit_request,
+            source_request_checksum_sha256: None,
+        }) => semantic_fingerprint(namespace_id, commit_request)
+            .map_err(|err| CoreError::Store(err.to_string())),
+        NamespaceMutationCandidate::Path(intent) => {
+            intent.source_request_checksum_sha256(namespace_id)
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct SemanticCommit<'a> {
     namespace_id: &'a NamespaceId,
@@ -323,7 +380,7 @@ struct SemanticCommit<'a> {
 
 fn semantic_fingerprint(
     namespace_id: &NamespaceId,
-    request: &V0CommitRequest,
+    request: &ApiCommitRequest,
 ) -> Result<String, serde_json::Error> {
     payload_checksum_sha256(&SemanticCommit {
         namespace_id,
@@ -355,7 +412,9 @@ mod tests {
     use crate::config::StoreConfig;
     use loon_api::v0::{CommitOp, CommitRequest};
     use loon_api::{ChangeSeq, InodeId};
-    use loon_core::bootstrap_namespace;
+    use loon_core::{
+        bootstrap_namespace, store_bytes_as_content, PathMutationIntent, PutFileBehavior,
+    };
     use loon_objectstore::fs::LocalFsStore;
     use tempfile::tempdir;
 
@@ -416,5 +475,74 @@ mod tests {
 
         let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
         assert_eq!(wal_keys.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_batches_explicit_commit_and_path_intent_together() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let config = Arc::new(ServerConfig {
+            bind: "127.0.0.1:0".to_owned(),
+            auth_token: None,
+            writer_id: "writer-a".to_owned(),
+            writer_version: "test".to_owned(),
+            lease_duration_ms: 60_000,
+            store: StoreConfig::LocalFs {
+                root: temp_dir.path().display().to_string(),
+                key_prefix: None,
+            },
+        });
+        let namespace_id = NamespaceId::from("demo");
+        bootstrap_namespace(
+            store.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let content =
+            store_bytes_as_content(store.as_ref(), &namespace_id, b"hello").expect("stage content");
+        let registry = PublisherRegistry::new(store.clone(), config);
+
+        let explicit = CommitRequest {
+            request_id: "explicit-commit".to_owned(),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: Vec::new(),
+            ops: vec![CommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: "alpha".to_owned(),
+            }],
+            message: None,
+            annotations: None,
+        };
+        let path_intent = PathMutationIntent::PutFile {
+            request_id: "path-put".to_owned(),
+            absolute_path: "/file.txt".to_owned(),
+            content_ref: content.content_ref,
+            behavior: PutFileBehavior::CreateOnly,
+        };
+
+        let (explicit_response, path_response) = tokio::join!(
+            registry.submit_commit(namespace_id.clone(), explicit),
+            registry.submit_path_intent(namespace_id.clone(), path_intent)
+        );
+        assert_eq!(
+            explicit_response.expect("explicit response").committed_seq,
+            ChangeSeq(1)
+        );
+        assert_eq!(
+            path_response.expect("path response").committed_seq,
+            ChangeSeq(2)
+        );
+
+        let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+        assert_eq!(wal_keys.len(), 1);
+        let wal_bytes = store
+            .get(&wal_keys[0], None)
+            .expect("read wal")
+            .expect("wal exists");
+        let segment =
+            loon_api::decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");
+        assert_eq!(segment.payload.records.len(), 2);
     }
 }

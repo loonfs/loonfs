@@ -7,18 +7,19 @@ use crate::commit::{
 use crate::content::{validate_durable_content_reference, write_immutable_object};
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::metadata::RequestReceiptRecord;
+use crate::metadata::{MetadataState, RequestReceiptRecord};
 use crate::namespace::catalog::load_namespace_content_store_id;
+use crate::publisher::{NamespaceMutationCandidate, PlannedNamespaceMutation};
 use crate::wal::{prepare_wal_segment, PreparedWalRecord, StoredWalObject};
 use loon_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitOp as V0CommitOp, CommitOpResult,
-    CommitPrecondition as V0CommitPrecondition, CommitRequest as V0CommitRequest,
-    CommitResponse as V0CommitResponse, CommittedChange, CompleteUploadRequest,
+    BeginUploadResponse, ChangesResponse, CommitOp as ApiCommitOp, CommitOpResult,
+    CommitPrecondition as ApiCommitPrecondition, CommitRequest as ApiCommitRequest,
+    CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::{
     decode_wal_segment_envelope_zstd, ChangeSeq, CompletedUpload, ContentRef, ControlObjectKind,
-    InodeId, NamespaceId, UploadSessionEnvelope, UploadSessionState,
+    HeadState, InodeId, NamespaceId, UploadSessionEnvelope, UploadSessionState,
 };
 use loon_objectstore::keys::{content_blob, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -217,154 +218,107 @@ pub fn complete_upload<S: ObjectStore + ?Sized>(
 pub fn commit_operations<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    request: V0CommitRequest,
+    request: ApiCommitRequest,
     context: &MutationContext,
-) -> Result<V0CommitResponse, CoreError> {
+) -> Result<ApiCommitResponse, CoreError> {
     commit_operations_with_source_checksum(store, namespace_id, request, None, context)
 }
 
 pub fn commit_operations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    requests: Vec<V0CommitRequest>,
+    requests: Vec<ApiCommitRequest>,
     context: &MutationContext,
-) -> Vec<Result<V0CommitResponse, CoreError>> {
-    commit_operations_batch_with_source_checksums(
+) -> Vec<Result<ApiCommitResponse, CoreError>> {
+    publish_namespace_mutations_batch(
         store,
         namespace_id,
         requests
             .into_iter()
-            .map(|request| (request, None))
+            .map(NamespaceMutationCandidate::Commit)
             .collect(),
         context,
     )
 }
 
-pub(crate) fn commit_path_operations<S: ObjectStore + ?Sized>(
+pub(crate) fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    request: V0CommitRequest,
-    source_request_checksum_sha256: String,
+    candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
-) -> Result<V0CommitResponse, CoreError> {
-    commit_operations_with_source_checksum(
-        store,
-        namespace_id,
-        request,
-        Some(source_request_checksum_sha256),
-        context,
-    )
-}
-
-pub(crate) fn retry_existing_path_request<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    request_id: &str,
-    source_request_checksum_sha256: &str,
-    context: &MutationContext,
-) -> Result<Option<V0CommitResponse>, CoreError> {
-    let _ = context;
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    let Some(receipt) = find_request_receipt(&basis.metadata_state, request_id) else {
-        return Ok(None);
-    };
-    if receipt.semantic_fingerprint_sha256 != source_request_checksum_sha256 {
-        return Err(CoreError::RequestIdConflict(request_id.to_owned()));
-    }
-    Ok(Some(commit_response_from_receipt(namespace_id, receipt)))
+) -> Vec<Result<ApiCommitResponse, CoreError>> {
+    commit_namespace_mutations_batch(store, namespace_id, candidates, context)
 }
 
 fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    request: V0CommitRequest,
+    request: ApiCommitRequest,
     source_request_checksum_sha256: Option<String>,
     context: &MutationContext,
-) -> Result<V0CommitResponse, CoreError> {
-    commit_operations_batch_with_source_checksums(
+) -> Result<ApiCommitResponse, CoreError> {
+    publish_namespace_mutations_batch(
         store,
         namespace_id,
-        vec![(request, source_request_checksum_sha256)],
+        vec![NamespaceMutationCandidate::Planned(
+            PlannedNamespaceMutation {
+                commit_request: request,
+                source_request_checksum_sha256,
+            },
+        )],
         context,
     )
     .pop()
     .unwrap_or_else(|| Err(CoreError::Store("empty commit batch".to_owned())))
 }
 
-fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
+fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    requests: Vec<(V0CommitRequest, Option<String>)>,
+    candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
-) -> Vec<Result<V0CommitResponse, CoreError>> {
-    if requests.is_empty() {
+) -> Vec<Result<ApiCommitResponse, CoreError>> {
+    if candidates.is_empty() {
         return Vec::new();
     }
     if let Err(error) = crate::acquire_or_renew_namespace_lease(store, namespace_id, context) {
-        return (0..requests.len())
+        return (0..candidates.len())
             .map(|_| Err(CoreError::Lease(error.clone())))
             .collect();
     }
     let basis = match load_verified_namespace_basis(store, namespace_id) {
         Ok(basis) => basis,
         Err(error) => {
-            return (0..requests.len())
+            return (0..candidates.len())
                 .map(|_| Err(CoreError::Basis(error.clone())))
                 .collect()
         }
     };
 
-    let mut outcomes: Vec<Option<Result<V0CommitResponse, CoreError>>> =
-        (0..requests.len()).map(|_| None).collect();
+    let mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>> =
+        (0..candidates.len()).map(|_| None).collect();
     let mut current_head = basis.head.clone();
     let mut current_metadata_state = basis.metadata_state.clone();
     let mut accepted: Vec<(usize, PreparedWalRecord)> = Vec::new();
     let mut in_batch_requests: HashMap<String, InBatchRequest> = HashMap::new();
     let mut aliases: Vec<(usize, usize)> = Vec::new();
 
-    for (index, (request, source_request_checksum_sha256)) in requests.into_iter().enumerate() {
-        let request = map_commit_request(
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let Some(request) = prepare_candidate_request(
+            store,
             namespace_id,
             &basis,
-            request,
-            source_request_checksum_sha256,
+            &current_head,
+            &current_metadata_state,
+            candidate,
             context,
-        );
-        let semantic_fingerprint = match request.semantic_fingerprint_sha256() {
-            Ok(value) => value,
-            Err(err) => {
-                outcomes[index] = Some(Err(CoreError::Store(err.to_string())));
-                continue;
-            }
+            index,
+            &mut outcomes,
+            &mut in_batch_requests,
+            &mut aliases,
+        ) else {
+            continue;
         };
-        if let Some(existing) = find_request_receipt(&basis.metadata_state, &request.request_id) {
-            outcomes[index] = Some(
-                if existing.semantic_fingerprint_sha256 != semantic_fingerprint {
-                    Err(CoreError::RequestIdConflict(request.request_id.clone()))
-                } else {
-                    Ok(commit_response_from_receipt(namespace_id, existing))
-                },
-            );
-            continue;
-        }
-        if let Some(existing) = in_batch_requests.get(&request.request_id) {
-            if existing.semantic_fingerprint_sha256 != semantic_fingerprint {
-                outcomes[index] = Some(Err(CoreError::RequestIdConflict(
-                    request.request_id.clone(),
-                )));
-            } else {
-                aliases.push((index, existing.primary_index));
-            }
-            continue;
-        }
-        in_batch_requests.insert(
-            request.request_id.clone(),
-            InBatchRequest {
-                primary_index: index,
-                semantic_fingerprint_sha256: semantic_fingerprint,
-            },
-        );
-
         let validation = CommitValidationContext {
             head: current_head.clone(),
             lease: basis.lease.clone(),
@@ -497,7 +451,7 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
     }
 
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
-        outcomes[outcome_index] = Some(Ok(V0CommitResponse {
+        outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
             namespace_id: namespace_id.clone(),
             commit_id: record.request.request_id,
             committed_seq: wal.envelope.payload.records[accepted_index].seq,
@@ -505,6 +459,158 @@ fn commit_operations_batch_with_source_checksums<S: ObjectStore + ?Sized>(
         }));
     }
     finish_batch_outcomes_with_aliases(outcomes, &aliases)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_candidate_request<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    basis: &crate::VerifiedNamespaceBasis,
+    current_head: &HeadState,
+    current_metadata_state: &MetadataState,
+    candidate: NamespaceMutationCandidate,
+    context: &MutationContext,
+    index: usize,
+    outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
+    in_batch_requests: &mut HashMap<String, InBatchRequest>,
+    aliases: &mut Vec<(usize, usize)>,
+) -> Option<CoreCommitRequest> {
+    match candidate {
+        NamespaceMutationCandidate::Commit(request) => {
+            let request = map_commit_request(namespace_id, basis, request, None, context);
+            let semantic_fingerprint = match request.semantic_fingerprint_sha256() {
+                Ok(value) => value,
+                Err(err) => {
+                    outcomes[index] = Some(Err(CoreError::Store(err.to_string())));
+                    return None;
+                }
+            };
+            if !record_primary_request_or_complete_idempotent(
+                namespace_id,
+                &basis.metadata_state,
+                outcomes,
+                in_batch_requests,
+                aliases,
+                index,
+                &request.request_id,
+                &semantic_fingerprint,
+            ) {
+                return None;
+            }
+            Some(request)
+        }
+        NamespaceMutationCandidate::Planned(planned) => {
+            let request = map_commit_request(
+                namespace_id,
+                basis,
+                planned.commit_request,
+                planned.source_request_checksum_sha256,
+                context,
+            );
+            let semantic_fingerprint = match request.semantic_fingerprint_sha256() {
+                Ok(value) => value,
+                Err(err) => {
+                    outcomes[index] = Some(Err(CoreError::Store(err.to_string())));
+                    return None;
+                }
+            };
+            if !record_primary_request_or_complete_idempotent(
+                namespace_id,
+                &basis.metadata_state,
+                outcomes,
+                in_batch_requests,
+                aliases,
+                index,
+                &request.request_id,
+                &semantic_fingerprint,
+            ) {
+                return None;
+            }
+            Some(request)
+        }
+        NamespaceMutationCandidate::Path(intent) => {
+            let semantic_fingerprint = match intent.source_request_checksum_sha256(namespace_id) {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(error));
+                    return None;
+                }
+            };
+            let request_id = intent.request_id().to_owned();
+            if !record_primary_request_or_complete_idempotent(
+                namespace_id,
+                &basis.metadata_state,
+                outcomes,
+                in_batch_requests,
+                aliases,
+                index,
+                &request_id,
+                &semantic_fingerprint,
+            ) {
+                return None;
+            }
+            let planned = match crate::services::plan_path_mutation_against_state(
+                store,
+                namespace_id,
+                &intent,
+                current_head,
+                current_metadata_state,
+                &basis.content_store_id,
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(error));
+                    return None;
+                }
+            };
+            Some(map_commit_request(
+                namespace_id,
+                basis,
+                planned.commit_request,
+                Some(planned.source_request_checksum_sha256),
+                context,
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_primary_request_or_complete_idempotent(
+    namespace_id: &NamespaceId,
+    visible_metadata_state: &MetadataState,
+    outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
+    in_batch_requests: &mut HashMap<String, InBatchRequest>,
+    aliases: &mut Vec<(usize, usize)>,
+    index: usize,
+    request_id: &str,
+    semantic_fingerprint: &str,
+) -> bool {
+    if let Some(existing) = find_request_receipt(visible_metadata_state, request_id) {
+        outcomes[index] = Some(
+            if existing.semantic_fingerprint_sha256 != semantic_fingerprint {
+                Err(CoreError::RequestIdConflict(request_id.to_owned()))
+            } else {
+                Ok(commit_response_from_receipt(namespace_id, existing))
+            },
+        );
+        return false;
+    }
+    if let Some(existing) = in_batch_requests.get(request_id) {
+        if existing.semantic_fingerprint_sha256 != semantic_fingerprint {
+            outcomes[index] = Some(Err(CoreError::RequestIdConflict(request_id.to_owned())));
+        } else {
+            aliases.push((index, existing.primary_index));
+        }
+        return false;
+    }
+    in_batch_requests.insert(
+        request_id.to_owned(),
+        InBatchRequest {
+            primary_index: index,
+            semantic_fingerprint_sha256: semantic_fingerprint.to_owned(),
+        },
+    );
+    true
 }
 
 pub fn list_changes_after<S: ObjectStore + ?Sized>(
@@ -634,7 +740,7 @@ fn derive_commit_results(
 fn map_commit_request(
     namespace_id: &NamespaceId,
     basis: &crate::VerifiedNamespaceBasis,
-    request: V0CommitRequest,
+    request: ApiCommitRequest,
     source_request_checksum_sha256: Option<String>,
     context: &MutationContext,
 ) -> CoreCommitRequest {
@@ -656,16 +762,16 @@ fn map_commit_request(
     }
 }
 
-fn map_commit_op(op: V0CommitOp) -> CommitOp {
+fn map_commit_op(op: ApiCommitOp) -> CommitOp {
     match op {
-        V0CommitOp::CreateDir {
+        ApiCommitOp::CreateDir {
             parent_inode,
             display_name,
         } => CommitOp::CreateDir {
             parent_inode,
             display_name,
         },
-        V0CommitOp::CreateFile {
+        ApiCommitOp::CreateFile {
             parent_inode,
             display_name,
             content_ref,
@@ -674,7 +780,7 @@ fn map_commit_op(op: V0CommitOp) -> CommitOp {
             display_name,
             content_ref,
         },
-        V0CommitOp::ReplaceFile {
+        ApiCommitOp::ReplaceFile {
             inode_id,
             base_revision_no,
             content_ref,
@@ -683,7 +789,7 @@ fn map_commit_op(op: V0CommitOp) -> CommitOp {
             base_revision: base_revision_no,
             content_ref,
         },
-        V0CommitOp::RestoreRevision {
+        ApiCommitOp::RestoreRevision {
             inode_id,
             source_revision_no,
             base_revision_no,
@@ -692,8 +798,8 @@ fn map_commit_op(op: V0CommitOp) -> CommitOp {
             source_revision: source_revision_no,
             base_revision: base_revision_no,
         },
-        V0CommitOp::DeleteFile { inode_id } => CommitOp::DeleteFile { inode_id },
-        V0CommitOp::Rename {
+        ApiCommitOp::DeleteFile { inode_id } => CommitOp::DeleteFile { inode_id },
+        ApiCommitOp::Rename {
             inode_id,
             new_parent_inode,
             new_display_name,
@@ -702,24 +808,24 @@ fn map_commit_op(op: V0CommitOp) -> CommitOp {
             new_parent_inode,
             new_display_name,
         },
-        V0CommitOp::DeleteSubtree { root_inode } => CommitOp::DeleteSubtree { root_inode },
+        ApiCommitOp::DeleteSubtree { root_inode } => CommitOp::DeleteSubtree { root_inode },
     }
 }
 
-fn map_commit_precondition(precondition: V0CommitPrecondition) -> Precondition {
+fn map_commit_precondition(precondition: ApiCommitPrecondition) -> Precondition {
     match precondition {
-        V0CommitPrecondition::HeadSeqIs { expected_seq } => Precondition::HeadSeqIs(expected_seq),
-        V0CommitPrecondition::InodeRevisionIs {
+        ApiCommitPrecondition::HeadSeqIs { expected_seq } => Precondition::HeadSeqIs(expected_seq),
+        ApiCommitPrecondition::InodeRevisionIs {
             inode_id,
             revision_no,
         } => Precondition::InodeRevisionIs {
             inode_id,
             revision: revision_no,
         },
-        V0CommitPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
+        ApiCommitPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
             Precondition::AncestorsNotSubtreeDeleted { inode_id }
         }
-        V0CommitPrecondition::ChildNameAbsent {
+        ApiCommitPrecondition::ChildNameAbsent {
             parent_inode,
             name_key,
         } => Precondition::ChildNameAbsent {
@@ -880,8 +986,8 @@ fn find_request_receipt<'a>(
 fn commit_response_from_receipt(
     namespace_id: &NamespaceId,
     receipt: &RequestReceiptRecord,
-) -> V0CommitResponse {
-    V0CommitResponse {
+) -> ApiCommitResponse {
+    ApiCommitResponse {
         namespace_id: namespace_id.clone(),
         commit_id: receipt.commit_id.clone(),
         committed_seq: receipt.committed_seq,
@@ -890,8 +996,8 @@ fn commit_response_from_receipt(
 }
 
 fn finish_batch_outcomes(
-    outcomes: Vec<Option<Result<V0CommitResponse, CoreError>>>,
-) -> Vec<Result<V0CommitResponse, CoreError>> {
+    outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>>,
+) -> Vec<Result<ApiCommitResponse, CoreError>> {
     outcomes
         .into_iter()
         .map(|outcome| {
@@ -901,9 +1007,9 @@ fn finish_batch_outcomes(
 }
 
 fn finish_batch_outcomes_with_aliases(
-    mut outcomes: Vec<Option<Result<V0CommitResponse, CoreError>>>,
+    mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>>,
     aliases: &[(usize, usize)],
-) -> Vec<Result<V0CommitResponse, CoreError>> {
+) -> Vec<Result<ApiCommitResponse, CoreError>> {
     for (alias_index, primary_index) in aliases {
         let primary_outcome = outcomes
             .get(*primary_index)

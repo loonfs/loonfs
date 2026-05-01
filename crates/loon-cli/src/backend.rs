@@ -9,6 +9,7 @@ use loon_core::{
 };
 use loon_objectstore::ConfiguredObjectStore;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
@@ -213,6 +214,7 @@ impl Backend for DirectBackend {
         } else {
             PutFileBehavior::CreateOnly
         };
+        let request_id = Uuid::new_v4().to_string();
         put_file_bytes(
             &self.store,
             &ns_id,
@@ -220,19 +222,20 @@ impl Backend for DirectBackend {
             bytes,
             behavior,
             &self.mutation_context(),
-            None,
+            Some(&request_id),
         )
         .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
+        let request_id = Uuid::new_v4().to_string();
         delete_path_non_recursive(
             &self.store,
             &ns_id,
             &spec.absolute_path,
             &self.mutation_context(),
-            None,
+            Some(&request_id),
         )
         .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
@@ -243,13 +246,14 @@ impl Backend for DirectBackend {
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&from.namespace)?;
+        let request_id = Uuid::new_v4().to_string();
         move_path(
             &self.store,
             &ns_id,
             &from.absolute_path,
             &to.absolute_path,
             &self.mutation_context(),
-            None,
+            Some(&request_id),
         )
         .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
     }
@@ -260,13 +264,14 @@ impl Backend for DirectBackend {
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&from.namespace)?;
+        let request_id = Uuid::new_v4().to_string();
         copy_file_path(
             &self.store,
             &ns_id,
             &from.absolute_path,
             &to.absolute_path,
             &self.mutation_context(),
-            None,
+            Some(&request_id),
         )
         .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
     }
@@ -442,10 +447,11 @@ impl RemoteTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_core_error, LocalTarget, DEFAULT_LEASE_DURATION_MS};
+    use super::{map_core_error, Backend, LocalTarget, DEFAULT_LEASE_DURATION_MS};
     use crate::config::StoreConfig;
-    use loon_api::{InodeId, RevisionNo};
-    use loon_core::{commit::CommitValidationError, CoreError};
+    use loon_api::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
+    use loon_client::NamespacePath;
+    use loon_core::{commit::CommitValidationError, list_changes_after, CoreError};
     use tempfile::tempdir;
 
     #[test]
@@ -486,5 +492,40 @@ mod tests {
             LocalTarget::new(&store, None, None, Some(12_345)).expect("build local target");
 
         assert_eq!(target.backend.lease_duration_ms, 12_345);
+    }
+
+    #[test]
+    fn direct_backend_generates_non_empty_request_id_for_local_put() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let store = StoreConfig::LocalFs {
+            root: temp_dir.path().display().to_string(),
+            key_prefix: None,
+        };
+        let target = LocalTarget::new(&store, None, None, None).expect("build local target");
+        target
+            .backend
+            .create_namespace("demo")
+            .expect("create namespace");
+
+        target
+            .backend
+            .put_file_bytes(
+                &NamespacePath {
+                    namespace: "demo".to_owned(),
+                    absolute_path: "/file.txt".to_owned(),
+                },
+                b"hello",
+                false,
+            )
+            .expect("put file");
+
+        let changes = list_changes_after(
+            &target.backend.store,
+            &NamespaceId::from("demo"),
+            ChangeSeq(0),
+        )
+        .expect("list changes");
+        assert_eq!(changes.changes.len(), 1);
+        assert!(!changes.changes[0].request_id.trim().is_empty());
     }
 }

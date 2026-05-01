@@ -1,7 +1,7 @@
 use loon_api::{
     decode_wal_segment_envelope_zstd, sha256_digest,
     v0::{
-        CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest,
+        CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
         CompleteUploadRequest,
     },
     ChangeSeq, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope, ControlObjectKind,
@@ -16,9 +16,11 @@ use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
     bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
     copy_file_path, delete_path, delete_path_non_recursive, fork_namespace, list_changes_after,
-    list_namespaces, load_verified_namespace_basis, move_path, put_file_bytes, read_file_bytes,
-    resolve_path, store_bytes_as_content, write_file_bytes, CoreError, CoreErrorKind,
-    MutationContext, PutFileBehavior,
+    list_namespaces, load_verified_namespace_basis, move_path, publish_namespace_mutations_batch,
+    put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes,
+    CoreError, CoreErrorKind, DirectObjectStorePublisher, MutationContext,
+    NamespaceMutationCandidate, NamespaceMutationPublisher, PathMutationIntent, PublishOptions,
+    PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -748,22 +750,22 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
         &store,
         &namespace_id,
         vec![
-            V0CommitRequest {
+            ApiCommitRequest {
                 request_id: "req-batch-a".to_owned(),
                 planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
-                ops: vec![V0CommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "alpha".to_owned(),
                 }],
                 message: None,
                 annotations: None,
             },
-            V0CommitRequest {
+            ApiCommitRequest {
                 request_id: "req-batch-b".to_owned(),
                 planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
-                ops: vec![V0CommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "beta".to_owned(),
                 }],
@@ -809,11 +811,11 @@ fn batch_commit_aliases_duplicate_request_id_with_same_fingerprint() {
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
-    let request = V0CommitRequest {
+    let request = ApiCommitRequest {
         request_id: "req-duplicate".to_owned(),
         planned_head_seq: ChangeSeq(0),
         preconditions: Vec::new(),
-        ops: vec![V0CommitOp::CreateDir {
+        ops: vec![ApiCommitOp::CreateDir {
             parent_inode: InodeId(1),
             display_name: "alpha".to_owned(),
         }],
@@ -857,22 +859,22 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
         &store,
         &namespace_id,
         vec![
-            V0CommitRequest {
+            ApiCommitRequest {
                 request_id: "req-conflict".to_owned(),
                 planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
-                ops: vec![V0CommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "alpha".to_owned(),
                 }],
                 message: None,
                 annotations: None,
             },
-            V0CommitRequest {
+            ApiCommitRequest {
                 request_id: "req-conflict".to_owned(),
                 planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
-                ops: vec![V0CommitOp::CreateDir {
+                ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "beta".to_owned(),
                 }],
@@ -902,6 +904,178 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(changes.changes[0].request_id, "req-conflict");
+}
+
+#[test]
+fn direct_publisher_path_intents_cover_basic_mutations() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let publisher = DirectObjectStorePublisher::new(&store);
+
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+    let put = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::PutFile {
+                request_id: "put-path".to_owned(),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("put path");
+    assert_eq!(put.committed_seq, ChangeSeq(1));
+
+    let moved = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::MovePath {
+                request_id: "move-path".to_owned(),
+                from_path: "/docs/a.txt".to_owned(),
+                to_path: "/docs/b.txt".to_owned(),
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("move path");
+    assert_eq!(moved.committed_seq, ChangeSeq(2));
+
+    let copied = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::CopyFilePath {
+                request_id: "copy-path".to_owned(),
+                from_path: "/docs/b.txt".to_owned(),
+                to_path: "/docs/c.txt".to_owned(),
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("copy path");
+    assert_eq!(copied.committed_seq, ChangeSeq(3));
+
+    let deleted = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::DeletePath {
+                request_id: "delete-path".to_owned(),
+                absolute_path: "/docs/b.txt".to_owned(),
+                recursive: false,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("delete path");
+    assert_eq!(deleted.committed_seq, ChangeSeq(4));
+
+    let copied_bytes =
+        read_file_bytes(&store, &namespace_id, "/docs/c.txt").expect("read copied file");
+    assert_eq!(copied_bytes.bytes, b"hello");
+}
+
+#[test]
+fn direct_publisher_uses_durable_path_request_id_receipts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let publisher = DirectObjectStorePublisher::new(&store);
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+
+    let intent = PathMutationIntent::PutFile {
+        request_id: "same-path-request".to_owned(),
+        absolute_path: "/same.txt".to_owned(),
+        content_ref: content.content_ref.clone(),
+        behavior: PutFileBehavior::CreateOnly,
+    };
+    let first = publisher
+        .submit_path_intent(
+            &namespace_id,
+            intent.clone(),
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("first publish");
+    let retry = publisher
+        .submit_path_intent(&namespace_id, intent, &context, PublishOptions::default())
+        .expect("idempotent retry");
+    assert_eq!(retry.committed_seq, first.committed_seq);
+
+    let conflict = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::DeletePath {
+                request_id: "same-path-request".to_owned(),
+                absolute_path: "/same.txt".to_owned(),
+                recursive: false,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect_err("conflicting retry");
+    assert!(matches!(
+        conflict,
+        CoreError::RequestIdConflict(request_id) if request_id == "same-path-request"
+    ));
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+}
+
+#[test]
+fn path_intents_in_one_batch_see_tentative_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+
+    let responses = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                request_id: "put-batched-path".to_owned(),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            }),
+            NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
+                request_id: "move-batched-path".to_owned(),
+                from_path: "/docs/a.txt".to_owned(),
+                to_path: "/docs/b.txt".to_owned(),
+            }),
+        ],
+        &context,
+    );
+
+    assert_eq!(
+        responses[0].as_ref().expect("put").committed_seq,
+        ChangeSeq(1)
+    );
+    assert_eq!(
+        responses[1].as_ref().expect("move").committed_seq,
+        ChangeSeq(2)
+    );
+    let moved_bytes =
+        read_file_bytes(&store, &namespace_id, "/docs/b.txt").expect("read moved file");
+    assert_eq!(moved_bytes.bytes, b"hello");
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.records.len(), 2);
 }
 
 #[test]
@@ -1247,13 +1421,13 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     let create = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "restore-create".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
             }],
-            ops: vec![V0CommitOp::CreateFile {
+            ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "restore.txt".to_owned(),
                 content_ref: first.content_ref.clone(),
@@ -1273,13 +1447,13 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "restore-replace".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
-            ops: vec![V0CommitOp::ReplaceFile {
+            ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(1),
                 content_ref: second.content_ref,
@@ -1301,13 +1475,13 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "restore-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(2),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(2),
             }],
-            ops: vec![V0CommitOp::RestoreRevision {
+            ops: vec![ApiCommitOp::RestoreRevision {
                 inode_id,
                 source_revision_no: RevisionNo(1),
                 base_revision_no: RevisionNo(2),
@@ -1381,13 +1555,13 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "create-missing-parent-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
             }],
-            ops: vec![V0CommitOp::CreateFile {
+            ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(99),
                 display_name: "missing.txt".to_owned(),
                 content_ref: content_ref("missing-content"),
@@ -1428,13 +1602,13 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "replace-stale-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
-            ops: vec![V0CommitOp::ReplaceFile {
+            ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(99),
                 content_ref: content_ref("missing-content"),
@@ -1475,13 +1649,13 @@ fn restore_revision_missing_source_is_revision_not_found() {
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "restore-missing-source".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
-            ops: vec![V0CommitOp::RestoreRevision {
+            ops: vec![ApiCommitOp::RestoreRevision {
                 inode_id,
                 source_revision_no: RevisionNo(99),
                 base_revision_no: RevisionNo(1),
@@ -1506,13 +1680,13 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
     let create = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "resolve-before-durable-check-create".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
             }],
-            ops: vec![V0CommitOp::CreateFile {
+            ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "restore.txt".to_owned(),
                 content_ref: first.content_ref.clone(),
@@ -1539,19 +1713,19 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "resolve-before-durable-check-commit".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
             ops: vec![
-                V0CommitOp::ReplaceFile {
+                ApiCommitOp::ReplaceFile {
                     inode_id,
                     base_revision_no: RevisionNo(1),
                     content_ref: second.content_ref.clone(),
                 },
-                V0CommitOp::RestoreRevision {
+                ApiCommitOp::RestoreRevision {
                     inode_id,
                     source_revision_no: RevisionNo(2),
                     base_revision_no: RevisionNo(2),

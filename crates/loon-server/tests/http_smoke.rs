@@ -1,7 +1,7 @@
 use loon_api::{
     v0::{
         CommitAnnotations, CommitOp, CommitOpResult, CommitPrecondition,
-        CommitRequest as V0CommitRequest, CompleteUploadRequest,
+        CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, ContentRef, CreateCheckpointResponse, InodeId,
     RevisionNo,
@@ -296,7 +296,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         let mut annotations = CommitAnnotations::new();
         annotations.insert("source".to_owned(), json!("http-smoke"));
         annotations.insert("kind".to_owned(), json!("service-proxied"));
-        let commit_request = V0CommitRequest {
+        let commit_request = ApiCommitRequest {
             request_id: "req-phase-2a-create-file".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
@@ -397,7 +397,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .client
             .commit_operations(
                 namespace,
-                &V0CommitRequest {
+                &ApiCommitRequest {
                     request_id: "req-restore-create".to_owned(),
                     planned_head_seq: ChangeSeq(0),
                     preconditions: vec![CommitPrecondition::HeadSeqIs {
@@ -424,7 +424,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .client
             .commit_operations(
                 namespace,
-                &V0CommitRequest {
+                &ApiCommitRequest {
                     request_id: "req-restore-replace".to_owned(),
                     planned_head_seq: ChangeSeq(1),
                     preconditions: vec![CommitPrecondition::HeadSeqIs {
@@ -446,7 +446,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .client
             .commit_operations(
                 namespace,
-                &V0CommitRequest {
+                &ApiCommitRequest {
                     request_id: "req-restore-restore".to_owned(),
                     planned_head_seq: ChangeSeq(2),
                     preconditions: vec![CommitPrecondition::HeadSeqIs {
@@ -524,7 +524,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
             .client
             .commit_operations(
                 namespace,
-                &V0CommitRequest {
+                &ApiCommitRequest {
                     request_id: "req-restore-missing-source-create".to_owned(),
                     planned_head_seq: ChangeSeq(0),
                     preconditions: vec![CommitPrecondition::HeadSeqIs {
@@ -547,7 +547,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
 
         match harness.client.commit_operations(
             namespace,
-            &V0CommitRequest {
+            &ApiCommitRequest {
                 request_id: "req-restore-missing-source-restore".to_owned(),
                 planned_head_seq: ChangeSeq(1),
                 preconditions: vec![CommitPrecondition::HeadSeqIs {
@@ -595,7 +595,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
 
         let first_content_ref =
             stage_uploaded_content_ref(&harness.client, namespace, b"first payload\n");
-        let first_request = V0CommitRequest {
+        let first_request = ApiCommitRequest {
             request_id: "req-phase-2a-conflict".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
@@ -618,7 +618,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
             stage_uploaded_content_ref(&harness.client, namespace, b"second payload\n");
         let mut changed_annotations = BTreeMap::new();
         changed_annotations.insert("source".to_owned(), json!("changed"));
-        let conflicting_request = V0CommitRequest {
+        let conflicting_request = ApiCommitRequest {
             request_id: first_request.request_id.clone(),
             planned_head_seq: ChangeSeq(0),
             preconditions: first_request.preconditions.clone(),
