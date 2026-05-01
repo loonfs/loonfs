@@ -6,12 +6,13 @@ use crate::loading::ControlObjectLoadError;
 use crate::metadata::{MetadataApplyError, VisiblePathError};
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::wal::WalBuildError;
-use loon_api::{ChangeSeq, InodeId, InodeKind, NamespaceId};
+use loon_api::{ChangeSeq, InodeId, InodeKind, NamespaceId, NamespaceIdValidationError};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreErrorKind {
     InvalidPath,
+    InvalidNamespaceId,
     NamespaceNotFound,
     NamespaceExists,
     NamespacePartial,
@@ -56,6 +57,8 @@ pub enum CoreError {
     WalWrite(String),
     #[error("invalid absolute path `{0}`")]
     InvalidPath(String),
+    #[error(transparent)]
+    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("path not found `{0}`")]
     MissingPath(String),
     #[error("expected file at `{path}` but found `{kind:?}`")]
@@ -157,6 +160,7 @@ impl CoreError {
             CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
                 CoreErrorKind::InvalidPath
             }
+            CoreError::InvalidNamespaceId(_) => CoreErrorKind::InvalidNamespaceId,
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
             CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
             CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,
@@ -179,6 +183,7 @@ impl CoreError {
 
 fn classify_control_object_load_error(error: &ControlObjectLoadError) -> CoreErrorKind {
     match error {
+        ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
         ControlObjectLoadError::MissingObject { .. }
         | ControlObjectLoadError::MissingObjectAfterHead { .. } => CoreErrorKind::NamespaceNotFound,
         ControlObjectLoadError::KindMismatch { .. }
@@ -194,6 +199,7 @@ fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
     match error {
         BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
         BasisLoadError::LoadContentStoreDescriptor(error) => match error {
+            ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
             ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
             _ => CoreErrorKind::NamespaceCorrupt,
         },

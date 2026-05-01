@@ -238,7 +238,7 @@ pub(crate) fn retry_existing_path_request<S: ObjectStore + ?Sized>(
     source_request_checksum_sha256: &str,
     context: &MutationContext,
 ) -> Result<Option<V0CommitResponse>, CoreError> {
-    validate_namespace_id_for_key_construction(namespace_id)?;
+    validate_namespace_id_for_protocol_key(namespace_id)?;
     let Some(existing) =
         find_existing_commit_payload_by_request_id(store, namespace_id, request_id)?
     else {
@@ -267,7 +267,7 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
     source_request_checksum_sha256: Option<String>,
     context: &MutationContext,
 ) -> Result<V0CommitResponse, CoreError> {
-    validate_namespace_id_for_key_construction(namespace_id)?;
+    validate_namespace_id_for_protocol_key(namespace_id)?;
     crate::acquire_or_renew_namespace_lease(store, namespace_id, context)?;
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     let request = map_commit_request(
@@ -710,7 +710,7 @@ fn read_upload_session_object<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &str,
 ) -> Result<LoadedUploadSessionObject, CoreError> {
-    validate_namespace_id_for_key_construction(namespace_id)?;
+    validate_namespace_id_for_protocol_key(namespace_id)?;
     let object_key = upload_session(namespace_id.as_str(), upload_id);
     let metadata = store
         .head(&object_key)
@@ -757,12 +757,6 @@ fn read_upload_session_object<S: ObjectStore + ?Sized>(
     })
 }
 
-fn validate_namespace_id_for_key_construction(namespace_id: &NamespaceId) -> Result<(), CoreError> {
-    NamespaceId::parse(namespace_id.as_str())
-        .map(|_| ())
-        .map_err(CoreError::from)
-}
-
 fn load_existing_commit_payload<S: ObjectStore + ?Sized>(
     store: &S,
     wal_key: &str,
@@ -783,6 +777,7 @@ fn find_existing_commit_payload_by_request_id<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request_id: &str,
 ) -> Result<Option<loon_api::WalCommitPayload>, CoreError> {
+    validate_namespace_id_for_protocol_key(namespace_id)?;
     let prefix = format!("namespaces/{}/wal/", namespace_id.as_str());
     let mut matching_keys: Vec<String> = store
         .list_prefix(&prefix)
@@ -816,6 +811,7 @@ fn load_wal_range<S: ObjectStore + ?Sized>(
     from_seq_exclusive: ChangeSeq,
     through_seq_inclusive: ChangeSeq,
 ) -> Result<Vec<crate::wal::StoredWalObject>, CoreError> {
+    validate_namespace_id_for_protocol_key(namespace_id)?;
     let prefix = format!("namespaces/{}/wal/", namespace_id.as_str());
     let listed = store
         .list_prefix(&prefix)
@@ -870,6 +866,12 @@ fn load_wal_range<S: ObjectStore + ?Sized>(
     }
 
     Ok(out)
+}
+
+fn validate_namespace_id_for_protocol_key(namespace_id: &NamespaceId) -> Result<(), CoreError> {
+    NamespaceId::parse(namespace_id.as_str())
+        .map(|_| ())
+        .map_err(CoreError::from)
 }
 
 fn wal_seq_from_key(prefix: &str, object_key: &str) -> Option<ChangeSeq> {

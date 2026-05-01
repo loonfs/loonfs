@@ -23,7 +23,7 @@ use loon_api::{
     ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
     FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope,
     MutationResult, NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId,
-    NamespaceSummary,
+    NamespaceIdValidationError, NamespaceSummary,
 };
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
@@ -53,6 +53,8 @@ pub enum PutFileBehavior {
 
 #[derive(Debug, Error)]
 pub enum BootstrapNamespaceError {
+    #[error(transparent)]
+    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("holder id must not be empty")]
     EmptyHolderId,
     #[error("writer version must not be empty")]
@@ -78,6 +80,9 @@ pub enum BootstrapNamespaceError {
 impl From<NamespaceInitializationError> for BootstrapNamespaceError {
     fn from(value: NamespaceInitializationError) -> Self {
         match value {
+            NamespaceInitializationError::InvalidNamespaceId(error) => {
+                Self::InvalidNamespaceId(error)
+            }
             NamespaceInitializationError::InspectNamespaceDescriptor(message) => {
                 Self::DescriptorWrite(message)
             }
@@ -219,8 +224,7 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<NamespaceSummary, CoreError> {
     match namespace_initialization_state(store, new_namespace_id)
-        .map_err(BootstrapNamespaceError::from)
-        .map_err(|err| CoreError::Store(err.to_string()))?
+        .map_err(map_namespace_initialization_error_to_core)?
     {
         NamespaceInitializationState::Absent => {}
         NamespaceInitializationState::Complete => {
@@ -329,8 +333,7 @@ fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
             match namespace_initialization_state(store, namespace_id)
-                .map_err(BootstrapNamespaceError::from)
-                .map_err(|err| CoreError::Store(err.to_string()))?
+                .map_err(map_namespace_initialization_error_to_core)?
             {
                 NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
                     namespace_id: namespace_id.clone(),
@@ -346,6 +349,15 @@ fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
             }
         }
         Err(err) => Err(CoreError::Store(err.to_string())),
+    }
+}
+
+fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {
+    match error {
+        NamespaceInitializationError::InvalidNamespaceId(error) => {
+            CoreError::InvalidNamespaceId(error)
+        }
+        other => CoreError::Store(BootstrapNamespaceError::from(other).to_string()),
     }
 }
 

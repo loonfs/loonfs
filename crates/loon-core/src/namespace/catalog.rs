@@ -1,7 +1,7 @@
 use crate::loading::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };
-use loon_api::{ContentStoreId, NamespaceDescriptorState, NamespaceId};
+use loon_api::{ContentStoreId, NamespaceDescriptorState, NamespaceId, NamespaceIdValidationError};
 use loon_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
 use thiserror::Error;
@@ -29,6 +29,8 @@ pub(crate) enum NamespaceInitializationState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum NamespaceInitializationError {
+    #[error(transparent)]
+    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("failed to inspect namespace descriptor object: {0}")]
     InspectNamespaceDescriptor(String),
     #[error("failed to inspect namespace head object: {0}")]
@@ -76,6 +78,8 @@ pub(crate) fn namespace_initialization_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceInitializationState, NamespaceInitializationError> {
+    NamespaceId::parse(namespace_id.as_str())?;
+
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
     let head_key = namespace_head(namespace_id.as_str());
     let lease_key = namespace_lease(namespace_id.as_str());
