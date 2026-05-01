@@ -1,6 +1,6 @@
+use crate::context::MutationContext;
 use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::namespace::{next_takeover_head, HeadFenceTakeoverError};
-use crate::services::MutationContext;
 use loon_api::{
     ControlObjectKind, FenceToken, HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId,
 };

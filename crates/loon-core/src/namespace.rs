@@ -1,3 +1,5 @@
+pub(crate) mod catalog;
+
 use loon_api::FenceToken;
 pub use loon_api::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
 use thiserror::Error;
