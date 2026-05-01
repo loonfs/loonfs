@@ -3,7 +3,7 @@ use loon_api::{
     v0::{CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest},
     ChangeSeq, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope, ControlObjectKind,
     FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceDescriptorEnvelope,
-    NamespaceId, RevisionNo,
+    NamespaceDescriptorState, NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
@@ -18,9 +18,10 @@ use loon_core::{
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    content_blob, content_store_descriptor, namespace_descriptor, namespace_head,
+    content_blob, content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
 };
-use loon_objectstore::ObjectStore;
+use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use std::sync::Mutex;
 use tempfile::tempdir;
 
 #[test]
@@ -721,6 +722,11 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_basis.head.snapshot_hint_seq, Some(ChangeSeq(1)));
     assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
 
+    let duplicate_error =
+        fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+            .expect_err("duplicate fork target");
+    assert_eq!(duplicate_error.kind(), CoreErrorKind::NamespaceExists);
+
     let source_entry =
         resolve_path(&store, &source_namespace_id, "/docs/shared.txt").expect("source stat");
     let clone_entry =
@@ -800,6 +806,162 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
             .expect("clone remains readable")
             .bytes,
         b"clone-after-fork"
+    );
+}
+
+#[test]
+fn fork_failure_after_target_head_reserves_partial_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::from("clone");
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Prefix(format!(
+            "namespaces/{}/snapshots/",
+            clone_namespace_id.as_str()
+        )),
+        InjectedCreateFailure::Transport {
+            message: "injected target checkpoint failure",
+        },
+    );
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("target checkpoint write should fail");
+    assert_eq!(error.kind(), CoreErrorKind::ServerError);
+    assert!(
+        store
+            .head(&namespace_head(clone_namespace_id.as_str()))
+            .expect("head target head")
+            .is_some(),
+        "target head should reserve namespace before target checkpoint writes"
+    );
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .expect("head target descriptor")
+            .is_none(),
+        "descriptor must remain unpublished"
+    );
+    assert_namespace_partial(&store, &clone_namespace_id, &context);
+}
+
+#[test]
+fn fork_failure_after_target_checkpoint_artifacts_remains_partial() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::from("clone");
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Exact(namespace_lease(clone_namespace_id.as_str())),
+        InjectedCreateFailure::Transport {
+            message: "injected target lease failure",
+        },
+    );
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("target lease write should fail");
+    assert_eq!(error.kind(), CoreErrorKind::ServerError);
+    assert!(
+        store
+            .head(&namespace_head(clone_namespace_id.as_str()))
+            .expect("head target head")
+            .is_some(),
+        "target head should still reserve namespace"
+    );
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .expect("head target descriptor")
+            .is_none(),
+        "descriptor must remain unpublished"
+    );
+    let target_snapshot_keys = store
+        .list_prefix(&format!(
+            "namespaces/{}/snapshots/",
+            clone_namespace_id.as_str()
+        ))
+        .expect("list target snapshots");
+    assert!(
+        !target_snapshot_keys.is_empty(),
+        "target checkpoint artifacts should have been written before lease failure"
+    );
+    assert_namespace_partial(&store, &clone_namespace_id, &context);
+}
+
+#[test]
+fn fork_target_control_precondition_rechecks_partial_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::from("clone");
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Exact(namespace_head(clone_namespace_id.as_str())),
+        InjectedCreateFailure::PreconditionFailed {
+            write_attempted_object: true,
+            additional_writes: Vec::new(),
+        },
+    );
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("target head precondition should re-check partial namespace");
+    assert_eq!(error.kind(), CoreErrorKind::NamespacePartial);
+    assert_namespace_partial(&store, &clone_namespace_id, &context);
+}
+
+#[test]
+fn fork_target_control_conflict_rechecks_complete_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::from("clone");
+    let context = mutation_context();
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    seed_source_namespace_for_fork(&inner, &source_namespace_id, &context);
+    let content_store_id = load_verified_namespace_basis(&inner, &source_namespace_id)
+        .expect("source basis")
+        .content_store_id;
+    let descriptor = NamespaceDescriptorEnvelope::from_state(
+        ControlObjectKind::NamespaceDescriptor,
+        &context.writer_version,
+        NamespaceDescriptorState {
+            namespace_id: clone_namespace_id.clone(),
+            content_store_id,
+        },
+    )
+    .expect("descriptor envelope");
+    let store = InjectCreateFailureStore::new(
+        inner,
+        KeyMatcher::Exact(namespace_head(clone_namespace_id.as_str())),
+        InjectedCreateFailure::Conflict {
+            write_attempted_object: true,
+            additional_writes: vec![
+                (
+                    namespace_lease(clone_namespace_id.as_str()),
+                    b"lease-present".to_vec(),
+                ),
+                (
+                    namespace_descriptor(clone_namespace_id.as_str()),
+                    serde_json::to_vec(&descriptor).expect("descriptor bytes"),
+                ),
+            ],
+        },
+    );
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("target head conflict should re-check complete namespace");
+    assert_eq!(error.kind(), CoreErrorKind::NamespaceExists);
+    assert_eq!(
+        list_namespaces(&store)
+            .expect("list namespaces")
+            .into_iter()
+            .map(|summary| summary.namespace_id)
+            .collect::<Vec<_>>(),
+        vec![clone_namespace_id, source_namespace_id]
     );
 }
 
@@ -1355,6 +1517,173 @@ fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
     )
     .expect_err("create-only conflict");
     assert_eq!(error.kind(), CoreErrorKind::PathConflict);
+}
+
+fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
+    store: &S,
+    source_namespace_id: &NamespaceId,
+    context: &MutationContext,
+) {
+    bootstrap_namespace(store, source_namespace_id, context, false)
+        .expect("bootstrap source namespace");
+    write_file_bytes(
+        store,
+        source_namespace_id,
+        "/docs/shared.txt",
+        b"base",
+        context,
+        Some("seed-shared"),
+    )
+    .expect("seed shared file");
+}
+
+fn assert_namespace_partial<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) {
+    let partial_error =
+        bootstrap_namespace(store, namespace_id, context, false).expect_err("partial namespace");
+    assert!(matches!(
+        partial_error,
+        loon_core::BootstrapNamespaceError::NamespacePartiallyInitialized { .. }
+    ));
+}
+
+#[derive(Debug)]
+struct InjectCreateFailureStore {
+    inner: LocalFsStore,
+    matcher: KeyMatcher,
+    failure: InjectedCreateFailure,
+    injected: Mutex<bool>,
+}
+
+impl InjectCreateFailureStore {
+    fn new(inner: LocalFsStore, matcher: KeyMatcher, failure: InjectedCreateFailure) -> Self {
+        Self {
+            inner,
+            matcher,
+            failure,
+            injected: Mutex::new(false),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum KeyMatcher {
+    Exact(String),
+    Prefix(String),
+}
+
+impl KeyMatcher {
+    fn matches(&self, key: &str) -> bool {
+        match self {
+            Self::Exact(expected) => key == expected,
+            Self::Prefix(prefix) => key.starts_with(prefix),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum InjectedCreateFailure {
+    Transport {
+        message: &'static str,
+    },
+    Conflict {
+        write_attempted_object: bool,
+        additional_writes: Vec<(String, Vec<u8>)>,
+    },
+    PreconditionFailed {
+        write_attempted_object: bool,
+        additional_writes: Vec<(String, Vec<u8>)>,
+    },
+}
+
+impl InjectedCreateFailure {
+    fn apply_before_error(
+        &self,
+        inner: &LocalFsStore,
+        attempted_key: &str,
+        attempted_bytes: &[u8],
+    ) -> Result<(), ObjectStoreError> {
+        match self {
+            Self::Transport { .. } => Ok(()),
+            Self::Conflict {
+                write_attempted_object,
+                additional_writes,
+            }
+            | Self::PreconditionFailed {
+                write_attempted_object,
+                additional_writes,
+            } => {
+                if *write_attempted_object {
+                    inner.put_overwrite(attempted_key, attempted_bytes)?;
+                }
+                for (key, bytes) in additional_writes {
+                    inner.put_overwrite(key, bytes)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn error(&self) -> ObjectStoreError {
+        match self {
+            Self::Transport { message } => ObjectStoreError::Transport((*message).to_owned()),
+            Self::Conflict { .. } => ObjectStoreError::Conflict,
+            Self::PreconditionFailed { .. } => ObjectStoreError::PreconditionFailed,
+        }
+    }
+}
+
+impl ObjectStore for InjectCreateFailureStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if matches!(&mode, PutMode::CreateIfAbsent) && self.matcher.matches(key) {
+            let should_inject = {
+                let mut injected = self
+                    .injected
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *injected {
+                    false
+                } else {
+                    *injected = true;
+                    true
+                }
+            };
+            if should_inject {
+                self.failure.apply_before_error(&self.inner, key, bytes)?;
+                return Err(self.failure.error());
+            }
+        }
+
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
 }
 
 fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {

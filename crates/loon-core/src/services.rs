@@ -242,19 +242,6 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
         load_verified_checkpoint_materialization(store, source_namespace_id, fork_seq)
             .map_err(|err| CoreError::Basis(BasisLoadError::CheckpointLoad(err)))?;
 
-    write_verified_checkpoint_from_metadata(
-        store,
-        CheckpointMetadataWriteRequest {
-            namespace_id: new_namespace_id,
-            checkpoint_seq: fork_seq,
-            active_fence_token: FenceToken(0),
-            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
-            retention_floor_seq: fork_seq,
-            metadata_state: &source_checkpoint.metadata_state,
-            writer_version: &context.writer_version,
-        },
-    )?;
-
     let initial_head = HeadState {
         namespace_id: new_namespace_id.clone(),
         seq: fork_seq,
@@ -295,29 +282,71 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
     let head_key = namespace_head(new_namespace_id.as_str());
     let lease_key = namespace_lease(new_namespace_id.as_str());
     let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
-    store
-        .put_if_absent(
-            &head_key,
-            &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-    store
-        .put_if_absent(
-            &lease_key,
-            &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-    store
-        .put_if_absent(
-            &descriptor_key,
-            &serde_json::to_vec(&namespace_descriptor_envelope)
-                .map_err(|err| CoreError::Store(err.to_string()))?,
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &head_key,
+        &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
+    write_verified_checkpoint_from_metadata(
+        store,
+        CheckpointMetadataWriteRequest {
+            namespace_id: new_namespace_id,
+            checkpoint_seq: fork_seq,
+            active_fence_token: FenceToken(0),
+            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
+            retention_floor_seq: fork_seq,
+            metadata_state: &source_checkpoint.metadata_state,
+            writer_version: &context.writer_version,
+        },
+    )?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &lease_key,
+        &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &descriptor_key,
+        &serde_json::to_vec(&namespace_descriptor_envelope)
+            .map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
 
     Ok(NamespaceSummary {
         namespace_id: new_namespace_id.clone(),
     })
+}
+
+fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<(), CoreError> {
+    match store.put_if_absent(object_key, bytes) {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+            match namespace_initialization_state(store, namespace_id)
+                .map_err(BootstrapNamespaceError::from)
+                .map_err(|err| CoreError::Store(err.to_string()))?
+            {
+                NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
+                    namespace_id: namespace_id.clone(),
+                }),
+                NamespaceInitializationState::Partial => {
+                    Err(CoreError::NamespacePartiallyInitialized {
+                        namespace_id: namespace_id.clone(),
+                    })
+                }
+                NamespaceInitializationState::Absent => Err(CoreError::Store(format!(
+                    "target namespace control object `{object_key}` write failed, but namespace remains absent"
+                ))),
+            }
+        }
+        Err(err) => Err(CoreError::Store(err.to_string())),
+    }
 }
 
 pub fn list_namespaces<S: ObjectStore + ?Sized>(
