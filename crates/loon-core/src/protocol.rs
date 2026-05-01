@@ -597,24 +597,34 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     request: &CoreCommitRequest,
     resolved_restore_content_refs: &[Option<ContentRef>],
 ) -> Result<(), CoreError> {
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+    let mut content_refs = Vec::new();
     for (index, op) in request.ops.iter().enumerate() {
         match op {
             CommitOp::CreateFile { content_ref, .. }
             | CommitOp::ReplaceFile { content_ref, .. } => {
-                validate_durable_content_reference(store, &content_store_id, content_ref)?;
+                content_refs.push(content_ref);
             }
             CommitOp::RestoreRevision { .. } => {
                 if let Some(content_ref) = resolved_restore_content_refs
                     .get(index)
                     .and_then(|content_ref| content_ref.as_ref())
                 {
-                    validate_durable_content_reference(store, &content_store_id, content_ref)?;
+                    content_refs.push(content_ref);
                 }
             }
             _ => {}
         }
     }
+
+    if content_refs.is_empty() {
+        return Ok(());
+    }
+
+    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+    for content_ref in content_refs {
+        validate_durable_content_reference(store, &content_store_id, content_ref)?;
+    }
+
     Ok(())
 }
 

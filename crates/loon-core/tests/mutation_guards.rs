@@ -20,7 +20,9 @@ use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, namespace_descriptor, namespace_head,
 };
-use loon_objectstore::ObjectStore;
+use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
 
 #[test]
@@ -894,6 +896,51 @@ fn restore_revision_revalidates_durable_content_before_publish() {
 }
 
 #[test]
+fn metadata_only_commit_does_not_validate_content_store_refs() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/delete-me.txt",
+        b"hello",
+        &context,
+        Some("seed-metadata-only-delete"),
+    )
+    .expect("seed file");
+    let inode_id = resolve_path(&store, &namespace_id(), "/docs/delete-me.txt")
+        .expect("resolve seeded file")
+        .inode_id;
+
+    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 2);
+    let response = commit_operations(
+        &guarded_store,
+        &namespace_id(),
+        V0CommitRequest {
+            request_id: "metadata-only-delete".to_owned(),
+            planned_head_seq: ChangeSeq(1),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(1),
+            }],
+            ops: vec![V0CommitOp::DeleteFile { inode_id }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect("metadata-only delete should not perform content validation");
+
+    assert_eq!(response.committed_seq, ChangeSeq(2));
+    assert_eq!(
+        guarded_store.content_store_access_count(),
+        2,
+        "basis loading performs one content-store descriptor head/get; metadata-only validation must not add another lookup",
+    );
+}
+
+#[test]
 fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1427,5 +1474,72 @@ fn content_ref(seed: &str) -> ContentRef {
         kind: ContentRefKind::WholeFileV0,
         digest: sha256_digest(seed.as_bytes()),
         size_bytes: seed.len() as u64,
+    }
+}
+
+struct ContentStoreAccessLimitStore {
+    inner: LocalFsStore,
+    content_store_accesses: AtomicUsize,
+    max_content_store_accesses: usize,
+}
+
+impl ContentStoreAccessLimitStore {
+    fn new(root: impl AsRef<Path>, max_content_store_accesses: usize) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("store"),
+            content_store_accesses: AtomicUsize::new(0),
+            max_content_store_accesses,
+        }
+    }
+
+    fn content_store_access_count(&self) -> usize {
+        self.content_store_accesses.load(Ordering::SeqCst)
+    }
+
+    fn record_content_store_access(&self, key: &str) -> Result<(), ObjectStoreError> {
+        if !key.starts_with("content-stores/") {
+            return Ok(());
+        }
+
+        let previous = self.content_store_accesses.fetch_add(1, Ordering::SeqCst);
+        if previous >= self.max_content_store_accesses {
+            return Err(ObjectStoreError::Transport(format!(
+                "unexpected content-store descriptor access: {key}",
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl ObjectStore for ContentStoreAccessLimitStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.record_content_store_access(key)?;
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.record_content_store_access(key)?;
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
     }
 }
