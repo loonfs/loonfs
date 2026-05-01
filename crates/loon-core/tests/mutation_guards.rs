@@ -1523,13 +1523,13 @@ fn metadata_only_commit_does_not_validate_content_store_refs() {
     let response = commit_operations(
         &guarded_store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "metadata-only-delete".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
-            ops: vec![V0CommitOp::DeleteFile { inode_id }],
+            ops: vec![ApiCommitOp::DeleteFile { inode_id }],
             message: None,
             annotations: None,
         },
