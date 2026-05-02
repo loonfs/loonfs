@@ -134,7 +134,6 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         NamespaceInitializationState::Absent => {}
     }
 
-    let content_store_id = create_new_content_store(store, context)?;
     let initial_head = HeadState::initial(namespace_id.clone());
     let initial_lease = LeaseState {
         namespace_id: namespace_id.clone(),
@@ -158,6 +157,17 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
     let lease_bytes = serde_json::to_vec(&lease_envelope)
         .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
+
+    let head_key = namespace_head(namespace_id.as_str());
+    let lease_key = namespace_lease(namespace_id.as_str());
+    store
+        .put_if_absent(&head_key, &head_bytes)
+        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
+    store
+        .put_if_absent(&lease_key, &lease_bytes)
+        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
+
+    let content_store_id = create_new_content_store(store, context)?;
     let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(
         ControlObjectKind::NamespaceDescriptor,
         &context.writer_version,
@@ -170,15 +180,7 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     let namespace_descriptor_bytes = serde_json::to_vec(&namespace_descriptor_envelope)
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
 
-    let head_key = namespace_head(namespace_id.as_str());
-    let lease_key = namespace_lease(namespace_id.as_str());
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
-    store
-        .put_if_absent(&head_key, &head_bytes)
-        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
-    store
-        .put_if_absent(&lease_key, &lease_bytes)
-        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
     store
         .put_if_absent(&descriptor_key, &namespace_descriptor_bytes)
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
