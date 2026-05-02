@@ -650,6 +650,36 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
 }
 
 #[test]
+fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Exact(namespace_head(namespace_id.as_str())),
+        InjectedCreateFailure::PreconditionFailed {
+            write_attempted_object: true,
+            additional_writes: Vec::new(),
+        },
+    );
+
+    let error = bootstrap_namespace(&store, &namespace_id, &context, false)
+        .expect_err("target head precondition should fail bootstrap");
+    assert!(matches!(
+        error,
+        loon_core::BootstrapNamespaceError::HeadWrite(_)
+    ));
+    assert!(
+        store
+            .list_prefix("content-stores/")
+            .expect("list content stores")
+            .is_empty(),
+        "content-store descriptor must not be allocated before namespace head reservation"
+    );
+    assert_namespace_partial(&store, &namespace_id, &context);
+}
+
+#[test]
 fn public_namespace_operations_reject_invalid_namespace_id_before_key_construction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
