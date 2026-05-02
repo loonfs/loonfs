@@ -157,7 +157,7 @@ impl DirectBackend {
 
 impl Backend for DirectBackend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError> {
-        let ns_id = NamespaceId::from(namespace_id.to_owned());
+        let ns_id = parse_namespace_id(namespace_id)?;
         bootstrap_namespace(&self.store, &ns_id, &self.mutation_context(), false)
             .map_err(map_bootstrap_error)
     }
@@ -167,8 +167,8 @@ impl Backend for DirectBackend {
         source: &str,
         new_namespace_id: &str,
     ) -> Result<NamespaceSummary, CliError> {
-        let source_namespace_id = NamespaceId::from(source.to_owned());
-        let new_namespace_id = NamespaceId::from(new_namespace_id.to_owned());
+        let source_namespace_id = parse_namespace_id(source)?;
+        let new_namespace_id = parse_namespace_id(new_namespace_id)?;
         fork_namespace(
             &self.store,
             &source_namespace_id,
@@ -183,19 +183,19 @@ impl Backend for DirectBackend {
     }
 
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
-        let ns_id = NamespaceId::from(spec.namespace.clone());
+        let ns_id = parse_namespace_id(&spec.namespace)?;
         list_path(&self.store, &ns_id, &spec.absolute_path)
             .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError> {
-        let ns_id = NamespaceId::from(spec.namespace.clone());
+        let ns_id = parse_namespace_id(&spec.namespace)?;
         resolve_path(&self.store, &ns_id, &spec.absolute_path)
             .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError> {
-        let ns_id = NamespaceId::from(spec.namespace.clone());
+        let ns_id = parse_namespace_id(&spec.namespace)?;
         let result = read_file_bytes(&self.store, &ns_id, &spec.absolute_path)
             .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))?;
         Ok(result.bytes)
@@ -207,7 +207,7 @@ impl Backend for DirectBackend {
         bytes: &[u8],
         force: bool,
     ) -> Result<MutationResult, CliError> {
-        let ns_id = NamespaceId::from(spec.namespace.clone());
+        let ns_id = parse_namespace_id(&spec.namespace)?;
         let behavior = if force {
             PutFileBehavior::ReplaceExisting
         } else {
@@ -226,7 +226,7 @@ impl Backend for DirectBackend {
     }
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
-        let ns_id = NamespaceId::from(spec.namespace.clone());
+        let ns_id = parse_namespace_id(&spec.namespace)?;
         delete_path_non_recursive(
             &self.store,
             &ns_id,
@@ -242,7 +242,7 @@ impl Backend for DirectBackend {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
-        let ns_id = NamespaceId::from(from.namespace.clone());
+        let ns_id = parse_namespace_id(&from.namespace)?;
         move_path(
             &self.store,
             &ns_id,
@@ -259,7 +259,7 @@ impl Backend for DirectBackend {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
-        let ns_id = NamespaceId::from(from.namespace.clone());
+        let ns_id = parse_namespace_id(&from.namespace)?;
         copy_file_path(
             &self.store,
             &ns_id,
@@ -272,9 +272,18 @@ impl Backend for DirectBackend {
     }
 }
 
+fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
+    NamespaceId::parse(namespace).map_err(|error| CliError::invalid_input(error.to_string()))
+}
+
 fn map_core_error(error: CoreError) -> CliError {
+    if matches!(error.kind(), CoreErrorKind::InvalidNamespaceId) {
+        return CliError::invalid_input(error.to_string());
+    }
+
     let code = match error.kind() {
         CoreErrorKind::InvalidPath => "invalid_path",
+        CoreErrorKind::InvalidNamespaceId => unreachable!("handled before code mapping"),
         CoreErrorKind::NamespaceNotFound => "namespace_not_found",
         CoreErrorKind::NamespaceExists => "namespace_exists",
         CoreErrorKind::NamespacePartial => "namespace_partial",
@@ -312,6 +321,9 @@ fn map_namespace_scoped_core_error(namespace: &str, error: CoreError) -> CliErro
 
 fn map_bootstrap_error(error: BootstrapNamespaceError) -> CliError {
     match &error {
+        BootstrapNamespaceError::InvalidNamespaceId(_) => {
+            CliError::invalid_input(error.to_string())
+        }
         BootstrapNamespaceError::NamespaceAlreadyExists { .. } => {
             CliError::new("namespace_exists", error.to_string())
         }

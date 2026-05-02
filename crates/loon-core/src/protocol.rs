@@ -239,6 +239,7 @@ pub(crate) fn retry_existing_path_request<S: ObjectStore + ?Sized>(
     source_request_checksum_sha256: &str,
     context: &MutationContext,
 ) -> Result<Option<V0CommitResponse>, CoreError> {
+    validate_namespace_id_for_key_construction(namespace_id)?;
     let Some(existing) =
         find_existing_commit_payload_by_request_id(store, namespace_id, request_id)?
     else {
@@ -267,6 +268,7 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
     source_request_checksum_sha256: Option<String>,
     context: &MutationContext,
 ) -> Result<V0CommitResponse, CoreError> {
+    validate_namespace_id_for_key_construction(namespace_id)?;
     crate::acquire_or_renew_namespace_lease(store, namespace_id, context)?;
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     let request = map_commit_request(
@@ -633,6 +635,7 @@ fn read_upload_session_object<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &str,
 ) -> Result<LoadedUploadSessionObject, CoreError> {
+    validate_namespace_id_for_key_construction(namespace_id)?;
     let object_key = upload_session(namespace_id.as_str(), upload_id);
     let metadata = store
         .head(&object_key)
@@ -677,6 +680,12 @@ fn read_upload_session_object<S: ObjectStore + ?Sized>(
         metadata,
         envelope,
     })
+}
+
+fn validate_namespace_id_for_key_construction(namespace_id: &NamespaceId) -> Result<(), CoreError> {
+    NamespaceId::parse(namespace_id.as_str())
+        .map(|_| ())
+        .map_err(CoreError::from)
 }
 
 fn load_existing_commit_payload<S: ObjectStore + ?Sized>(

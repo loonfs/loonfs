@@ -24,7 +24,7 @@ use loon_api::{
     ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
     FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope,
     MutationResult, NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId,
-    NamespaceSummary,
+    NamespaceIdValidationError, NamespaceSummary,
 };
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
@@ -60,6 +60,7 @@ pub enum PutFileBehavior {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreErrorKind {
     InvalidPath,
+    InvalidNamespaceId,
     NamespaceNotFound,
     NamespaceExists,
     NamespacePartial,
@@ -84,6 +85,8 @@ pub enum CoreErrorKind {
 
 #[derive(Debug, Error)]
 pub enum BootstrapNamespaceError {
+    #[error(transparent)]
+    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("holder id must not be empty")]
     EmptyHolderId,
     #[error("writer version must not be empty")]
@@ -108,6 +111,8 @@ pub enum BootstrapNamespaceError {
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error(transparent)]
+    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error(transparent)]
     Basis(#[from] BasisLoadError),
     #[error(transparent)]
@@ -204,6 +209,7 @@ impl From<CommitHeadPublishError> for CoreError {
 impl CoreError {
     pub fn kind(&self) -> CoreErrorKind {
         match self {
+            CoreError::InvalidNamespaceId(_) => CoreErrorKind::InvalidNamespaceId,
             CoreError::Basis(error) => classify_basis_load_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
             CoreError::DurableContent(error) => classify_durable_content_error(error),
@@ -336,6 +342,8 @@ fn namespace_initialization_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceInitializationState, BootstrapNamespaceError> {
+    NamespaceId::parse(namespace_id.as_str())?;
+
     let descriptor_key = namespace_descriptor(namespace_id.as_str());
     let head_key = namespace_head(namespace_id.as_str());
     let lease_key = namespace_lease(namespace_id.as_str());
@@ -419,7 +427,7 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<NamespaceSummary, CoreError> {
     match namespace_initialization_state(store, new_namespace_id)
-        .map_err(|err| CoreError::Store(err.to_string()))?
+        .map_err(map_namespace_initialization_error_to_core)?
     {
         NamespaceInitializationState::Absent => {}
         NamespaceInitializationState::Complete => {
@@ -440,19 +448,6 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
     let source_checkpoint =
         load_verified_checkpoint_materialization(store, source_namespace_id, fork_seq)
             .map_err(|err| CoreError::Basis(BasisLoadError::CheckpointLoad(err)))?;
-
-    write_verified_checkpoint_from_metadata(
-        store,
-        CheckpointMetadataWriteRequest {
-            namespace_id: new_namespace_id,
-            checkpoint_seq: fork_seq,
-            active_fence_token: FenceToken(0),
-            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
-            retention_floor_seq: fork_seq,
-            metadata_state: &source_checkpoint.metadata_state,
-            writer_version: &context.writer_version,
-        },
-    )?;
 
     let initial_head = HeadState {
         namespace_id: new_namespace_id.clone(),
@@ -494,29 +489,77 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
     let head_key = namespace_head(new_namespace_id.as_str());
     let lease_key = namespace_lease(new_namespace_id.as_str());
     let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
-    store
-        .put_if_absent(
-            &head_key,
-            &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-    store
-        .put_if_absent(
-            &lease_key,
-            &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
-    store
-        .put_if_absent(
-            &descriptor_key,
-            &serde_json::to_vec(&namespace_descriptor_envelope)
-                .map_err(|err| CoreError::Store(err.to_string()))?,
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &head_key,
+        &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
+    write_verified_checkpoint_from_metadata(
+        store,
+        CheckpointMetadataWriteRequest {
+            namespace_id: new_namespace_id,
+            checkpoint_seq: fork_seq,
+            active_fence_token: FenceToken(0),
+            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
+            retention_floor_seq: fork_seq,
+            metadata_state: &source_checkpoint.metadata_state,
+            writer_version: &context.writer_version,
+        },
+    )?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &lease_key,
+        &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &descriptor_key,
+        &serde_json::to_vec(&namespace_descriptor_envelope)
+            .map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
 
     Ok(NamespaceSummary {
         namespace_id: new_namespace_id.clone(),
     })
+}
+
+fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<(), CoreError> {
+    match store.put_if_absent(object_key, bytes) {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+            match namespace_initialization_state(store, namespace_id)
+                .map_err(map_namespace_initialization_error_to_core)?
+            {
+                NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
+                    namespace_id: namespace_id.clone(),
+                }),
+                NamespaceInitializationState::Partial => {
+                    Err(CoreError::NamespacePartiallyInitialized {
+                        namespace_id: namespace_id.clone(),
+                    })
+                }
+                NamespaceInitializationState::Absent => Err(CoreError::Store(format!(
+                    "target namespace control object `{object_key}` write failed, but namespace remains absent"
+                ))),
+            }
+        }
+        Err(err) => Err(CoreError::Store(err.to_string())),
+    }
+}
+
+fn map_namespace_initialization_error_to_core(error: BootstrapNamespaceError) -> CoreError {
+    match error {
+        BootstrapNamespaceError::InvalidNamespaceId(error) => CoreError::InvalidNamespaceId(error),
+        other => CoreError::Store(other.to_string()),
+    }
 }
 
 pub fn list_namespaces<S: ObjectStore + ?Sized>(
@@ -1510,6 +1553,7 @@ fn tombstoned_path_ancestor(
 
 fn classify_control_object_load_error(error: &ControlObjectLoadError) -> CoreErrorKind {
     match error {
+        ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
         ControlObjectLoadError::MissingObject { .. }
         | ControlObjectLoadError::MissingObjectAfterHead { .. } => CoreErrorKind::NamespaceNotFound,
         ControlObjectLoadError::KindMismatch { .. }
@@ -1529,6 +1573,7 @@ fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
             _ => CoreErrorKind::NamespaceCorrupt,
         },
         BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => match error {
+            ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
             ControlObjectLoadError::MissingObject { .. }
             | ControlObjectLoadError::MissingObjectAfterHead { .. } => {
                 CoreErrorKind::NamespaceCorrupt

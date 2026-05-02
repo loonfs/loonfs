@@ -41,6 +41,11 @@ pub(crate) struct LoadedLeaseObject {
 
 #[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize, Error)]
 pub enum ControlObjectLoadError {
+    #[error("invalid namespace_id {namespace_id:?}: {message}")]
+    InvalidNamespaceId {
+        namespace_id: String,
+        message: String,
+    },
     #[error("missing control object `{object_key}`")]
     MissingObject { object_key: String },
     #[error("missing control object after head `{object_key}`")]
@@ -87,6 +92,7 @@ pub(crate) fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedNamespaceDescriptorObject, ControlObjectLoadError> {
+    validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_descriptor(expected_namespace.as_str());
     let metadata = store
         .head(&object_key)
@@ -149,6 +155,7 @@ pub(crate) fn read_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
+    validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_head(expected_namespace.as_str());
     let metadata = store
         .head(&object_key)
@@ -180,6 +187,7 @@ pub(crate) fn read_lease_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<LoadedLeaseObject, ControlObjectLoadError> {
+    validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_lease(expected_namespace.as_str());
     let metadata = store
         .head(&object_key)
@@ -205,6 +213,17 @@ pub(crate) fn read_lease_object<S: ObjectStore + ?Sized>(
         metadata,
         envelope,
     })
+}
+
+fn validate_namespace_id_for_control_key(
+    namespace_id: &NamespaceId,
+) -> Result<(), ControlObjectLoadError> {
+    NamespaceId::parse(namespace_id.as_str())
+        .map(|_| ())
+        .map_err(|err| ControlObjectLoadError::InvalidNamespaceId {
+            namespace_id: namespace_id.as_str().to_owned(),
+            message: err.reason().to_owned(),
+        })
 }
 
 fn validate_namespace_descriptor_envelope(

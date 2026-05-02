@@ -212,10 +212,11 @@ The fork protocol is:
 
 1. Resolve and verify the source namespace descriptor, content-store descriptor, head, lease, checkpoint, and WAL basis.
 2. Create or reuse a verified source checkpoint at the current source head.
-3. Rebuild checkpoint artifacts under the new namespace id with fresh checksums and object keys.
-4. Create the new namespace descriptor with the same `content_store_id` as the source namespace.
-5. Create the new namespace head at the fork seq, with `snapshot_hint_seq` and `retention_floor_seq` set to that seq.
-6. Start the new namespace WAL independently at `fork_seq + 1`.
+3. Reserve the target namespace by creating its head at the fork seq, with `snapshot_hint_seq` and `retention_floor_seq` set to that seq.
+4. Rebuild checkpoint artifacts under the new namespace id with fresh checksums and object keys.
+5. Create the target namespace lease.
+6. Create the new namespace descriptor with the same `content_store_id` as the source namespace. The descriptor is the publish/list marker and is written last.
+7. Start the new namespace WAL independently at `fork_seq + 1`.
 
 The fork copies namespace-local checkpoint metadata only. It does not copy content-store blobs. It also does not create a durable parent/child relationship; provenance may be recorded later as audit metadata outside the core namespace model.
 
