@@ -158,12 +158,8 @@ impl NamespacePublisher {
                 return Ok(());
             }
 
-            if state.publishing {
-                return Err(CoreError::CommitQueueFull);
-            }
-
             if state.batch.is_none() {
-                should_spawn = true;
+                should_spawn = !state.publishing;
                 state.batch = Some(OpenBatch {
                     candidates: Vec::new(),
                     notify: Arc::new(Notify::new()),
@@ -194,10 +190,7 @@ impl NamespacePublisher {
         }
 
         if should_spawn {
-            let publisher = self.clone();
-            tokio::spawn(async move {
-                publisher.publish_open_batch().await;
-            });
+            self.spawn_publish_task();
         }
         if let Some(notify) = notify_full {
             notify.notify_one();
@@ -205,22 +198,33 @@ impl NamespacePublisher {
         Ok(())
     }
 
+    fn spawn_publish_task(&self) {
+        let publisher = self.clone();
+        tokio::spawn(async move {
+            publisher.publish_open_batch().await;
+        });
+    }
+
     async fn publish_open_batch(self) {
-        let notify = {
+        let (notify, already_full) = {
             let state = self
                 .state
                 .lock()
                 .expect("namespace publisher mutex poisoned");
-            state
-                .batch
-                .as_ref()
-                .map(|batch| batch.notify.clone())
-                .expect("publish task requires an open batch")
+            let Some(batch) = state.batch.as_ref() else {
+                return;
+            };
+            (
+                batch.notify.clone(),
+                batch.candidates.len() >= MAX_BATCH_CANDIDATES,
+            )
         };
 
-        tokio::select! {
-            _ = tokio::time::sleep(COALESCING_DELAY) => {}
-            _ = notify.notified() => {}
+        if !already_full {
+            tokio::select! {
+                _ = tokio::time::sleep(COALESCING_DELAY) => {}
+                _ = notify.notified() => {}
+            }
         }
 
         loop {
@@ -245,11 +249,11 @@ impl NamespacePublisher {
                 .expect("namespace publisher mutex poisoned");
             state.publishing = true;
             state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
-            state
-                .batch
-                .take()
-                .map(|batch| batch.candidates)
-                .unwrap_or_default()
+            let Some(batch) = state.batch.take() else {
+                state.publishing = false;
+                return;
+            };
+            batch.candidates
         };
 
         let mut results = Vec::new();
@@ -307,23 +311,37 @@ impl NamespacePublisher {
 
     fn complete_batch(&self, candidates: Vec<BatchCandidate>, results: Vec<CommitResult>) {
         let mut deliveries = Vec::new();
-        {
+        let should_spawn_next = {
             let mut state = self
                 .state
                 .lock()
                 .expect("namespace publisher mutex poisoned");
             state.publishing = false;
-            for (candidate, result) in candidates.into_iter().zip(results.into_iter()) {
+            let mut results = results.into_iter();
+            for candidate in candidates {
+                let result = results.next().unwrap_or_else(|| {
+                    Err(CoreError::Store(
+                        "publisher returned too few batch results".to_owned(),
+                    ))
+                });
                 if let Some(in_flight) = state.in_flight.remove(&candidate.request_id) {
                     for waiter in in_flight.waiters {
                         deliveries.push((waiter, result.clone()));
                     }
                 }
             }
-        }
+            state
+                .batch
+                .as_ref()
+                .is_some_and(|batch| !batch.candidates.is_empty())
+        };
 
         for (waiter, result) in deliveries {
             let _ = waiter.send(result);
+        }
+
+        if should_spawn_next {
+            self.spawn_publish_task();
         }
     }
 }
@@ -416,7 +434,400 @@ mod tests {
         bootstrap_namespace, store_bytes_as_content, PathMutationIntent, PutFileBehavior,
     };
     use loon_objectstore::fs::LocalFsStore;
+    use loon_objectstore::keys::namespace_head;
+    use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use std::path::Path;
+    use std::sync::Condvar;
     use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct BlockingHeadCasStore {
+        inner: LocalFsStore,
+        head_key: String,
+        gate: Arc<HeadCasGate>,
+    }
+
+    #[derive(Debug)]
+    struct HeadCasGate {
+        state: Mutex<HeadCasGateState>,
+        cvar: Condvar,
+    }
+
+    #[derive(Debug)]
+    struct HeadCasGateState {
+        blocks_remaining: usize,
+        entered: usize,
+        released: bool,
+    }
+
+    impl BlockingHeadCasStore {
+        fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+            Self {
+                inner: LocalFsStore::new(root.as_ref()).expect("store"),
+                head_key: namespace_head(namespace_id.as_str()),
+                gate: Arc::new(HeadCasGate {
+                    state: Mutex::new(HeadCasGateState {
+                        blocks_remaining: 0,
+                        entered: 0,
+                        released: false,
+                    }),
+                    cvar: Condvar::new(),
+                }),
+            }
+        }
+
+        fn arm_next_head_cas(&self) {
+            let mut state = self.gate.state.lock().expect("head gate mutex poisoned");
+            state.blocks_remaining = 1;
+            state.released = false;
+        }
+
+        async fn wait_for_blocked_head_cas(&self) {
+            let gate = self.gate.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut state = gate.state.lock().expect("head gate mutex poisoned");
+                while state.entered < 1 {
+                    state = gate.cvar.wait(state).expect("head gate mutex poisoned");
+                }
+            })
+            .await
+            .expect("wait for blocked head CAS");
+        }
+
+        fn release_head_cas(&self) {
+            let mut state = self.gate.state.lock().expect("head gate mutex poisoned");
+            state.released = true;
+            self.gate.cvar.notify_all();
+        }
+    }
+
+    impl ObjectStore for BlockingHeadCasStore {
+        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key)
+        }
+
+        fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+            self.inner.get(key, range)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+                let mut state = self.gate.state.lock().expect("head gate mutex poisoned");
+                if state.blocks_remaining > 0 {
+                    state.blocks_remaining -= 1;
+                    state.entered += 1;
+                    self.gate.cvar.notify_all();
+                    while !state.released {
+                        state = self
+                            .gate
+                            .cvar
+                            .wait(state)
+                            .expect("head gate mutex poisoned");
+                    }
+                }
+            }
+            self.inner.put(key, bytes, mode)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key)
+        }
+
+        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+            self.inner.list_prefix(prefix)
+        }
+    }
+
+    fn test_config(root: &Path) -> Arc<ServerConfig> {
+        Arc::new(ServerConfig {
+            bind: "127.0.0.1:0".to_owned(),
+            auth_token: None,
+            writer_id: "writer-a".to_owned(),
+            writer_version: "test".to_owned(),
+            lease_duration_ms: 60_000,
+            store: StoreConfig::LocalFs {
+                root: root.display().to_string(),
+                key_prefix: None,
+            },
+        })
+    }
+
+    fn create_dir_request(
+        request_id: impl Into<String>,
+        display_name: impl Into<String>,
+    ) -> CommitRequest {
+        CommitRequest {
+            request_id: request_id.into(),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: Vec::new(),
+            ops: vec![CommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: display_name.into(),
+            }],
+            message: None,
+            annotations: None,
+        }
+    }
+
+    fn admit_commit(
+        publisher: &NamespacePublisher,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+    ) -> oneshot::Receiver<CommitResult> {
+        try_admit_commit(publisher, namespace_id, request).expect("admit commit")
+    }
+
+    fn try_admit_commit(
+        publisher: &NamespacePublisher,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+    ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
+        let request_id = request.request_id.clone();
+        let candidate = NamespaceMutationCandidate::Commit(request);
+        let fingerprint = candidate_fingerprint(namespace_id, &candidate)?;
+        let (sender, receiver) = oneshot::channel();
+        publisher.admit(request_id, candidate, fingerprint, sender)?;
+        Ok(receiver)
+    }
+
+    async fn recv_commit(
+        receiver: oneshot::Receiver<CommitResult>,
+        label: &str,
+    ) -> ApiCommitResponse {
+        receiver
+            .await
+            .unwrap_or_else(|err| panic!("{label} receiver dropped: {err}"))
+            .unwrap_or_else(|err| panic!("{label} failed: {err}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_admits_pending_batch_while_active_publish_blocks() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(
+            shared.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+
+        store.arm_next_head_cas();
+        let active = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("active", "active"),
+        );
+        store.wait_for_blocked_head_cas().await;
+
+        let pending = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("pending", "pending"),
+        );
+        {
+            let state = publisher
+                .state
+                .lock()
+                .expect("namespace publisher mutex poisoned");
+            assert!(state.publishing);
+            assert_eq!(
+                state
+                    .batch
+                    .as_ref()
+                    .expect("pending batch")
+                    .candidates
+                    .len(),
+                1
+            );
+        }
+
+        store.release_head_cas();
+        let active_response = recv_commit(active, "active").await;
+        let pending_response = recv_commit(pending, "pending").await;
+        assert_eq!(active_response.committed_seq, ChangeSeq(1));
+        assert_eq!(pending_response.committed_seq, ChangeSeq(2));
+
+        let wal_keys = shared
+            .list_prefix("namespaces/demo/wal/")
+            .expect("list wal");
+        assert_eq!(wal_keys.len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(
+            shared.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+
+        store.arm_next_head_cas();
+        let active = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("active", "active"),
+        );
+        store.wait_for_blocked_head_cas().await;
+
+        let duplicate = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("active", "active"),
+        );
+        let conflict = try_admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("active", "different-active"),
+        );
+        assert!(matches!(
+            conflict,
+            Err(CoreError::RequestIdConflict(request_id)) if request_id == "active"
+        ));
+
+        store.release_head_cas();
+        let active_response = recv_commit(active, "active").await;
+        let duplicate_response = recv_commit(duplicate, "duplicate").await;
+        assert_eq!(active_response.committed_seq, ChangeSeq(1));
+        assert_eq!(duplicate_response.committed_seq, ChangeSeq(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(
+            shared.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+
+        store.arm_next_head_cas();
+        let active = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("active", "active"),
+        );
+        store.wait_for_blocked_head_cas().await;
+
+        let mut pending = Vec::with_capacity(MAX_BATCH_CANDIDATES);
+        for index in 0..MAX_BATCH_CANDIDATES {
+            pending.push(admit_commit(
+                &publisher,
+                &namespace_id,
+                create_dir_request(format!("pending-{index}"), format!("pending-{index}")),
+            ));
+        }
+
+        let duplicate = admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("pending-0", "pending-0"),
+        );
+        let conflict = try_admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("pending-0", "different-pending"),
+        );
+        assert!(matches!(
+            conflict,
+            Err(CoreError::RequestIdConflict(request_id)) if request_id == "pending-0"
+        ));
+
+        let overflow = try_admit_commit(
+            &publisher,
+            &namespace_id,
+            create_dir_request("overflow", "overflow"),
+        );
+        assert!(matches!(overflow, Err(CoreError::CommitQueueFull)));
+
+        store.release_head_cas();
+        assert_eq!(
+            recv_commit(active, "active").await.committed_seq,
+            ChangeSeq(1)
+        );
+        for (index, receiver) in pending.into_iter().enumerate() {
+            assert_eq!(
+                recv_commit(receiver, "pending").await.committed_seq,
+                ChangeSeq(index as u64 + 2)
+            );
+        }
+        assert_eq!(
+            recv_commit(duplicate, "duplicate").await.committed_seq,
+            ChangeSeq(2)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn publisher_full_batch_does_not_wait_on_missed_full_notification() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(
+            shared.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+
+        store.arm_next_head_cas();
+        let mut receivers = Vec::with_capacity(MAX_BATCH_CANDIDATES);
+        for index in 0..MAX_BATCH_CANDIDATES {
+            receivers.push(admit_commit(
+                &publisher,
+                &namespace_id,
+                create_dir_request(format!("full-{index}"), format!("full-{index}")),
+            ));
+        }
+
+        tokio::task::yield_now().await;
+        {
+            let state = publisher
+                .state
+                .lock()
+                .expect("namespace publisher mutex poisoned");
+            assert!(state.publishing);
+            assert!(state.batch.is_none());
+        }
+        store.release_head_cas();
+        for (index, receiver) in receivers.into_iter().enumerate() {
+            assert_eq!(
+                recv_commit(receiver, "full").await.committed_seq,
+                ChangeSeq(index as u64 + 1)
+            );
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
