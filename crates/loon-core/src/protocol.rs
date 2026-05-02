@@ -10,7 +10,9 @@ use crate::error::CoreError;
 use crate::metadata::{MetadataState, RequestReceiptRecord};
 use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::publisher::{NamespaceMutationCandidate, PlannedNamespaceMutation};
-use crate::wal::{prepare_wal_segment, PreparedWalRecord, StoredWalObject};
+use crate::wal::{
+    build_wal_commit_payload, prepare_wal_segment, PreparedWalRecord, StoredWalObject,
+};
 use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitOp as ApiCommitOp, CommitOpResult,
     CommitPrecondition as ApiCommitPrecondition, CommitRequest as ApiCommitRequest,
@@ -352,13 +354,8 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             plan: plan.clone(),
             results,
         };
-        let preview = match prepare_wal_segment(
-            namespace_id.clone(),
-            current_head.visible_wal_tip.clone(),
-            std::slice::from_ref(&record),
-            &context.writer_version,
-        ) {
-            Ok(segment) => segment.envelope.payload.records[0].clone(),
+        let preview = match build_wal_commit_payload(namespace_id, &record) {
+            Ok(payload) => payload,
             Err(error) => {
                 outcomes[index] = Some(Err(error.into()));
                 continue;

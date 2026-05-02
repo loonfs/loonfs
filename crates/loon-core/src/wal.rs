@@ -118,70 +118,29 @@ pub fn prepare_wal_segment(
     }
 
     let mut payload_records: Vec<WalCommitPayload> = Vec::with_capacity(records.len());
-    for (index, record) in records.iter().enumerate() {
-        if !record.plan.wal_object_must_be_written {
-            return Err(WalBuildError::WalWriteNotRequired);
-        }
-        if record.request.namespace_id != record.plan.namespace_id {
-            return Err(WalBuildError::NamespaceMismatch {
-                request: record.request.namespace_id.clone(),
-                plan: record.plan.namespace_id.clone(),
-            });
-        }
-        if record.plan.namespace_id != namespace_id {
-            return Err(WalBuildError::NamespaceMismatch {
-                request: record.plan.namespace_id.clone(),
-                plan: namespace_id,
-            });
-        }
-        if index > 0 {
-            let expected = payload_records[index - 1]
+    for record in records {
+        let payload_record = build_wal_commit_payload(&namespace_id, record)?;
+        if let Some(previous) = payload_records.last() {
+            let expected = previous
                 .seq
                 .0
                 .checked_add(1)
                 .map(ChangeSeq)
                 .ok_or_else(|| WalBuildError::Codec("seq overflow".to_owned()))?;
-            if record.plan.next_seq != expected {
+            if payload_record.seq != expected {
                 return Err(WalBuildError::NonContiguousSeq {
                     expected,
-                    actual: record.plan.next_seq,
+                    actual: payload_record.seq,
                 });
             }
-            if record.plan.base_head_seq != payload_records[index - 1].seq {
+            if payload_record.base_head_seq != previous.seq {
                 return Err(WalBuildError::BaseHeadSeqMismatch {
-                    request: record.plan.base_head_seq,
-                    plan: payload_records[index - 1].seq,
+                    request: payload_record.base_head_seq,
+                    plan: previous.seq,
                 });
             }
         }
-        payload_records.push(WalCommitPayload {
-            namespace_id: record.plan.namespace_id.clone(),
-            seq: record.plan.next_seq,
-            base_head_seq: record.plan.base_head_seq,
-            commit_id: record.plan.commit_id.clone(),
-            request_id: record.request.request_id.clone(),
-            request_checksum_sha256: record
-                .request
-                .request_checksum_sha256()
-                .map_err(|err| WalBuildError::Codec(err.to_string()))?,
-            semantic_fingerprint_sha256: record
-                .request
-                .semantic_fingerprint_sha256()
-                .map_err(|err| WalBuildError::Codec(err.to_string()))?,
-            source_request_checksum_sha256: record.request.source_request_checksum_sha256.clone(),
-            writer_id: record.request.writer_id.clone(),
-            writer_fence_token: record.request.writer_fence_token,
-            message: record.request.message.clone(),
-            annotations: record.request.annotations.clone(),
-            ops: build_wal_ops(&record.request, &record.plan)?,
-            preconditions: record
-                .request
-                .preconditions
-                .iter()
-                .map(WalPrecondition::from)
-                .collect(),
-            results: record.results.clone(),
-        });
+        payload_records.push(payload_record);
     }
 
     let start_seq = payload_records
@@ -223,6 +182,56 @@ pub fn prepare_wal_segment(
             "wal_key_matches_segment_seq_range".to_owned(),
             "head_publish_requires_durable_wal".to_owned(),
         ],
+    })
+}
+
+pub(crate) fn build_wal_commit_payload(
+    namespace_id: &NamespaceId,
+    record: &PreparedWalRecord,
+) -> Result<WalCommitPayload, WalBuildError> {
+    if !record.plan.wal_object_must_be_written {
+        return Err(WalBuildError::WalWriteNotRequired);
+    }
+    if record.request.namespace_id != record.plan.namespace_id {
+        return Err(WalBuildError::NamespaceMismatch {
+            request: record.request.namespace_id.clone(),
+            plan: record.plan.namespace_id.clone(),
+        });
+    }
+    if record.plan.namespace_id != *namespace_id {
+        return Err(WalBuildError::NamespaceMismatch {
+            request: record.plan.namespace_id.clone(),
+            plan: namespace_id.clone(),
+        });
+    }
+
+    Ok(WalCommitPayload {
+        namespace_id: record.plan.namespace_id.clone(),
+        seq: record.plan.next_seq,
+        base_head_seq: record.plan.base_head_seq,
+        commit_id: record.plan.commit_id.clone(),
+        request_id: record.request.request_id.clone(),
+        request_checksum_sha256: record
+            .request
+            .request_checksum_sha256()
+            .map_err(|err| WalBuildError::Codec(err.to_string()))?,
+        semantic_fingerprint_sha256: record
+            .request
+            .semantic_fingerprint_sha256()
+            .map_err(|err| WalBuildError::Codec(err.to_string()))?,
+        source_request_checksum_sha256: record.request.source_request_checksum_sha256.clone(),
+        writer_id: record.request.writer_id.clone(),
+        writer_fence_token: record.request.writer_fence_token,
+        message: record.request.message.clone(),
+        annotations: record.request.annotations.clone(),
+        ops: build_wal_ops(&record.request, &record.plan)?,
+        preconditions: record
+            .request
+            .preconditions
+            .iter()
+            .map(WalPrecondition::from)
+            .collect(),
+        results: record.results.clone(),
     })
 }
 
@@ -562,5 +571,58 @@ impl From<&Precondition> for WalPrecondition {
                 name_key: name_key.clone(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loon_api::{v0::CommitOpResult, FenceToken};
+
+    #[test]
+    fn build_wal_commit_payload_matches_segment_record_payload() {
+        let namespace_id = NamespaceId::from("demo");
+        let record = PreparedWalRecord {
+            request: CommitRequest {
+                namespace_id: namespace_id.clone(),
+                request_id: "req-wal-payload".to_owned(),
+                writer_id: "writer-a".to_owned(),
+                writer_fence_token: FenceToken(1),
+                planned_head_seq: ChangeSeq(0),
+                source_request_checksum_sha256: None,
+                ops: vec![CommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "docs".to_owned(),
+                }],
+                preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
+                message: Some("create docs".to_owned()),
+                annotations: None,
+            },
+            plan: CommitPlan {
+                namespace_id: namespace_id.clone(),
+                commit_id: "commit-wal-payload".to_owned(),
+                base_head_seq: ChangeSeq(0),
+                next_seq: ChangeSeq(1),
+                allocated_inode_ids: vec![InodeId(2)],
+                resolved_restore_content_refs: vec![None],
+                resulting_next_inode_id: InodeId(3),
+                durable_content_required: false,
+                wal_object_must_be_written: true,
+                head_cas_must_succeed: true,
+                metadata_preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
+                checked_invariants: Vec::new(),
+            },
+            results: vec![CommitOpResult::CreateDir {
+                op_index: 0,
+                inode_id: InodeId(2),
+            }],
+        };
+
+        let payload =
+            build_wal_commit_payload(&namespace_id, &record).expect("build commit payload");
+        let segment = prepare_wal_segment(namespace_id, None, &[record], "test-writer")
+            .expect("prepare wal segment");
+
+        assert_eq!(payload, segment.envelope.payload.records[0]);
     }
 }

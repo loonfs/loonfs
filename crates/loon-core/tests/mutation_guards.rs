@@ -804,6 +804,68 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 }
 
 #[test]
+fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"retry").expect("stage content");
+    let publisher = DirectObjectStorePublisher::new(&store);
+
+    let result = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::PutFile {
+                request_id: "retry-after-orphan".to_owned(),
+                absolute_path: "/retry.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("path intent retries stale head");
+    assert_eq!(result.committed_seq, ChangeSeq(1));
+    assert!(store.injected_stale_head());
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 2);
+
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    assert_eq!(basis.head.seq, ChangeSeq(1));
+    let visible_tip = basis
+        .head
+        .visible_wal_tip
+        .as_ref()
+        .expect("visible wal tip");
+    assert!(wal_keys.contains(&visible_tip.object_key));
+    let orphan_keys = wal_keys
+        .iter()
+        .filter(|key| *key != &visible_tip.object_key)
+        .collect::<Vec<_>>();
+    assert_eq!(orphan_keys.len(), 1);
+
+    let visible_wal = store
+        .get(&visible_tip.object_key, None)
+        .expect("read visible wal")
+        .expect("visible wal exists");
+    let visible_segment =
+        decode_wal_segment_envelope_zstd(&visible_wal).expect("decode visible segment");
+    assert_eq!(visible_segment.payload.start_seq, ChangeSeq(1));
+    assert_eq!(visible_segment.payload.end_seq, ChangeSeq(1));
+    assert_eq!(visible_segment.payload.records.len(), 1);
+    assert_eq!(
+        visible_segment.payload.records[0].request_id,
+        "retry-after-orphan"
+    );
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.changes[0].request_id, "retry-after-orphan");
+}
+
+#[test]
 fn batch_commit_aliases_duplicate_request_id_with_same_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2306,6 +2368,80 @@ impl ObjectStore for ContentStoreAccessLimitStore {
         bytes: &[u8],
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
+}
+
+struct StaleHeadAfterWalWriteStore {
+    inner: LocalFsStore,
+    head_key: String,
+    injected_stale_head: Mutex<bool>,
+}
+
+impl StaleHeadAfterWalWriteStore {
+    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("store"),
+            head_key: namespace_head(namespace_id.as_str()),
+            injected_stale_head: Mutex::new(false),
+        }
+    }
+
+    fn injected_stale_head(&self) -> bool {
+        *self
+            .injected_stale_head
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl ObjectStore for StaleHeadAfterWalWriteStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+            let should_inject = {
+                let mut injected = self
+                    .injected_stale_head
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *injected {
+                    false
+                } else {
+                    *injected = true;
+                    true
+                }
+            };
+            if should_inject {
+                if let Some(existing) = self.inner.get(key, None)? {
+                    self.inner.put_overwrite(key, &existing)?;
+                }
+                return Err(ObjectStoreError::PreconditionFailed);
+            }
+        }
         self.inner.put(key, bytes, mode)
     }
 

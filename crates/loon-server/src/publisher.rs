@@ -248,11 +248,11 @@ impl NamespacePublisher {
                 .lock()
                 .expect("namespace publisher mutex poisoned");
             state.publishing = true;
-            state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
             let Some(batch) = state.batch.take() else {
                 state.publishing = false;
                 return;
             };
+            state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
             batch.candidates
         };
 
