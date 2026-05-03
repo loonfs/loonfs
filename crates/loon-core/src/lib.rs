@@ -29,9 +29,10 @@ pub use protocol::{
     upload_content,
 };
 pub use publisher::{
-    publish_namespace_mutations_batch, DirectObjectStorePublisher, FlushPolicy,
-    NamespaceMutationCandidate, PathMutationIntent, PlannedNamespaceMutation, PlannedPathMutation,
-    PublishOptions,
+    publish_namespace_mutations_batch, publish_namespace_mutations_batch_with_basis,
+    publish_namespace_mutations_batch_with_fresh_basis, DirectObjectStorePublisher, FlushPolicy,
+    NamespaceBatchPublishResult, NamespaceMutationCandidate, PathMutationIntent,
+    PlannedNamespaceMutation, PlannedPathMutation, PublishOptions,
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, fork_namespace,

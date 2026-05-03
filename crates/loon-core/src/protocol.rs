@@ -1,4 +1,4 @@
-use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::basis::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use crate::commit::{
     build_commit_plan, prepare_commit_head_publish, publish_commit_head,
     resolve_restore_content_refs, CommitOp, CommitRequest as CoreCommitRequest,
@@ -9,7 +9,9 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, RequestReceiptRecord};
 use crate::namespace::catalog::load_namespace_content_store_id;
-use crate::publisher::{NamespaceMutationCandidate, PlannedNamespaceMutation};
+use crate::publisher::{
+    NamespaceBatchPublishResult, NamespaceMutationCandidate, PlannedNamespaceMutation,
+};
 use crate::wal::{
     build_wal_commit_payload, prepare_wal_segment, PreparedWalRecord, StoredWalObject,
 };
@@ -249,7 +251,52 @@ pub(crate) fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
-    commit_namespace_mutations_batch(store, namespace_id, candidates, context)
+    publish_namespace_mutations_batch_with_fresh_basis(store, namespace_id, candidates, context)
+        .results
+}
+
+pub(crate) fn publish_namespace_mutations_batch_with_fresh_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidates: Vec<NamespaceMutationCandidate>,
+    context: &MutationContext,
+) -> NamespaceBatchPublishResult {
+    if candidates.is_empty() {
+        return NamespaceBatchPublishResult {
+            results: Vec::new(),
+            promoted_basis: None,
+        };
+    }
+    if let Err(error) = crate::acquire_or_renew_namespace_lease(store, namespace_id, context) {
+        return NamespaceBatchPublishResult {
+            results: (0..candidates.len())
+                .map(|_| Err(CoreError::Lease(error.clone())))
+                .collect(),
+            promoted_basis: None,
+        };
+    }
+    let basis = match load_verified_namespace_basis(store, namespace_id) {
+        Ok(basis) => basis,
+        Err(error) => {
+            return NamespaceBatchPublishResult {
+                results: (0..candidates.len())
+                    .map(|_| Err(CoreError::Basis(error.clone())))
+                    .collect(),
+                promoted_basis: None,
+            }
+        }
+    };
+    publish_namespace_mutations_batch_with_basis(store, namespace_id, candidates, context, basis)
+}
+
+pub(crate) fn publish_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidates: Vec<NamespaceMutationCandidate>,
+    context: &MutationContext,
+    basis: VerifiedNamespaceBasis,
+) -> NamespaceBatchPublishResult {
+    commit_namespace_mutations_batch_with_basis(store, namespace_id, candidates, context, basis)
 }
 
 fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
@@ -274,28 +321,19 @@ fn commit_operations_with_source_checksum<S: ObjectStore + ?Sized>(
     .unwrap_or_else(|| Err(CoreError::Store("empty commit batch".to_owned())))
 }
 
-fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+fn commit_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
-) -> Vec<Result<ApiCommitResponse, CoreError>> {
+    basis: VerifiedNamespaceBasis,
+) -> NamespaceBatchPublishResult {
     if candidates.is_empty() {
-        return Vec::new();
+        return NamespaceBatchPublishResult {
+            results: Vec::new(),
+            promoted_basis: Some(basis),
+        };
     }
-    if let Err(error) = crate::acquire_or_renew_namespace_lease(store, namespace_id, context) {
-        return (0..candidates.len())
-            .map(|_| Err(CoreError::Lease(error.clone())))
-            .collect();
-    }
-    let basis = match load_verified_namespace_basis(store, namespace_id) {
-        Ok(basis) => basis,
-        Err(error) => {
-            return (0..candidates.len())
-                .map(|_| Err(CoreError::Basis(error.clone())))
-                .collect()
-        }
-    };
 
     let mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>> =
         (0..candidates.len()).map(|_| None).collect();
@@ -373,7 +411,10 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     }
 
     if accepted.is_empty() {
-        return finish_batch_outcomes_with_aliases(outcomes, &aliases);
+        return NamespaceBatchPublishResult {
+            results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+            promoted_basis: Some(basis),
+        };
     }
     let records = accepted
         .iter()
@@ -391,7 +432,10 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::Store(message.clone())));
             }
-            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
+            return NamespaceBatchPublishResult {
+                results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+                promoted_basis: None,
+            };
         }
     };
     match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
@@ -400,7 +444,10 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::WalWrite(err.to_string())));
             }
-            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
+            return NamespaceBatchPublishResult {
+                results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+                promoted_basis: None,
+            };
         }
     }
 
@@ -418,15 +465,35 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::Store(message.clone())));
             }
-            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
+            return NamespaceBatchPublishResult {
+                results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+                promoted_basis: None,
+            };
         }
     };
-    if let Err(error) = publish_commit_head(store, &basis.head_etag, &head_publish) {
-        for (index, _) in accepted {
-            outcomes[index] = Some(Err(error.clone().into()));
+    let head_metadata = match publish_commit_head(store, &basis.head_etag, &head_publish) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            for (index, _) in accepted {
+                outcomes[index] = Some(Err(error.clone().into()));
+            }
+            return NamespaceBatchPublishResult {
+                results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+                promoted_basis: None,
+            };
         }
-        return finish_batch_outcomes_with_aliases(outcomes, &aliases);
-    }
+    };
+    let promoted_basis = head_metadata
+        .etag
+        .clone()
+        .map(|head_etag| VerifiedNamespaceBasis {
+            namespace_descriptor: basis.namespace_descriptor,
+            content_store_id: basis.content_store_id,
+            head: head_publish.resulting_head.clone(),
+            head_etag,
+            lease: basis.lease,
+            metadata_state: current_metadata_state,
+        });
 
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
         outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
@@ -436,7 +503,10 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             results: record.results,
         }));
     }
-    finish_batch_outcomes_with_aliases(outcomes, &aliases)
+    NamespaceBatchPublishResult {
+        results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+        promoted_basis,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

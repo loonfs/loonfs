@@ -1,6 +1,7 @@
 use crate::context::MutationContext;
 use crate::error::{CoreError, CoreErrorKind};
 use crate::services::PutFileBehavior;
+use crate::VerifiedNamespaceBasis;
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::{ContentRef, MutationResult, NamespaceId};
 use loon_objectstore::ObjectStore;
@@ -68,6 +69,12 @@ pub enum NamespaceMutationCandidate {
     Commit(ApiCommitRequest),
     Planned(PlannedNamespaceMutation),
     Path(PathMutationIntent),
+}
+
+#[derive(Debug, Clone)]
+pub struct NamespaceBatchPublishResult {
+    pub results: Vec<Result<ApiCommitResponse, CoreError>>,
+    pub promoted_basis: Option<VerifiedNamespaceBasis>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,4 +182,34 @@ pub fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
     crate::protocol::publish_namespace_mutations_batch(store, namespace_id, candidates, context)
+}
+
+pub fn publish_namespace_mutations_batch_with_fresh_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidates: Vec<NamespaceMutationCandidate>,
+    context: &MutationContext,
+) -> NamespaceBatchPublishResult {
+    crate::protocol::publish_namespace_mutations_batch_with_fresh_basis(
+        store,
+        namespace_id,
+        candidates,
+        context,
+    )
+}
+
+pub fn publish_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidates: Vec<NamespaceMutationCandidate>,
+    context: &MutationContext,
+    basis: VerifiedNamespaceBasis,
+) -> NamespaceBatchPublishResult {
+    crate::protocol::publish_namespace_mutations_batch_with_basis(
+        store,
+        namespace_id,
+        candidates,
+        context,
+        basis,
+    )
 }

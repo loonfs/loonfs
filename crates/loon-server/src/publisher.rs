@@ -2,8 +2,10 @@ use crate::config::ServerConfig;
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::{payload_checksum_sha256, NamespaceId};
 use loon_core::{
-    commit::CommitHeadPublishError, publish_namespace_mutations_batch, CoreError, MutationContext,
-    NamespaceMutationCandidate, PathMutationIntent, PlannedNamespaceMutation,
+    commit::CommitHeadPublishError, publish_namespace_mutations_batch_with_basis,
+    publish_namespace_mutations_batch_with_fresh_basis, CoreError, MutationContext,
+    NamespaceBatchPublishResult, NamespaceMutationCandidate, PathMutationIntent,
+    PlannedNamespaceMutation, VerifiedNamespaceBasis,
 };
 use loon_objectstore::ObjectStore;
 use serde::Serialize;
@@ -20,6 +22,7 @@ const MAX_BATCH_CANDIDATES: usize = 1024;
 const COALESCING_DELAY: Duration = Duration::from_millis(100);
 const MIN_NAMESPACE_CAS_INTERVAL: Duration = Duration::from_secs(1);
 const HEAD_CAS_RETRY_LIMIT: usize = 8;
+const PUBLISH_LEASE_SAFETY_MARGIN_MS: u64 = 5_000;
 
 #[derive(Clone)]
 pub(crate) struct PublisherRegistry {
@@ -93,6 +96,7 @@ struct NamespacePublisherState {
     in_flight: HashMap<String, InFlightRequest>,
     publishing: bool,
     next_allowed_cas_at: Instant,
+    cached_basis: Option<VerifiedNamespaceBasis>,
 }
 
 struct OpenBatch {
@@ -122,6 +126,7 @@ impl NamespacePublisher {
                 in_flight: HashMap::new(),
                 publishing: false,
                 next_allowed_cas_at: Instant::now(),
+                cached_basis: None,
             })),
         }
     }
@@ -265,17 +270,32 @@ impl NamespacePublisher {
             let namespace_id = self.namespace_id.clone();
             let store = self.store.clone();
             let context = mutation_context(&self.config);
-            results = tokio::task::spawn_blocking(move || {
-                publish_namespace_mutations_batch(
+            let cached_basis = self.cached_basis_for_publish(&context);
+            let publish_result = tokio::task::spawn_blocking(move || match cached_basis {
+                Some(basis) => publish_namespace_mutations_batch_with_basis(
                     store.as_ref(),
                     &namespace_id,
                     batch_candidates,
                     &context,
-                )
+                    basis,
+                ),
+                None => publish_namespace_mutations_batch_with_fresh_basis(
+                    store.as_ref(),
+                    &namespace_id,
+                    batch_candidates,
+                    &context,
+                ),
             })
             .await
-            .unwrap_or_else(|err| vec![Err(CoreError::Store(err.to_string())); candidates.len()]);
-            if !results.iter().any(is_head_publish_stale) {
+            .unwrap_or_else(|err| NamespaceBatchPublishResult {
+                results: vec![Err(CoreError::Store(err.to_string())); candidates.len()],
+                promoted_basis: None,
+            });
+            self.update_cached_basis(publish_result.promoted_basis.clone());
+            let batch_results = publish_result.results;
+            let stale_head = batch_results.iter().any(is_head_publish_stale);
+            results = batch_results;
+            if !stale_head {
                 break;
             }
             if attempt + 1 == HEAD_CAS_RETRY_LIMIT {
@@ -285,6 +305,36 @@ impl NamespacePublisher {
         }
 
         self.complete_batch(candidates, results);
+    }
+
+    fn cached_basis_for_publish(
+        &self,
+        context: &MutationContext,
+    ) -> Option<VerifiedNamespaceBasis> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("namespace publisher mutex poisoned");
+        if state.cached_basis.as_ref().is_some_and(|basis| {
+            can_use_cached_basis(
+                basis,
+                &self.namespace_id,
+                &self.config.writer_id,
+                context.now_ms,
+            )
+        }) {
+            return state.cached_basis.clone();
+        }
+        state.cached_basis = None;
+        None
+    }
+
+    fn update_cached_basis(&self, promoted_basis: Option<VerifiedNamespaceBasis>) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("namespace publisher mutex poisoned");
+        state.cached_basis = promoted_basis;
     }
 
     async fn wait_for_next_cas_token(&self) {
@@ -344,6 +394,21 @@ impl NamespacePublisher {
             self.spawn_publish_task();
         }
     }
+}
+
+fn can_use_cached_basis(
+    basis: &VerifiedNamespaceBasis,
+    namespace_id: &NamespaceId,
+    writer_id: &str,
+    now_ms: u64,
+) -> bool {
+    basis.head.namespace_id == *namespace_id
+        && basis.namespace_descriptor.namespace_id == *namespace_id
+        && !basis.head_etag.trim().is_empty()
+        && basis.lease.holder_id == writer_id
+        && basis.lease.namespace_id == *namespace_id
+        && basis.lease.fence_token == basis.head.active_fence_token
+        && basis.lease.lease_expires_at_ms.saturating_sub(now_ms) >= PUBLISH_LEASE_SAFETY_MARGIN_MS
 }
 
 fn is_head_publish_stale(result: &CommitResult) -> bool {
@@ -437,6 +502,7 @@ mod tests {
     use loon_objectstore::keys::namespace_head;
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Condvar;
     use tempfile::tempdir;
 
@@ -547,6 +613,93 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct InstrumentedStore {
+        inner: LocalFsStore,
+        head_key: String,
+        counters: Arc<InstrumentedCounters>,
+        fail_next_head_cas: AtomicUsize,
+    }
+
+    #[derive(Debug, Default)]
+    struct InstrumentedCounters {
+        head_calls: AtomicUsize,
+        get_calls: AtomicUsize,
+        head_cas_calls: AtomicUsize,
+    }
+
+    impl InstrumentedStore {
+        fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+            Self {
+                inner: LocalFsStore::new(root.as_ref()).expect("store"),
+                head_key: namespace_head(namespace_id.as_str()),
+                counters: Arc::new(InstrumentedCounters::default()),
+                fail_next_head_cas: AtomicUsize::new(0),
+            }
+        }
+
+        fn reset_counts(&self) {
+            self.counters.head_calls.store(0, Ordering::SeqCst);
+            self.counters.get_calls.store(0, Ordering::SeqCst);
+            self.counters.head_cas_calls.store(0, Ordering::SeqCst);
+        }
+
+        fn head_calls(&self) -> usize {
+            self.counters.head_calls.load(Ordering::SeqCst)
+        }
+
+        fn get_calls(&self) -> usize {
+            self.counters.get_calls.load(Ordering::SeqCst)
+        }
+
+        fn head_cas_calls(&self) -> usize {
+            self.counters.head_cas_calls.load(Ordering::SeqCst)
+        }
+
+        fn fail_next_head_cas(&self) {
+            self.fail_next_head_cas.store(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ObjectStore for InstrumentedStore {
+        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.counters.head_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.head(key)
+        }
+
+        fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+            self.counters.get_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.get(key, range)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+                self.counters.head_cas_calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail_next_head_cas.swap(0, Ordering::SeqCst) > 0 {
+                    return Err(ObjectStoreError::PreconditionFailed);
+                }
+            }
+            self.inner.put(key, bytes, mode)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key)
+        }
+
+        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+            self.inner.list_prefix(prefix)
+        }
+    }
+
     fn test_config(root: &Path) -> Arc<ServerConfig> {
         Arc::new(ServerConfig {
             bind: "127.0.0.1:0".to_owned(),
@@ -607,6 +760,239 @@ mod tests {
             .await
             .unwrap_or_else(|err| panic!("{label} receiver dropped: {err}"))
             .unwrap_or_else(|err| panic!("{label} failed: {err}"))
+    }
+
+    fn allow_immediate_next_publish(publisher: &NamespacePublisher) {
+        publisher
+            .state
+            .lock()
+            .expect("namespace publisher mutex poisoned")
+            .next_allowed_cas_at = Instant::now();
+    }
+
+    fn cached_basis(publisher: &NamespacePublisher) -> VerifiedNamespaceBasis {
+        publisher
+            .state
+            .lock()
+            .expect("namespace publisher mutex poisoned")
+            .cached_basis
+            .clone()
+            .expect("cached basis")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_promotes_and_reuses_cached_basis_for_sequential_batches() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = Arc::new(InstrumentedStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(
+            shared.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+
+        let first = publisher
+            .submit(NamespaceMutationCandidate::Commit(create_dir_request(
+                "first", "first",
+            )))
+            .await
+            .expect("first commit");
+        assert_eq!(first.committed_seq, ChangeSeq(1));
+
+        let first_basis = cached_basis(&publisher);
+        assert_eq!(first_basis.head.seq, ChangeSeq(1));
+        assert_eq!(first_basis.head.next_inode_id, InodeId(3));
+        assert!(first_basis.head.visible_wal_tip.is_some());
+        assert!(!first_basis.head_etag.trim().is_empty());
+        assert!(first_basis
+            .metadata_state
+            .request_receipts
+            .iter()
+            .any(|receipt| receipt.request_id == "first"));
+
+        store.reset_counts();
+        allow_immediate_next_publish(&publisher);
+        let second = publisher
+            .submit(NamespaceMutationCandidate::Commit(create_dir_request(
+                "second", "second",
+            )))
+            .await
+            .expect("second commit");
+        assert_eq!(second.committed_seq, ChangeSeq(2));
+        assert_eq!(store.head_calls(), 0, "cached publish should not HEAD");
+        assert_eq!(store.get_calls(), 0, "cached publish should not GET");
+        assert_eq!(store.head_cas_calls(), 1);
+
+        let second_basis = cached_basis(&publisher);
+        assert_eq!(second_basis.head.seq, ChangeSeq(2));
+        assert_eq!(second_basis.head.next_inode_id, InodeId(4));
+        assert!(second_basis
+            .metadata_state
+            .request_receipts
+            .iter()
+            .any(|receipt| receipt.request_id == "second"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_serves_previous_request_id_from_cached_receipt() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = Arc::new(InstrumentedStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(
+            shared.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+        let request = create_dir_request("same-request", "same-dir");
+
+        let first = publisher
+            .submit(NamespaceMutationCandidate::Commit(request.clone()))
+            .await
+            .expect("first commit");
+        assert_eq!(first.committed_seq, ChangeSeq(1));
+
+        store.reset_counts();
+        allow_immediate_next_publish(&publisher);
+        let duplicate = publisher
+            .submit(NamespaceMutationCandidate::Commit(request))
+            .await
+            .expect("duplicate commit");
+        assert_eq!(duplicate.committed_seq, ChangeSeq(1));
+        assert_eq!(store.head_calls(), 0);
+        assert_eq!(store.get_calls(), 0);
+        assert_eq!(store.head_cas_calls(), 0);
+
+        let wal_keys = shared
+            .list_prefix("namespaces/demo/wal/")
+            .expect("list wal");
+        assert_eq!(wal_keys.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_clears_cached_basis_after_stale_head_and_retries_fresh() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = Arc::new(InstrumentedStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(
+            shared.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+
+        publisher
+            .submit(NamespaceMutationCandidate::Commit(create_dir_request(
+                "first", "first",
+            )))
+            .await
+            .expect("first commit");
+        assert_eq!(cached_basis(&publisher).head.seq, ChangeSeq(1));
+
+        store.reset_counts();
+        store.fail_next_head_cas();
+        allow_immediate_next_publish(&publisher);
+        let second = publisher
+            .submit(NamespaceMutationCandidate::Commit(create_dir_request(
+                "second", "second",
+            )))
+            .await
+            .expect("second commit");
+        assert_eq!(second.committed_seq, ChangeSeq(2));
+        assert!(
+            store.head_calls() > 0,
+            "retry after stale head should cold-load a fresh basis"
+        );
+        assert!(
+            store.get_calls() > 0,
+            "retry after stale head should read durable basis objects"
+        );
+        assert_eq!(cached_basis(&publisher).head.seq, ChangeSeq(2));
+
+        let wal_keys = shared
+            .list_prefix("namespaces/demo/wal/")
+            .expect("list wal");
+        assert_eq!(wal_keys.len(), 3, "first publish, orphan, retry");
+        let changes = loon_core::list_changes_after(shared.as_ref(), &namespace_id, ChangeSeq(0))
+            .expect("changes");
+        assert_eq!(changes.changes.len(), 2);
+        assert_eq!(changes.through_seq, ChangeSeq(2));
+    }
+
+    #[test]
+    fn cached_basis_safety_gate_rejects_unsafe_states() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(&store, &namespace_id, &mutation_context(&config), false)
+            .expect("bootstrap");
+        let mut basis =
+            loon_core::load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        basis.lease.lease_expires_at_ms = 10_000;
+        assert!(can_use_cached_basis(
+            &basis,
+            &namespace_id,
+            "writer-a",
+            4_000
+        ));
+
+        let mut near_expiry = basis.clone();
+        near_expiry.lease.lease_expires_at_ms = 8_999;
+        assert!(!can_use_cached_basis(
+            &near_expiry,
+            &namespace_id,
+            "writer-a",
+            4_000
+        ));
+
+        let mut wrong_holder = basis.clone();
+        wrong_holder.lease.holder_id = "writer-b".to_owned();
+        assert!(!can_use_cached_basis(
+            &wrong_holder,
+            &namespace_id,
+            "writer-a",
+            4_000
+        ));
+
+        let mut fence_mismatch = basis.clone();
+        fence_mismatch.lease.fence_token = loon_api::FenceToken(1);
+        assert!(!can_use_cached_basis(
+            &fence_mismatch,
+            &namespace_id,
+            "writer-a",
+            4_000
+        ));
+
+        let mut empty_token = basis.clone();
+        empty_token.head_etag = " ".to_owned();
+        assert!(!can_use_cached_basis(
+            &empty_token,
+            &namespace_id,
+            "writer-a",
+            4_000
+        ));
+
+        basis.head.namespace_id = NamespaceId::from("other");
+        assert!(!can_use_cached_basis(
+            &basis,
+            &namespace_id,
+            "writer-a",
+            4_000
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
