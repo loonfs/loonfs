@@ -75,6 +75,91 @@ fn stale_head_precondition_is_rejected() {
 }
 
 #[test]
+fn missing_head_seq_precondition_is_rejected() {
+    let metadata_state = metadata_state_after(&[
+        vec![loon_api::WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![loon_api::WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_ref: content_ref("content-1"),
+        }],
+    ]);
+    let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
+    let request = CommitRequest {
+        namespace_id: namespace_id(),
+        request_id: "missing-head-seq".to_owned(),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token: FenceToken(1),
+        planned_head_seq: ChangeSeq(2),
+        source_request_checksum_sha256: None,
+        ops: vec![CommitOp::DeleteFile {
+            inode_id: InodeId(3),
+        }],
+        preconditions: Vec::new(),
+        message: None,
+        annotations: None,
+    };
+
+    let error = build_commit_plan(&request, &context).expect_err("missing head seq");
+    assert!(matches!(
+        error,
+        CommitValidationError::MissingHeadSeqPrecondition {
+            expected: ChangeSeq(2),
+        }
+    ));
+}
+
+#[test]
+fn planned_head_seq_mismatch_is_rejected() {
+    let metadata_state = metadata_state_after(&[
+        vec![loon_api::WalOp::CreateDir {
+            op_index: 0,
+            inode_id: InodeId(2),
+            parent_inode: InodeId(1),
+            display_name: "docs".to_owned(),
+        }],
+        vec![loon_api::WalOp::CreateFile {
+            op_index: 0,
+            inode_id: InodeId(3),
+            parent_inode: InodeId(2),
+            display_name: "readme.txt".to_owned(),
+            content_ref: content_ref("content-1"),
+        }],
+    ]);
+    let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
+    let request = CommitRequest {
+        namespace_id: namespace_id(),
+        request_id: "planned-head-mismatch".to_owned(),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token: FenceToken(1),
+        planned_head_seq: ChangeSeq(1),
+        source_request_checksum_sha256: None,
+        ops: vec![CommitOp::DeleteFile {
+            inode_id: InodeId(3),
+        }],
+        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
+        message: None,
+        annotations: None,
+    };
+
+    let error = build_commit_plan(&request, &context).expect_err("planned head mismatch");
+    assert!(matches!(
+        error,
+        CommitValidationError::PlannedHeadSeqMismatch {
+            expected: ChangeSeq(2),
+            actual: ChangeSeq(1),
+        }
+    ));
+}
+
+#[test]
 fn stale_revision_precondition_is_rejected() {
     let metadata_state = metadata_state_after(&[
         vec![loon_api::WalOp::CreateDir {
@@ -752,7 +837,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
             ApiCommitRequest {
                 request_id: "req-batch-a".to_owned(),
                 planned_head_seq: ChangeSeq(0),
-                preconditions: Vec::new(),
+                preconditions: api_head_seq_is(ChangeSeq(0)),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "alpha".to_owned(),
@@ -762,8 +847,8 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
             },
             ApiCommitRequest {
                 request_id: "req-batch-b".to_owned(),
-                planned_head_seq: ChangeSeq(0),
-                preconditions: Vec::new(),
+                planned_head_seq: ChangeSeq(1),
+                preconditions: api_head_seq_is(ChangeSeq(1)),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "beta".to_owned(),
@@ -875,7 +960,7 @@ fn batch_commit_aliases_duplicate_request_id_with_same_fingerprint() {
     let request = ApiCommitRequest {
         request_id: "req-duplicate".to_owned(),
         planned_head_seq: ChangeSeq(0),
-        preconditions: Vec::new(),
+        preconditions: api_head_seq_is(ChangeSeq(0)),
         ops: vec![ApiCommitOp::CreateDir {
             parent_inode: InodeId(1),
             display_name: "alpha".to_owned(),
@@ -923,7 +1008,7 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
             ApiCommitRequest {
                 request_id: "req-conflict".to_owned(),
                 planned_head_seq: ChangeSeq(0),
-                preconditions: Vec::new(),
+                preconditions: api_head_seq_is(ChangeSeq(0)),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "alpha".to_owned(),
@@ -934,7 +1019,7 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
             ApiCommitRequest {
                 request_id: "req-conflict".to_owned(),
                 planned_head_seq: ChangeSeq(0),
-                preconditions: Vec::new(),
+                preconditions: api_head_seq_is(ChangeSeq(0)),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "beta".to_owned(),
@@ -2298,6 +2383,10 @@ fn mutation_context() -> MutationContext {
         now_ms: 1_000,
         lease_duration_ms: 60_000,
     }
+}
+
+fn api_head_seq_is(expected_seq: ChangeSeq) -> Vec<CommitPrecondition> {
+    vec![CommitPrecondition::HeadSeqIs { expected_seq }]
 }
 
 fn namespace_id() -> NamespaceId {

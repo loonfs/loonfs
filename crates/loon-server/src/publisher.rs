@@ -271,6 +271,7 @@ impl NamespacePublisher {
             let store = self.store.clone();
             let context = mutation_context(&self.config);
             let cached_basis = self.cached_basis_for_publish(&context);
+            let used_cached_basis = cached_basis.is_some();
             let publish_result = tokio::task::spawn_blocking(move || match cached_basis {
                 Some(basis) => publish_namespace_mutations_batch_with_basis(
                     store.as_ref(),
@@ -290,7 +291,16 @@ impl NamespacePublisher {
             .unwrap_or_else(|err| NamespaceBatchPublishResult {
                 results: vec![Err(CoreError::Store(err.to_string())); candidates.len()],
                 promoted_basis: None,
+                head_published: false,
             });
+            if used_cached_basis
+                && !publish_result.head_published
+                && publish_result.results.iter().any(Result::is_err)
+                && attempt + 1 < HEAD_CAS_RETRY_LIMIT
+            {
+                self.update_cached_basis(None);
+                continue;
+            }
             self.update_cached_basis(publish_result.promoted_basis.clone());
             let batch_results = publish_result.results;
             let stale_head = batch_results.iter().any(is_head_publish_stale);
@@ -493,10 +503,12 @@ fn mutation_context(config: &ServerConfig) -> MutationContext {
 mod tests {
     use super::*;
     use crate::config::StoreConfig;
-    use loon_api::v0::{CommitOp, CommitRequest};
+    use loon_api::v0::{CommitOp, CommitPrecondition, CommitRequest};
     use loon_api::{ChangeSeq, InodeId};
     use loon_core::{
-        bootstrap_namespace, store_bytes_as_content, PathMutationIntent, PutFileBehavior,
+        bootstrap_namespace, load_verified_namespace_basis,
+        publish_namespace_mutations_batch_with_fresh_basis, store_bytes_as_content,
+        PathMutationIntent, PutFileBehavior,
     };
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
@@ -718,10 +730,18 @@ mod tests {
         request_id: impl Into<String>,
         display_name: impl Into<String>,
     ) -> CommitRequest {
+        create_dir_request_at(ChangeSeq(0), request_id, display_name)
+    }
+
+    fn create_dir_request_at(
+        expected_seq: ChangeSeq,
+        request_id: impl Into<String>,
+        display_name: impl Into<String>,
+    ) -> CommitRequest {
         CommitRequest {
             request_id: request_id.into(),
-            planned_head_seq: ChangeSeq(0),
-            preconditions: Vec::new(),
+            planned_head_seq: expected_seq,
+            preconditions: vec![CommitPrecondition::HeadSeqIs { expected_seq }],
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: display_name.into(),
@@ -818,8 +838,10 @@ mod tests {
         store.reset_counts();
         allow_immediate_next_publish(&publisher);
         let second = publisher
-            .submit(NamespaceMutationCandidate::Commit(create_dir_request(
-                "second", "second",
+            .submit(NamespaceMutationCandidate::Commit(create_dir_request_at(
+                ChangeSeq(1),
+                "second",
+                "second",
             )))
             .await
             .expect("second commit");
@@ -906,8 +928,10 @@ mod tests {
         store.fail_next_head_cas();
         allow_immediate_next_publish(&publisher);
         let second = publisher
-            .submit(NamespaceMutationCandidate::Commit(create_dir_request(
-                "second", "second",
+            .submit(NamespaceMutationCandidate::Commit(create_dir_request_at(
+                ChangeSeq(1),
+                "second",
+                "second",
             )))
             .await
             .expect("second commit");
@@ -930,6 +954,79 @@ mod tests {
             .expect("changes");
         assert_eq!(changes.changes.len(), 2);
         assert_eq!(changes.through_seq, ChangeSeq(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publisher_retries_cached_validation_error_against_fresh_basis() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let store = Arc::new(InstrumentedStore::new(temp_dir.path(), &namespace_id));
+        let shared = store.clone() as SharedStore;
+        let config = test_config(temp_dir.path());
+        bootstrap_namespace(
+            shared.as_ref(),
+            &namespace_id,
+            &mutation_context(&config),
+            false,
+        )
+        .expect("bootstrap");
+        let publisher =
+            NamespacePublisher::new(namespace_id.clone(), shared.clone(), config.clone());
+
+        publisher
+            .submit(NamespaceMutationCandidate::Commit(create_dir_request(
+                "first", "first",
+            )))
+            .await
+            .expect("first commit");
+        assert_eq!(cached_basis(&publisher).head.seq, ChangeSeq(1));
+
+        let mut external_results = publish_namespace_mutations_batch_with_fresh_basis(
+            shared.as_ref(),
+            &namespace_id,
+            vec![NamespaceMutationCandidate::Commit(create_dir_request_at(
+                ChangeSeq(1),
+                "external",
+                "external",
+            ))],
+            &mutation_context(&config),
+        )
+        .results;
+        let external = external_results
+            .pop()
+            .expect("external result")
+            .expect("external commit");
+        assert_eq!(external.committed_seq, ChangeSeq(2));
+        assert_eq!(
+            load_verified_namespace_basis(shared.as_ref(), &namespace_id)
+                .expect("basis")
+                .head
+                .seq,
+            ChangeSeq(2)
+        );
+
+        store.reset_counts();
+        allow_immediate_next_publish(&publisher);
+        let deleted = publisher
+            .submit(NamespaceMutationCandidate::Path(
+                PathMutationIntent::DeletePath {
+                    request_id: "delete-external".to_owned(),
+                    absolute_path: "/external".to_owned(),
+                    recursive: false,
+                },
+            ))
+            .await
+            .expect("delete retries against fresh basis");
+        assert_eq!(deleted.committed_seq, ChangeSeq(3));
+        assert!(
+            store.head_calls() > 0,
+            "fresh retry should reload head after cached validation error"
+        );
+        assert!(
+            store.get_calls() > 0,
+            "fresh retry should reload basis after cached validation error"
+        );
+        assert_eq!(cached_basis(&publisher).head.seq, ChangeSeq(3));
     }
 
     #[test]
@@ -1022,7 +1119,7 @@ mod tests {
         let pending = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("pending", "pending"),
+            create_dir_request_at(ChangeSeq(1), "pending", "pending"),
         );
         {
             let state = publisher
@@ -1128,19 +1225,23 @@ mod tests {
             pending.push(admit_commit(
                 &publisher,
                 &namespace_id,
-                create_dir_request(format!("pending-{index}"), format!("pending-{index}")),
+                create_dir_request_at(
+                    ChangeSeq(index as u64 + 1),
+                    format!("pending-{index}"),
+                    format!("pending-{index}"),
+                ),
             ));
         }
 
         let duplicate = admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("pending-0", "pending-0"),
+            create_dir_request_at(ChangeSeq(1), "pending-0", "pending-0"),
         );
         let conflict = try_admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("pending-0", "different-pending"),
+            create_dir_request_at(ChangeSeq(1), "pending-0", "different-pending"),
         );
         assert!(matches!(
             conflict,
@@ -1150,7 +1251,11 @@ mod tests {
         let overflow = try_admit_commit(
             &publisher,
             &namespace_id,
-            create_dir_request("overflow", "overflow"),
+            create_dir_request_at(
+                ChangeSeq(MAX_BATCH_CANDIDATES as u64 + 1),
+                "overflow",
+                "overflow",
+            ),
         );
         assert!(matches!(overflow, Err(CoreError::CommitQueueFull)));
 
@@ -1193,7 +1298,11 @@ mod tests {
             receivers.push(admit_commit(
                 &publisher,
                 &namespace_id,
-                create_dir_request(format!("full-{index}"), format!("full-{index}")),
+                create_dir_request_at(
+                    ChangeSeq(index as u64),
+                    format!("full-{index}"),
+                    format!("full-{index}"),
+                ),
             ));
         }
 
@@ -1243,7 +1352,9 @@ mod tests {
         let request_a = CommitRequest {
             request_id: "req-a".to_owned(),
             planned_head_seq: ChangeSeq(0),
-            preconditions: Vec::new(),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(0),
+            }],
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: "alpha".to_owned(),
@@ -1253,8 +1364,10 @@ mod tests {
         };
         let request_b = CommitRequest {
             request_id: "req-b".to_owned(),
-            planned_head_seq: ChangeSeq(0),
-            preconditions: Vec::new(),
+            planned_head_seq: ChangeSeq(1),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(1),
+            }],
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: "beta".to_owned(),
@@ -1304,7 +1417,9 @@ mod tests {
         let explicit = CommitRequest {
             request_id: "explicit-commit".to_owned(),
             planned_head_seq: ChangeSeq(0),
-            preconditions: Vec::new(),
+            preconditions: vec![CommitPrecondition::HeadSeqIs {
+                expected_seq: ChangeSeq(0),
+            }],
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: "alpha".to_owned(),

@@ -265,6 +265,7 @@ pub(crate) fn publish_namespace_mutations_batch_with_fresh_basis<S: ObjectStore 
         return NamespaceBatchPublishResult {
             results: Vec::new(),
             promoted_basis: None,
+            head_published: false,
         };
     }
     if let Err(error) = crate::acquire_or_renew_namespace_lease(store, namespace_id, context) {
@@ -273,6 +274,7 @@ pub(crate) fn publish_namespace_mutations_batch_with_fresh_basis<S: ObjectStore 
                 .map(|_| Err(CoreError::Lease(error.clone())))
                 .collect(),
             promoted_basis: None,
+            head_published: false,
         };
     }
     let basis = match load_verified_namespace_basis(store, namespace_id) {
@@ -283,6 +285,7 @@ pub(crate) fn publish_namespace_mutations_batch_with_fresh_basis<S: ObjectStore 
                     .map(|_| Err(CoreError::Basis(error.clone())))
                     .collect(),
                 promoted_basis: None,
+                head_published: false,
             }
         }
     };
@@ -332,6 +335,7 @@ fn commit_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
         return NamespaceBatchPublishResult {
             results: Vec::new(),
             promoted_basis: Some(basis),
+            head_published: false,
         };
     }
 
@@ -414,6 +418,7 @@ fn commit_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
         return NamespaceBatchPublishResult {
             results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
             promoted_basis: Some(basis),
+            head_published: false,
         };
     }
     let records = accepted
@@ -435,6 +440,7 @@ fn commit_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
             return NamespaceBatchPublishResult {
                 results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
                 promoted_basis: None,
+                head_published: false,
             };
         }
     };
@@ -447,6 +453,7 @@ fn commit_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
             return NamespaceBatchPublishResult {
                 results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
                 promoted_basis: None,
+                head_published: false,
             };
         }
     }
@@ -468,6 +475,7 @@ fn commit_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
             return NamespaceBatchPublishResult {
                 results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
                 promoted_basis: None,
+                head_published: false,
             };
         }
     };
@@ -480,6 +488,7 @@ fn commit_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
             return NamespaceBatchPublishResult {
                 results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
                 promoted_basis: None,
+                head_published: false,
             };
         }
     };
@@ -506,6 +515,7 @@ fn commit_namespace_mutations_batch_with_basis<S: ObjectStore + ?Sized>(
     NamespaceBatchPublishResult {
         results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
         promoted_basis,
+        head_published: true,
     }
 }
 

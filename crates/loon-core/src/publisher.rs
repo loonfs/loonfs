@@ -75,6 +75,7 @@ pub enum NamespaceMutationCandidate {
 pub struct NamespaceBatchPublishResult {
     pub results: Vec<Result<ApiCommitResponse, CoreError>>,
     pub promoted_basis: Option<VerifiedNamespaceBasis>,
+    pub head_published: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
