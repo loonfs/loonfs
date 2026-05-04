@@ -10,7 +10,7 @@
 | **Access-control service** | Evaluates ACLs and shares, then authorizes LoonFS operations. This may be part of the authoritative service in a simple deployment. |
 | **Background workers** | Build checkpoints, advance retention safely, clean up expired control objects, and reclaim unreachable content. |
 
-Namespaces and content stores are separate durable domains. A namespace owns filesystem metadata and history; a content store owns immutable file bytes. Each namespace descriptor names exactly one content store, and forked namespaces share that content store while keeping independent metadata history.
+Namespaces and content stores are separate durable domains. A namespace owns filesystem metadata and history; a content store owns immutable file bytes. A namespace descriptor references exactly one content store, but that reference is not lifecycle ownership. Forked namespaces share the source namespace's content store while keeping independent metadata history and no durable parent/child relationship.
 
 ## 2. Data plane, metadata plane, and control plane
 

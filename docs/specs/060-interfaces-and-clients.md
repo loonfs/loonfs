@@ -84,6 +84,8 @@ Namespace creation uses the namespace id directly. v0 has no namespace aliases o
 }
 ```
 
+The field name `namespace_id` is intentional API compatibility surface. Fork creation uses `new_namespace_id` for the target namespace. Route placeholders such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are only path parameter names for the same namespace id value; v0 does not accept or emit a namespace `name` alias.
+
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
 
 ### 3.1 `GET /filesystem/stat`

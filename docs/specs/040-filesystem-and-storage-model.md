@@ -124,7 +124,7 @@ The v0 policy is `nfc_casefold_v0`, which defines sibling-name comparison by Uni
 
 A file is represented by one inode and a sequence of immutable revisions.
 
-Each revision points to exactly one immutable content reference. In v0, that reference names one whole-file object containing the complete plaintext file bytes.
+Each revision stores exactly one immutable `content_ref`. In v0, that reference names one whole-file object containing the complete plaintext file bytes. Revisions do not store object-store paths or `content_store_id`; readers resolve those through the namespace descriptor when bytes are needed.
 
 Content objects belong to the namespace's content store. A file revision may reference only content that is durable under the content store named by that namespace descriptor.
 
@@ -149,7 +149,7 @@ The core rules are:
 - `content_ref.kind` is `whole_file_v0` for the v0 content strategy;
 - `content_ref.digest` uses `sha256:<64 lowercase hex>` over the complete plaintext file bytes;
 - `content_ref.size_bytes` records the complete byte length;
-- the object key leaf is the raw 64-character hex digest, while JSON keeps the full `sha256:<hex>` digest string; and
+- the object key leaf is the raw 64-character hex digest, while JSON keeps the full `sha256:<hex>` digest string;
 - all content-object access resolves `namespace_id` through the namespace descriptor to its `content_store_id`;
 - future content strategies must use a new `content_ref.kind` and name their durability and validation rules before revisions may reference them.
 
@@ -173,7 +173,7 @@ Namespace deletion does not imply content-store deletion. In v0, content-store d
 
 ## 6. Forks
 
-Forking a namespace creates a new namespace with independent metadata history and the same `content_store_id` as the source namespace. The fork point is the source namespace's current head. The implementation creates or reuses a verified source checkpoint at that head, rewrites checkpoint artifacts under the new namespace id and object keys, creates the new namespace descriptor with the shared content-store id, and initializes the new head at the fork seq.
+Forking a namespace creates a new namespace with independent metadata history and the same `content_store_id` as the source namespace. The fork point is the source namespace's current head. The implementation creates or reuses a verified source checkpoint at that head, writes the target head first to reserve the namespace, rewrites checkpoint artifacts under the new namespace id and object keys, writes the target lease, and writes the namespace descriptor last as the publish/list marker.
 
 No durable parent/child relationship is part of v0 namespace state. After fork, the clone must remain readable even if the source namespace metadata is deleted or corrupted. Source writes after the fork do not affect the clone, and clone writes do not affect the source.
 
