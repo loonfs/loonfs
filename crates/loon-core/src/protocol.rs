@@ -396,25 +396,6 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     };
     match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
         Ok(_) => {}
-        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
-            match store.get(&wal.object_key, None) {
-                Ok(Some(existing)) if existing == wal.encoded_bytes => {}
-                Ok(_) => {
-                    for (index, _) in accepted {
-                        outcomes[index] = Some(Err(CoreError::WalWrite(
-                            "conflicting WAL segment object already exists".to_owned(),
-                        )));
-                    }
-                    return finish_batch_outcomes_with_aliases(outcomes, &aliases);
-                }
-                Err(err) => {
-                    for (index, _) in accepted {
-                        outcomes[index] = Some(Err(CoreError::WalWrite(err.to_string())));
-                    }
-                    return finish_batch_outcomes_with_aliases(outcomes, &aliases);
-                }
-            }
-        }
         Err(err) => {
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::WalWrite(err.to_string())));

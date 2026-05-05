@@ -30,8 +30,8 @@ pub use protocol::{
 };
 pub use publisher::{
     publish_namespace_mutations_batch, DirectObjectStorePublisher, FlushPolicy,
-    NamespaceMutationCandidate, NamespaceMutationPublisher, PathMutationIntent,
-    PlannedNamespaceMutation, PlannedPathMutation, PublishOptions,
+    NamespaceMutationCandidate, PathMutationIntent, PlannedNamespaceMutation, PlannedPathMutation,
+    PublishOptions,
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, delete_path, delete_path_non_recursive, fork_namespace,

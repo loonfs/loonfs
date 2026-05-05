@@ -14,8 +14,7 @@ use crate::namespace::catalog::{
     NamespaceInitializationError, NamespaceInitializationState,
 };
 use crate::publisher::{
-    DirectObjectStorePublisher, NamespaceMutationPublisher, PathMutationIntent,
-    PlannedPathMutation, PublishOptions,
+    DirectObjectStorePublisher, PathMutationIntent, PlannedPathMutation, PublishOptions,
 };
 use loon_api::{
     name_key_for_display_name, payload_checksum_sha256,

@@ -19,8 +19,7 @@ use loon_core::{
     list_namespaces, load_verified_namespace_basis, move_path, publish_namespace_mutations_batch,
     put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes,
     CoreError, CoreErrorKind, DirectObjectStorePublisher, MutationContext,
-    NamespaceMutationCandidate, NamespaceMutationPublisher, PathMutationIntent, PublishOptions,
-    PutFileBehavior,
+    NamespaceMutationCandidate, PathMutationIntent, PublishOptions, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{

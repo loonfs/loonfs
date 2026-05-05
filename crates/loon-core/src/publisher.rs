@@ -91,30 +91,6 @@ impl Default for PublishOptions {
     }
 }
 
-pub trait NamespaceMutationPublisher {
-    fn submit_path_intent(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: PathMutationIntent,
-        context: &MutationContext,
-        options: PublishOptions,
-    ) -> Result<MutationResult, CoreError>;
-
-    fn submit_commit_request(
-        &self,
-        namespace_id: &NamespaceId,
-        request: ApiCommitRequest,
-        context: &MutationContext,
-    ) -> Result<ApiCommitResponse, CoreError>;
-
-    fn submit_commit_batch(
-        &self,
-        namespace_id: &NamespaceId,
-        requests: Vec<ApiCommitRequest>,
-        context: &MutationContext,
-    ) -> Vec<Result<ApiCommitResponse, CoreError>>;
-}
-
 pub struct DirectObjectStorePublisher<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
 }
@@ -131,10 +107,8 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
     ) -> Result<PlannedPathMutation, CoreError> {
         crate::services::plan_path_mutation(self.store, namespace_id, intent)
     }
-}
 
-impl<S: ObjectStore + ?Sized> NamespaceMutationPublisher for DirectObjectStorePublisher<'_, S> {
-    fn submit_path_intent(
+    pub fn submit_path_intent(
         &self,
         namespace_id: &NamespaceId,
         intent: PathMutationIntent,
@@ -175,7 +149,7 @@ impl<S: ObjectStore + ?Sized> NamespaceMutationPublisher for DirectObjectStorePu
         }))
     }
 
-    fn submit_commit_request(
+    pub fn submit_commit_request(
         &self,
         namespace_id: &NamespaceId,
         request: ApiCommitRequest,
@@ -184,7 +158,7 @@ impl<S: ObjectStore + ?Sized> NamespaceMutationPublisher for DirectObjectStorePu
         crate::protocol::commit_operations(self.store, namespace_id, request, context)
     }
 
-    fn submit_commit_batch(
+    pub fn submit_commit_batch(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<ApiCommitRequest>,
