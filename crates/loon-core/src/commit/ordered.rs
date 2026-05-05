@@ -1,10 +1,10 @@
 use super::frame::validate_commit_request_frame;
 use super::{
     push_unique_invariant, CommitOp, CommitPlan, CommitRequest, CommitValidationContext,
-    CommitValidationError,
+    CommitValidationError, IndexedCommitValidationContext,
 };
 use crate::invariants::INVARIANTS;
-use crate::metadata::MetadataState;
+use crate::metadata::{CurrentMetadataView, IndexedMetadataState, MetadataOverlay, RevisionRecord};
 use loon_api::{
     name_key_for_display_name, ChangeSeq, ContentRef, InodeId, InodeKind, NamePolicy, RevisionNo,
     WalOp,
@@ -17,9 +17,9 @@ struct CommitShape {
     resulting_next_inode_id: InodeId,
 }
 
-pub(crate) fn resolve_restore_content_refs(
+pub(crate) fn resolve_restore_content_refs_indexed(
     request: &CommitRequest,
-    context: &CommitValidationContext,
+    context: &IndexedCommitValidationContext<'_>,
 ) -> Vec<Option<ContentRef>> {
     let mut resolved_request_revisions = BTreeMap::<(InodeId, RevisionNo), ContentRef>::new();
 
@@ -49,7 +49,7 @@ pub(crate) fn resolve_restore_content_refs(
                     .or_else(|| {
                         context
                             .metadata_state
-                            .revision_at_seq(*inode_id, *source_revision, context.head.seq)
+                            .revision(*inode_id, *source_revision)
                             .map(|revision| revision.content_ref)
                     });
                 if let (Some(next_revision), Some(content_ref)) = (
@@ -69,6 +69,21 @@ pub fn build_commit_plan(
     request: &CommitRequest,
     context: &CommitValidationContext,
 ) -> Result<CommitPlan, CommitValidationError> {
+    let indexed =
+        IndexedMetadataState::from_metadata_state(context.metadata_state.clone(), context.head.seq);
+    let indexed_context = IndexedCommitValidationContext {
+        head: &context.head,
+        lease: &context.lease,
+        now_ms: context.now_ms,
+        metadata_state: &indexed,
+    };
+    build_commit_plan_indexed(request, &indexed_context)
+}
+
+pub(crate) fn build_commit_plan_indexed(
+    request: &CommitRequest,
+    context: &IndexedCommitValidationContext<'_>,
+) -> Result<CommitPlan, CommitValidationError> {
     validate_commit_request_frame(request, context)?;
 
     let mut checked_invariants = INVARIANTS
@@ -87,7 +102,7 @@ pub fn build_commit_plan(
     let shape = compute_commit_shape(request, context)?;
     let resolved_restore_content_refs = validate_metadata_preconditions(
         request,
-        &context.metadata_state,
+        context.metadata_state,
         shape.next_seq,
         &shape.allocated_inode_ids,
         &mut checked_invariants,
@@ -156,7 +171,7 @@ pub fn build_commit_plan(
 
 fn compute_commit_shape(
     request: &CommitRequest,
-    context: &CommitValidationContext,
+    context: &IndexedCommitValidationContext<'_>,
 ) -> Result<CommitShape, CommitValidationError> {
     let next_seq = context
         .head
@@ -202,12 +217,12 @@ fn compute_commit_shape(
 
 fn validate_metadata_preconditions(
     request: &CommitRequest,
-    metadata_state: &MetadataState,
+    metadata_state: &IndexedMetadataState,
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
     checked_invariants: &mut Vec<String>,
 ) -> Result<Vec<Option<ContentRef>>, CommitValidationError> {
-    let mut ephemeral_metadata_state = metadata_state.clone();
+    let mut ephemeral_metadata_state = MetadataOverlay::new(metadata_state, committed_seq);
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
     let mut resolved_restore_content_refs = Vec::with_capacity(request.ops.len());
 
@@ -220,17 +235,11 @@ fn validate_metadata_preconditions(
                 source_revision,
                 base_revision,
             } => {
-                validate_restore_target(
-                    &ephemeral_metadata_state,
-                    *inode_id,
-                    *base_revision,
-                    committed_seq,
-                )?;
+                validate_restore_target(&ephemeral_metadata_state, *inode_id, *base_revision)?;
                 let source_revision = validate_restore_source_revision(
                     &ephemeral_metadata_state,
                     *inode_id,
                     *source_revision,
-                    committed_seq,
                 )?;
                 if base_revision.0.checked_add(1).is_none() {
                     return Err(CommitValidationError::RestoreRevisionOverflow {
@@ -241,7 +250,6 @@ fn validate_metadata_preconditions(
                 validate_restore_not_covered(
                     &ephemeral_metadata_state,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                 )?;
                 Some(source_revision.content_ref)
@@ -258,16 +266,10 @@ fn validate_metadata_preconditions(
                 display_name,
                 ..
             } => {
-                validate_child_name_absent(
-                    &ephemeral_metadata_state,
-                    *parent_inode,
-                    display_name,
-                    committed_seq,
-                )?;
+                validate_child_name_absent(&ephemeral_metadata_state, *parent_inode, display_name)?;
                 validate_ancestors_not_subtree_deleted(
                     &ephemeral_metadata_state,
                     *parent_inode,
-                    committed_seq,
                     checked_invariants,
                     true,
                 )?;
@@ -277,12 +279,7 @@ fn validate_metadata_preconditions(
                 base_revision,
                 ..
             } => {
-                validate_inode_revision_is(
-                    &ephemeral_metadata_state,
-                    *inode_id,
-                    *base_revision,
-                    committed_seq,
-                )?;
+                validate_inode_revision_is(&ephemeral_metadata_state, *inode_id, *base_revision)?;
                 if base_revision.0.checked_add(1).is_none() {
                     return Err(CommitValidationError::ReplaceFileRevisionOverflow {
                         inode_id: *inode_id,
@@ -292,18 +289,16 @@ fn validate_metadata_preconditions(
                 validate_ancestors_not_subtree_deleted(
                     &ephemeral_metadata_state,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                     false,
                 )?;
             }
             CommitOp::RestoreRevision { .. } => {}
             CommitOp::DeleteFile { inode_id } => {
-                validate_delete_file_target(&ephemeral_metadata_state, *inode_id, committed_seq)?;
+                validate_delete_file_target(&ephemeral_metadata_state, *inode_id)?;
                 validate_delete_file_not_covered(
                     &ephemeral_metadata_state,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                 )?;
             }
@@ -312,60 +307,50 @@ fn validate_metadata_preconditions(
                 new_parent_inode,
                 new_display_name,
             } => {
-                validate_rename_source(&ephemeral_metadata_state, *inode_id, committed_seq)?;
+                validate_rename_source(&ephemeral_metadata_state, *inode_id)?;
                 validate_rename_target_name_absent(
                     &ephemeral_metadata_state,
                     *new_parent_inode,
                     new_display_name,
-                    committed_seq,
                 )?;
                 validate_rename_does_not_cycle(
                     &ephemeral_metadata_state,
                     *inode_id,
                     *new_parent_inode,
-                    committed_seq,
                 )?;
                 validate_rename_inode_not_covered(
                     &ephemeral_metadata_state,
                     *inode_id,
-                    committed_seq,
                     checked_invariants,
                 )?;
                 validate_rename_target_parent_not_covered(
                     &ephemeral_metadata_state,
                     *new_parent_inode,
-                    committed_seq,
                     checked_invariants,
                 )?;
             }
             CommitOp::DeleteSubtree { root_inode } => {
-                validate_delete_subtree_root(
-                    &ephemeral_metadata_state,
-                    *root_inode,
-                    committed_seq,
-                )?;
+                validate_delete_subtree_root(&ephemeral_metadata_state, *root_inode)?;
                 validate_delete_subtree_not_covered(
                     &ephemeral_metadata_state,
                     *root_inode,
-                    committed_seq,
                     checked_invariants,
                 )?;
             }
         }
         resolved_restore_content_refs.push(resolved_restore_content_ref.clone());
 
-        let applied_metadata = ephemeral_metadata_state
-            .apply_committed_wal_ops(
+        ephemeral_metadata_state
+            .apply_committed_wal_op(
                 committed_seq,
-                &[materialize_simulated_wal_op(
+                &materialize_simulated_wal_op(
                     op,
                     op_index,
                     resolved_restore_content_ref.as_ref(),
                     &mut allocated_inode_ids,
-                )?],
+                )?,
             )
             .expect("validated commit ops should always apply into ephemeral metadata state");
-        ephemeral_metadata_state = applied_metadata.metadata_state;
     }
 
     Ok(resolved_restore_content_refs)
@@ -452,13 +437,12 @@ fn materialize_simulated_wal_op(
 }
 
 fn validate_child_name_absent(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     parent_inode: InodeId,
     display_name: &str,
-    base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
+        .inode(parent_inode)
         .ok_or(CommitValidationError::CreateParentMissing { parent_inode })?;
     if parent.inode_kind != InodeKind::Dir {
         return Err(CommitValidationError::CreateParentNotDirectory {
@@ -467,7 +451,7 @@ fn validate_child_name_absent(
         });
     }
 
-    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
+    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name) {
         return Err(CommitValidationError::CreateChildNameCollision {
             parent_inode,
             name_key: name_key_for_display_name(NamePolicy::default(), display_name),
@@ -479,13 +463,12 @@ fn validate_child_name_absent(
 }
 
 fn validate_inode_revision_is(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
     expected_revision: RevisionNo,
-    base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode(inode_id)
         .ok_or(CommitValidationError::ReplaceFileInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::File {
         return Err(CommitValidationError::ReplaceFileInodeNotFile {
@@ -495,7 +478,7 @@ fn validate_inode_revision_is(
     }
 
     let actual_revision = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
+        .latest_revision_head(inode_id)
         .map(|revision| revision.revision_no);
     if actual_revision != Some(expected_revision) {
         return Err(CommitValidationError::ReplaceFileBaseRevisionMismatch {
@@ -509,13 +492,12 @@ fn validate_inode_revision_is(
 }
 
 fn validate_restore_target(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
     expected_revision: RevisionNo,
-    base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode(inode_id)
         .ok_or(CommitValidationError::RestoreRevisionInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::File {
         return Err(CommitValidationError::RestoreRevisionInodeNotFile {
@@ -525,7 +507,7 @@ fn validate_restore_target(
     }
 
     let actual_revision = metadata_state
-        .latest_revision_head_at_seq(inode_id, base_seq)
+        .latest_revision_head(inode_id)
         .map(|revision| revision.revision_no);
     if actual_revision != Some(expected_revision) {
         return Err(CommitValidationError::RestoreRevisionBaseRevisionMismatch {
@@ -539,29 +521,25 @@ fn validate_restore_target(
 }
 
 fn validate_restore_source_revision(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
     source_revision: RevisionNo,
-    base_seq: ChangeSeq,
-) -> Result<crate::metadata::RevisionRecord, CommitValidationError> {
-    metadata_state
-        .revision_at_seq(inode_id, source_revision, base_seq)
-        .ok_or(
-            CommitValidationError::RestoreRevisionSourceRevisionMissing {
-                inode_id,
-                source_revision,
-            },
-        )
+) -> Result<RevisionRecord, CommitValidationError> {
+    metadata_state.revision(inode_id, source_revision).ok_or(
+        CommitValidationError::RestoreRevisionSourceRevisionMissing {
+            inode_id,
+            source_revision,
+        },
+    )
 }
 
 fn validate_ancestors_not_subtree_deleted(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
     checked_invariants: &mut Vec<String>,
     is_create: bool,
 ) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id) {
         return if is_create {
             Err(CommitValidationError::CreateUnderSubtreeTombstone {
                 parent_inode: inode_id,
@@ -585,12 +563,11 @@ fn validate_ancestors_not_subtree_deleted(
 }
 
 fn validate_restore_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
     checked_invariants: &mut Vec<String>,
 ) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id) {
         return Err(
             CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
                 inode_id,
@@ -608,12 +585,11 @@ fn validate_restore_not_covered(
 }
 
 fn validate_delete_subtree_root(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     root_inode: InodeId,
-    base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let inode = metadata_state
-        .inode_at_seq(root_inode, base_seq)
+        .inode(root_inode)
         .ok_or(CommitValidationError::DeleteSubtreeRootMissing { root_inode })?;
     if inode.inode_kind != InodeKind::Dir {
         return Err(CommitValidationError::DeleteSubtreeRootNotDirectory {
@@ -626,12 +602,11 @@ fn validate_delete_subtree_root(
 }
 
 fn validate_delete_file_target(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode(inode_id)
         .ok_or(CommitValidationError::DeleteFileInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::File {
         return Err(CommitValidationError::DeleteFileInodeNotFile {
@@ -644,12 +619,11 @@ fn validate_delete_file_target(
 }
 
 fn validate_delete_file_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
     checked_invariants: &mut Vec<String>,
 ) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id) {
         return Err(CommitValidationError::DeleteFileCoveredByTombstone {
             inode_id,
             covering_root_inode: tombstone.root_inode_id,
@@ -665,12 +639,11 @@ fn validate_delete_file_not_covered(
 }
 
 fn validate_delete_subtree_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     root_inode: InodeId,
-    base_seq: ChangeSeq,
     checked_invariants: &mut Vec<String>,
 ) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(root_inode, base_seq) {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(root_inode) {
         return Err(CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
             root_inode,
             covering_root_inode: tombstone.root_inode_id,
@@ -686,15 +659,14 @@ fn validate_delete_subtree_not_covered(
 }
 
 fn validate_rename_source(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode(inode_id)
         .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
     if metadata_state
-        .current_parent_binding_for_child(inode_id, base_seq)
+        .current_parent_binding_for_child(inode_id)
         .is_none()
     {
         return Err(CommitValidationError::RenameSourceBindingMissing { inode_id });
@@ -704,13 +676,12 @@ fn validate_rename_source(
 }
 
 fn validate_rename_target_name_absent(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     parent_inode: InodeId,
     display_name: &str,
-    base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
+        .inode(parent_inode)
         .ok_or(CommitValidationError::RenameTargetParentMissing { parent_inode })?;
     if parent.inode_kind != InodeKind::Dir {
         return Err(CommitValidationError::RenameTargetParentNotDirectory {
@@ -719,7 +690,7 @@ fn validate_rename_target_name_absent(
         });
     }
 
-    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
+    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name) {
         return Err(CommitValidationError::RenameTargetNameCollision {
             parent_inode,
             name_key: name_key_for_display_name(NamePolicy::default(), display_name),
@@ -731,18 +702,17 @@ fn validate_rename_target_name_absent(
 }
 
 fn validate_rename_does_not_cycle(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
     new_parent_inode: InodeId,
-    base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let inode = metadata_state
-        .inode_at_seq(inode_id, base_seq)
+        .inode(inode_id)
         .ok_or(CommitValidationError::RenameInodeMissing { inode_id })?;
     if inode.inode_kind != InodeKind::Dir {
         return Ok(());
     }
-    if metadata_state.would_create_directory_cycle(inode_id, new_parent_inode, base_seq) {
+    if metadata_state.would_create_directory_cycle(inode_id, new_parent_inode) {
         return Err(CommitValidationError::RenameWouldCycleDirectory {
             inode_id,
             new_parent_inode,
@@ -753,12 +723,11 @@ fn validate_rename_does_not_cycle(
 }
 
 fn validate_rename_inode_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     inode_id: InodeId,
-    base_seq: ChangeSeq,
     checked_invariants: &mut Vec<String>,
 ) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id) {
         return Err(CommitValidationError::RenameInodeUnderSubtreeTombstone {
             inode_id,
             root_inode: tombstone.root_inode_id,
@@ -774,12 +743,11 @@ fn validate_rename_inode_not_covered(
 }
 
 fn validate_rename_target_parent_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     parent_inode: InodeId,
-    base_seq: ChangeSeq,
     checked_invariants: &mut Vec<String>,
 ) -> Result<(), CommitValidationError> {
-    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(parent_inode, base_seq) {
+    if let Some(tombstone) = metadata_state.covering_subtree_tombstone(parent_inode) {
         return Err(
             CommitValidationError::RenameTargetParentUnderSubtreeTombstone {
                 parent_inode,

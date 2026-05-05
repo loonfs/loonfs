@@ -8,7 +8,10 @@ use crate::content::{
 };
 use crate::genesis::bootstrap_basis_metadata_state;
 use crate::loading::ControlObjectLoadError;
-use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use crate::metadata::{
+    CurrentMetadataView, IndexedMetadataState, MetadataOverlay, MetadataState, ResolvedVisiblePath,
+    VisiblePathError,
+};
 use crate::namespace::catalog::{
     load_namespace_content_store_id, load_namespace_descriptor, namespace_initialization_state,
     NamespaceInitializationError, NamespaceInitializationState,
@@ -682,6 +685,25 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataState,
     content_store_id: &ContentStoreId,
 ) -> Result<PlannedPathMutation, CoreError> {
+    let indexed = IndexedMetadataState::from_metadata_state(metadata_state.clone(), head.seq);
+    plan_path_mutation_against_indexed_state(
+        store,
+        namespace_id,
+        intent,
+        head,
+        &indexed,
+        content_store_id,
+    )
+}
+
+pub(crate) fn plan_path_mutation_against_indexed_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    intent: &PathMutationIntent,
+    head: &HeadState,
+    metadata_state: &IndexedMetadataState,
+    content_store_id: &ContentStoreId,
+) -> Result<PlannedPathMutation, CoreError> {
     let request_id = intent.request_id().to_owned();
     let source_request_checksum = source_request_checksum_for_path_intent(namespace_id, intent)?;
     let view = PathPlanningView {
@@ -724,7 +746,7 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
 
 struct PathPlanningView<'a> {
     head: &'a HeadState,
-    metadata_state: &'a MetadataState,
+    metadata_state: &'a IndexedMetadataState,
     content_store_id: &'a ContentStoreId,
 }
 
@@ -739,16 +761,15 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     validate_path_for_mutation(absolute_path)?;
     let _validated =
         validate_durable_content_reference(store, view.content_store_id, &content_ref)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, absolute_path, view.head.seq)?;
-    let target = lookup_path(view.metadata_state, absolute_path, view.head.seq);
+    reject_tombstoned_path_ancestor(view.metadata_state, absolute_path)?;
+    let target = lookup_path(view.metadata_state, absolute_path);
 
     let mut ops = Vec::new();
-    let mut working = view.metadata_state.clone();
+    let mut working = MetadataOverlay::new(view.metadata_state, view.head.seq);
     let mut next_inode_id = view.head.next_inode_id;
     let mut op_index = 0u32;
     let final_parent_inode = ensure_parent_directories(
         absolute_path,
-        view.head.seq,
         &mut working,
         &mut ops,
         &mut next_inode_id,
@@ -772,7 +793,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
             }
             let revision = view
                 .metadata_state
-                .latest_revision_head_at_seq(existing.inode_id, view.head.seq)
+                .current_revision_head(existing.inode_id)
                 .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
             ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
@@ -907,9 +928,7 @@ fn plan_delete_path(
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(absolute_path)?;
-    let resolved = view
-        .metadata_state
-        .resolve_visible_path(absolute_path, view.head.seq)?;
+    let resolved = view.metadata_state.resolve_visible_path(absolute_path)?;
     let op = match resolved.inode_kind {
         InodeKind::File => ApiCommitOp::DeleteFile {
             inode_id: resolved.inode_id,
@@ -918,9 +937,7 @@ fn plan_delete_path(
             root_inode: resolved.inode_id,
         },
         InodeKind::Dir => {
-            let children = view
-                .metadata_state
-                .visible_children(resolved.inode_id, view.head.seq);
+            let children = view.metadata_state.visible_children(resolved.inode_id);
             if !children.is_empty() {
                 return Err(CoreError::DirectoryNotEmpty(absolute_path.to_owned()));
             }
@@ -955,14 +972,12 @@ fn plan_move_path(
 ) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(from_path)?;
     validate_path_for_mutation(to_path)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, from_path, view.head.seq)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, to_path, view.head.seq)?;
-    let source = view
-        .metadata_state
-        .resolve_visible_path(from_path, view.head.seq)?;
-    let target_parent = resolve_parent_directory(view.metadata_state, to_path, view.head.seq)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, from_path)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, to_path)?;
+    let source = view.metadata_state.resolve_visible_path(from_path)?;
+    let target_parent = resolve_parent_directory(view.metadata_state, to_path)?;
     let target_name = final_component(to_path)?;
-    if lookup_path(view.metadata_state, to_path, view.head.seq).is_ok() {
+    if lookup_path(view.metadata_state, to_path).is_ok() {
         return Err(CoreError::DestinationExists(to_path.to_owned()));
     }
     Ok(ApiCommitRequest {
@@ -990,12 +1005,10 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
 ) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(from_path)?;
     validate_path_for_mutation(to_path)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, from_path, view.head.seq)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, to_path, view.head.seq)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, from_path)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, to_path)?;
 
-    let source = view
-        .metadata_state
-        .resolve_visible_path(from_path, view.head.seq)?;
+    let source = view.metadata_state.resolve_visible_path(from_path)?;
     if source.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: from_path.to_owned(),
@@ -1003,18 +1016,18 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
         });
     }
 
-    if lookup_path(view.metadata_state, to_path, view.head.seq).is_ok() {
+    if lookup_path(view.metadata_state, to_path).is_ok() {
         return Err(CoreError::DestinationExists(to_path.to_owned()));
     }
 
     let revision = view
         .metadata_state
-        .latest_revision_head_at_seq(source.inode_id, view.head.seq)
+        .current_revision_head(source.inode_id)
         .ok_or_else(|| CoreError::MissingPath(from_path.to_owned()))?;
     let _validated =
         validate_durable_content_reference(store, view.content_store_id, &revision.content_ref)?;
 
-    let target_parent = resolve_parent_directory(view.metadata_state, to_path, view.head.seq)?;
+    let target_parent = resolve_parent_directory(view.metadata_state, to_path)?;
     let target_name = final_component(to_path)?;
     let target_name_key = name_key_for_display_name(view.head.name_policy, &target_name);
     Ok(ApiCommitRequest {
@@ -1044,8 +1057,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
 
 fn ensure_parent_directories(
     absolute_path: &str,
-    committed_seq: ChangeSeq,
-    working: &mut MetadataState,
+    working: &mut MetadataOverlay<'_>,
     ops: &mut Vec<ApiCommitOp>,
     next_inode_id: &mut InodeId,
     op_index: &mut u32,
@@ -1057,9 +1069,9 @@ fn ensure_parent_directories(
 
     let mut current_inode = InodeId(1);
     for component in &components[..components.len() - 1] {
-        if let Some(child) = working.visible_child(current_inode, component, committed_seq) {
+        if let Some(child) = working.visible_child(current_inode, component) {
             let inode = working
-                .visible_inode(child.child_inode_id, committed_seq)
+                .visible_inode(child.child_inode_id)
                 .ok_or_else(|| CoreError::MissingPath(component.clone()))?;
             if inode.inode_kind != InodeKind::Dir {
                 return Err(CoreError::NonDirectoryPathComponent(component.clone()));
@@ -1074,16 +1086,15 @@ fn ensure_parent_directories(
         });
         let allocated = *next_inode_id;
         *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
-        let applied = working.apply_committed_wal_ops(
-            committed_seq,
-            &[loon_api::WalOp::CreateDir {
+        working.apply_committed_wal_op(
+            working.head_seq(),
+            &loon_api::WalOp::CreateDir {
                 op_index: *op_index,
                 inode_id: allocated,
                 parent_inode: current_inode,
                 display_name: component.clone(),
-            }],
+            },
         )?;
-        *working = applied.metadata_state;
         *op_index = op_index.saturating_add(1);
         current_inode = allocated;
     }
@@ -1091,16 +1102,15 @@ fn ensure_parent_directories(
 }
 
 fn resolve_parent_directory(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     absolute_path: &str,
-    seq: ChangeSeq,
 ) -> Result<InodeId, CoreError> {
     let components = path_components(absolute_path)?;
     if components.len() <= 1 {
         return Ok(InodeId(1));
     }
     let parent_path = format!("/{}", components[..components.len() - 1].join("/"));
-    let resolved = metadata_state.resolve_visible_path(&parent_path, seq)?;
+    let resolved = metadata_state.resolve_visible_path(&parent_path)?;
     if resolved.inode_kind != InodeKind::Dir {
         return Err(CoreError::ExpectedDirectory {
             path: parent_path,
@@ -1146,11 +1156,10 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
 }
 
 fn lookup_path(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     absolute_path: &str,
-    seq: ChangeSeq,
 ) -> Result<ResolvedVisiblePath, VisiblePathError> {
-    metadata_state.resolve_visible_path(absolute_path, seq)
+    metadata_state.resolve_visible_path(absolute_path)
 }
 
 fn validate_path_for_mutation(absolute_path: &str) -> Result<(), CoreError> {
@@ -1197,12 +1206,11 @@ fn join_absolute_path(base: &str, component: &str) -> String {
 }
 
 fn reject_tombstoned_path_ancestor(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     absolute_path: &str,
-    seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let Some((path, root_inode, tombstone_seq)) =
-        tombstoned_path_ancestor(metadata_state, absolute_path, seq)?
+        tombstoned_path_ancestor(metadata_state, absolute_path)?
     else {
         return Ok(());
     };
@@ -1214,21 +1222,19 @@ fn reject_tombstoned_path_ancestor(
 }
 
 fn tombstoned_path_ancestor(
-    metadata_state: &MetadataState,
+    metadata_state: &impl CurrentMetadataView,
     absolute_path: &str,
-    seq: ChangeSeq,
 ) -> Result<Option<(String, InodeId, ChangeSeq)>, CoreError> {
     let components = path_components(absolute_path)?;
     let mut current_inode = InodeId(1);
     let mut current_path = "/".to_owned();
 
     for component in components {
-        let Some(bound_child) = metadata_state.bound_child_at_seq(current_inode, &component, seq)
-        else {
+        let Some(bound_child) = metadata_state.bound_child(current_inode, &component) else {
             return Ok(None);
         };
         let Some(latest_binding) =
-            metadata_state.current_parent_binding_for_child(bound_child.child_inode_id, seq)
+            metadata_state.current_parent_binding_for_child(bound_child.child_inode_id)
         else {
             return Ok(None);
         };
@@ -1241,7 +1247,7 @@ fn tombstoned_path_ancestor(
         }
 
         if let Some(tombstone) =
-            metadata_state.covering_subtree_tombstone(bound_child.child_inode_id, seq)
+            metadata_state.covering_subtree_tombstone(bound_child.child_inode_id)
         {
             return Ok(Some((
                 join_absolute_path(&current_path, &bound_child.display_name),
@@ -1251,7 +1257,7 @@ fn tombstoned_path_ancestor(
         }
 
         if metadata_state
-            .visible_inode(bound_child.child_inode_id, seq)
+            .visible_inode(bound_child.child_inode_id)
             .is_none()
         {
             return Ok(None);

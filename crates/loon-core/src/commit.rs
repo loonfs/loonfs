@@ -1,4 +1,4 @@
-use crate::metadata::MetadataState;
+use crate::metadata::{IndexedMetadataState, MetadataState};
 use loon_api::{
     v0::CommitAnnotations, ChangeSeq, ContentRef, FenceToken, HeadState, HeadStateEnvelope,
     InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
@@ -10,7 +10,7 @@ mod ordered;
 mod publish;
 
 pub use self::ordered::build_commit_plan;
-pub(crate) use self::ordered::resolve_restore_content_refs;
+pub(crate) use self::ordered::{build_commit_plan_indexed, resolve_restore_content_refs_indexed};
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +103,14 @@ pub struct CommitValidationContext {
     pub now_ms: u64,
     #[serde(default)]
     pub metadata_state: MetadataState,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct IndexedCommitValidationContext<'a> {
+    pub head: &'a HeadState,
+    pub lease: &'a LeaseState,
+    pub now_ms: u64,
+    pub metadata_state: &'a IndexedMetadataState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

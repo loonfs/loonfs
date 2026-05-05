@@ -1053,6 +1053,72 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
 }
 
 #[test]
+fn rejected_batch_candidate_does_not_mutate_preview_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            ApiCommitRequest {
+                request_id: "bad-parent".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: api_head_seq_is(ChangeSeq(0)),
+                ops: vec![ApiCommitOp::CreateDir {
+                    parent_inode: InodeId(999),
+                    display_name: "ghost".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+            ApiCommitRequest {
+                request_id: "good-root".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: api_head_seq_is(ChangeSeq(0)),
+                ops: vec![ApiCommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "alpha".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+        ],
+        &context,
+    );
+
+    let first_error = responses[0].as_ref().expect_err("first candidate rejected");
+    assert!(matches!(
+        first_error,
+        CoreError::CommitValidation(CommitValidationError::CreateParentMissing {
+            parent_inode: InodeId(999),
+        })
+    ));
+    assert_eq!(
+        responses[1]
+            .as_ref()
+            .expect("second candidate commits")
+            .committed_seq,
+        ChangeSeq(1)
+    );
+    let alpha = resolve_path(&store, &namespace_id, "/alpha").expect("alpha exists");
+    assert_eq!(alpha.inode_id, InodeId(2));
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.records.len(), 1);
+    assert_eq!(segment.payload.records[0].request_id, "good-root");
+}
+
+#[test]
 fn direct_publisher_path_intents_cover_basic_mutations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
