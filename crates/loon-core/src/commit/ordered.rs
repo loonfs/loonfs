@@ -141,7 +141,7 @@ pub fn build_commit_plan(
     Ok(CommitPlan {
         namespace_id: request.namespace_id.clone(),
         commit_id: request.request_id.clone(),
-        base_head_seq: request.planned_head_seq,
+        base_head_seq: context.head.seq,
         next_seq: shape.next_seq,
         allocated_inode_ids: shape.allocated_inode_ids,
         resolved_restore_content_refs,

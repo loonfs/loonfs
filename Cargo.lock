@@ -1346,6 +1346,7 @@ dependencies = [
  "tempfile",
  "toml",
  "ureq",
+ "uuid",
 ]
 
 [[package]]

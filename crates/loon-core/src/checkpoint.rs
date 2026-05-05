@@ -1,9 +1,12 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::content::write_immutable_object;
+use crate::context::MutationContext;
+use crate::error::CoreError;
 use crate::loading::read_head_object;
 use crate::metadata::{
-    DirentryRecord, InodeRecord, MetadataState, RevisionRecord, SubtreeTombstoneRecord,
+    DirentryRecord, InodeRecord, MetadataState, RequestReceiptRecord, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
-use crate::services::{write_immutable_object, CoreError};
 use loon_api::{
     checkpoint_page_checksum_sha256, checkpoint_segment_payload_checksum_sha256,
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
@@ -25,11 +28,12 @@ const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
 // retention floor advances. This hook stays in place so future retention gates
 // can add progress requirements without restructuring the flow.
 const REQUIRED_RETENTION_PROGRESS_CLASSES: &[&str] = &[];
-const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 4] = [
+const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 5] = [
     CheckpointTableFamily::Inodes,
     CheckpointTableFamily::Direntries,
     CheckpointTableFamily::Revisions,
     CheckpointTableFamily::Tombstones,
+    CheckpointTableFamily::RequestReceipts,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,7 +178,7 @@ impl CheckpointLoadError {
 pub fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &crate::services::MutationContext,
+    context: &MutationContext,
 ) -> Result<CreateCheckpointResponse, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     let checkpoint_seq = basis.head.seq;
@@ -290,7 +294,7 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
 pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &crate::services::MutationContext,
+    context: &MutationContext,
 ) -> Result<AdvanceRetentionResponse, CoreError> {
     for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
@@ -321,6 +325,7 @@ pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
             name_policy: head.name_policy,
             snapshot_hint_seq: head.snapshot_hint_seq,
             retention_floor_seq: target_floor,
+            visible_wal_tip: head.visible_wal_tip.clone(),
         };
         match compare_and_swap_head(
             store,
@@ -370,6 +375,7 @@ pub(crate) fn checkpoint_basis_head(
         name_policy: current_head.name_policy,
         snapshot_hint_seq: current_head.snapshot_hint_seq,
         retention_floor_seq: current_head.retention_floor_seq,
+        visible_wal_tip: None,
     }
 }
 
@@ -550,6 +556,7 @@ fn publish_snapshot_hint_seq<S: ObjectStore + ?Sized>(
             name_policy: current_head.name_policy,
             snapshot_hint_seq: Some(checkpoint_seq),
             retention_floor_seq: current_head.retention_floor_seq,
+            visible_wal_tip: current_head.visible_wal_tip.clone(),
         };
         match compare_and_swap_head(
             store,
@@ -972,6 +979,22 @@ fn append_rows_to_metadata(
                     tombstone_seq: *tombstone_seq,
                     tombstone_op_index: *tombstone_op_index,
                 }),
+            (
+                CheckpointTableFamily::RequestReceipts,
+                CheckpointRow::RequestReceipt {
+                    request_id,
+                    semantic_fingerprint_sha256,
+                    committed_seq,
+                    commit_id,
+                    results,
+                },
+            ) => metadata_state.request_receipts.push(RequestReceiptRecord {
+                request_id: request_id.clone(),
+                semantic_fingerprint_sha256: semantic_fingerprint_sha256.clone(),
+                committed_seq: *committed_seq,
+                commit_id: commit_id.clone(),
+                results: results.clone(),
+            }),
             _ => {
                 return Err(CheckpointLoadError::TableRowKindMismatch {
                     object_key: object_key.to_owned(),
@@ -1036,6 +1059,17 @@ fn checkpoint_rows_for_family(
                 tombstone_op_index: tombstone.tombstone_op_index,
             })
             .collect::<Vec<_>>(),
+        CheckpointTableFamily::RequestReceipts => metadata_state
+            .request_receipts
+            .iter()
+            .map(|receipt| CheckpointRow::RequestReceipt {
+                request_id: receipt.request_id.clone(),
+                semantic_fingerprint_sha256: receipt.semantic_fingerprint_sha256.clone(),
+                committed_seq: receipt.committed_seq,
+                commit_id: receipt.commit_id.clone(),
+                results: receipt.results.clone(),
+            })
+            .collect::<Vec<_>>(),
     };
     rows.sort_by_key(CheckpointRow::row_key);
     rows
@@ -1047,6 +1081,7 @@ fn snapshot_table_family(family: CheckpointTableFamily) -> SnapshotTableFamily {
         CheckpointTableFamily::Direntries => SnapshotTableFamily::Direntries,
         CheckpointTableFamily::Revisions => SnapshotTableFamily::Revisions,
         CheckpointTableFamily::Tombstones => SnapshotTableFamily::Tombstones,
+        CheckpointTableFamily::RequestReceipts => SnapshotTableFamily::RequestReceipts,
     }
 }
 
@@ -1056,6 +1091,7 @@ fn checkpoint_row_kind(row: &CheckpointRow) -> &'static str {
         CheckpointRow::Direntry { .. } => "direntry",
         CheckpointRow::Revision { .. } => "revision",
         CheckpointRow::Tombstone { .. } => "tombstone",
+        CheckpointRow::RequestReceipt { .. } => "request_receipt",
     }
 }
 

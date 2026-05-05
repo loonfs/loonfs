@@ -1,3 +1,5 @@
+pub(crate) mod catalog;
+
 use loon_api::FenceToken;
 pub use loon_api::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
 use thiserror::Error;
@@ -27,5 +29,6 @@ pub fn next_takeover_head(current_head: &HeadState) -> Result<HeadState, HeadFen
         name_policy: current_head.name_policy,
         snapshot_hint_seq: current_head.snapshot_hint_seq,
         retention_floor_seq: current_head.retention_floor_seq,
+        visible_wal_tip: current_head.visible_wal_tip.clone(),
     })
 }

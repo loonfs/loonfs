@@ -3,8 +3,8 @@
 use http::Uri;
 use loon_api::{
     v0::{
-        BeginUploadResponse, ChangesResponse, CommitRequest as V0CommitRequest,
-        CommitResponse as V0CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
+        BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
+        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         UploadContentResponse,
     },
     ApiError, AuthoritativePathEntry, ChangeSeq, ContentRef, CreateNamespaceRequest,
@@ -240,11 +240,11 @@ impl Client {
     pub fn commit_operations(
         &self,
         namespace: &str,
-        request: &V0CommitRequest,
-    ) -> Result<V0CommitResponse, ClientError> {
+        request: &ApiCommitRequest,
+    ) -> Result<ApiCommitResponse, ClientError> {
         let namespace = namespace_url_segment(namespace)?;
         let url = format!("{}/v0/namespaces/{namespace}/commits", self.base_url);
-        self.request_json::<_, V0CommitResponse>(self.agent.post(&url), Some(request))
+        self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
     }
 
     pub fn list_changes(

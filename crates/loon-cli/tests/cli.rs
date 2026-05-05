@@ -521,7 +521,7 @@ default_profile = "default"
 
 [default]
 mode = "local"
-default_namespace = "   "
+default_namespace = "bad/name"
 
 [default.store]
 kind = "local-fs"

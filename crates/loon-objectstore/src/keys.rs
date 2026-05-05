@@ -6,6 +6,7 @@ pub enum SnapshotTableFamily {
     Direntries,
     Revisions,
     Tombstones,
+    RequestReceipts,
 }
 
 impl SnapshotTableFamily {
@@ -15,6 +16,7 @@ impl SnapshotTableFamily {
             Self::Direntries => "direntries",
             Self::Revisions => "revisions",
             Self::Tombstones => "tombstones",
+            Self::RequestReceipts => "request-receipts",
         }
     }
 }
@@ -33,6 +35,10 @@ pub fn namespace_lease(namespace: &str) -> String {
 
 pub fn wal_commit(namespace: &str, seq: u64, commit_id: &str) -> String {
     format!("namespaces/{namespace}/wal/{seq:020}-{commit_id}.cbor.zst")
+}
+
+pub fn wal_segment(namespace: &str, start_seq: u64, end_seq: u64, segment_id: &str) -> String {
+    format!("namespaces/{namespace}/wal/{start_seq:020}-{end_seq:020}-{segment_id}.cbor.zst")
 }
 
 pub fn content_store_descriptor(content_store: &str) -> String {
@@ -111,7 +117,7 @@ mod tests {
         conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
         derived_progress, namespace_descriptor, namespace_head, namespace_lease, queue_shard,
         sha256_hex_from_digest, snapshot_manifest, snapshot_table, upload_session,
-        upload_session_prefix, wal_commit, SnapshotTableFamily,
+        upload_session_prefix, wal_commit, wal_segment, SnapshotTableFamily,
     };
 
     #[test]
@@ -129,6 +135,10 @@ mod tests {
         assert_eq!(
             wal_commit("ns-1", 420, "commit-123"),
             "namespaces/ns-1/wal/00000000000000000420-commit-123.cbor.zst"
+        );
+        assert_eq!(
+            wal_segment("ns-1", 420, 425, "seg-123"),
+            "namespaces/ns-1/wal/00000000000000000420-00000000000000000425-seg-123.cbor.zst"
         );
         assert_eq!(
             snapshot_manifest("ns-1", 400),

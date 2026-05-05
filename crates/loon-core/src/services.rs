@@ -3,22 +3,24 @@ use crate::checkpoint::{
     create_checkpoint, load_verified_checkpoint_materialization,
     write_verified_checkpoint_from_metadata, CheckpointMetadataWriteRequest,
 };
-use crate::commit::{CommitHeadPublishError, CommitOp, CommitValidationError};
 use crate::content::{
-    read_durable_content_bytes, validate_durable_content_reference, DurableContentValidationError,
+    read_durable_content_bytes, validate_durable_content_reference, write_immutable_object,
 };
 use crate::genesis::bootstrap_basis_metadata_state;
-use crate::lease::LeaseAcquireError;
-use crate::loading::{
-    read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
+use crate::loading::ControlObjectLoadError;
+use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use crate::namespace::catalog::{
+    load_namespace_content_store_id, load_namespace_descriptor, namespace_initialization_state,
+    NamespaceInitializationError, NamespaceInitializationState,
 };
-use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, VisiblePathError};
-use crate::wal::WalBuildError;
+use crate::publisher::{
+    DirectObjectStorePublisher, PathMutationIntent, PlannedPathMutation, PublishOptions,
+};
 use loon_api::{
     name_key_for_display_name, payload_checksum_sha256,
     v0::{
-        CommitOp as V0CommitOp, CommitOpResult, CommitPrecondition as V0CommitPrecondition,
-        CommitRequest as V0CommitRequest, CommitResponse as V0CommitResponse,
+        CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
+        CommitRequest as ApiCommitRequest,
     },
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
     ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
@@ -34,13 +36,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MutationContext {
-    pub writer_id: String,
-    pub writer_version: String,
-    pub now_ms: u64,
-    pub lease_duration_ms: u64,
-}
+pub use crate::context::MutationContext;
+pub use crate::error::{CoreError, CoreErrorKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredContent {
@@ -55,32 +52,6 @@ pub struct StoredContent {
 pub enum PutFileBehavior {
     CreateOnly,
     ReplaceExisting,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoreErrorKind {
-    InvalidPath,
-    InvalidNamespaceId,
-    NamespaceNotFound,
-    NamespaceExists,
-    NamespacePartial,
-    PathNotFound,
-    RevisionNotFound,
-    PathConflict,
-    StaleHead,
-    StaleRevision,
-    TombstoneConflict,
-    LeaseConflict,
-    WouldCycle,
-    RequestIdConflict,
-    CheckpointUnavailable,
-    UploadNotFound,
-    UploadAlreadyCompleted,
-    UploadContentConflict,
-    InvalidUploadContent,
-    RebootstrapRequired,
-    NamespaceCorrupt,
-    ServerError,
 }
 
 #[derive(Debug, Error)]
@@ -109,136 +80,23 @@ pub enum BootstrapNamespaceError {
     LeaseWrite(String),
 }
 
-#[derive(Debug, Error)]
-pub enum CoreError {
-    #[error(transparent)]
-    InvalidNamespaceId(#[from] NamespaceIdValidationError),
-    #[error(transparent)]
-    Basis(#[from] BasisLoadError),
-    #[error(transparent)]
-    VisiblePath(#[from] VisiblePathError),
-    #[error(transparent)]
-    DurableContent(#[from] DurableContentValidationError),
-    #[error(transparent)]
-    Lease(#[from] LeaseAcquireError),
-    #[error("commit validation failed: {0:?}")]
-    CommitValidation(CommitValidationError),
-    #[error("wal build failed: {0:?}")]
-    WalBuild(WalBuildError),
-    #[error("metadata apply failed: {0:?}")]
-    MetadataApply(MetadataApplyError),
-    #[error("head publish failed: {0:?}")]
-    HeadPublish(CommitHeadPublishError),
-    #[error("failed to write wal object: {0}")]
-    WalWrite(String),
-    #[error("invalid absolute path `{0}`")]
-    InvalidPath(String),
-    #[error("path not found `{0}`")]
-    MissingPath(String),
-    #[error("expected file at `{path}` but found `{kind:?}`")]
-    ExpectedFile { path: String, kind: InodeKind },
-    #[error("expected directory at `{path}` but found `{kind:?}`")]
-    ExpectedDirectory { path: String, kind: InodeKind },
-    #[error("directory not empty `{0}`")]
-    DirectoryNotEmpty(String),
-    #[error("cannot mutate root path")]
-    RootMutationForbidden,
-    #[error("destination already exists at `{0}`")]
-    DestinationExists(String),
-    #[error("request id conflict for `{0}`")]
-    RequestIdConflict(String),
-    #[error("{0}")]
-    CheckpointUnavailable(String),
-    #[error("upload session `{upload_id}` was not found")]
-    UploadNotFound { upload_id: String },
-    #[error("upload session `{upload_id}` is already completed")]
-    UploadAlreadyCompleted { upload_id: String },
-    #[error("upload session `{upload_id}` content conflicts with prior content")]
-    UploadContentConflict { upload_id: String },
-    #[error("invalid upload content: {0}")]
-    InvalidUploadContent(String),
-    #[error(
-        "change feed cursor `{after_seq:?}` is older than retention floor `{retention_floor_seq:?}`"
-    )]
-    RebootstrapRequired {
-        after_seq: ChangeSeq,
-        retention_floor_seq: ChangeSeq,
-    },
-    #[error(
-        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode}` from seq `{tombstone_seq:?}`"
-    )]
-    TombstoneConflict {
-        path: String,
-        root_inode: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
-    #[error("path component `{0}` is not a directory")]
-    NonDirectoryPathComponent(String),
-    #[error("object store error: {0}")]
-    Store(String),
-    #[error("namespace `{namespace_id}` already exists")]
-    NamespaceAlreadyExists { namespace_id: NamespaceId },
-    #[error("namespace `{namespace_id}` is partially initialized")]
-    NamespacePartiallyInitialized { namespace_id: NamespaceId },
-}
-
-impl From<CommitValidationError> for CoreError {
-    fn from(value: CommitValidationError) -> Self {
-        Self::CommitValidation(value)
-    }
-}
-
-impl From<WalBuildError> for CoreError {
-    fn from(value: WalBuildError) -> Self {
-        Self::WalBuild(value)
-    }
-}
-
-impl From<MetadataApplyError> for CoreError {
-    fn from(value: MetadataApplyError) -> Self {
-        Self::MetadataApply(value)
-    }
-}
-
-impl From<CommitHeadPublishError> for CoreError {
-    fn from(value: CommitHeadPublishError) -> Self {
-        Self::HeadPublish(value)
-    }
-}
-
-impl CoreError {
-    pub fn kind(&self) -> CoreErrorKind {
-        match self {
-            CoreError::InvalidNamespaceId(_) => CoreErrorKind::InvalidNamespaceId,
-            CoreError::Basis(error) => classify_basis_load_error(error),
-            CoreError::VisiblePath(error) => classify_visible_path_error(error),
-            CoreError::DurableContent(error) => classify_durable_content_error(error),
-            CoreError::Lease(error) => classify_lease_acquire_error(error),
-            CoreError::CommitValidation(error) => classify_commit_validation_error(error),
-            CoreError::WalBuild(_)
-            | CoreError::MetadataApply(_)
-            | CoreError::WalWrite(_)
-            | CoreError::Store(_) => CoreErrorKind::ServerError,
-            CoreError::HeadPublish(error) => classify_head_publish_error(error),
-            CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
-                CoreErrorKind::InvalidPath
+impl From<NamespaceInitializationError> for BootstrapNamespaceError {
+    fn from(value: NamespaceInitializationError) -> Self {
+        match value {
+            NamespaceInitializationError::InvalidNamespaceId(error) => {
+                Self::InvalidNamespaceId(error)
             }
-            CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
-            CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
-            CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,
-            CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
-            CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
-            CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
-            CoreError::UploadAlreadyCompleted { .. } => CoreErrorKind::UploadAlreadyCompleted,
-            CoreError::UploadContentConflict { .. } => CoreErrorKind::UploadContentConflict,
-            CoreError::InvalidUploadContent(_) => CoreErrorKind::InvalidUploadContent,
-            CoreError::RebootstrapRequired { .. } => CoreErrorKind::RebootstrapRequired,
-            CoreError::ExpectedFile { .. }
-            | CoreError::ExpectedDirectory { .. }
-            | CoreError::DirectoryNotEmpty(_)
-            | CoreError::DestinationExists(_) => CoreErrorKind::PathConflict,
-            CoreError::TombstoneConflict { .. } => CoreErrorKind::TombstoneConflict,
-            CoreError::NonDirectoryPathComponent(_) => CoreErrorKind::InvalidPath,
+            NamespaceInitializationError::InspectNamespaceDescriptor(message) => {
+                Self::DescriptorWrite(message)
+            }
+            NamespaceInitializationError::InspectNamespaceHead(message) => Self::HeadWrite(message),
+            NamespaceInitializationError::InspectNamespaceLease(message) => {
+                Self::LeaseWrite(message)
+            }
+            NamespaceInitializationError::LoadNamespaceDescriptor(error)
+            | NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
+                Self::Descriptor(error)
+            }
         }
     }
 }
@@ -301,7 +159,6 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 
     let head_key = namespace_head(namespace_id.as_str());
     let lease_key = namespace_lease(namespace_id.as_str());
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
     store
         .put_if_absent(&head_key, &head_bytes)
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
@@ -321,6 +178,8 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
     let namespace_descriptor_bytes = serde_json::to_vec(&namespace_descriptor_envelope)
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
+
+    let descriptor_key = namespace_descriptor(namespace_id.as_str());
     store
         .put_if_absent(&descriptor_key, &namespace_descriptor_bytes)
         .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
@@ -330,52 +189,6 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     Ok(NamespaceSummary {
         namespace_id: namespace_id.clone(),
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NamespaceInitializationState {
-    Absent,
-    Partial,
-    Complete,
-}
-
-fn namespace_initialization_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<NamespaceInitializationState, BootstrapNamespaceError> {
-    NamespaceId::parse(namespace_id.as_str())?;
-
-    let descriptor_key = namespace_descriptor(namespace_id.as_str());
-    let head_key = namespace_head(namespace_id.as_str());
-    let lease_key = namespace_lease(namespace_id.as_str());
-
-    let descriptor_exists = store
-        .head(&descriptor_key)
-        .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?
-        .is_some();
-    let head_exists = store
-        .head(&head_key)
-        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?
-        .is_some();
-    let lease_exists = store
-        .head(&lease_key)
-        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?
-        .is_some();
-
-    match (descriptor_exists, head_exists, lease_exists) {
-        (false, false, false) => Ok(NamespaceInitializationState::Absent),
-        (true, true, true) => {
-            let descriptor = read_namespace_descriptor_object(store, namespace_id)
-                .map_err(BootstrapNamespaceError::Descriptor)?;
-            read_content_store_descriptor_object(
-                store,
-                &descriptor.envelope.state.content_store_id,
-            )
-            .map_err(BootstrapNamespaceError::Descriptor)?;
-            Ok(NamespaceInitializationState::Complete)
-        }
-        _ => Ok(NamespaceInitializationState::Partial),
-    }
 }
 
 const CONTENT_STORE_ID_RETRY_LIMIT: usize = 8;
@@ -407,18 +220,6 @@ fn create_new_content_store<S: ObjectStore + ?Sized>(
     Err(BootstrapNamespaceError::ContentStoreWrite(
         "content store id generation collided repeatedly".to_owned(),
     ))
-}
-
-pub(crate) fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<ContentStoreId, CoreError> {
-    let descriptor = read_namespace_descriptor_object(store, namespace_id)
-        .map_err(|err| CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(err)))?;
-    let content_store_id = descriptor.envelope.state.content_store_id;
-    read_content_store_descriptor_object(store, &content_store_id)
-        .map_err(|err| CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(err)))?;
-    Ok(content_store_id)
 }
 
 pub fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -458,6 +259,7 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
         name_policy: source_basis.head.name_policy,
         snapshot_hint_seq: Some(fork_seq),
         retention_floor_seq: fork_seq,
+        visible_wal_tip: None,
     };
     let initial_lease = LeaseState {
         namespace_id: new_namespace_id.clone(),
@@ -556,10 +358,12 @@ fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
     }
 }
 
-fn map_namespace_initialization_error_to_core(error: BootstrapNamespaceError) -> CoreError {
+fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {
     match error {
-        BootstrapNamespaceError::InvalidNamespaceId(error) => CoreError::InvalidNamespaceId(error),
-        other => CoreError::Store(other.to_string()),
+        NamespaceInitializationError::InvalidNamespaceId(error) => {
+            CoreError::InvalidNamespaceId(error)
+        }
+        other => CoreError::Store(BootstrapNamespaceError::from(other).to_string()),
     }
 }
 
@@ -581,8 +385,7 @@ pub fn list_namespaces<S: ObjectStore + ?Sized>(
             continue;
         }
         let namespace_id = NamespaceId::from(namespace.to_owned());
-        read_namespace_descriptor_object(store, &namespace_id)
-            .map_err(|err| CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(err)))?;
+        load_namespace_descriptor(store, &namespace_id)?;
         names.insert(namespace_id);
     }
     Ok(names
@@ -747,21 +550,47 @@ fn source_request_checksum_sha256(identity: &PathRequestIdentity) -> Result<Stri
     payload_checksum_sha256(identity).map_err(|err| CoreError::Store(err.to_string()))
 }
 
-fn maybe_retry_existing_path_request<S: ObjectStore + ?Sized>(
-    store: &S,
+pub(crate) fn source_request_checksum_for_path_intent(
     namespace_id: &NamespaceId,
-    request_id: &str,
-    source_request_checksum_sha256: &str,
-    context: &MutationContext,
-) -> Result<Option<MutationResult>, CoreError> {
-    crate::protocol::retry_existing_path_request(
-        store,
-        namespace_id,
-        request_id,
-        source_request_checksum_sha256,
-        context,
-    )
-    .map(|response| response.map(mutation_result_from_commit_response))
+    intent: &PathMutationIntent,
+) -> Result<String, CoreError> {
+    let identity = match intent {
+        PathMutationIntent::PutFile {
+            absolute_path,
+            behavior,
+            content_ref,
+            ..
+        } => PathRequestIdentity::PutFile {
+            namespace_id: namespace_id.clone(),
+            absolute_path: absolute_path.clone(),
+            behavior: *behavior,
+            content_ref: content_ref.clone(),
+        },
+        PathMutationIntent::DeletePath {
+            absolute_path,
+            recursive,
+            ..
+        } => PathRequestIdentity::DeletePath {
+            namespace_id: namespace_id.clone(),
+            absolute_path: absolute_path.clone(),
+            recursive: *recursive,
+        },
+        PathMutationIntent::MovePath {
+            from_path, to_path, ..
+        } => PathRequestIdentity::MovePath {
+            namespace_id: namespace_id.clone(),
+            from_path: from_path.clone(),
+            to_path: to_path.clone(),
+        },
+        PathMutationIntent::CopyFilePath {
+            from_path, to_path, ..
+        } => PathRequestIdentity::CopyFilePath {
+            namespace_id: namespace_id.clone(),
+            from_path: from_path.clone(),
+            to_path: to_path.clone(),
+        },
+    };
+    source_request_checksum_sha256(&identity)
 }
 
 pub fn put_file_bytes<S: ObjectStore + ?Sized>(
@@ -775,9 +604,6 @@ pub fn put_file_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(absolute_path)?;
     let stored = store_bytes_as_content(store, namespace_id, bytes)?;
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
-    let _validated =
-        validate_durable_content_reference(store, &content_store_id, &stored.content_ref)?;
     put_file_content_ref(
         store,
         namespace_id,
@@ -817,65 +643,120 @@ pub fn put_file_content_ref<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
-    let _validated = validate_durable_content_reference(store, &content_store_id, &content_ref)?;
-    commit_file_content_ref(
-        store,
-        namespace_id,
-        absolute_path,
+    let request_id = normalized_request_id(request_id);
+    let intent = PathMutationIntent::PutFile {
+        request_id,
+        absolute_path: absolute_path.to_owned(),
         content_ref,
         behavior,
+    };
+    DirectObjectStorePublisher::new(store).submit_path_intent(
+        namespace_id,
+        intent,
         context,
-        request_id,
+        PublishOptions::default(),
     )
 }
 
-fn commit_file_content_ref<S: ObjectStore + ?Sized>(
+pub(crate) fn plan_path_mutation<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    intent: &PathMutationIntent,
+) -> Result<PlannedPathMutation, CoreError> {
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    plan_path_mutation_against_state(
+        store,
+        namespace_id,
+        intent,
+        &basis.head,
+        &basis.metadata_state,
+        &basis.content_store_id,
+    )
+}
+
+pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    intent: &PathMutationIntent,
+    head: &HeadState,
+    metadata_state: &MetadataState,
+    content_store_id: &ContentStoreId,
+) -> Result<PlannedPathMutation, CoreError> {
+    let request_id = intent.request_id().to_owned();
+    let source_request_checksum = source_request_checksum_for_path_intent(namespace_id, intent)?;
+    let view = PathPlanningView {
+        head,
+        metadata_state,
+        content_store_id,
+    };
+    let commit_request = match intent {
+        PathMutationIntent::PutFile {
+            absolute_path,
+            content_ref,
+            behavior,
+            ..
+        } => plan_put_file_content_ref(
+            store,
+            absolute_path,
+            content_ref.clone(),
+            *behavior,
+            &request_id,
+            &view,
+        )?,
+        PathMutationIntent::DeletePath {
+            absolute_path,
+            recursive,
+            ..
+        } => plan_delete_path(absolute_path, *recursive, &request_id, &view)?,
+        PathMutationIntent::MovePath {
+            from_path, to_path, ..
+        } => plan_move_path(from_path, to_path, &request_id, &view)?,
+        PathMutationIntent::CopyFilePath {
+            from_path, to_path, ..
+        } => plan_copy_file_path(store, from_path, to_path, &request_id, &view)?,
+    };
+    Ok(PlannedPathMutation {
+        request_id,
+        source_request_checksum_sha256: source_request_checksum,
+        commit_request,
+    })
+}
+
+struct PathPlanningView<'a> {
+    head: &'a HeadState,
+    metadata_state: &'a MetadataState,
+    content_store_id: &'a ContentStoreId,
+}
+
+fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
+    store: &S,
     absolute_path: &str,
     content_ref: ContentRef,
     behavior: PutFileBehavior,
-    context: &MutationContext,
-    request_id: Option<&str>,
-) -> Result<MutationResult, CoreError> {
+    request_id: &str,
+    view: &PathPlanningView<'_>,
+) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(absolute_path)?;
-    let request_id = normalized_request_id(request_id);
-    let source_request_checksum = source_request_checksum_sha256(&PathRequestIdentity::PutFile {
-        namespace_id: namespace_id.clone(),
-        absolute_path: absolute_path.to_owned(),
-        behavior,
-        content_ref: content_ref.clone(),
-    })?;
-    if let Some(existing) = maybe_retry_existing_path_request(
-        store,
-        namespace_id,
-        &request_id,
-        &source_request_checksum,
-        context,
-    )? {
-        return Ok(existing);
-    }
-
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    reject_tombstoned_path_ancestor(&basis.metadata_state, absolute_path, basis.head.seq)?;
-    let target = lookup_path(&basis.metadata_state, absolute_path, basis.head.seq);
+    let _validated =
+        validate_durable_content_reference(store, view.content_store_id, &content_ref)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, absolute_path, view.head.seq)?;
+    let target = lookup_path(view.metadata_state, absolute_path, view.head.seq);
 
     let mut ops = Vec::new();
-    let mut working = basis.metadata_state.clone();
-    let mut next_inode_id = basis.head.next_inode_id;
+    let mut working = view.metadata_state.clone();
+    let mut next_inode_id = view.head.next_inode_id;
     let mut op_index = 0u32;
     let final_parent_inode = ensure_parent_directories(
         absolute_path,
-        basis.head.seq,
+        view.head.seq,
         &mut working,
         &mut ops,
         &mut next_inode_id,
         &mut op_index,
     )?;
     let final_name = final_component(absolute_path)?;
-    let mut preconditions = vec![V0CommitPrecondition::HeadSeqIs {
-        expected_seq: basis.head.seq,
+    let mut preconditions = vec![ApiCommitPrecondition::HeadSeqIs {
+        expected_seq: view.head.seq,
     }];
 
     match target {
@@ -889,55 +770,48 @@ fn commit_file_content_ref<S: ObjectStore + ?Sized>(
                     kind: existing.inode_kind,
                 });
             }
-            let revision = basis
+            let revision = view
                 .metadata_state
-                .latest_revision_head_at_seq(existing.inode_id, basis.head.seq)
+                .latest_revision_head_at_seq(existing.inode_id, view.head.seq)
                 .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-            ops.push(V0CommitOp::ReplaceFile {
+            ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision_no: revision.revision_no,
                 content_ref: content_ref.clone(),
             });
-            preconditions.push(V0CommitPrecondition::InodeRevisionIs {
+            preconditions.push(ApiCommitPrecondition::InodeRevisionIs {
                 inode_id: existing.inode_id,
                 revision_no: revision.revision_no,
             });
-            preconditions.push(V0CommitPrecondition::AncestorsNotSubtreeDeleted {
+            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: existing.inode_id,
             });
         }
         Err(VisiblePathError::PathNotFound { .. }) => {
-            ops.push(V0CommitOp::CreateFile {
+            ops.push(ApiCommitOp::CreateFile {
                 parent_inode: final_parent_inode,
                 display_name: final_name.clone(),
                 content_ref,
             });
-            preconditions.push(V0CommitPrecondition::ChildNameAbsent {
+            preconditions.push(ApiCommitPrecondition::ChildNameAbsent {
                 parent_inode: final_parent_inode,
-                name_key: name_key_for_display_name(basis.head.name_policy, &final_name),
+                name_key: name_key_for_display_name(view.head.name_policy, &final_name),
             });
-            preconditions.push(V0CommitPrecondition::AncestorsNotSubtreeDeleted {
+            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: final_parent_inode,
             });
         }
         Err(other) => return Err(other.into()),
     }
 
-    crate::protocol::commit_path_operations(
-        store,
-        namespace_id,
-        V0CommitRequest {
-            request_id,
-            planned_head_seq: basis.head.seq,
-            ops,
-            preconditions,
-            message: None,
-            annotations: None,
-        },
-        source_request_checksum,
-        context,
-    )
-    .map(mutation_result_from_commit_response)
+    Ok(ApiCommitRequest {
+        request_id: request_id.to_owned(),
+        planned_head_seq: view.head.seq,
+        ops,
+        preconditions,
+        message: None,
+        annotations: None,
+    })
 }
 
 pub fn delete_path<S: ObjectStore + ?Sized>(
@@ -947,59 +821,18 @@ pub fn delete_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    validate_path_for_mutation(absolute_path)?;
     let request_id = normalized_request_id(request_id);
-    let source_request_checksum =
-        source_request_checksum_sha256(&PathRequestIdentity::DeletePath {
-            namespace_id: namespace_id.clone(),
-            absolute_path: absolute_path.to_owned(),
-            recursive: true,
-        })?;
-    if let Some(existing) = maybe_retry_existing_path_request(
-        store,
-        namespace_id,
-        &request_id,
-        &source_request_checksum,
-        context,
-    )? {
-        return Ok(existing);
-    }
-
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    let resolved = basis
-        .metadata_state
-        .resolve_visible_path(absolute_path, basis.head.seq)?;
-    let op = match resolved.inode_kind {
-        InodeKind::File => V0CommitOp::DeleteFile {
-            inode_id: resolved.inode_id,
-        },
-        InodeKind::Dir => V0CommitOp::DeleteSubtree {
-            root_inode: resolved.inode_id,
-        },
-        kind => {
-            return Err(CoreError::ExpectedFile {
-                path: absolute_path.to_owned(),
-                kind,
-            });
-        }
+    let intent = PathMutationIntent::DeletePath {
+        request_id,
+        absolute_path: absolute_path.to_owned(),
+        recursive: true,
     };
-    crate::protocol::commit_path_operations(
-        store,
+    DirectObjectStorePublisher::new(store).submit_path_intent(
         namespace_id,
-        V0CommitRequest {
-            request_id,
-            planned_head_seq: basis.head.seq,
-            ops: vec![op],
-            preconditions: vec![V0CommitPrecondition::HeadSeqIs {
-                expected_seq: basis.head.seq,
-            }],
-            message: None,
-            annotations: None,
-        },
-        source_request_checksum,
+        intent,
         context,
+        PublishOptions::default(),
     )
-    .map(mutation_result_from_commit_response)
 }
 
 pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
@@ -1009,68 +842,18 @@ pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    validate_path_for_mutation(absolute_path)?;
     let request_id = normalized_request_id(request_id);
-    let source_request_checksum =
-        source_request_checksum_sha256(&PathRequestIdentity::DeletePath {
-            namespace_id: namespace_id.clone(),
-            absolute_path: absolute_path.to_owned(),
-            recursive: false,
-        })?;
-    if let Some(existing) = maybe_retry_existing_path_request(
-        store,
-        namespace_id,
-        &request_id,
-        &source_request_checksum,
-        context,
-    )? {
-        return Ok(existing);
-    }
-
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    let resolved = basis
-        .metadata_state
-        .resolve_visible_path(absolute_path, basis.head.seq)?;
-
-    let op = match resolved.inode_kind {
-        InodeKind::File => V0CommitOp::DeleteFile {
-            inode_id: resolved.inode_id,
-        },
-        InodeKind::Dir => {
-            let children = basis
-                .metadata_state
-                .visible_children(resolved.inode_id, basis.head.seq);
-            if !children.is_empty() {
-                return Err(CoreError::DirectoryNotEmpty(absolute_path.to_owned()));
-            }
-            V0CommitOp::DeleteSubtree {
-                root_inode: resolved.inode_id,
-            }
-        }
-        kind => {
-            return Err(CoreError::ExpectedFile {
-                path: absolute_path.to_owned(),
-                kind,
-            });
-        }
+    let intent = PathMutationIntent::DeletePath {
+        request_id,
+        absolute_path: absolute_path.to_owned(),
+        recursive: false,
     };
-    crate::protocol::commit_path_operations(
-        store,
+    DirectObjectStorePublisher::new(store).submit_path_intent(
         namespace_id,
-        V0CommitRequest {
-            request_id,
-            planned_head_seq: basis.head.seq,
-            ops: vec![op],
-            preconditions: vec![V0CommitPrecondition::HeadSeqIs {
-                expected_seq: basis.head.seq,
-            }],
-            message: None,
-            annotations: None,
-        },
-        source_request_checksum,
+        intent,
         context,
+        PublishOptions::default(),
     )
-    .map(mutation_result_from_commit_response)
 }
 
 pub fn move_path<S: ObjectStore + ?Sized>(
@@ -1081,56 +864,18 @@ pub fn move_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    validate_path_for_mutation(from_path)?;
-    validate_path_for_mutation(to_path)?;
     let request_id = normalized_request_id(request_id);
-    let source_request_checksum = source_request_checksum_sha256(&PathRequestIdentity::MovePath {
-        namespace_id: namespace_id.clone(),
+    let intent = PathMutationIntent::MovePath {
+        request_id,
         from_path: from_path.to_owned(),
         to_path: to_path.to_owned(),
-    })?;
-    if let Some(existing) = maybe_retry_existing_path_request(
-        store,
+    };
+    DirectObjectStorePublisher::new(store).submit_path_intent(
         namespace_id,
-        &request_id,
-        &source_request_checksum,
+        intent,
         context,
-    )? {
-        return Ok(existing);
-    }
-
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    reject_tombstoned_path_ancestor(&basis.metadata_state, from_path, basis.head.seq)?;
-    reject_tombstoned_path_ancestor(&basis.metadata_state, to_path, basis.head.seq)?;
-    let source = basis
-        .metadata_state
-        .resolve_visible_path(from_path, basis.head.seq)?;
-    let target_parent = resolve_parent_directory(&basis.metadata_state, to_path, basis.head.seq)?;
-    let target_name = final_component(to_path)?;
-    if lookup_path(&basis.metadata_state, to_path, basis.head.seq).is_ok() {
-        return Err(CoreError::DestinationExists(to_path.to_owned()));
-    }
-    crate::protocol::commit_path_operations(
-        store,
-        namespace_id,
-        V0CommitRequest {
-            request_id,
-            planned_head_seq: basis.head.seq,
-            ops: vec![V0CommitOp::Rename {
-                inode_id: source.inode_id,
-                new_parent_inode: target_parent,
-                new_display_name: target_name,
-            }],
-            preconditions: vec![V0CommitPrecondition::HeadSeqIs {
-                expected_seq: basis.head.seq,
-            }],
-            message: None,
-            annotations: None,
-        },
-        source_request_checksum,
-        context,
+        PublishOptions::default(),
     )
-    .map(mutation_result_from_commit_response)
 }
 
 pub fn copy_file_path<S: ObjectStore + ?Sized>(
@@ -1141,32 +886,116 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
+    let request_id = normalized_request_id(request_id);
+    let intent = PathMutationIntent::CopyFilePath {
+        request_id,
+        from_path: from_path.to_owned(),
+        to_path: to_path.to_owned(),
+    };
+    DirectObjectStorePublisher::new(store).submit_path_intent(
+        namespace_id,
+        intent,
+        context,
+        PublishOptions::default(),
+    )
+}
+
+fn plan_delete_path(
+    absolute_path: &str,
+    recursive: bool,
+    request_id: &str,
+    view: &PathPlanningView<'_>,
+) -> Result<ApiCommitRequest, CoreError> {
+    validate_path_for_mutation(absolute_path)?;
+    let resolved = view
+        .metadata_state
+        .resolve_visible_path(absolute_path, view.head.seq)?;
+    let op = match resolved.inode_kind {
+        InodeKind::File => ApiCommitOp::DeleteFile {
+            inode_id: resolved.inode_id,
+        },
+        InodeKind::Dir if recursive => ApiCommitOp::DeleteSubtree {
+            root_inode: resolved.inode_id,
+        },
+        InodeKind::Dir => {
+            let children = view
+                .metadata_state
+                .visible_children(resolved.inode_id, view.head.seq);
+            if !children.is_empty() {
+                return Err(CoreError::DirectoryNotEmpty(absolute_path.to_owned()));
+            }
+            ApiCommitOp::DeleteSubtree {
+                root_inode: resolved.inode_id,
+            }
+        }
+        kind => {
+            return Err(CoreError::ExpectedFile {
+                path: absolute_path.to_owned(),
+                kind,
+            });
+        }
+    };
+    Ok(ApiCommitRequest {
+        request_id: request_id.to_owned(),
+        planned_head_seq: view.head.seq,
+        ops: vec![op],
+        preconditions: vec![ApiCommitPrecondition::HeadSeqIs {
+            expected_seq: view.head.seq,
+        }],
+        message: None,
+        annotations: None,
+    })
+}
+
+fn plan_move_path(
+    from_path: &str,
+    to_path: &str,
+    request_id: &str,
+    view: &PathPlanningView<'_>,
+) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(from_path)?;
     validate_path_for_mutation(to_path)?;
-    let request_id = normalized_request_id(request_id);
-    let source_request_checksum =
-        source_request_checksum_sha256(&PathRequestIdentity::CopyFilePath {
-            namespace_id: namespace_id.clone(),
-            from_path: from_path.to_owned(),
-            to_path: to_path.to_owned(),
-        })?;
-    if let Some(existing) = maybe_retry_existing_path_request(
-        store,
-        namespace_id,
-        &request_id,
-        &source_request_checksum,
-        context,
-    )? {
-        return Ok(existing);
-    }
-
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    reject_tombstoned_path_ancestor(&basis.metadata_state, from_path, basis.head.seq)?;
-    reject_tombstoned_path_ancestor(&basis.metadata_state, to_path, basis.head.seq)?;
-
-    let source = basis
+    reject_tombstoned_path_ancestor(view.metadata_state, from_path, view.head.seq)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, to_path, view.head.seq)?;
+    let source = view
         .metadata_state
-        .resolve_visible_path(from_path, basis.head.seq)?;
+        .resolve_visible_path(from_path, view.head.seq)?;
+    let target_parent = resolve_parent_directory(view.metadata_state, to_path, view.head.seq)?;
+    let target_name = final_component(to_path)?;
+    if lookup_path(view.metadata_state, to_path, view.head.seq).is_ok() {
+        return Err(CoreError::DestinationExists(to_path.to_owned()));
+    }
+    Ok(ApiCommitRequest {
+        request_id: request_id.to_owned(),
+        planned_head_seq: view.head.seq,
+        ops: vec![ApiCommitOp::Rename {
+            inode_id: source.inode_id,
+            new_parent_inode: target_parent,
+            new_display_name: target_name,
+        }],
+        preconditions: vec![ApiCommitPrecondition::HeadSeqIs {
+            expected_seq: view.head.seq,
+        }],
+        message: None,
+        annotations: None,
+    })
+}
+
+fn plan_copy_file_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    from_path: &str,
+    to_path: &str,
+    request_id: &str,
+    view: &PathPlanningView<'_>,
+) -> Result<ApiCommitRequest, CoreError> {
+    validate_path_for_mutation(from_path)?;
+    validate_path_for_mutation(to_path)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, from_path, view.head.seq)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, to_path, view.head.seq)?;
+
+    let source = view
+        .metadata_state
+        .resolve_visible_path(from_path, view.head.seq)?;
     if source.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: from_path.to_owned(),
@@ -1174,140 +1003,50 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
         });
     }
 
-    if lookup_path(&basis.metadata_state, to_path, basis.head.seq).is_ok() {
+    if lookup_path(view.metadata_state, to_path, view.head.seq).is_ok() {
         return Err(CoreError::DestinationExists(to_path.to_owned()));
     }
 
-    let revision = basis
+    let revision = view
         .metadata_state
-        .latest_revision_head_at_seq(source.inode_id, basis.head.seq)
+        .latest_revision_head_at_seq(source.inode_id, view.head.seq)
         .ok_or_else(|| CoreError::MissingPath(from_path.to_owned()))?;
     let _validated =
-        validate_durable_content_reference(store, &basis.content_store_id, &revision.content_ref)?;
+        validate_durable_content_reference(store, view.content_store_id, &revision.content_ref)?;
 
-    let target_parent = resolve_parent_directory(&basis.metadata_state, to_path, basis.head.seq)?;
+    let target_parent = resolve_parent_directory(view.metadata_state, to_path, view.head.seq)?;
     let target_name = final_component(to_path)?;
-    let target_name_key = name_key_for_display_name(basis.head.name_policy, &target_name);
-    crate::protocol::commit_path_operations(
-        store,
-        namespace_id,
-        V0CommitRequest {
-            request_id,
-            planned_head_seq: basis.head.seq,
-            ops: vec![V0CommitOp::CreateFile {
+    let target_name_key = name_key_for_display_name(view.head.name_policy, &target_name);
+    Ok(ApiCommitRequest {
+        request_id: request_id.to_owned(),
+        planned_head_seq: view.head.seq,
+        ops: vec![ApiCommitOp::CreateFile {
+            parent_inode: target_parent,
+            display_name: target_name.clone(),
+            content_ref: revision.content_ref,
+        }],
+        preconditions: vec![
+            ApiCommitPrecondition::HeadSeqIs {
+                expected_seq: view.head.seq,
+            },
+            ApiCommitPrecondition::ChildNameAbsent {
                 parent_inode: target_parent,
-                display_name: target_name.clone(),
-                content_ref: revision.content_ref,
-            }],
-            preconditions: vec![
-                V0CommitPrecondition::HeadSeqIs {
-                    expected_seq: basis.head.seq,
-                },
-                V0CommitPrecondition::ChildNameAbsent {
-                    parent_inode: target_parent,
-                    name_key: target_name_key,
-                },
-                V0CommitPrecondition::AncestorsNotSubtreeDeleted {
-                    inode_id: target_parent,
-                },
-            ],
-            message: None,
-            annotations: None,
-        },
-        source_request_checksum,
-        context,
-    )
-    .map(mutation_result_from_commit_response)
-}
-
-fn mutation_result_from_commit_response(response: V0CommitResponse) -> MutationResult {
-    MutationResult {
-        namespace_id: response.namespace_id,
-        committed_seq: response.committed_seq,
-    }
-}
-
-pub(crate) fn derive_commit_results(
-    ops: &[CommitOp],
-    allocated_inode_ids: &[InodeId],
-    resolved_restore_content_refs: &[Option<ContentRef>],
-) -> Vec<CommitOpResult> {
-    let mut allocated = allocated_inode_ids.iter().copied();
-    ops.iter()
-        .enumerate()
-        .map(|(index, op)| {
-            let op_index = u32::try_from(index).expect("commit op index should fit in u32");
-            match op {
-                CommitOp::CreateDir { .. } => CommitOpResult::CreateDir {
-                    op_index,
-                    inode_id: allocated
-                        .next()
-                        .expect("allocated inode ids should cover create ops"),
-                },
-                CommitOp::CreateFile { content_ref, .. } => CommitOpResult::CreateFile {
-                    op_index,
-                    inode_id: allocated
-                        .next()
-                        .expect("allocated inode ids should cover create ops"),
-                    revision_no: loon_api::RevisionNo(1),
-                    content_ref: content_ref.clone(),
-                },
-                CommitOp::ReplaceFile {
-                    inode_id,
-                    base_revision,
-                    content_ref,
-                } => CommitOpResult::ReplaceFile {
-                    op_index,
-                    inode_id: *inode_id,
-                    revision_no: loon_api::RevisionNo(
-                        base_revision
-                            .0
-                            .checked_add(1)
-                            .expect("replace_file revision increment validated"),
-                    ),
-                    content_ref: content_ref.clone(),
-                },
-                CommitOp::RestoreRevision {
-                    inode_id,
-                    source_revision,
-                    base_revision,
-                } => CommitOpResult::RestoreRevision {
-                    op_index,
-                    inode_id: *inode_id,
-                    source_revision_no: *source_revision,
-                    revision_no: loon_api::RevisionNo(
-                        base_revision
-                            .0
-                            .checked_add(1)
-                            .expect("restore_revision increment validated"),
-                    ),
-                    content_ref: resolved_restore_content_refs[index]
-                        .as_ref()
-                        .expect("resolved restore content ref should be present")
-                        .clone(),
-                },
-                CommitOp::DeleteFile { inode_id } => CommitOpResult::DeleteFile {
-                    op_index,
-                    inode_id: *inode_id,
-                },
-                CommitOp::Rename { inode_id, .. } => CommitOpResult::Rename {
-                    op_index,
-                    inode_id: *inode_id,
-                },
-                CommitOp::DeleteSubtree { root_inode } => CommitOpResult::DeleteSubtree {
-                    op_index,
-                    root_inode: *root_inode,
-                },
-            }
-        })
-        .collect()
+                name_key: target_name_key,
+            },
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: target_parent,
+            },
+        ],
+        message: None,
+        annotations: None,
+    })
 }
 
 fn ensure_parent_directories(
     absolute_path: &str,
     committed_seq: ChangeSeq,
     working: &mut MetadataState,
-    ops: &mut Vec<V0CommitOp>,
+    ops: &mut Vec<ApiCommitOp>,
     next_inode_id: &mut InodeId,
     op_index: &mut u32,
 ) -> Result<InodeId, CoreError> {
@@ -1329,7 +1068,7 @@ fn ensure_parent_directories(
             continue;
         }
 
-        ops.push(V0CommitOp::CreateDir {
+        ops.push(ApiCommitOp::CreateDir {
             parent_inode: current_inode,
             display_name: component.clone(),
         });
@@ -1404,34 +1143,6 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
         size_bytes,
         content_ref,
     })
-}
-
-pub(crate) fn write_immutable_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    expected_bytes: &[u8],
-) -> Result<(), CoreError> {
-    match store.put_if_absent(object_key, expected_bytes) {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed) => {
-            let existing = store
-                .get(object_key, None)
-                .map_err(|err| CoreError::Store(err.to_string()))?
-                .ok_or_else(|| {
-                    CoreError::Store(format!(
-                        "missing immutable object `{object_key}` after precondition failure"
-                    ))
-                })?;
-            if existing == expected_bytes {
-                Ok(())
-            } else {
-                Err(CoreError::Store(format!(
-                    "immutable object `{object_key}` already exists with different bytes"
-                )))
-            }
-        }
-        Err(err) => Err(CoreError::Store(err.to_string())),
-    }
 }
 
 fn lookup_path(
@@ -1550,157 +1261,4 @@ fn tombstoned_path_ancestor(
     }
 
     Ok(None)
-}
-
-fn classify_control_object_load_error(error: &ControlObjectLoadError) -> CoreErrorKind {
-    match error {
-        ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
-        ControlObjectLoadError::MissingObject { .. }
-        | ControlObjectLoadError::MissingObjectAfterHead { .. } => CoreErrorKind::NamespaceNotFound,
-        ControlObjectLoadError::KindMismatch { .. }
-        | ControlObjectLoadError::NamespaceMismatch { .. }
-        | ControlObjectLoadError::ContentStoreMismatch { .. }
-        | ControlObjectLoadError::ChecksumMismatch { .. }
-        | ControlObjectLoadError::Codec { .. } => CoreErrorKind::NamespaceCorrupt,
-        ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
-    match error {
-        BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
-        BasisLoadError::LoadContentStoreDescriptor(error) => match error {
-            ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
-            _ => CoreErrorKind::NamespaceCorrupt,
-        },
-        BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => match error {
-            ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
-            ControlObjectLoadError::MissingObject { .. }
-            | ControlObjectLoadError::MissingObjectAfterHead { .. } => {
-                CoreErrorKind::NamespaceCorrupt
-            }
-            _ => classify_control_object_load_error(error),
-        },
-        BasisLoadError::InvalidWalObjectKey { .. }
-        | BasisLoadError::DuplicateWalSeq { .. }
-        | BasisLoadError::MissingWalObject { .. }
-        | BasisLoadError::MissingWalObjectAfterList { .. }
-        | BasisLoadError::WalReplay(_)
-        | BasisLoadError::ReconstructedHeadMismatch { .. } => CoreErrorKind::NamespaceCorrupt,
-        BasisLoadError::CheckpointLoad(error) => match error.kind() {
-            crate::CheckpointLoadErrorKind::Corrupt => CoreErrorKind::NamespaceCorrupt,
-            crate::CheckpointLoadErrorKind::Store => CoreErrorKind::ServerError,
-        },
-        BasisLoadError::MissingHeadEtag { .. }
-        | BasisLoadError::ListWal { .. }
-        | BasisLoadError::ReadWal { .. } => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_visible_path_error(error: &VisiblePathError) -> CoreErrorKind {
-    match error {
-        VisiblePathError::InvalidAbsolutePath { .. } => CoreErrorKind::InvalidPath,
-        VisiblePathError::RootMissing => CoreErrorKind::NamespaceCorrupt,
-        VisiblePathError::PathNotFound { .. } => CoreErrorKind::PathNotFound,
-        VisiblePathError::PathComponentNotDirectory { .. } => CoreErrorKind::PathConflict,
-    }
-}
-
-fn classify_durable_content_error(error: &DurableContentValidationError) -> CoreErrorKind {
-    match error {
-        DurableContentValidationError::UnsupportedContentRefKind { .. }
-        | DurableContentValidationError::InvalidDigest { .. }
-        | DurableContentValidationError::MissingContentObject { .. }
-        | DurableContentValidationError::ContentLengthMismatch { .. }
-        | DurableContentValidationError::ContentDigestMismatch { .. } => {
-            CoreErrorKind::NamespaceCorrupt
-        }
-        DurableContentValidationError::Store { .. } => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_lease_acquire_error(error: &LeaseAcquireError) -> CoreErrorKind {
-    match error {
-        LeaseAcquireError::LoadHead(error) | LeaseAcquireError::LoadLease(error) => {
-            classify_control_object_load_error(error)
-        }
-        LeaseAcquireError::HeldByOtherWriter { .. } => CoreErrorKind::LeaseConflict,
-        LeaseAcquireError::UnexpectedControlState { .. } => CoreErrorKind::NamespaceCorrupt,
-        LeaseAcquireError::EmptyWriterId
-        | LeaseAcquireError::ZeroLeaseDuration
-        | LeaseAcquireError::MissingHeadEtag { .. }
-        | LeaseAcquireError::MissingLeaseEtag { .. }
-        | LeaseAcquireError::HeadFenceTakeover(_)
-        | LeaseAcquireError::HeadWrite(_)
-        | LeaseAcquireError::LeaseWrite(_)
-        | LeaseAcquireError::RetryExhausted { .. } => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorKind {
-    match error {
-        CommitValidationError::PlannedHeadSeqMismatch { .. }
-        | CommitValidationError::MissingHeadSeqPrecondition { .. }
-        | CommitValidationError::ConflictingHeadSeqPrecondition { .. } => CoreErrorKind::StaleHead,
-        CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
-        | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. } => {
-            CoreErrorKind::StaleRevision
-        }
-        CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
-            CoreErrorKind::RevisionNotFound
-        }
-        CommitValidationError::CreateUnderSubtreeTombstone { .. }
-        | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }
-        | CommitValidationError::RestoreRevisionUnderSubtreeTombstone { .. }
-        | CommitValidationError::DeleteFileCoveredByTombstone { .. }
-        | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
-        | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
-        | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. } => {
-            CoreErrorKind::TombstoneConflict
-        }
-        CommitValidationError::CreateChildNameCollision { .. }
-        | CommitValidationError::CreateParentNotDirectory { .. }
-        | CommitValidationError::ReplaceFileInodeNotFile { .. }
-        | CommitValidationError::RestoreRevisionInodeNotFile { .. }
-        | CommitValidationError::DeleteFileInodeNotFile { .. }
-        | CommitValidationError::RenameTargetParentNotDirectory { .. }
-        | CommitValidationError::RenameTargetNameCollision { .. }
-        | CommitValidationError::DeleteSubtreeRootNotDirectory { .. } => {
-            CoreErrorKind::PathConflict
-        }
-        CommitValidationError::CreateParentMissing { .. }
-        | CommitValidationError::ReplaceFileInodeMissing { .. }
-        | CommitValidationError::RestoreRevisionInodeMissing { .. }
-        | CommitValidationError::DeleteFileInodeMissing { .. }
-        | CommitValidationError::RenameInodeMissing { .. }
-        | CommitValidationError::RenameSourceBindingMissing { .. }
-        | CommitValidationError::RenameTargetParentMissing { .. }
-        | CommitValidationError::DeleteSubtreeRootMissing { .. } => CoreErrorKind::PathNotFound,
-        CommitValidationError::RenameWouldCycleDirectory { .. } => CoreErrorKind::WouldCycle,
-        CommitValidationError::StaleWriterFenceToken { .. }
-        | CommitValidationError::LeaseHolderMismatch { .. }
-        | CommitValidationError::LeaseExpired { .. } => CoreErrorKind::LeaseConflict,
-        CommitValidationError::EmptyCommit
-        | CommitValidationError::NamespaceMismatch
-        | CommitValidationError::HeadLeaseNamespaceMismatch
-        | CommitValidationError::HeadLeaseFenceMismatch { .. }
-        | CommitValidationError::RestoreRevisionOverflow { .. }
-        | CommitValidationError::ReplaceFileRevisionOverflow { .. }
-        | CommitValidationError::SeqOverflow
-        | CommitValidationError::NextInodeOverflow
-        | CommitValidationError::OpIndexOverflow => CoreErrorKind::ServerError,
-    }
-}
-
-fn classify_head_publish_error(error: &CommitHeadPublishError) -> CoreErrorKind {
-    match error {
-        CommitHeadPublishError::StaleHead => CoreErrorKind::StaleHead,
-        CommitHeadPublishError::EmptyWriterVersion
-        | CommitHeadPublishError::EmptyExpectedHeadEtag
-        | CommitHeadPublishError::NamespaceMismatch { .. }
-        | CommitHeadPublishError::PlanBaseHeadSeqMismatch { .. }
-        | CommitHeadPublishError::PlanNextSeqMismatch { .. }
-        | CommitHeadPublishError::Codec(_)
-        | CommitHeadPublishError::Store(_) => CoreErrorKind::ServerError,
-    }
 }

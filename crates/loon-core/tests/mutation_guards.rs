@@ -1,12 +1,12 @@
 use loon_api::{
-    sha256_digest,
+    decode_wal_segment_envelope_zstd, sha256_digest,
     v0::{
-        CommitOp as V0CommitOp, CommitPrecondition, CommitRequest as V0CommitRequest,
+        CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
         CompleteUploadRequest,
     },
     ChangeSeq, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope, ControlObjectKind,
     FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceDescriptorEnvelope,
-    NamespaceId, RevisionNo,
+    NamespaceDescriptorState, NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
@@ -14,11 +14,12 @@ use loon_core::commit::{
 };
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
-    bootstrap_namespace, commit_operations, complete_upload, copy_file_path, delete_path,
-    delete_path_non_recursive, fork_namespace, list_changes_after, list_namespaces,
-    load_verified_namespace_basis, move_path, put_file_bytes, read_file_bytes, resolve_path,
-    store_bytes_as_content, write_file_bytes, CoreError, CoreErrorKind, MutationContext,
-    PutFileBehavior,
+    bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
+    copy_file_path, delete_path, delete_path_non_recursive, fork_namespace, list_changes_after,
+    list_namespaces, load_verified_namespace_basis, move_path, publish_namespace_mutations_batch,
+    put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes,
+    CoreError, CoreErrorKind, DirectObjectStorePublisher, MutationContext,
+    NamespaceMutationCandidate, PathMutationIntent, PublishOptions, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -555,6 +556,7 @@ fn restore_revision_overflow_is_rejected() {
             content_ref: content_ref("content-max"),
         }],
         subtree_tombstones: Vec::new(),
+        request_receipts: Vec::new(),
     };
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
@@ -736,6 +738,408 @@ fn public_namespace_operations_reject_invalid_namespace_id_before_key_constructi
 }
 
 #[test]
+fn batch_commit_writes_one_segment_and_expands_change_feed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            ApiCommitRequest {
+                request_id: "req-batch-a".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: Vec::new(),
+                ops: vec![ApiCommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "alpha".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+            ApiCommitRequest {
+                request_id: "req-batch-b".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: Vec::new(),
+                ops: vec![ApiCommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "beta".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+        ],
+        &context,
+    );
+    let first = responses[0].as_ref().expect("first commit");
+    let second = responses[1].as_ref().expect("second commit");
+    assert_eq!(first.committed_seq, ChangeSeq(1));
+    assert_eq!(second.committed_seq, ChangeSeq(2));
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.start_seq, ChangeSeq(1));
+    assert_eq!(segment.payload.end_seq, ChangeSeq(2));
+    assert_eq!(segment.payload.records.len(), 2);
+    store
+        .put_if_absent(
+            "namespaces/demo/wal/00000000000000000999-00000000000000000999-orphan.cbor.zst",
+            &wal_bytes,
+        )
+        .expect("write unreachable orphan");
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    assert_eq!(changes.changes.len(), 2);
+    assert_eq!(changes.changes[0].request_id, "req-batch-a");
+    assert_eq!(changes.changes[1].request_id, "req-batch-b");
+}
+
+#[test]
+fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"retry").expect("stage content");
+    let publisher = DirectObjectStorePublisher::new(&store);
+
+    let result = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::PutFile {
+                request_id: "retry-after-orphan".to_owned(),
+                absolute_path: "/retry.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("path intent retries stale head");
+    assert_eq!(result.committed_seq, ChangeSeq(1));
+    assert!(store.injected_stale_head());
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 2);
+
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    assert_eq!(basis.head.seq, ChangeSeq(1));
+    let visible_tip = basis
+        .head
+        .visible_wal_tip
+        .as_ref()
+        .expect("visible wal tip");
+    assert!(wal_keys.contains(&visible_tip.object_key));
+    let orphan_keys = wal_keys
+        .iter()
+        .filter(|key| *key != &visible_tip.object_key)
+        .collect::<Vec<_>>();
+    assert_eq!(orphan_keys.len(), 1);
+
+    let visible_wal = store
+        .get(&visible_tip.object_key, None)
+        .expect("read visible wal")
+        .expect("visible wal exists");
+    let visible_segment =
+        decode_wal_segment_envelope_zstd(&visible_wal).expect("decode visible segment");
+    assert_eq!(visible_segment.payload.start_seq, ChangeSeq(1));
+    assert_eq!(visible_segment.payload.end_seq, ChangeSeq(1));
+    assert_eq!(visible_segment.payload.records.len(), 1);
+    assert_eq!(
+        visible_segment.payload.records[0].request_id,
+        "retry-after-orphan"
+    );
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.changes[0].request_id, "retry-after-orphan");
+}
+
+#[test]
+fn batch_commit_aliases_duplicate_request_id_with_same_fingerprint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let request = ApiCommitRequest {
+        request_id: "req-duplicate".to_owned(),
+        planned_head_seq: ChangeSeq(0),
+        preconditions: Vec::new(),
+        ops: vec![ApiCommitOp::CreateDir {
+            parent_inode: InodeId(1),
+            display_name: "alpha".to_owned(),
+        }],
+        message: None,
+        annotations: None,
+    };
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![request.clone(), request],
+        &context,
+    );
+    let first = responses[0].as_ref().expect("primary commit");
+    let duplicate = responses[1].as_ref().expect("duplicate commit");
+    assert_eq!(first, duplicate);
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.records.len(), 1);
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.changes[0].request_id, "req-duplicate");
+}
+
+#[test]
+fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            ApiCommitRequest {
+                request_id: "req-conflict".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: Vec::new(),
+                ops: vec![ApiCommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "alpha".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+            ApiCommitRequest {
+                request_id: "req-conflict".to_owned(),
+                planned_head_seq: ChangeSeq(0),
+                preconditions: Vec::new(),
+                ops: vec![ApiCommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "beta".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+        ],
+        &context,
+    );
+
+    responses[0].as_ref().expect("primary commit");
+    let error = responses[1].as_ref().expect_err("duplicate conflict");
+    assert!(matches!(
+        error,
+        CoreError::RequestIdConflict(request_id) if request_id == "req-conflict"
+    ));
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.records.len(), 1);
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.changes[0].request_id, "req-conflict");
+}
+
+#[test]
+fn direct_publisher_path_intents_cover_basic_mutations() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let publisher = DirectObjectStorePublisher::new(&store);
+
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+    let put = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::PutFile {
+                request_id: "put-path".to_owned(),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("put path");
+    assert_eq!(put.committed_seq, ChangeSeq(1));
+
+    let moved = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::MovePath {
+                request_id: "move-path".to_owned(),
+                from_path: "/docs/a.txt".to_owned(),
+                to_path: "/docs/b.txt".to_owned(),
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("move path");
+    assert_eq!(moved.committed_seq, ChangeSeq(2));
+
+    let copied = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::CopyFilePath {
+                request_id: "copy-path".to_owned(),
+                from_path: "/docs/b.txt".to_owned(),
+                to_path: "/docs/c.txt".to_owned(),
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("copy path");
+    assert_eq!(copied.committed_seq, ChangeSeq(3));
+
+    let deleted = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::DeletePath {
+                request_id: "delete-path".to_owned(),
+                absolute_path: "/docs/b.txt".to_owned(),
+                recursive: false,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("delete path");
+    assert_eq!(deleted.committed_seq, ChangeSeq(4));
+
+    let copied_bytes =
+        read_file_bytes(&store, &namespace_id, "/docs/c.txt").expect("read copied file");
+    assert_eq!(copied_bytes.bytes, b"hello");
+}
+
+#[test]
+fn direct_publisher_uses_durable_path_request_id_receipts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let publisher = DirectObjectStorePublisher::new(&store);
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+
+    let intent = PathMutationIntent::PutFile {
+        request_id: "same-path-request".to_owned(),
+        absolute_path: "/same.txt".to_owned(),
+        content_ref: content.content_ref.clone(),
+        behavior: PutFileBehavior::CreateOnly,
+    };
+    let first = publisher
+        .submit_path_intent(
+            &namespace_id,
+            intent.clone(),
+            &context,
+            PublishOptions::default(),
+        )
+        .expect("first publish");
+    let retry = publisher
+        .submit_path_intent(&namespace_id, intent, &context, PublishOptions::default())
+        .expect("idempotent retry");
+    assert_eq!(retry.committed_seq, first.committed_seq);
+
+    let conflict = publisher
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::DeletePath {
+                request_id: "same-path-request".to_owned(),
+                absolute_path: "/same.txt".to_owned(),
+                recursive: false,
+            },
+            &context,
+            PublishOptions::default(),
+        )
+        .expect_err("conflicting retry");
+    assert!(matches!(
+        conflict,
+        CoreError::RequestIdConflict(request_id) if request_id == "same-path-request"
+    ));
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+}
+
+#[test]
+fn path_intents_in_one_batch_see_tentative_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+
+    let responses = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                request_id: "put-batched-path".to_owned(),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            }),
+            NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
+                request_id: "move-batched-path".to_owned(),
+                from_path: "/docs/a.txt".to_owned(),
+                to_path: "/docs/b.txt".to_owned(),
+            }),
+        ],
+        &context,
+    );
+
+    assert_eq!(
+        responses[0].as_ref().expect("put").committed_seq,
+        ChangeSeq(1)
+    );
+    assert_eq!(
+        responses[1].as_ref().expect("move").committed_seq,
+        ChangeSeq(2)
+    );
+    let moved_bytes =
+        read_file_bytes(&store, &namespace_id, "/docs/b.txt").expect("read moved file");
+    assert_eq!(moved_bytes.bytes, b"hello");
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.records.len(), 2);
+}
+
+#[test]
 fn namespace_descriptor_checksum_is_validated() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -813,6 +1217,11 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_basis.head.seq, ChangeSeq(1));
     assert_eq!(clone_basis.head.snapshot_hint_seq, Some(ChangeSeq(1)));
     assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
+
+    let duplicate_error =
+        fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+            .expect_err("duplicate fork target");
+    assert_eq!(duplicate_error.kind(), CoreErrorKind::NamespaceExists);
 
     let source_entry =
         resolve_path(&store, &source_namespace_id, "/docs/shared.txt").expect("source stat");
@@ -1025,7 +1434,7 @@ fn fork_target_control_conflict_rechecks_complete_namespace() {
     let descriptor = NamespaceDescriptorEnvelope::from_state(
         ControlObjectKind::NamespaceDescriptor,
         &context.writer_version,
-        loon_api::NamespaceDescriptorState {
+        NamespaceDescriptorState {
             namespace_id: clone_namespace_id.clone(),
             content_store_id,
         },
@@ -1073,13 +1482,13 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     let create = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "restore-create".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
             }],
-            ops: vec![V0CommitOp::CreateFile {
+            ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "restore.txt".to_owned(),
                 content_ref: first.content_ref.clone(),
@@ -1099,13 +1508,13 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "restore-replace".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
-            ops: vec![V0CommitOp::ReplaceFile {
+            ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(1),
                 content_ref: second.content_ref,
@@ -1127,13 +1536,13 @@ fn restore_revision_revalidates_durable_content_before_publish() {
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "restore-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(2),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(2),
             }],
-            ops: vec![V0CommitOp::RestoreRevision {
+            ops: vec![ApiCommitOp::RestoreRevision {
                 inode_id,
                 source_revision_no: RevisionNo(1),
                 base_revision_no: RevisionNo(2),
@@ -1175,13 +1584,13 @@ fn metadata_only_commit_does_not_validate_content_store_refs() {
     let response = commit_operations(
         &guarded_store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "metadata-only-delete".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
-            ops: vec![V0CommitOp::DeleteFile { inode_id }],
+            ops: vec![ApiCommitOp::DeleteFile { inode_id }],
             message: None,
             annotations: None,
         },
@@ -1207,13 +1616,13 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "create-missing-parent-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
             }],
-            ops: vec![V0CommitOp::CreateFile {
+            ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(99),
                 display_name: "missing.txt".to_owned(),
                 content_ref: content_ref("missing-content"),
@@ -1254,13 +1663,13 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "replace-stale-missing-content".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
-            ops: vec![V0CommitOp::ReplaceFile {
+            ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(99),
                 content_ref: content_ref("missing-content"),
@@ -1301,13 +1710,13 @@ fn restore_revision_missing_source_is_revision_not_found() {
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "restore-missing-source".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
-            ops: vec![V0CommitOp::RestoreRevision {
+            ops: vec![ApiCommitOp::RestoreRevision {
                 inode_id,
                 source_revision_no: RevisionNo(99),
                 base_revision_no: RevisionNo(1),
@@ -1332,13 +1741,13 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
     let create = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "resolve-before-durable-check-create".to_owned(),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
             }],
-            ops: vec![V0CommitOp::CreateFile {
+            ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "restore.txt".to_owned(),
                 content_ref: first.content_ref.clone(),
@@ -1365,19 +1774,19 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
     let error = commit_operations(
         &store,
         &namespace_id(),
-        V0CommitRequest {
+        ApiCommitRequest {
             request_id: "resolve-before-durable-check-commit".to_owned(),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
             }],
             ops: vec![
-                V0CommitOp::ReplaceFile {
+                ApiCommitOp::ReplaceFile {
                     inode_id,
                     base_revision_no: RevisionNo(1),
                     content_ref: second.content_ref.clone(),
                 },
-                V0CommitOp::RestoreRevision {
+                ApiCommitOp::RestoreRevision {
                     inode_id,
                     source_revision_no: RevisionNo(2),
                     base_revision_no: RevisionNo(2),
@@ -1838,6 +2247,7 @@ fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {
         direntries: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
+        request_receipts: Vec::new(),
     };
 
     for (index, ops) in sequences.iter().enumerate() {
@@ -1864,6 +2274,7 @@ fn validation_context(
         name_policy: loon_api::NamePolicy::default(),
         snapshot_hint_seq: Some(ChangeSeq(0)),
         retention_floor_seq: ChangeSeq(0),
+        visible_wal_tip: None,
     };
     let lease = LeaseState {
         namespace_id,
@@ -1956,6 +2367,80 @@ impl ObjectStore for ContentStoreAccessLimitStore {
         bytes: &[u8],
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
+}
+
+struct StaleHeadAfterWalWriteStore {
+    inner: LocalFsStore,
+    head_key: String,
+    injected_stale_head: Mutex<bool>,
+}
+
+impl StaleHeadAfterWalWriteStore {
+    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("store"),
+            head_key: namespace_head(namespace_id.as_str()),
+            injected_stale_head: Mutex::new(false),
+        }
+    }
+
+    fn injected_stale_head(&self) -> bool {
+        *self
+            .injected_stale_head
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl ObjectStore for StaleHeadAfterWalWriteStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
+            let should_inject = {
+                let mut injected = self
+                    .injected_stale_head
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *injected {
+                    false
+                } else {
+                    *injected = true;
+                    true
+                }
+            };
+            if should_inject {
+                if let Some(existing) = self.inner.get(key, None)? {
+                    self.inner.put_overwrite(key, &existing)?;
+                }
+                return Err(ObjectStoreError::PreconditionFailed);
+            }
+        }
         self.inner.put(key, bytes, mode)
     }
 

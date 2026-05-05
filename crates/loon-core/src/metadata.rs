@@ -1,6 +1,6 @@
 use loon_api::{
-    name_key_for_display_name, ChangeSeq, ContentRef, InodeId, InodeKind, NamePolicy, RevisionNo,
-    WalOp,
+    name_key_for_display_name, v0::CommitOpResult, ChangeSeq, ContentRef, InodeId, InodeKind,
+    NamePolicy, RevisionNo, WalCommitPayload, WalOp,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -16,6 +16,8 @@ pub struct MetadataState {
     pub revisions: Vec<RevisionRecord>,
     #[serde(default)]
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
+    #[serde(default)]
+    pub request_receipts: Vec<RequestReceiptRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +54,15 @@ pub struct SubtreeTombstoneRecord {
     pub tombstone_seq: ChangeSeq,
     #[serde(default)]
     pub tombstone_op_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestReceiptRecord {
+    pub request_id: String,
+    pub semantic_fingerprint_sha256: String,
+    pub committed_seq: ChangeSeq,
+    pub commit_id: String,
+    pub results: Vec<CommitOpResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +284,28 @@ impl MetadataState {
             metadata_state,
             checked_invariants,
         })
+    }
+
+    pub fn apply_committed_wal_record(
+        &self,
+        record: &WalCommitPayload,
+    ) -> Result<AppliedMetadataState, MetadataApplyError> {
+        let mut applied = self.apply_committed_wal_ops(record.seq, &record.ops)?;
+        applied
+            .metadata_state
+            .request_receipts
+            .push(RequestReceiptRecord {
+                request_id: record.request_id.clone(),
+                semantic_fingerprint_sha256: record.semantic_fingerprint_sha256.clone(),
+                committed_seq: record.seq,
+                commit_id: record.commit_id.clone(),
+                results: record.results.clone(),
+            });
+        push_unique_invariant(
+            &mut applied.checked_invariants,
+            "wal_replay_records_request_receipt",
+        );
+        Ok(applied)
     }
 
     pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {

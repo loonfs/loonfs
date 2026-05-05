@@ -11,5 +11,6 @@ pub(crate) fn bootstrap_basis_metadata_state() -> MetadataState {
         direntries: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
+        request_receipts: Vec::new(),
     }
 }
