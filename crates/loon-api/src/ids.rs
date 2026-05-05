@@ -1,11 +1,105 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+use thiserror::Error;
 
 /// Unique identifier for a namespace (a logical sync boundary).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NamespaceId(pub String);
 
+/// Unique identifier for an immutable content store.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContentStoreId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid namespace_id {value:?}: {reason}")]
+pub struct NamespaceIdValidationError {
+    value: String,
+    reason: &'static str,
+}
+
+impl NamespaceIdValidationError {
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn reason(&self) -> &'static str {
+        self.reason
+    }
+}
+
 impl NamespaceId {
+    /// Constructs a namespace id without validation. Use [`NamespaceId::parse`]
+    /// for user-supplied or durable-boundary input.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, NamespaceIdValidationError> {
+        let value = value.as_ref();
+        validate_namespace_id(value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn try_new(value: impl Into<String>) -> Result<Self, NamespaceIdValidationError> {
+        let value = value.into();
+        validate_namespace_id(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn validate_namespace_id(value: &str) -> Result<(), NamespaceIdValidationError> {
+    if value.is_empty() {
+        return Err(namespace_id_error(value, "must not be empty"));
+    }
+    if value.len() > 128 {
+        return Err(namespace_id_error(value, "must be 128 bytes or fewer"));
+    }
+    if value.trim() != value {
+        return Err(namespace_id_error(
+            value,
+            "must not have leading or trailing whitespace",
+        ));
+    }
+    if matches!(value, "." | "..") {
+        return Err(namespace_id_error(value, "must not be `.` or `..`"));
+    }
+
+    let mut chars = value.chars();
+    let first = chars
+        .next()
+        .expect("empty namespace_id returned before char validation");
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return Err(namespace_id_error(
+            value,
+            "must start with a lowercase ASCII letter or digit",
+        ));
+    }
+    if !chars.all(is_allowed_namespace_id_tail_char) {
+        return Err(namespace_id_error(
+            value,
+            "must contain only lowercase ASCII letters, digits, `.`, `_`, or `-`",
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_allowed_namespace_id_tail_char(ch: char) -> bool {
+    ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+}
+
+fn namespace_id_error(value: &str, reason: &'static str) -> NamespaceIdValidationError {
+    NamespaceIdValidationError {
+        value: value.to_owned(),
+        reason,
+    }
+}
+
+impl ContentStoreId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -27,6 +121,18 @@ impl From<String> for NamespaceId {
     }
 }
 
+impl From<&str> for ContentStoreId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for ContentStoreId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 impl Serialize for NamespaceId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -36,7 +142,25 @@ impl Serialize for NamespaceId {
     }
 }
 
+impl Serialize for ContentStoreId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 impl<'de> Deserialize<'de> for NamespaceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self(String::deserialize(deserializer)?))
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentStoreId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -92,8 +216,49 @@ impl fmt::Display for NamespaceId {
     }
 }
 
+impl fmt::Display for ContentStoreId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl fmt::Display for InodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "inode-{}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NamespaceId;
+
+    #[test]
+    fn namespace_id_parse_accepts_allowed_grammar() {
+        let long_id = format!("a{}", "b".repeat(127));
+        for value in ["demo", "demo-1", "demo_1", "demo.v1", &long_id] {
+            let parsed = NamespaceId::parse(value).expect("valid namespace_id");
+            assert_eq!(parsed.as_str(), value);
+        }
+    }
+
+    #[test]
+    fn namespace_id_parse_rejects_invalid_values() {
+        let long_id = format!("a{}", "b".repeat(128));
+        for value in [
+            "", "/", "a/b", ".", "..", " demo", "demo ", "demo\n", "demo?", "demo#", "demo%",
+            "Demo", &long_id,
+        ] {
+            assert!(
+                NamespaceId::parse(value).is_err(),
+                "expected invalid namespace_id {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_id_unchecked_construction_remains_available() {
+        let namespace_id = NamespaceId::from("invalid/name");
+
+        assert_eq!(namespace_id.as_str(), "invalid/name");
     }
 }

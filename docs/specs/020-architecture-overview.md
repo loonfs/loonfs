@@ -4,11 +4,13 @@
 
 | Part | Role |
 | --- | --- |
-| **Object store** | Holds every durable object: file content objects, WAL segments, checkpoints, and small control objects. |
+| **Object store** | Holds every durable object: content-store blobs, namespace WAL segments, checkpoints, descriptors, and small control objects. |
 | **Authoritative service** | Resolves paths, validates mutations, writes logical commits into WAL segments, advances heads, serves reads, and issues capabilities for upload or download. |
 | **Clients** | Use either direct filesystem operations or the lower-level upload, commit, and change-feed model. |
 | **Access-control service** | Evaluates ACLs and shares, then authorizes LoonFS operations. This may be part of the authoritative service in a simple deployment. |
 | **Background workers** | Build checkpoints, advance retention safely, clean up expired control objects, and reclaim unreachable content. |
+
+Namespaces and content stores are separate durable domains. A namespace owns filesystem metadata and history; a content store owns immutable file bytes. A namespace descriptor references exactly one content store, but that reference is not lifecycle ownership. Forked namespaces share the source namespace's content store while keeping independent metadata history and no durable parent/child relationship.
 
 ## 2. Data plane, metadata plane, and control plane
 

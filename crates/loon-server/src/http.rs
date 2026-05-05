@@ -13,14 +13,15 @@ use loon_api::{
     },
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ListNamespacesResponse, NamespaceId,
+    FilesystemPutBehavior, ForkNamespaceRequest, ListNamespacesResponse, NamespaceId,
+    NamespaceIdValidationError,
 };
 use loon_core::{
     advance_retention_floor, begin_upload, bootstrap_namespace, commit_operations, complete_upload,
-    copy_file_path, create_checkpoint, delete_path_non_recursive, list_changes_after,
-    list_namespaces, list_path, move_path, put_file_content_ref, read_file_bytes, resolve_path,
-    upload_content, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
-    PutFileBehavior,
+    copy_file_path, create_checkpoint, delete_path_non_recursive, fork_namespace,
+    list_changes_after, list_namespaces, list_path, move_path, put_file_content_ref,
+    read_file_bytes, resolve_path, upload_content, BootstrapNamespaceError, CoreError,
+    CoreErrorKind, MutationContext, PutFileBehavior,
 };
 use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
@@ -61,6 +62,10 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
         .route(
             "/v0/namespaces",
             post(create_namespace).get(list_namespaces_handler),
+        )
+        .route(
+            "/v0/namespaces/:namespace/forks",
+            post(fork_namespace_handler),
         )
         .route(
             "/v0/namespaces/:namespace/filesystem/list",
@@ -132,7 +137,7 @@ async fn create_namespace(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(request.name);
+    let namespace_id = parse_namespace_id(request.namespace_id)?;
     let summary = run_blocking(move || {
         bootstrap_namespace(
             store.as_ref(),
@@ -158,6 +163,30 @@ async fn list_namespaces_handler(
     Ok(Json(ListNamespacesResponse { namespaces }))
 }
 
+async fn fork_namespace_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<ForkNamespaceRequest>,
+) -> Result<Json<loon_api::NamespaceSummary>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let store = state.store.clone();
+    let config = state.config.clone();
+    let source_namespace_id = parse_namespace_id(namespace)?;
+    let new_namespace_id = parse_namespace_id(request.new_namespace_id)?;
+    let summary = run_blocking(move || {
+        fork_namespace(
+            store.as_ref(),
+            &source_namespace_id,
+            &new_namespace_id,
+            &mutation_context(&config),
+        )
+        .map_err(|error| ApiResponseError::core_for_namespace(&source_namespace_id, error))
+    })
+    .await?;
+    Ok(Json(summary))
+}
+
 async fn list_entries(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
@@ -166,7 +195,7 @@ async fn list_entries(
 ) -> Result<Json<Vec<loon_api::AuthoritativePathEntry>>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let entries = run_blocking(move || {
         list_path(store.as_ref(), &namespace_id, &path)
@@ -184,7 +213,7 @@ async fn stat_entry(
 ) -> Result<Json<loon_api::AuthoritativePathEntry>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let entry = run_blocking(move || {
         resolve_path(store.as_ref(), &namespace_id, &path)
@@ -202,7 +231,7 @@ async fn get_content(
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let file = run_blocking(move || {
         read_file_bytes(store.as_ref(), &namespace_id, &path)
@@ -221,7 +250,7 @@ async fn filesystem_operation(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let result = run_blocking(move || {
         let result = match request.operation {
             FilesystemOperation::PutFile {
@@ -276,7 +305,7 @@ async fn begin_upload_handler(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
         begin_upload(store.as_ref(), &namespace_id, &mutation_context(&config))
             .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
@@ -294,7 +323,7 @@ async fn upload_content_handler(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let bytes = body.to_vec();
     let response = run_blocking(move || {
         upload_content(
@@ -319,7 +348,7 @@ async fn complete_upload_handler(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
         complete_upload(
             store.as_ref(),
@@ -343,7 +372,7 @@ async fn commit_operations_handler(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
         commit_operations(
             store.as_ref(),
@@ -365,7 +394,7 @@ async fn list_changes_handler(
 ) -> Result<Json<ChangesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let after_seq = loon_api::ChangeSeq(query.after_seq);
     let response = run_blocking(move || {
         list_changes_after(store.as_ref(), &namespace_id, after_seq)
@@ -383,7 +412,7 @@ async fn create_checkpoint_handler(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
         create_checkpoint(store.as_ref(), &namespace_id, &mutation_context(&config))
             .map_err(ApiResponseError::core)
@@ -400,7 +429,7 @@ async fn advance_retention_handler(
     authorize(&state.config, &headers)?;
     let store = state.store.clone();
     let config = state.config.clone();
-    let namespace_id = NamespaceId::from(namespace);
+    let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
         advance_retention_floor(store.as_ref(), &namespace_id, &mutation_context(&config))
             .map_err(ApiResponseError::core)
@@ -448,6 +477,10 @@ fn map_filesystem_put_behavior(value: FilesystemPutBehavior) -> PutFileBehavior 
     }
 }
 
+fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
+    NamespaceId::parse(&value).map_err(ApiResponseError::invalid_namespace_id)
+}
+
 async fn run_blocking<T, F>(operation: F) -> Result<T, ApiResponseError>
 where
     T: Send + 'static,
@@ -478,8 +511,17 @@ impl ApiResponseError {
         }
     }
 
+    fn invalid_namespace_id(error: NamespaceIdValidationError) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_namespace_id",
+            &error.to_string(),
+        )
+    }
+
     fn bootstrap(error: BootstrapNamespaceError) -> Self {
         match error {
+            BootstrapNamespaceError::InvalidNamespaceId(error) => Self::invalid_namespace_id(error),
             BootstrapNamespaceError::NamespaceAlreadyExists { .. } => {
                 Self::new(StatusCode::CONFLICT, "namespace_exists", &error.to_string())
             }
@@ -505,7 +547,10 @@ impl ApiResponseError {
     fn core(error: CoreError) -> Self {
         let (status, code) = match error.kind() {
             CoreErrorKind::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path"),
+            CoreErrorKind::InvalidNamespaceId => (StatusCode::BAD_REQUEST, "invalid_namespace_id"),
             CoreErrorKind::NamespaceNotFound => (StatusCode::NOT_FOUND, "namespace_not_found"),
+            CoreErrorKind::NamespaceExists => (StatusCode::CONFLICT, "namespace_exists"),
+            CoreErrorKind::NamespacePartial => (StatusCode::CONFLICT, "namespace_partial"),
             CoreErrorKind::PathNotFound => (StatusCode::NOT_FOUND, "path_not_found"),
             CoreErrorKind::RevisionNotFound => (StatusCode::CONFLICT, "revision_not_found"),
             CoreErrorKind::PathConflict => (StatusCode::CONFLICT, "path_conflict"),

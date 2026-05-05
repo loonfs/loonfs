@@ -9,7 +9,8 @@ use loon_api::{
     },
     ApiError, AuthoritativePathEntry, ChangeSeq, ContentRef, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ListNamespacesResponse, MutationResult, NamespaceSummary,
+    FilesystemPutBehavior, ForkNamespaceRequest, ListNamespacesResponse, MutationResult,
+    NamespaceId, NamespaceSummary,
 };
 use serde::Deserialize;
 use std::fs;
@@ -111,12 +112,13 @@ impl Client {
         }
     }
 
-    pub fn create_namespace(&self, name: &str) -> Result<NamespaceSummary, ClientError> {
+    pub fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, ClientError> {
+        let namespace_id = NamespaceId::parse(namespace_id).map_err(invalid_namespace_id_error)?;
         let url = format!("{}/v0/namespaces", self.base_url);
         self.request_json::<_, NamespaceSummary>(
             self.agent.post(&url),
             Some(&CreateNamespaceRequest {
-                name: name.to_owned(),
+                namespace_id: namespace_id.as_str().to_owned(),
             }),
         )
     }
@@ -128,34 +130,54 @@ impl Client {
             .namespaces)
     }
 
+    pub fn fork_namespace(
+        &self,
+        source_namespace: &str,
+        new_namespace_id: &str,
+    ) -> Result<NamespaceSummary, ClientError> {
+        let source_namespace = namespace_url_segment(source_namespace)?;
+        let new_namespace_id =
+            NamespaceId::parse(new_namespace_id).map_err(invalid_namespace_id_error)?;
+        let url = format!("{}/v0/namespaces/{source_namespace}/forks", self.base_url);
+        self.request_json::<_, NamespaceSummary>(
+            self.agent.post(&url),
+            Some(&ForkNamespaceRequest {
+                new_namespace_id: new_namespace_id.as_str().to_owned(),
+            }),
+        )
+    }
+
     pub fn list_path(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, ClientError> {
+        let namespace = namespace_url_segment(&spec.namespace)?;
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/list?path={}",
             self.base_url,
-            spec.namespace,
+            namespace,
             urlencoding::encode(&spec.absolute_path)
         );
         self.request_json::<(), Vec<AuthoritativePathEntry>>(self.agent.get(&url), None)
     }
 
     pub fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, ClientError> {
+        let namespace = namespace_url_segment(&spec.namespace)?;
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/stat?path={}",
             self.base_url,
-            spec.namespace,
+            namespace,
             urlencoding::encode(&spec.absolute_path)
         );
         self.request_json::<(), AuthoritativePathEntry>(self.agent.get(&url), None)
     }
 
     pub fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, ClientError> {
+        let namespace = namespace_url_segment(&spec.namespace)?;
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/content?path={}",
             self.base_url,
-            spec.namespace,
+            namespace,
             urlencoding::encode(&spec.absolute_path)
         );
         let request = self.authenticated(self.agent.get(&url));
@@ -175,6 +197,7 @@ impl Client {
     }
 
     pub fn begin_upload(&self, namespace: &str) -> Result<BeginUploadResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
         let url = format!("{}/v0/namespaces/{namespace}/uploads", self.base_url);
         self.request_json::<(), BeginUploadResponse>(self.agent.post(&url), None)
     }
@@ -185,6 +208,7 @@ impl Client {
         upload_id: &str,
         bytes: &[u8],
     ) -> Result<UploadContentResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
         let url = format!(
             "{}/v0/namespaces/{namespace}/uploads/{upload_id}/content",
             self.base_url
@@ -205,6 +229,7 @@ impl Client {
         upload_id: &str,
         request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
         let url = format!(
             "{}/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
             self.base_url
@@ -217,6 +242,7 @@ impl Client {
         namespace: &str,
         request: &V0CommitRequest,
     ) -> Result<V0CommitResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
         let url = format!("{}/v0/namespaces/{namespace}/commits", self.base_url);
         self.request_json::<_, V0CommitResponse>(self.agent.post(&url), Some(request))
     }
@@ -226,6 +252,7 @@ impl Client {
         namespace: &str,
         after_seq: ChangeSeq,
     ) -> Result<ChangesResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
         let url = format!(
             "{}/v0/namespaces/{namespace}/changes?after_seq={}",
             self.base_url, after_seq.0
@@ -238,6 +265,7 @@ impl Client {
         namespace: &str,
         request: &FilesystemOperationRequest,
     ) -> Result<FilesystemOperationResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
         let url = format!(
             "{}/v0/namespaces/{namespace}/filesystem/operations",
             self.base_url
@@ -560,7 +588,9 @@ impl NamespacePath {
         let (namespace, path) = value
             .split_once(':')
             .ok_or_else(|| ClientError::InvalidNamespacePath(value.to_owned()))?;
-        if namespace.trim().is_empty() || !path.starts_with('/') {
+        NamespaceId::parse(namespace)
+            .map_err(|err| ClientError::InvalidNamespacePath(err.to_string()))?;
+        if !path.starts_with('/') {
             return Err(ClientError::InvalidNamespacePath(value.to_owned()));
         }
         Ok(Self {
@@ -568,6 +598,16 @@ impl NamespacePath {
             absolute_path: path.to_owned(),
         })
     }
+}
+
+fn namespace_url_segment(namespace: &str) -> Result<&str, ClientError> {
+    NamespaceId::parse(namespace)
+        .map(|_| namespace)
+        .map_err(invalid_namespace_id_error)
+}
+
+fn invalid_namespace_id_error(error: loon_api::NamespaceIdValidationError) -> ClientError {
+    ClientError::InvalidNamespacePath(error.to_string())
 }
 
 fn file_name_for_path(path: &str) -> Result<String, ClientError> {
@@ -639,7 +679,7 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Cl
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientConfig, ClientError};
+    use super::{Client, ClientConfig, ClientError, NamespacePath};
     use std::fs;
     use tempfile::tempdir;
 
@@ -694,6 +734,40 @@ auth_token = "   "
         let error = ClientConfig::load(&path).expect_err("decode error");
 
         assert!(matches!(error, ClientError::ConfigDecode(_)));
+    }
+
+    #[test]
+    fn namespace_path_parse_rejects_invalid_namespace_id() {
+        for value in [
+            "bad/name:/notes.txt",
+            "Demo:/notes.txt",
+            "..:/notes.txt",
+            "demo?:/notes.txt",
+        ] {
+            assert!(
+                matches!(
+                    NamespacePath::parse(value),
+                    Err(ClientError::InvalidNamespacePath(_))
+                ),
+                "expected invalid namespace path {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_rejects_invalid_namespace_ids_before_http_requests() {
+        let client = Client::new(ClientConfig {
+            server_url: "http://127.0.0.1:9".to_owned(),
+            auth_token: None,
+        });
+
+        for result in [
+            client.create_namespace("bad/name").map(|_| ()),
+            client.fork_namespace("demo", "bad/name").map(|_| ()),
+            client.begin_upload("bad/name").map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(ClientError::InvalidNamespacePath(_))));
+        }
     }
 
     fn write_config(contents: &str) -> std::path::PathBuf {

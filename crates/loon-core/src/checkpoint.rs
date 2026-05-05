@@ -11,7 +11,7 @@ use loon_api::{
     AdvanceRetentionResponse, ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload,
     CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
     CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind,
-    CreateCheckpointResponse, HeadState, HeadStateEnvelope, NamespaceId,
+    CreateCheckpointResponse, FenceToken, HeadState, HeadStateEnvelope, InodeId, NamespaceId,
 };
 use loon_objectstore::keys::{
     derived_progress, snapshot_manifest, snapshot_table, SnapshotTableFamily,
@@ -233,6 +233,58 @@ pub fn create_checkpoint<S: ObjectStore + ?Sized>(
         snapshot_hint_points_at_checkpoint: resulting_head.snapshot_hint_seq
             == Some(checkpoint_seq),
     })
+}
+
+pub(crate) struct CheckpointMetadataWriteRequest<'a> {
+    pub(crate) namespace_id: &'a NamespaceId,
+    pub(crate) checkpoint_seq: ChangeSeq,
+    pub(crate) active_fence_token: FenceToken,
+    pub(crate) next_inode_id: InodeId,
+    pub(crate) retention_floor_seq: ChangeSeq,
+    pub(crate) metadata_state: &'a MetadataState,
+    pub(crate) writer_version: &'a str,
+}
+
+pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
+    store: &S,
+    request: CheckpointMetadataWriteRequest<'_>,
+) -> Result<CheckpointManifestEnvelope, CoreError> {
+    let tables = build_checkpoint_tables(
+        store,
+        request.namespace_id,
+        request.checkpoint_seq,
+        request.metadata_state,
+        request.writer_version,
+    )?;
+    let materialized = load_checkpoint_materialization_from_tables(
+        store,
+        request.namespace_id,
+        request.checkpoint_seq,
+        &snapshot_manifest(request.namespace_id.as_str(), request.checkpoint_seq.0),
+        &tables,
+    )
+    .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
+    if !metadata_states_equivalent(request.metadata_state, &materialized) {
+        return Err(CoreError::Basis(BasisLoadError::CheckpointLoad(
+            CheckpointLoadError::MetadataMismatch,
+        )));
+    }
+
+    let manifest = CheckpointManifestEnvelope::from_payload(
+        request.writer_version,
+        CheckpointManifestPayload {
+            namespace_id: request.namespace_id.clone(),
+            checkpoint_seq: request.checkpoint_seq,
+            active_fence_token: request.active_fence_token,
+            next_inode_id: request.next_inode_id,
+            retention_floor_seq: request.retention_floor_seq,
+            verified: true,
+            tables,
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    write_checkpoint_manifest(store, &manifest).map_err(CoreError::Basis)?;
+    Ok(manifest)
 }
 
 pub fn advance_retention_floor<S: ObjectStore + ?Sized>(

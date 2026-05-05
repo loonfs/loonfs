@@ -25,9 +25,11 @@ The required durable object families and standard key patterns are:
 
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
+| **Namespace descriptor** | Immutable | Record namespace identity and its immutable content-store relationship. | `namespaces/{namespace_id}/descriptor.json` |
 | **Namespace head** | Mutable | Record the current visible boundary, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/head.json` |
 | **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/lease.json` |
-| **Content objects** | Immutable | Store whole-file v0 bytes. | `namespaces/{namespace_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
+| **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
+| **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq}-{end_seq}-{segment_id}.cbor.zst` |
 | **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/manifest.json` |
 | **Checkpoint segments** | Immutable | Store verified checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/tables/{family}-{segment_index}.sst.zst` |
@@ -54,6 +56,8 @@ The content model has four rules.
 4. A metadata commit may reference a `content_ref` only after the referenced object is already durable.
 
 In v0, file content is stored as one whole-file object whose `content_ref.kind` is `whole_file_v0`. The digest remains serialized as `sha256:<64hex>`, while the object key partitions the hex as `sha256/ab/cd/<hex>`.
+
+A reader or writer resolves content through the namespace descriptor: `namespace_id -> content_store_id -> content-stores/{content_store_id}/...`. File revisions and change-feed payloads store only `content_ref`; they do not store content-store ids or object-store paths.
 
 ## 6. Mutable control-object rules
 

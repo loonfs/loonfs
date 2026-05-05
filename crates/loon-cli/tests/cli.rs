@@ -163,6 +163,51 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 }
 
 #[test]
+fn local_profile_namespace_fork_reads_shared_content_and_diverges() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let upload_path = harness.temp_dir.path().join("upload.txt");
+    let clone_upload_path = harness.temp_dir.path().join("clone-upload.txt");
+    fs::write(&upload_path, b"base from cli\n").expect("upload payload");
+    fs::write(&clone_upload_path, b"clone from cli\n").expect("clone upload payload");
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["put", upload_path.to_str().unwrap(), "/docs/shared.txt"]));
+
+    let fork = harness.run(&["--json", "namespace", "fork", "demo", "clone"]);
+    assert_success(&fork);
+    assert_eq!(json_data(&fork)["namespace_id"], "clone");
+
+    let source = harness.run(&["--json", "stat", "/docs/shared.txt"]);
+    let clone = harness.run(&["--json", "stat", "--namespace", "clone", "/docs/shared.txt"]);
+    assert_success(&source);
+    assert_success(&clone);
+    assert_eq!(
+        json_data(&source)["content_ref"],
+        json_data(&clone)["content_ref"]
+    );
+
+    assert_success(&harness.run(&[
+        "put",
+        "--namespace",
+        "clone",
+        clone_upload_path.to_str().unwrap(),
+        "/docs/shared.txt",
+        "--force",
+    ]));
+
+    let source_cat = harness.run(&["cat", "/docs/shared.txt"]);
+    assert_success(&source_cat);
+    assert_eq!(source_cat.stdout, b"base from cli\n");
+
+    let clone_cat = harness.run(&["cat", "--namespace", "clone", "/docs/shared.txt"]);
+    assert_success(&clone_cat);
+    assert_eq!(clone_cat.stdout, b"clone from cli\n");
+}
+
+#[test]
 fn init_creates_local_profile_and_current_reports_namespace_unset() {
     let harness = Harness::new();
 
@@ -496,6 +541,57 @@ root = "{}"
 }
 
 #[test]
+fn local_namespace_commands_reject_invalid_namespace_ids() {
+    let harness = Harness::new();
+    harness.add_local_profile("default");
+
+    let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
+    assert_failure(&create);
+    assert_eq!(json_error(&create)["code"], "invalid_input");
+    assert!(json_error(&create)["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid namespace_id"));
+
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
+    assert_failure(&fork);
+    assert_eq!(json_error(&fork)["code"], "invalid_input");
+
+    let use_namespace = harness.run(&["--json", "use", "bad/name"]);
+    assert_failure(&use_namespace);
+    assert_eq!(json_error(&use_namespace)["code"], "invalid_input");
+}
+
+#[test]
+fn remote_namespace_commands_reject_invalid_namespace_ids_before_http() {
+    let harness = Harness::new();
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        "http://127.0.0.1:9",
+    ]);
+    assert_success(&add_remote);
+
+    let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
+    assert_failure(&create);
+    assert_eq!(json_error(&create)["code"], "invalid_input");
+
+    let fork = harness.run(&["--json", "namespace", "fork", "demo", "bad/name"]);
+    assert_failure(&fork);
+    assert_eq!(json_error(&fork)["code"], "invalid_input");
+
+    let use_namespace = harness.run(&["--json", "use", "bad/name"]);
+    assert_failure(&use_namespace);
+    assert_eq!(json_error(&use_namespace)["code"], "invalid_input");
+}
+
+#[test]
 fn invalid_remote_urls_are_rejected() {
     let harness = Harness::new();
 
@@ -551,6 +647,9 @@ fn external_remote_profile_executes_through_http() {
 
     let create = harness.run(&["--json", "namespace", "create", "demo"]);
     assert_success(&create);
+    let fork = harness.run(&["--json", "namespace", "fork", "demo", "clone"]);
+    assert_success(&fork);
+    assert_eq!(json_data(&fork)["namespace_id"], "clone");
 
     let use_namespace = harness.run(&["--json", "use", "demo"]);
     assert_success(&use_namespace);
@@ -559,8 +658,9 @@ fn external_remote_profile_executes_through_http() {
     assert_success(&list);
     let list_data = json_data(&list);
     let namespaces = list_data["namespaces"].as_array().unwrap();
-    assert_eq!(namespaces.len(), 1);
-    assert_eq!(namespaces[0]["name"], "demo");
+    assert_eq!(namespaces.len(), 2);
+    assert_eq!(namespaces[0]["namespace_id"], "clone");
+    assert_eq!(namespaces[1]["namespace_id"], "demo");
 }
 
 #[test]

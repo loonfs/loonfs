@@ -62,6 +62,7 @@ A representative v0 binding is shown below.
 
 | Purpose | Representative HTTP shape |
 | --- | --- |
+| Create a namespace | `POST /v0/namespaces` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
@@ -71,8 +72,19 @@ A representative v0 binding is shown below.
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
 | Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
+| Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 
 Long-running transfers may additionally expose session resources. Implementations may also expose workflow helper resources, but those helpers are outside the core semantics. Once a multi-request interaction begins, the server-issued identifier is the stable in-flight identifier of that interaction.
+
+Namespace creation uses the namespace id directly. v0 has no namespace aliases or separate display names:
+
+```json
+{
+  "namespace_id": "demo"
+}
+```
+
+The field name `namespace_id` is intentional API compatibility surface. Fork creation uses `new_namespace_id` for the target namespace. Route placeholders such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are only path parameter names for the same namespace id value; v0 does not accept or emit a namespace `name` alias.
 
 A few representative requests and responses are shown below. These examples are illustrative, not exhaustive.
 
@@ -325,6 +337,26 @@ Representative response:
   ]
 }
 ```
+
+### 3.8 `POST /forks`
+
+Representative request:
+
+```json
+{
+  "new_namespace_id": "demo-branch"
+}
+```
+
+Representative response:
+
+```json
+{
+  "namespace_id": "demo-branch"
+}
+```
+
+The server forks from the source namespace's current head. The new namespace shares the source namespace's content store, starts with independent namespace metadata, and records no durable parent/child relationship in v0.
 
 ## 4. Client profiles
 

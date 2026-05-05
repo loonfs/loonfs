@@ -1,5 +1,5 @@
 use crate::digest::sha256_hex;
-use crate::{ChangeSeq, ContentRef, FenceToken, InodeId, NamePolicy, NamespaceId};
+use crate::{ChangeSeq, ContentRef, ContentStoreId, FenceToken, InodeId, NamePolicy, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
@@ -7,11 +7,24 @@ pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlObjectKind {
+    NamespaceDescriptor,
+    ContentStoreDescriptor,
     NamespaceHead,
     NamespaceLease,
     NamespaceProgress,
     UploadSession,
     QueueShard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceDescriptorState {
+    pub namespace_id: NamespaceId,
+    pub content_store_id: ContentStoreId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentStoreDescriptorState {
+    pub content_store_id: ContentStoreId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +126,8 @@ pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
 pub type LeaseStateEnvelope = ControlObjectEnvelope<LeaseState>;
 pub type ProgressStateEnvelope = ControlObjectEnvelope<ProgressState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
+pub type NamespaceDescriptorEnvelope = ControlObjectEnvelope<NamespaceDescriptorState>;
+pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
 
 pub fn payload_checksum_sha256<T>(value: &T) -> Result<String, serde_json::Error>
 where

@@ -1,11 +1,17 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::checkpoint::{
+    create_checkpoint, load_verified_checkpoint_materialization,
+    write_verified_checkpoint_from_metadata, CheckpointMetadataWriteRequest,
+};
 use crate::commit::{CommitHeadPublishError, CommitOp, CommitValidationError};
 use crate::content::{
     read_durable_content_bytes, validate_durable_content_reference, DurableContentValidationError,
 };
 use crate::genesis::bootstrap_basis_metadata_state;
 use crate::lease::LeaseAcquireError;
-use crate::loading::ControlObjectLoadError;
+use crate::loading::{
+    read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
+};
 use crate::metadata::{MetadataApplyError, MetadataState, ResolvedVisiblePath, VisiblePathError};
 use crate::wal::WalBuildError;
 use loon_api::{
@@ -14,11 +20,15 @@ use loon_api::{
         CommitOp as V0CommitOp, CommitOpResult, CommitPrecondition as V0CommitPrecondition,
         CommitRequest as V0CommitRequest, CommitResponse as V0CommitResponse,
     },
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef, ControlObjectKind,
-    HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope,
-    MutationResult, NamespaceId, NamespaceSummary,
+    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
+    ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
+    FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope,
+    MutationResult, NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId,
+    NamespaceIdValidationError, NamespaceSummary,
 };
-use loon_objectstore::keys::{content_blob, namespace_head, namespace_lease};
+use loon_objectstore::keys::{
+    content_blob, content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
+};
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -34,6 +44,8 @@ pub struct MutationContext {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredContent {
+    pub content_store_id: ContentStoreId,
+    pub object_key: String,
     pub content_ref: ContentRef,
     pub file_digest_sha256: String,
     pub file_size_bytes: u64,
@@ -48,7 +60,10 @@ pub enum PutFileBehavior {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreErrorKind {
     InvalidPath,
+    InvalidNamespaceId,
     NamespaceNotFound,
+    NamespaceExists,
+    NamespacePartial,
     PathNotFound,
     RevisionNotFound,
     PathConflict,
@@ -70,6 +85,8 @@ pub enum CoreErrorKind {
 
 #[derive(Debug, Error)]
 pub enum BootstrapNamespaceError {
+    #[error(transparent)]
+    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("holder id must not be empty")]
     EmptyHolderId,
     #[error("writer version must not be empty")]
@@ -79,7 +96,13 @@ pub enum BootstrapNamespaceError {
     #[error("namespace `{namespace_id}` is partially initialized")]
     NamespacePartiallyInitialized { namespace_id: NamespaceId },
     #[error(transparent)]
-    Head(#[from] ControlObjectLoadError),
+    Descriptor(ControlObjectLoadError),
+    #[error("failed to write namespace descriptor object: {0}")]
+    DescriptorWrite(String),
+    #[error("failed to write content store descriptor object: {0}")]
+    ContentStoreWrite(String),
+    #[error(transparent)]
+    Head(ControlObjectLoadError),
     #[error("failed to write head object: {0}")]
     HeadWrite(String),
     #[error("failed to write lease object: {0}")]
@@ -88,6 +111,8 @@ pub enum BootstrapNamespaceError {
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error(transparent)]
+    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error(transparent)]
     Basis(#[from] BasisLoadError),
     #[error(transparent)]
@@ -151,6 +176,10 @@ pub enum CoreError {
     NonDirectoryPathComponent(String),
     #[error("object store error: {0}")]
     Store(String),
+    #[error("namespace `{namespace_id}` already exists")]
+    NamespaceAlreadyExists { namespace_id: NamespaceId },
+    #[error("namespace `{namespace_id}` is partially initialized")]
+    NamespacePartiallyInitialized { namespace_id: NamespaceId },
 }
 
 impl From<CommitValidationError> for CoreError {
@@ -180,6 +209,7 @@ impl From<CommitHeadPublishError> for CoreError {
 impl CoreError {
     pub fn kind(&self) -> CoreErrorKind {
         match self {
+            CoreError::InvalidNamespaceId(_) => CoreErrorKind::InvalidNamespaceId,
             CoreError::Basis(error) => classify_basis_load_error(error),
             CoreError::VisiblePath(error) => classify_visible_path_error(error),
             CoreError::DurableContent(error) => classify_durable_content_error(error),
@@ -194,6 +224,8 @@ impl CoreError {
                 CoreErrorKind::InvalidPath
             }
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
+            CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
+            CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,
             CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
             CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,
@@ -224,34 +256,23 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         return Err(BootstrapNamespaceError::EmptyWriterVersion);
     }
 
-    let head_key = namespace_head(namespace_id.as_str());
-    let lease_key = namespace_lease(namespace_id.as_str());
-    let existing_head = store
-        .head(&head_key)
-        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?
-        .is_some();
-    let existing_lease = store
-        .head(&lease_key)
-        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?
-        .is_some();
-
-    match (existing_head, existing_lease) {
-        (true, true) if allow_existing => {
+    match namespace_initialization_state(store, namespace_id)? {
+        NamespaceInitializationState::Complete if allow_existing => {
             return Ok(NamespaceSummary {
-                name: namespace_id.clone(),
+                namespace_id: namespace_id.clone(),
             });
         }
-        (true, true) => {
+        NamespaceInitializationState::Complete => {
             return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
                 namespace_id: namespace_id.clone(),
             });
         }
-        (true, false) | (false, true) => {
+        NamespaceInitializationState::Partial => {
             return Err(BootstrapNamespaceError::NamespacePartiallyInitialized {
                 namespace_id: namespace_id.clone(),
             });
         }
-        (false, false) => {}
+        NamespaceInitializationState::Absent => {}
     }
 
     let initial_head = HeadState::initial(namespace_id.clone());
@@ -278,6 +299,9 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     let lease_bytes = serde_json::to_vec(&lease_envelope)
         .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
 
+    let head_key = namespace_head(namespace_id.as_str());
+    let lease_key = namespace_lease(namespace_id.as_str());
+    let descriptor_key = namespace_descriptor(namespace_id.as_str());
     store
         .put_if_absent(&head_key, &head_bytes)
         .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
@@ -285,11 +309,258 @@ pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         .put_if_absent(&lease_key, &lease_bytes)
         .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?;
 
+    let content_store_id = create_new_content_store(store, context)?;
+    let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(
+        ControlObjectKind::NamespaceDescriptor,
+        &context.writer_version,
+        NamespaceDescriptorState {
+            namespace_id: namespace_id.clone(),
+            content_store_id,
+        },
+    )
+    .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
+    let namespace_descriptor_bytes = serde_json::to_vec(&namespace_descriptor_envelope)
+        .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
+    store
+        .put_if_absent(&descriptor_key, &namespace_descriptor_bytes)
+        .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
+
     let _ = bootstrap_basis_metadata_state();
 
     Ok(NamespaceSummary {
-        name: namespace_id.clone(),
+        namespace_id: namespace_id.clone(),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamespaceInitializationState {
+    Absent,
+    Partial,
+    Complete,
+}
+
+fn namespace_initialization_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<NamespaceInitializationState, BootstrapNamespaceError> {
+    NamespaceId::parse(namespace_id.as_str())?;
+
+    let descriptor_key = namespace_descriptor(namespace_id.as_str());
+    let head_key = namespace_head(namespace_id.as_str());
+    let lease_key = namespace_lease(namespace_id.as_str());
+
+    let descriptor_exists = store
+        .head(&descriptor_key)
+        .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?
+        .is_some();
+    let head_exists = store
+        .head(&head_key)
+        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?
+        .is_some();
+    let lease_exists = store
+        .head(&lease_key)
+        .map_err(|err| BootstrapNamespaceError::LeaseWrite(err.to_string()))?
+        .is_some();
+
+    match (descriptor_exists, head_exists, lease_exists) {
+        (false, false, false) => Ok(NamespaceInitializationState::Absent),
+        (true, true, true) => {
+            let descriptor = read_namespace_descriptor_object(store, namespace_id)
+                .map_err(BootstrapNamespaceError::Descriptor)?;
+            read_content_store_descriptor_object(
+                store,
+                &descriptor.envelope.state.content_store_id,
+            )
+            .map_err(BootstrapNamespaceError::Descriptor)?;
+            Ok(NamespaceInitializationState::Complete)
+        }
+        _ => Ok(NamespaceInitializationState::Partial),
+    }
+}
+
+const CONTENT_STORE_ID_RETRY_LIMIT: usize = 8;
+
+fn create_new_content_store<S: ObjectStore + ?Sized>(
+    store: &S,
+    context: &MutationContext,
+) -> Result<ContentStoreId, BootstrapNamespaceError> {
+    for _attempt in 0..CONTENT_STORE_ID_RETRY_LIMIT {
+        let content_store_id = ContentStoreId::from(format!("cs_{}", Uuid::new_v4().simple()));
+        let descriptor = ContentStoreDescriptorEnvelope::from_state(
+            ControlObjectKind::ContentStoreDescriptor,
+            &context.writer_version,
+            ContentStoreDescriptorState {
+                content_store_id: content_store_id.clone(),
+            },
+        )
+        .map_err(|err| BootstrapNamespaceError::ContentStoreWrite(err.to_string()))?;
+        let bytes = serde_json::to_vec(&descriptor)
+            .map_err(|err| BootstrapNamespaceError::ContentStoreWrite(err.to_string()))?;
+        let key = content_store_descriptor(content_store_id.as_str());
+        match store.put_if_absent(&key, &bytes) {
+            Ok(_) => return Ok(content_store_id),
+            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
+            Err(err) => return Err(BootstrapNamespaceError::ContentStoreWrite(err.to_string())),
+        }
+    }
+
+    Err(BootstrapNamespaceError::ContentStoreWrite(
+        "content store id generation collided repeatedly".to_owned(),
+    ))
+}
+
+pub(crate) fn load_namespace_content_store_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<ContentStoreId, CoreError> {
+    let descriptor = read_namespace_descriptor_object(store, namespace_id)
+        .map_err(|err| CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(err)))?;
+    let content_store_id = descriptor.envelope.state.content_store_id;
+    read_content_store_descriptor_object(store, &content_store_id)
+        .map_err(|err| CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(err)))?;
+    Ok(content_store_id)
+}
+
+pub fn fork_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    source_namespace_id: &NamespaceId,
+    new_namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<NamespaceSummary, CoreError> {
+    match namespace_initialization_state(store, new_namespace_id)
+        .map_err(map_namespace_initialization_error_to_core)?
+    {
+        NamespaceInitializationState::Absent => {}
+        NamespaceInitializationState::Complete => {
+            return Err(CoreError::NamespaceAlreadyExists {
+                namespace_id: new_namespace_id.clone(),
+            });
+        }
+        NamespaceInitializationState::Partial => {
+            return Err(CoreError::NamespacePartiallyInitialized {
+                namespace_id: new_namespace_id.clone(),
+            });
+        }
+    }
+
+    let checkpoint = create_checkpoint(store, source_namespace_id, context)?;
+    let fork_seq = checkpoint.checkpoint_seq;
+    let source_basis = load_verified_namespace_basis(store, source_namespace_id)?;
+    let source_checkpoint =
+        load_verified_checkpoint_materialization(store, source_namespace_id, fork_seq)
+            .map_err(|err| CoreError::Basis(BasisLoadError::CheckpointLoad(err)))?;
+
+    let initial_head = HeadState {
+        namespace_id: new_namespace_id.clone(),
+        seq: fork_seq,
+        active_fence_token: FenceToken(0),
+        next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
+        name_policy: source_basis.head.name_policy,
+        snapshot_hint_seq: Some(fork_seq),
+        retention_floor_seq: fork_seq,
+    };
+    let initial_lease = LeaseState {
+        namespace_id: new_namespace_id.clone(),
+        holder_id: context.writer_id.clone(),
+        fence_token: initial_head.active_fence_token,
+        lease_expires_at_ms: context.now_ms.saturating_add(context.lease_duration_ms),
+    };
+    let namespace_descriptor_envelope = NamespaceDescriptorEnvelope::from_state(
+        ControlObjectKind::NamespaceDescriptor,
+        &context.writer_version,
+        NamespaceDescriptorState {
+            namespace_id: new_namespace_id.clone(),
+            content_store_id: source_basis.content_store_id,
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    let head = HeadStateEnvelope::from_state(
+        ControlObjectKind::NamespaceHead,
+        &context.writer_version,
+        initial_head,
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    let lease = LeaseStateEnvelope::from_state(
+        ControlObjectKind::NamespaceLease,
+        &context.writer_version,
+        initial_lease,
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+
+    let head_key = namespace_head(new_namespace_id.as_str());
+    let lease_key = namespace_lease(new_namespace_id.as_str());
+    let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &head_key,
+        &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
+    write_verified_checkpoint_from_metadata(
+        store,
+        CheckpointMetadataWriteRequest {
+            namespace_id: new_namespace_id,
+            checkpoint_seq: fork_seq,
+            active_fence_token: FenceToken(0),
+            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
+            retention_floor_seq: fork_seq,
+            metadata_state: &source_checkpoint.metadata_state,
+            writer_version: &context.writer_version,
+        },
+    )?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &lease_key,
+        &serde_json::to_vec(&lease).map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &descriptor_key,
+        &serde_json::to_vec(&namespace_descriptor_envelope)
+            .map_err(|err| CoreError::Store(err.to_string()))?,
+    )?;
+
+    Ok(NamespaceSummary {
+        namespace_id: new_namespace_id.clone(),
+    })
+}
+
+fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<(), CoreError> {
+    match store.put_if_absent(object_key, bytes) {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+            match namespace_initialization_state(store, namespace_id)
+                .map_err(map_namespace_initialization_error_to_core)?
+            {
+                NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
+                    namespace_id: namespace_id.clone(),
+                }),
+                NamespaceInitializationState::Partial => {
+                    Err(CoreError::NamespacePartiallyInitialized {
+                        namespace_id: namespace_id.clone(),
+                    })
+                }
+                NamespaceInitializationState::Absent => Err(CoreError::Store(format!(
+                    "target namespace control object `{object_key}` write failed, but namespace remains absent"
+                ))),
+            }
+        }
+        Err(err) => Err(CoreError::Store(err.to_string())),
+    }
+}
+
+fn map_namespace_initialization_error_to_core(error: BootstrapNamespaceError) -> CoreError {
+    match error {
+        BootstrapNamespaceError::InvalidNamespaceId(error) => CoreError::InvalidNamespaceId(error),
+        other => CoreError::Store(other.to_string()),
+    }
 }
 
 pub fn list_namespaces<S: ObjectStore + ?Sized>(
@@ -303,14 +574,20 @@ pub fn list_namespaces<S: ObjectStore + ?Sized>(
         let Some(rest) = key.strip_prefix("namespaces/") else {
             continue;
         };
-        let Some((namespace, _)) = rest.split_once('/') else {
+        let Some((namespace, leaf)) = rest.split_once('/') else {
             continue;
         };
-        names.insert(NamespaceId::from(namespace.to_owned()));
+        if leaf != "descriptor.json" {
+            continue;
+        }
+        let namespace_id = NamespaceId::from(namespace.to_owned());
+        read_namespace_descriptor_object(store, &namespace_id)
+            .map_err(|err| CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(err)))?;
+        names.insert(namespace_id);
     }
     Ok(names
         .into_iter()
-        .map(|name| NamespaceSummary { name })
+        .map(|namespace_id| NamespaceSummary { namespace_id })
         .collect())
 }
 
@@ -326,6 +603,7 @@ pub fn resolve_path<S: ObjectStore + ?Sized>(
     build_authoritative_path_entry(
         store,
         namespace_id,
+        &basis.content_store_id,
         basis.head.seq,
         &basis.metadata_state,
         &resolved,
@@ -345,6 +623,7 @@ pub fn list_path<S: ObjectStore + ?Sized>(
         return Ok(vec![build_authoritative_path_entry(
             store,
             namespace_id,
+            &basis.content_store_id,
             basis.head.seq,
             &basis.metadata_state,
             &resolved,
@@ -369,6 +648,7 @@ pub fn list_path<S: ObjectStore + ?Sized>(
             build_authoritative_path_entry(
                 store,
                 namespace_id,
+                &basis.content_store_id,
                 basis.head.seq,
                 &basis.metadata_state,
                 &ResolvedVisiblePath {
@@ -402,7 +682,8 @@ pub fn read_file_bytes<S: ObjectStore + ?Sized>(
         .content_ref
         .clone()
         .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-    let read = read_durable_content_bytes(store, namespace_id, &content_ref)?;
+    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+    let read = read_durable_content_bytes(store, &content_store_id, &content_ref)?;
     Ok(AuthoritativeFileBytes {
         entry,
         bytes: read.bytes,
@@ -414,12 +695,15 @@ pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
+    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
     let content_ref = ContentRef::whole_file_v0(bytes);
-    let object_key = content_blob(namespace_id.as_str(), &content_ref.digest)
+    let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::Store(err.to_string()))?;
     write_immutable_object(store, &object_key, bytes)?;
 
     Ok(StoredContent {
+        content_store_id,
+        object_key,
         file_digest_sha256: content_ref.digest.clone(),
         file_size_bytes: content_ref.size_bytes,
         content_ref,
@@ -491,7 +775,9 @@ pub fn put_file_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(absolute_path)?;
     let stored = store_bytes_as_content(store, namespace_id, bytes)?;
-    let _validated = validate_durable_content_reference(store, namespace_id, &stored.content_ref)?;
+    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+    let _validated =
+        validate_durable_content_reference(store, &content_store_id, &stored.content_ref)?;
     put_file_content_ref(
         store,
         namespace_id,
@@ -531,7 +817,8 @@ pub fn put_file_content_ref<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     request_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    let _validated = validate_durable_content_reference(store, namespace_id, &content_ref)?;
+    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+    let _validated = validate_durable_content_reference(store, &content_store_id, &content_ref)?;
     commit_file_content_ref(
         store,
         namespace_id,
@@ -896,7 +1183,7 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
         .latest_revision_head_at_seq(source.inode_id, basis.head.seq)
         .ok_or_else(|| CoreError::MissingPath(from_path.to_owned()))?;
     let _validated =
-        validate_durable_content_reference(store, namespace_id, &revision.content_ref)?;
+        validate_durable_content_reference(store, &basis.content_store_id, &revision.content_ref)?;
 
     let target_parent = resolve_parent_directory(&basis.metadata_state, to_path, basis.head.seq)?;
     let target_name = final_component(to_path)?;
@@ -1087,6 +1374,7 @@ fn resolve_parent_directory(
 fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     head_seq: ChangeSeq,
     metadata_state: &MetadataState,
     resolved: &ResolvedVisiblePath,
@@ -1097,7 +1385,8 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
         .map(|revision| revision.content_ref.clone());
     let size_bytes = match content_ref.as_ref() {
         Some(content_ref) => {
-            let validated = validate_durable_content_reference(store, namespace_id, content_ref)?;
+            let validated =
+                validate_durable_content_reference(store, content_store_id, content_ref)?;
             Some(validated.file_size_bytes)
         }
         None => None,
@@ -1265,10 +1554,12 @@ fn tombstoned_path_ancestor(
 
 fn classify_control_object_load_error(error: &ControlObjectLoadError) -> CoreErrorKind {
     match error {
+        ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
         ControlObjectLoadError::MissingObject { .. }
         | ControlObjectLoadError::MissingObjectAfterHead { .. } => CoreErrorKind::NamespaceNotFound,
         ControlObjectLoadError::KindMismatch { .. }
         | ControlObjectLoadError::NamespaceMismatch { .. }
+        | ControlObjectLoadError::ContentStoreMismatch { .. }
         | ControlObjectLoadError::ChecksumMismatch { .. }
         | ControlObjectLoadError::Codec { .. } => CoreErrorKind::NamespaceCorrupt,
         ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
@@ -1277,9 +1568,19 @@ fn classify_control_object_load_error(error: &ControlObjectLoadError) -> CoreErr
 
 fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
     match error {
-        BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => {
-            classify_control_object_load_error(error)
-        }
+        BasisLoadError::LoadNamespaceDescriptor(error) => classify_control_object_load_error(error),
+        BasisLoadError::LoadContentStoreDescriptor(error) => match error {
+            ControlObjectLoadError::Store(_) => CoreErrorKind::ServerError,
+            _ => CoreErrorKind::NamespaceCorrupt,
+        },
+        BasisLoadError::LoadHead(error) | BasisLoadError::LoadLease(error) => match error {
+            ControlObjectLoadError::InvalidNamespaceId { .. } => CoreErrorKind::InvalidNamespaceId,
+            ControlObjectLoadError::MissingObject { .. }
+            | ControlObjectLoadError::MissingObjectAfterHead { .. } => {
+                CoreErrorKind::NamespaceCorrupt
+            }
+            _ => classify_control_object_load_error(error),
+        },
         BasisLoadError::InvalidWalObjectKey { .. }
         | BasisLoadError::DuplicateWalSeq { .. }
         | BasisLoadError::MissingWalObject { .. }

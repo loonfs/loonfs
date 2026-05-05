@@ -52,6 +52,39 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-test",
+        "http-invalid-ns",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        assert_invalid_namespace_response(
+            ureq::post(&format!("{}/v0/namespaces", harness.server_url))
+                .set("authorization", "Bearer test-token")
+                .send_json(json!({ "namespace_id": "bad/name" })),
+        );
+
+        assert_invalid_namespace_response(
+            ureq::get(&format!(
+                "{}/v0/namespaces/bad%25/filesystem/list?path=/",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .call(),
+        );
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_create_only_and_copy_preserve_cli_semantics() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -98,6 +131,95 @@ async fn http_put_create_only_and_copy_preserve_cli_semantics() {
             .read_file_bytes(&destination)
             .expect("read copied file");
         assert_eq!(dest_bytes, b"forced overwrite\n");
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_namespace_fork_shares_content_and_diverges() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-fork",
+        "http-fork-smoke",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+        let source_path = NamespacePath::parse("demo:/docs/shared.txt").expect("source path");
+        let clone_path = NamespacePath::parse("clone:/docs/shared.txt").expect("clone path");
+        harness
+            .client
+            .write_file_bytes(&source_path, b"base\n")
+            .expect("write source");
+
+        let forked = harness
+            .client
+            .fork_namespace("demo", "clone")
+            .expect("fork namespace");
+        assert_eq!(forked.namespace_id.as_str(), "clone");
+
+        let source_entry = harness.client.stat_path(&source_path).expect("source stat");
+        let clone_entry = harness.client.stat_path(&clone_path).expect("clone stat");
+        assert_eq!(source_entry.content_ref, clone_entry.content_ref);
+        assert_eq!(
+            harness
+                .client
+                .read_file_bytes(&clone_path)
+                .expect("read clone"),
+            b"base\n"
+        );
+
+        harness
+            .client
+            .write_file_bytes(&source_path, b"source-after-fork\n")
+            .expect("replace source");
+        assert_eq!(
+            harness
+                .client
+                .read_file_bytes(&clone_path)
+                .expect("read clone after source write"),
+            b"base\n"
+        );
+
+        let clone_write = harness
+            .client
+            .write_file_bytes(&clone_path, b"clone-after-fork\n")
+            .expect("replace clone");
+        assert_eq!(clone_write.committed_seq, ChangeSeq(2));
+        assert_eq!(
+            harness
+                .client
+                .read_file_bytes(&source_path)
+                .expect("read source"),
+            b"source-after-fork\n"
+        );
+        assert_eq!(
+            harness
+                .client
+                .read_file_bytes(&clone_path)
+                .expect("read clone"),
+            b"clone-after-fork\n"
+        );
+
+        match harness.client.list_changes("clone", ChangeSeq(0)) {
+            Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
+            other => panic!("expected rebootstrap_required, got {other:?}"),
+        }
+        let clone_changes = harness
+            .client
+            .list_changes("clone", ChangeSeq(1))
+            .expect("clone changes");
+        assert_eq!(clone_changes.changes.len(), 1);
+        assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
     })
     .await
     .expect("join blocking task");
@@ -929,6 +1051,19 @@ fn post_admin_json<T: serde::de::DeserializeOwned>(
             code: "transport".to_owned(),
             message: error.to_string(),
         }),
+    }
+}
+
+fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>) {
+    match result {
+        Err(ureq::Error::Status(status, response)) => {
+            assert_eq!(status, 400);
+            let error: ApiError =
+                serde_json::from_reader(response.into_reader()).expect("decode api error");
+            assert_eq!(error.code, "invalid_namespace_id");
+            assert!(error.message.contains("invalid namespace_id"));
+        }
+        other => panic!("expected invalid_namespace_id response, got {other:?}"),
     }
 }
 
