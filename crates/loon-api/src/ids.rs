@@ -10,6 +10,10 @@ pub struct NamespaceId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContentStoreId(pub String);
 
+/// Client-supplied stable identifier for one logical commit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CommitId(pub String);
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid namespace_id {value:?}: {reason}")]
 pub struct NamespaceIdValidationError {
@@ -17,7 +21,24 @@ pub struct NamespaceIdValidationError {
     reason: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid commit_id {value:?}: {reason}")]
+pub struct CommitIdValidationError {
+    value: String,
+    reason: &'static str,
+}
+
 impl NamespaceIdValidationError {
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn reason(&self) -> &'static str {
+        self.reason
+    }
+}
+
+impl CommitIdValidationError {
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -51,49 +72,79 @@ impl NamespaceId {
     }
 }
 
+impl CommitId {
+    /// Constructs a commit id without validation. Use [`CommitId::parse`]
+    /// for user-supplied or durable-boundary input.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, CommitIdValidationError> {
+        let value = value.as_ref();
+        validate_commit_id(value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn try_new(value: impl Into<String>) -> Result<Self, CommitIdValidationError> {
+        let value = value.into();
+        validate_commit_id(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 fn validate_namespace_id(value: &str) -> Result<(), NamespaceIdValidationError> {
+    validate_id_grammar(value).map_err(|reason| namespace_id_error(value, reason))
+}
+
+fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
+    validate_id_grammar(value).map_err(|reason| commit_id_error(value, reason))
+}
+
+fn validate_id_grammar(value: &str) -> Result<(), &'static str> {
     if value.is_empty() {
-        return Err(namespace_id_error(value, "must not be empty"));
+        return Err("must not be empty");
     }
     if value.len() > 128 {
-        return Err(namespace_id_error(value, "must be 128 bytes or fewer"));
+        return Err("must be 128 bytes or fewer");
     }
     if value.trim() != value {
-        return Err(namespace_id_error(
-            value,
-            "must not have leading or trailing whitespace",
-        ));
+        return Err("must not have leading or trailing whitespace");
     }
     if matches!(value, "." | "..") {
-        return Err(namespace_id_error(value, "must not be `.` or `..`"));
+        return Err("must not be `.` or `..`");
     }
 
     let mut chars = value.chars();
     let first = chars
         .next()
-        .expect("empty namespace_id returned before char validation");
+        .expect("empty id returned before char validation");
     if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return Err(namespace_id_error(
-            value,
-            "must start with a lowercase ASCII letter or digit",
-        ));
+        return Err("must start with a lowercase ASCII letter or digit");
     }
-    if !chars.all(is_allowed_namespace_id_tail_char) {
-        return Err(namespace_id_error(
-            value,
-            "must contain only lowercase ASCII letters, digits, `.`, `_`, or `-`",
-        ));
+    if !chars.all(is_allowed_id_tail_char) {
+        return Err("must contain only lowercase ASCII letters, digits, `.`, `_`, or `-`");
     }
 
     Ok(())
 }
 
-fn is_allowed_namespace_id_tail_char(ch: char) -> bool {
+fn is_allowed_id_tail_char(ch: char) -> bool {
     ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
 }
 
 fn namespace_id_error(value: &str, reason: &'static str) -> NamespaceIdValidationError {
     NamespaceIdValidationError {
+        value: value.to_owned(),
+        reason,
+    }
+}
+
+fn commit_id_error(value: &str, reason: &'static str) -> CommitIdValidationError {
+    CommitIdValidationError {
         value: value.to_owned(),
         reason,
     }
@@ -133,6 +184,18 @@ impl From<String> for ContentStoreId {
     }
 }
 
+impl From<&str> for CommitId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for CommitId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 impl Serialize for NamespaceId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -151,12 +214,31 @@ impl Serialize for ContentStoreId {
     }
 }
 
+impl Serialize for CommitId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 impl<'de> Deserialize<'de> for NamespaceId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         Ok(Self(String::deserialize(deserializer)?))
+    }
+}
+
+impl<'de> Deserialize<'de> for CommitId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        CommitId::try_new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -222,6 +304,12 @@ impl fmt::Display for ContentStoreId {
     }
 }
 
+impl fmt::Display for CommitId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl fmt::Display for InodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "inode-{}", self.0)
@@ -230,7 +318,7 @@ impl fmt::Display for InodeId {
 
 #[cfg(test)]
 mod tests {
-    use super::NamespaceId;
+    use super::{CommitId, NamespaceId};
 
     #[test]
     fn namespace_id_parse_accepts_allowed_grammar() {
@@ -260,5 +348,14 @@ mod tests {
         let namespace_id = NamespaceId::from("invalid/name");
 
         assert_eq!(namespace_id.as_str(), "invalid/name");
+    }
+
+    #[test]
+    fn commit_id_parse_uses_same_allowed_grammar() {
+        let parsed = CommitId::parse("c_demo-1").expect("valid commit_id");
+
+        assert_eq!(parsed.as_str(), "c_demo-1");
+        assert!(CommitId::parse("c/demo").is_err());
+        assert!(CommitId::parse("C_demo").is_err());
     }
 }

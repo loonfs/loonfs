@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, ContentRef, InodeId, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -39,7 +39,7 @@ pub struct CompleteUploadResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitRequest {
-    pub request_id: String,
+    pub commit_id: CommitId,
     pub planned_head_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preconditions: Vec<CommitPrecondition>,
@@ -53,7 +53,7 @@ pub struct CommitRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitResponse {
     pub namespace_id: NamespaceId,
-    pub commit_id: String,
+    pub commit_id: CommitId,
     pub committed_seq: ChangeSeq,
     pub results: Vec<CommitOpResult>,
 }
@@ -155,8 +155,7 @@ pub enum CommitOpResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedChange {
     pub seq: ChangeSeq,
-    pub commit_id: String,
-    pub request_id: String,
+    pub commit_id: CommitId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

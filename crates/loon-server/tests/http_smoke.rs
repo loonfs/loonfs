@@ -3,8 +3,8 @@ use loon_api::{
         CommitAnnotations, CommitOp, CommitOpResult, CommitPrecondition,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
-    AdvanceRetentionResponse, ApiError, ChangeSeq, ContentRef, CreateCheckpointResponse, InodeId,
-    RevisionNo,
+    AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
+    InodeId, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_objectstore::keys::snapshot_manifest;
@@ -297,7 +297,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         annotations.insert("source".to_owned(), json!("http-smoke"));
         annotations.insert("kind".to_owned(), json!("service-proxied"));
         let commit_request = ApiCommitRequest {
-            request_id: "req-phase-2a-create-file".to_owned(),
+            commit_id: CommitId::from("req-phase-2a-create-file"),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
@@ -314,7 +314,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .client
             .commit_operations(namespace, &commit_request)
             .expect("commit uploaded file");
-        assert_eq!(commit.commit_id, "req-phase-2a-create-file");
+        assert_eq!(commit.commit_id, CommitId::from("req-phase-2a-create-file"));
         assert_eq!(commit.committed_seq, ChangeSeq(1));
         assert_eq!(
             commit.results,
@@ -355,7 +355,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         let change = &changes.changes[0];
         assert_eq!(change.seq, commit.committed_seq);
         assert_eq!(change.commit_id, commit.commit_id);
-        assert_eq!(change.request_id, commit_request.request_id);
+        assert_eq!(change.commit_id, commit_request.commit_id);
         assert_eq!(change.message.as_deref(), Some("upload over http"));
         assert_eq!(change.annotations, Some(annotations));
         assert_eq!(change.ops, commit.results);
@@ -398,7 +398,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .commit_operations(
                 namespace,
                 &ApiCommitRequest {
-                    request_id: "req-restore-create".to_owned(),
+                    commit_id: CommitId::from("req-restore-create"),
                     planned_head_seq: ChangeSeq(0),
                     preconditions: vec![CommitPrecondition::HeadSeqIs {
                         expected_seq: ChangeSeq(0),
@@ -425,7 +425,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .commit_operations(
                 namespace,
                 &ApiCommitRequest {
-                    request_id: "req-restore-replace".to_owned(),
+                    commit_id: CommitId::from("req-restore-replace"),
                     planned_head_seq: ChangeSeq(1),
                     preconditions: vec![CommitPrecondition::HeadSeqIs {
                         expected_seq: ChangeSeq(1),
@@ -447,7 +447,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .commit_operations(
                 namespace,
                 &ApiCommitRequest {
-                    request_id: "req-restore-restore".to_owned(),
+                    commit_id: CommitId::from("req-restore-restore"),
                     planned_head_seq: ChangeSeq(2),
                     preconditions: vec![CommitPrecondition::HeadSeqIs {
                         expected_seq: ChangeSeq(2),
@@ -491,7 +491,10 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .list_changes(namespace, ChangeSeq(0))
             .expect("list changes");
         assert_eq!(changes.changes.len(), 3);
-        assert_eq!(changes.changes[2].request_id, "req-restore-restore");
+        assert_eq!(
+            changes.changes[2].commit_id,
+            CommitId::from("req-restore-restore")
+        );
         assert_eq!(changes.changes[2].ops, restore.results);
     })
     .await
@@ -525,7 +528,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
             .commit_operations(
                 namespace,
                 &ApiCommitRequest {
-                    request_id: "req-restore-missing-source-create".to_owned(),
+                    commit_id: CommitId::from("req-restore-missing-source-create"),
                     planned_head_seq: ChangeSeq(0),
                     preconditions: vec![CommitPrecondition::HeadSeqIs {
                         expected_seq: ChangeSeq(0),
@@ -548,7 +551,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
         match harness.client.commit_operations(
             namespace,
             &ApiCommitRequest {
-                request_id: "req-restore-missing-source-restore".to_owned(),
+                commit_id: CommitId::from("req-restore-missing-source-restore"),
                 planned_head_seq: ChangeSeq(1),
                 preconditions: vec![CommitPrecondition::HeadSeqIs {
                     expected_seq: ChangeSeq(1),
@@ -576,7 +579,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_commit_rejects_same_request_id_with_different_payload() {
+async fn http_commit_rejects_same_commit_id_with_different_payload() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -596,7 +599,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
         let first_content_ref =
             stage_uploaded_content_ref(&harness.client, namespace, b"first payload\n");
         let first_request = ApiCommitRequest {
-            request_id: "req-phase-2a-conflict".to_owned(),
+            commit_id: CommitId::from("req-phase-2a-conflict"),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
@@ -619,7 +622,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
         let mut changed_annotations = BTreeMap::new();
         changed_annotations.insert("source".to_owned(), json!("changed"));
         let conflicting_request = ApiCommitRequest {
-            request_id: first_request.request_id.clone(),
+            commit_id: first_request.commit_id.clone(),
             planned_head_seq: ChangeSeq(0),
             preconditions: first_request.preconditions.clone(),
             ops: vec![CommitOp::CreateFile {
@@ -636,9 +639,9 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
             .commit_operations(namespace, &conflicting_request)
         {
             Err(ClientError::Api { code, .. }) => {
-                assert_eq!(code, "idempotency_key_conflict")
+                assert_eq!(code, "commit_id_reuse_conflict")
             }
-            other => panic!("expected idempotency_key_conflict, got {other:?}"),
+            other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
         }
     })
     .await
@@ -648,7 +651,7 @@ async fn http_commit_rejects_same_request_id_with_different_payload() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
+async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -664,17 +667,17 @@ async fn http_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
             .create_namespace("demo")
             .expect("create namespace");
         let target = NamespacePath::parse("demo:/docs/retry.txt").expect("target");
-        let request_id = "req-v1-put";
+        let commit_id = "req-v1-put";
 
         let first = harness
             .client
-            .put_file_bytes_with_request_id(&target, b"stable bytes\n", false, request_id)
+            .put_file_bytes_with_commit_id(&target, b"stable bytes\n", false, commit_id)
             .expect("first put");
         assert!(first.committed_seq.0 >= 1);
 
         let repeated = harness
             .client
-            .put_file_bytes_with_request_id(&target, b"stable bytes\n", false, request_id)
+            .put_file_bytes_with_commit_id(&target, b"stable bytes\n", false, commit_id)
             .expect("repeat put");
         assert_eq!(repeated, first);
 
@@ -683,16 +686,16 @@ async fn http_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
         let bytes = harness.client.read_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"stable bytes\n");
 
-        match harness.client.put_file_bytes_with_request_id(
+        match harness.client.put_file_bytes_with_commit_id(
             &target,
             b"different bytes\n",
             false,
-            request_id,
+            commit_id,
         ) {
             Err(ClientError::Api { code, .. }) => {
-                assert_eq!(code, "idempotency_key_conflict")
+                assert_eq!(code, "commit_id_reuse_conflict")
             }
-            other => panic!("expected idempotency_key_conflict, got {other:?}"),
+            other => panic!("expected commit_id_reuse_conflict, got {other:?}"),
         }
     })
     .await
@@ -702,7 +705,7 @@ async fn http_put_request_id_is_idempotent_and_conflicts_on_different_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_delete_move_and_copy_request_ids_are_idempotent() {
+async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -726,11 +729,11 @@ async fn http_delete_move_and_copy_request_ids_are_idempotent() {
         let copied = NamespacePath::parse("demo:/docs/copied.txt").expect("copied");
         let copy_first = harness
             .client
-            .copy_path_with_request_id(&source, &copied, "req-v1-copy")
+            .copy_path_with_commit_id(&source, &copied, "req-v1-copy")
             .expect("copy first");
         let copy_repeated = harness
             .client
-            .copy_path_with_request_id(&source, &copied, "req-v1-copy")
+            .copy_path_with_commit_id(&source, &copied, "req-v1-copy")
             .expect("copy repeat");
         assert_eq!(copy_repeated, copy_first);
         let source_entry = harness.client.stat_path(&source).expect("source stat");
@@ -741,11 +744,11 @@ async fn http_delete_move_and_copy_request_ids_are_idempotent() {
         let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
         let move_first = harness
             .client
-            .move_path_with_request_id(&copied, &moved, "req-v1-move")
+            .move_path_with_commit_id(&copied, &moved, "req-v1-move")
             .expect("move first");
         let move_repeated = harness
             .client
-            .move_path_with_request_id(&copied, &moved, "req-v1-move")
+            .move_path_with_commit_id(&copied, &moved, "req-v1-move")
             .expect("move repeat");
         assert_eq!(move_repeated, move_first);
         match harness.client.stat_path(&copied) {
@@ -757,11 +760,11 @@ async fn http_delete_move_and_copy_request_ids_are_idempotent() {
 
         let delete_first = harness
             .client
-            .delete_path_with_request_id(&moved, "req-v1-delete")
+            .delete_path_with_commit_id(&moved, "req-v1-delete")
             .expect("delete first");
         let delete_repeated = harness
             .client
-            .delete_path_with_request_id(&moved, "req-v1-delete")
+            .delete_path_with_commit_id(&moved, "req-v1-delete")
             .expect("delete repeat");
         assert_eq!(delete_repeated, delete_first);
         match harness.client.stat_path(&moved) {

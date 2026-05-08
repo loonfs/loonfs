@@ -1,6 +1,6 @@
 use crate::digest::sha256_hex;
 use crate::v0::{CommitAnnotations, CommitOpResult};
-use crate::{ChangeSeq, ContentRef, FenceToken, InodeId, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, NamespaceId, RevisionNo};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -85,12 +85,8 @@ pub struct WalCommitPayload {
     pub namespace_id: NamespaceId,
     pub seq: ChangeSeq,
     pub base_head_seq: ChangeSeq,
-    pub commit_id: String,
-    pub request_id: String,
-    pub request_checksum_sha256: String,
-    pub semantic_fingerprint_sha256: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_request_checksum_sha256: Option<String>,
+    pub commit_id: CommitId,
+    pub request_fingerprint_sha256: String,
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     #[serde(default, skip_serializing_if = "Option::is_none")]

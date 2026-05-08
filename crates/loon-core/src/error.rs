@@ -6,13 +6,16 @@ use crate::loading::ControlObjectLoadError;
 use crate::metadata::{MetadataApplyError, VisiblePathError};
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::wal::WalBuildError;
-use loon_api::{ChangeSeq, InodeId, InodeKind, NamespaceId, NamespaceIdValidationError};
+use loon_api::{
+    ChangeSeq, CommitIdValidationError, InodeId, InodeKind, NamespaceId, NamespaceIdValidationError,
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreErrorKind {
     InvalidPath,
     InvalidNamespaceId,
+    InvalidCommitId,
     NamespaceNotFound,
     NamespaceExists,
     NamespacePartial,
@@ -24,7 +27,7 @@ pub enum CoreErrorKind {
     TombstoneConflict,
     LeaseConflict,
     WouldCycle,
-    RequestIdConflict,
+    CommitIdReuseConflict,
     CommitQueueFull,
     CheckpointUnavailable,
     UploadNotFound,
@@ -60,6 +63,8 @@ pub enum CoreError {
     InvalidPath(String),
     #[error(transparent)]
     InvalidNamespaceId(#[from] NamespaceIdValidationError),
+    #[error(transparent)]
+    InvalidCommitId(#[from] CommitIdValidationError),
     #[error("path not found `{0}`")]
     MissingPath(String),
     #[error("expected file at `{path}` but found `{kind:?}`")]
@@ -72,8 +77,8 @@ pub enum CoreError {
     RootMutationForbidden,
     #[error("destination already exists at `{0}`")]
     DestinationExists(String),
-    #[error("request id conflict for `{0}`")]
-    RequestIdConflict(String),
+    #[error("commit id conflict for `{0}`")]
+    CommitIdReuseConflict(String),
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
     #[error("{0}")]
@@ -164,10 +169,11 @@ impl CoreError {
                 CoreErrorKind::InvalidPath
             }
             CoreError::InvalidNamespaceId(_) => CoreErrorKind::InvalidNamespaceId,
+            CoreError::InvalidCommitId(_) => CoreErrorKind::InvalidCommitId,
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
             CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
             CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,
-            CoreError::RequestIdConflict(_) => CoreErrorKind::RequestIdConflict,
+            CoreError::CommitIdReuseConflict(_) => CoreErrorKind::CommitIdReuseConflict,
             CoreError::CommitQueueFull => CoreErrorKind::CommitQueueFull,
             CoreError::CheckpointUnavailable(_) => CoreErrorKind::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => CoreErrorKind::UploadNotFound,

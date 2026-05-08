@@ -27,7 +27,7 @@ A conforming server must:
 7. serve replay from verified checkpoints plus the visible WAL segment chain, replayed as logical commits;
 8. honor the namespace's `NamePolicy`;
 9. keep control-plane sessions and any implementation-specific coordinators out of namespace history and the change feed; and
-10. preserve per-request idempotency, ordering, and change-feed identity even when physically batching logical commits in a WAL segment.
+10. preserve per-commit idempotency, ordering, and change-feed identity even when physically batching logical commits in a WAL segment.
 
 ## 3. Writer and client requirements
 
@@ -35,7 +35,7 @@ A conforming writer or client must:
 
 1. treat paths as selectors, not as durable identity;
 2. upload or otherwise stage content before asking the server to publish it;
-3. use request ids or equivalent idempotency keys for safe retry;
+3. use commit ids or equivalent idempotency keys for safe retry;
 4. tolerate commit rejection when preconditions no longer hold; and
 5. re-bootstrap if its cursor falls behind the retention floor.
 

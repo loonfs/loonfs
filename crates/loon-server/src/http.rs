@@ -254,7 +254,7 @@ async fn filesystem_operation(
     authorize(&state.config, &headers)?;
     let namespace_id = parse_namespace_id(namespace)?;
     let FilesystemOperationRequest {
-        request_id,
+        commit_id,
         operation,
     } = request;
     let intent = match operation {
@@ -263,23 +263,23 @@ async fn filesystem_operation(
             content_ref,
             behavior,
         } => PathMutationIntent::PutFile {
-            request_id,
+            commit_id,
             absolute_path: path,
             content_ref,
             behavior: map_filesystem_put_behavior(behavior),
         },
         FilesystemOperation::DeletePath { path } => PathMutationIntent::DeletePath {
-            request_id,
+            commit_id,
             absolute_path: path,
             recursive: false,
         },
         FilesystemOperation::MovePath { from_path, to_path } => PathMutationIntent::MovePath {
-            request_id,
+            commit_id,
             from_path,
             to_path,
         },
         FilesystemOperation::CopyPath { from_path, to_path } => PathMutationIntent::CopyFilePath {
-            request_id,
+            commit_id,
             from_path,
             to_path,
         },
@@ -540,6 +540,7 @@ impl ApiResponseError {
         let (status, code) = match error.kind() {
             CoreErrorKind::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path"),
             CoreErrorKind::InvalidNamespaceId => (StatusCode::BAD_REQUEST, "invalid_namespace_id"),
+            CoreErrorKind::InvalidCommitId => (StatusCode::BAD_REQUEST, "invalid_commit_id"),
             CoreErrorKind::NamespaceNotFound => (StatusCode::NOT_FOUND, "namespace_not_found"),
             CoreErrorKind::NamespaceExists => (StatusCode::CONFLICT, "namespace_exists"),
             CoreErrorKind::NamespacePartial => (StatusCode::CONFLICT, "namespace_partial"),
@@ -551,7 +552,9 @@ impl ApiResponseError {
             CoreErrorKind::TombstoneConflict => (StatusCode::CONFLICT, "tombstone_conflict"),
             CoreErrorKind::LeaseConflict => (StatusCode::CONFLICT, "lease_conflict"),
             CoreErrorKind::WouldCycle => (StatusCode::CONFLICT, "would_cycle"),
-            CoreErrorKind::RequestIdConflict => (StatusCode::CONFLICT, "idempotency_key_conflict"),
+            CoreErrorKind::CommitIdReuseConflict => {
+                (StatusCode::CONFLICT, "commit_id_reuse_conflict")
+            }
             CoreErrorKind::CommitQueueFull => {
                 (StatusCode::SERVICE_UNAVAILABLE, "commit_queue_full")
             }
@@ -918,7 +921,7 @@ mod tests {
         let harness = start_server(store, temp_dir.path(), "server-writer").await;
         tokio::task::spawn_blocking(move || {
             let request = CommitRequest {
-                request_id: "stale-explicit".to_owned(),
+                commit_id: loon_api::CommitId::from("stale-explicit"),
                 planned_head_seq: ChangeSeq(1),
                 preconditions: vec![CommitPrecondition::HeadSeqIs {
                     expected_seq: ChangeSeq(1),

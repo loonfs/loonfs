@@ -125,7 +125,9 @@ fn map_client_error(error: ClientError) -> CliError {
         ClientError::ConfigValidation { field, reason } => {
             CliError::invalid_config(format!("invalid `{field}`: {reason}"))
         }
-        ClientError::InvalidNamespacePath(message) => CliError::invalid_input(message),
+        ClientError::InvalidNamespacePath(message) | ClientError::InvalidCommitId(message) => {
+            CliError::invalid_input(message)
+        }
         ClientError::Http(message) | ClientError::Json(message) => CliError::client_error(message),
         ClientError::Api { code, message, .. } => CliError::new(code, message),
         ClientError::Io(message) => CliError::new("io_error", format!("i/o error: {message}")),
@@ -214,7 +216,7 @@ impl Backend for DirectBackend {
         } else {
             PutFileBehavior::CreateOnly
         };
-        let request_id = Uuid::new_v4().to_string();
+        let commit_id = generated_commit_id();
         put_file_bytes(
             &self.store,
             &ns_id,
@@ -222,20 +224,20 @@ impl Backend for DirectBackend {
             bytes,
             behavior,
             &self.mutation_context(),
-            Some(&request_id),
+            Some(&commit_id),
         )
         .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        let request_id = Uuid::new_v4().to_string();
+        let commit_id = generated_commit_id();
         delete_path_non_recursive(
             &self.store,
             &ns_id,
             &spec.absolute_path,
             &self.mutation_context(),
-            Some(&request_id),
+            Some(&commit_id),
         )
         .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
     }
@@ -246,14 +248,14 @@ impl Backend for DirectBackend {
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&from.namespace)?;
-        let request_id = Uuid::new_v4().to_string();
+        let commit_id = generated_commit_id();
         move_path(
             &self.store,
             &ns_id,
             &from.absolute_path,
             &to.absolute_path,
             &self.mutation_context(),
-            Some(&request_id),
+            Some(&commit_id),
         )
         .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
     }
@@ -264,14 +266,14 @@ impl Backend for DirectBackend {
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&from.namespace)?;
-        let request_id = Uuid::new_v4().to_string();
+        let commit_id = generated_commit_id();
         copy_file_path(
             &self.store,
             &ns_id,
             &from.absolute_path,
             &to.absolute_path,
             &self.mutation_context(),
-            Some(&request_id),
+            Some(&commit_id),
         )
         .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
     }
@@ -281,14 +283,22 @@ fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
     NamespaceId::parse(namespace).map_err(|error| CliError::invalid_input(error.to_string()))
 }
 
+fn generated_commit_id() -> String {
+    format!("c_{}", Uuid::new_v4().simple())
+}
+
 fn map_core_error(error: CoreError) -> CliError {
-    if matches!(error.kind(), CoreErrorKind::InvalidNamespaceId) {
+    if matches!(
+        error.kind(),
+        CoreErrorKind::InvalidNamespaceId | CoreErrorKind::InvalidCommitId
+    ) {
         return CliError::invalid_input(error.to_string());
     }
 
     let code = match error.kind() {
         CoreErrorKind::InvalidPath => "invalid_path",
         CoreErrorKind::InvalidNamespaceId => unreachable!("handled before code mapping"),
+        CoreErrorKind::InvalidCommitId => unreachable!("handled before code mapping"),
         CoreErrorKind::NamespaceNotFound => "namespace_not_found",
         CoreErrorKind::NamespaceExists => "namespace_exists",
         CoreErrorKind::NamespacePartial => "namespace_partial",
@@ -300,7 +310,7 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::TombstoneConflict => "tombstone_conflict",
         CoreErrorKind::LeaseConflict => "lease_conflict",
         CoreErrorKind::WouldCycle => "would_cycle",
-        CoreErrorKind::RequestIdConflict => "request_id_conflict",
+        CoreErrorKind::CommitIdReuseConflict => "commit_id_reuse_conflict",
         CoreErrorKind::CommitQueueFull => "commit_queue_full",
         CoreErrorKind::CheckpointUnavailable => "checkpoint_unavailable",
         CoreErrorKind::UploadNotFound => "upload_not_found",
@@ -495,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_backend_generates_non_empty_request_id_for_local_put() {
+    fn direct_backend_generates_non_empty_commit_id_for_local_put() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
@@ -526,6 +536,6 @@ mod tests {
         )
         .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
-        assert!(!changes.changes[0].request_id.trim().is_empty());
+        assert!(!changes.changes[0].commit_id.as_str().trim().is_empty());
     }
 }

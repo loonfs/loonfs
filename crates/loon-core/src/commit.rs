@@ -1,7 +1,7 @@
 use crate::metadata::MetadataState;
 use loon_api::{
-    v0::CommitAnnotations, ChangeSeq, ContentRef, FenceToken, HeadState, HeadStateEnvelope,
-    InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
+    v0::CommitAnnotations, ChangeSeq, CommitId, ContentRef, FenceToken, HeadState,
+    HeadStateEnvelope, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,12 +16,12 @@ pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitRequest {
     pub namespace_id: NamespaceId,
-    pub request_id: String,
+    pub commit_id: CommitId,
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     pub planned_head_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_request_checksum_sha256: Option<String>,
+    pub request_fingerprint_sha256: Option<String>,
     pub ops: Vec<CommitOp>,
     pub preconditions: Vec<Precondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,7 +83,7 @@ pub enum Precondition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitPlan {
     pub namespace_id: NamespaceId,
-    pub commit_id: String,
+    pub commit_id: CommitId,
     pub base_head_seq: ChangeSeq,
     pub next_seq: ChangeSeq,
     pub allocated_inode_ids: Vec<InodeId>,
@@ -298,35 +298,28 @@ pub(crate) fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
 }
 
 impl CommitRequest {
-    pub fn request_checksum_sha256(&self) -> Result<String, serde_json::Error> {
-        let bytes = serde_json::to_vec(self)?;
-        Ok(loon_api::sha256_digest(&bytes))
-    }
-
-    pub fn semantic_fingerprint_sha256(&self) -> Result<String, serde_json::Error> {
-        if let Some(source) = &self.source_request_checksum_sha256 {
-            return Ok(source.clone());
+    pub fn request_fingerprint_sha256(&self) -> Result<String, serde_json::Error> {
+        if let Some(fingerprint) = &self.request_fingerprint_sha256 {
+            return Ok(fingerprint.clone());
         }
         #[derive(Serialize)]
-        struct SemanticCommit<'a> {
+        struct CanonicalCommitRequest<'a> {
             namespace_id: &'a NamespaceId,
-            request_id: &'a str,
             planned_head_seq: ChangeSeq,
             ops: &'a [CommitOp],
             preconditions: &'a [Precondition],
             message: &'a Option<String>,
             annotations: &'a Option<CommitAnnotations>,
         }
-        let semantic = SemanticCommit {
+        let request = CanonicalCommitRequest {
             namespace_id: &self.namespace_id,
-            request_id: &self.request_id,
             planned_head_seq: self.planned_head_seq,
             ops: &self.ops,
             preconditions: &self.preconditions,
             message: &self.message,
             annotations: &self.annotations,
         };
-        let bytes = serde_json::to_vec(&semantic)?;
+        let bytes = serde_json::to_vec(&request)?;
         Ok(loon_api::sha256_digest(&bytes))
     }
 }

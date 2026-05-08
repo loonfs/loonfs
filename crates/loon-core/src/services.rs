@@ -22,7 +22,7 @@ use loon_api::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
         CommitRequest as ApiCommitRequest,
     },
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
+    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef,
     ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
     FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope,
     MutationResult, NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId,
@@ -515,7 +515,7 @@ pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum PathRequestIdentity {
+enum PathFingerprintInput {
     PutFile {
         namespace_id: NamespaceId,
         absolute_path: String,
@@ -539,18 +539,24 @@ enum PathRequestIdentity {
     },
 }
 
-fn normalized_request_id(request_id: Option<&str>) -> String {
-    request_id
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| Uuid::new_v4().to_string())
+fn generated_commit_id() -> CommitId {
+    CommitId::from(format!("c_{}", Uuid::new_v4().simple()))
 }
 
-fn source_request_checksum_sha256(identity: &PathRequestIdentity) -> Result<String, CoreError> {
+fn normalized_commit_id(commit_id: Option<&str>) -> Result<CommitId, CoreError> {
+    let commit_id = commit_id
+        .filter(|value| !value.trim().is_empty())
+        .map(CommitId::parse)
+        .transpose()?
+        .unwrap_or_else(generated_commit_id);
+    Ok(commit_id)
+}
+
+fn request_fingerprint_sha256(identity: &PathFingerprintInput) -> Result<String, CoreError> {
     payload_checksum_sha256(identity).map_err(|err| CoreError::Store(err.to_string()))
 }
 
-pub(crate) fn source_request_checksum_for_path_intent(
+pub(crate) fn request_fingerprint_for_path_intent(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
 ) -> Result<String, CoreError> {
@@ -560,7 +566,7 @@ pub(crate) fn source_request_checksum_for_path_intent(
             behavior,
             content_ref,
             ..
-        } => PathRequestIdentity::PutFile {
+        } => PathFingerprintInput::PutFile {
             namespace_id: namespace_id.clone(),
             absolute_path: absolute_path.clone(),
             behavior: *behavior,
@@ -570,27 +576,27 @@ pub(crate) fn source_request_checksum_for_path_intent(
             absolute_path,
             recursive,
             ..
-        } => PathRequestIdentity::DeletePath {
+        } => PathFingerprintInput::DeletePath {
             namespace_id: namespace_id.clone(),
             absolute_path: absolute_path.clone(),
             recursive: *recursive,
         },
         PathMutationIntent::MovePath {
             from_path, to_path, ..
-        } => PathRequestIdentity::MovePath {
+        } => PathFingerprintInput::MovePath {
             namespace_id: namespace_id.clone(),
             from_path: from_path.clone(),
             to_path: to_path.clone(),
         },
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
-        } => PathRequestIdentity::CopyFilePath {
+        } => PathFingerprintInput::CopyFilePath {
             namespace_id: namespace_id.clone(),
             from_path: from_path.clone(),
             to_path: to_path.clone(),
         },
     };
-    source_request_checksum_sha256(&identity)
+    request_fingerprint_sha256(&identity)
 }
 
 pub fn put_file_bytes<S: ObjectStore + ?Sized>(
@@ -600,7 +606,7 @@ pub fn put_file_bytes<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     behavior: PutFileBehavior,
     context: &MutationContext,
-    request_id: Option<&str>,
+    commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
     validate_path_for_mutation(absolute_path)?;
     let stored = store_bytes_as_content(store, namespace_id, bytes)?;
@@ -611,7 +617,7 @@ pub fn put_file_bytes<S: ObjectStore + ?Sized>(
         stored.content_ref,
         behavior,
         context,
-        request_id,
+        commit_id,
     )
 }
 
@@ -621,7 +627,7 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     bytes: &[u8],
     context: &MutationContext,
-    request_id: Option<&str>,
+    commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
     put_file_bytes(
         store,
@@ -630,7 +636,7 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
         bytes,
         PutFileBehavior::ReplaceExisting,
         context,
-        request_id,
+        commit_id,
     )
 }
 
@@ -641,11 +647,11 @@ pub fn put_file_content_ref<S: ObjectStore + ?Sized>(
     content_ref: ContentRef,
     behavior: PutFileBehavior,
     context: &MutationContext,
-    request_id: Option<&str>,
+    commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    let request_id = normalized_request_id(request_id);
+    let commit_id = normalized_commit_id(commit_id)?;
     let intent = PathMutationIntent::PutFile {
-        request_id,
+        commit_id,
         absolute_path: absolute_path.to_owned(),
         content_ref,
         behavior,
@@ -682,8 +688,8 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
     metadata_state: &MetadataState,
     content_store_id: &ContentStoreId,
 ) -> Result<PlannedPathMutation, CoreError> {
-    let request_id = intent.request_id().to_owned();
-    let source_request_checksum = source_request_checksum_for_path_intent(namespace_id, intent)?;
+    let commit_id = intent.commit_id().clone();
+    let request_fingerprint = request_fingerprint_for_path_intent(namespace_id, intent)?;
     let view = PathPlanningView {
         head,
         metadata_state,
@@ -700,24 +706,24 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
             absolute_path,
             content_ref.clone(),
             *behavior,
-            &request_id,
+            &commit_id,
             &view,
         )?,
         PathMutationIntent::DeletePath {
             absolute_path,
             recursive,
             ..
-        } => plan_delete_path(absolute_path, *recursive, &request_id, &view)?,
+        } => plan_delete_path(absolute_path, *recursive, &commit_id, &view)?,
         PathMutationIntent::MovePath {
             from_path, to_path, ..
-        } => plan_move_path(from_path, to_path, &request_id, &view)?,
+        } => plan_move_path(from_path, to_path, &commit_id, &view)?,
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
-        } => plan_copy_file_path(store, from_path, to_path, &request_id, &view)?,
+        } => plan_copy_file_path(store, from_path, to_path, &commit_id, &view)?,
     };
     Ok(PlannedPathMutation {
-        request_id,
-        source_request_checksum_sha256: source_request_checksum,
+        commit_id,
+        request_fingerprint_sha256: request_fingerprint,
         commit_request,
     })
 }
@@ -733,7 +739,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     absolute_path: &str,
     content_ref: ContentRef,
     behavior: PutFileBehavior,
-    request_id: &str,
+    commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(absolute_path)?;
@@ -805,7 +811,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     }
 
     Ok(ApiCommitRequest {
-        request_id: request_id.to_owned(),
+        commit_id: commit_id.to_owned(),
         planned_head_seq: view.head.seq,
         ops,
         preconditions,
@@ -819,11 +825,11 @@ pub fn delete_path<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     context: &MutationContext,
-    request_id: Option<&str>,
+    commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    let request_id = normalized_request_id(request_id);
+    let commit_id = normalized_commit_id(commit_id)?;
     let intent = PathMutationIntent::DeletePath {
-        request_id,
+        commit_id,
         absolute_path: absolute_path.to_owned(),
         recursive: true,
     };
@@ -840,11 +846,11 @@ pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     context: &MutationContext,
-    request_id: Option<&str>,
+    commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    let request_id = normalized_request_id(request_id);
+    let commit_id = normalized_commit_id(commit_id)?;
     let intent = PathMutationIntent::DeletePath {
-        request_id,
+        commit_id,
         absolute_path: absolute_path.to_owned(),
         recursive: false,
     };
@@ -862,11 +868,11 @@ pub fn move_path<S: ObjectStore + ?Sized>(
     from_path: &str,
     to_path: &str,
     context: &MutationContext,
-    request_id: Option<&str>,
+    commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    let request_id = normalized_request_id(request_id);
+    let commit_id = normalized_commit_id(commit_id)?;
     let intent = PathMutationIntent::MovePath {
-        request_id,
+        commit_id,
         from_path: from_path.to_owned(),
         to_path: to_path.to_owned(),
     };
@@ -884,11 +890,11 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
     from_path: &str,
     to_path: &str,
     context: &MutationContext,
-    request_id: Option<&str>,
+    commit_id: Option<&str>,
 ) -> Result<MutationResult, CoreError> {
-    let request_id = normalized_request_id(request_id);
+    let commit_id = normalized_commit_id(commit_id)?;
     let intent = PathMutationIntent::CopyFilePath {
-        request_id,
+        commit_id,
         from_path: from_path.to_owned(),
         to_path: to_path.to_owned(),
     };
@@ -903,7 +909,7 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
 fn plan_delete_path(
     absolute_path: &str,
     recursive: bool,
-    request_id: &str,
+    commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(absolute_path)?;
@@ -936,7 +942,7 @@ fn plan_delete_path(
         }
     };
     Ok(ApiCommitRequest {
-        request_id: request_id.to_owned(),
+        commit_id: commit_id.to_owned(),
         planned_head_seq: view.head.seq,
         ops: vec![op],
         preconditions: vec![ApiCommitPrecondition::HeadSeqIs {
@@ -950,7 +956,7 @@ fn plan_delete_path(
 fn plan_move_path(
     from_path: &str,
     to_path: &str,
-    request_id: &str,
+    commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(from_path)?;
@@ -966,7 +972,7 @@ fn plan_move_path(
         return Err(CoreError::DestinationExists(to_path.to_owned()));
     }
     Ok(ApiCommitRequest {
-        request_id: request_id.to_owned(),
+        commit_id: commit_id.to_owned(),
         planned_head_seq: view.head.seq,
         ops: vec![ApiCommitOp::Rename {
             inode_id: source.inode_id,
@@ -985,7 +991,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     store: &S,
     from_path: &str,
     to_path: &str,
-    request_id: &str,
+    commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
     validate_path_for_mutation(from_path)?;
@@ -1018,7 +1024,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     let target_name = final_component(to_path)?;
     let target_name_key = name_key_for_display_name(view.head.name_policy, &target_name);
     Ok(ApiCommitRequest {
-        request_id: request_id.to_owned(),
+        commit_id: commit_id.to_owned(),
         planned_head_seq: view.head.seq,
         ops: vec![ApiCommitOp::CreateFile {
             parent_inode: target_parent,
