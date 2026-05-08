@@ -1,6 +1,9 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use thiserror::Error;
+use uuid::Uuid;
+
+const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
 
 /// Unique identifier for a namespace (a logical sync boundary).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -28,6 +31,13 @@ pub struct CommitIdValidationError {
     reason: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid generated id {value:?}: {reason}")]
+pub struct GeneratedIdValidationError {
+    value: String,
+    reason: String,
+}
+
 impl NamespaceIdValidationError {
     pub fn value(&self) -> &str {
         &self.value
@@ -45,6 +55,16 @@ impl CommitIdValidationError {
 
     pub fn reason(&self) -> &'static str {
         self.reason
+    }
+}
+
+impl GeneratedIdValidationError {
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
     }
 }
 
@@ -94,6 +114,63 @@ impl CommitId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn generate() -> Self {
+        Self(generated_id("c"))
+    }
+}
+
+/// Generates a project-standard opaque durable identifier.
+///
+/// Generated server-side IDs use an underscore prefix plus a 32-character
+/// lowercase UUID-simple body, such as `cs_<32hex>` or `seg_<32hex>`.
+pub fn generated_id(prefix: &'static str) -> String {
+    format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
+pub fn generate_upload_id() -> String {
+    generated_id("upl")
+}
+
+pub fn generate_wal_segment_id() -> String {
+    generated_id("seg")
+}
+
+pub fn validate_upload_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
+    validate_generated_id("upl", value.as_ref())
+}
+
+pub fn validate_wal_segment_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
+    validate_generated_id("seg", value.as_ref())
+}
+
+pub fn validate_generated_id(
+    prefix: &'static str,
+    value: &str,
+) -> Result<(), GeneratedIdValidationError> {
+    let expected_prefix = format!("{prefix}_");
+    let Some(body) = value.strip_prefix(&expected_prefix) else {
+        return Err(generated_id_error(
+            value,
+            format!("must start with `{expected_prefix}`"),
+        ));
+    };
+    if body.len() != SERVER_GENERATED_ID_BODY_LEN {
+        return Err(generated_id_error(
+            value,
+            format!("body must be {SERVER_GENERATED_ID_BODY_LEN} lowercase hex characters"),
+        ));
+    }
+    if !body
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(generated_id_error(
+            value,
+            "body must contain only lowercase hex characters".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_namespace_id(value: &str) -> Result<(), NamespaceIdValidationError> {
@@ -150,9 +227,32 @@ fn commit_id_error(value: &str, reason: &'static str) -> CommitIdValidationError
     }
 }
 
+fn generated_id_error(value: &str, reason: String) -> GeneratedIdValidationError {
+    GeneratedIdValidationError {
+        value: value.to_owned(),
+        reason,
+    }
+}
+
 impl ContentStoreId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
+    }
+
+    pub fn generate() -> Self {
+        Self(generated_id("cs"))
+    }
+
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, GeneratedIdValidationError> {
+        let value = value.as_ref();
+        validate_generated_id("cs", value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn try_new(value: impl Into<String>) -> Result<Self, GeneratedIdValidationError> {
+        let value = value.into();
+        validate_generated_id("cs", &value)?;
+        Ok(Self(value))
     }
 
     pub fn as_str(&self) -> &str {
@@ -247,7 +347,8 @@ impl<'de> Deserialize<'de> for ContentStoreId {
     where
         D: Deserializer<'de>,
     {
-        Ok(Self(String::deserialize(deserializer)?))
+        let value = String::deserialize(deserializer)?;
+        ContentStoreId::try_new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -318,7 +419,9 @@ impl fmt::Display for InodeId {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitId, NamespaceId};
+    use super::{
+        validate_upload_id, validate_wal_segment_id, CommitId, ContentStoreId, NamespaceId,
+    };
 
     #[test]
     fn namespace_id_parse_accepts_allowed_grammar() {
@@ -357,5 +460,40 @@ mod tests {
         assert_eq!(parsed.as_str(), "c_demo-1");
         assert!(CommitId::parse("c/demo").is_err());
         assert!(CommitId::parse("C_demo").is_err());
+    }
+
+    #[test]
+    fn generated_content_store_id_parse_requires_prefix_and_lower_hex_body() {
+        let parsed = ContentStoreId::parse("cs_00000000000000000000000000000001")
+            .expect("valid content store id");
+
+        assert_eq!(parsed.as_str(), "cs_00000000000000000000000000000001");
+        let hyphenated_content_store_id = ["cs", "1"].join("-");
+        for value in [
+            hyphenated_content_store_id.as_str(),
+            "upl_00000000000000000000000000000001",
+            "content-stores/foo",
+            "cs_",
+            "cs_abcdef",
+            "cs_0000000000000000000000000000000",
+            "cs_000000000000000000000000000000001",
+            "cs_ABCDEF00000000000000000000000000",
+            "cs_0000000000000000000000000000000g",
+            " cs_00000000000000000000000000000001",
+            "cs_00000000000000000000000000000001 ",
+        ] {
+            assert!(
+                ContentStoreId::parse(value).is_err(),
+                "expected invalid content store id {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_upload_and_wal_segment_validators_reject_hyphenated_ids() {
+        assert!(validate_upload_id("upl_00000000000000000000000000000001").is_ok());
+        assert!(validate_wal_segment_id("seg_00000000000000000000000000000001").is_ok());
+        assert!(validate_upload_id(["upl", "123"].join("-")).is_err());
+        assert!(validate_wal_segment_id(["seg", "123"].join("-")).is_err());
     }
 }

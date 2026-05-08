@@ -20,13 +20,13 @@ use loon_api::v0::{
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::{
-    decode_wal_segment_envelope_zstd, ChangeSeq, CommitId, CompletedUpload, ContentRef,
-    ControlObjectKind, HeadState, InodeId, NamespaceId, UploadSessionEnvelope, UploadSessionState,
+    decode_wal_segment_envelope_zstd, generate_upload_id, validate_upload_id, ChangeSeq, CommitId,
+    CompletedUpload, ContentRef, ControlObjectKind, HeadState, InodeId, NamespaceId,
+    UploadSessionEnvelope, UploadSessionState,
 };
 use loon_objectstore::keys::{content_blob, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
 
@@ -49,7 +49,7 @@ pub fn begin_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<BeginUploadResponse, CoreError> {
     let _basis = load_verified_namespace_basis(store, namespace_id)?;
-    let upload_id = format!("upl_{}", Uuid::new_v4().simple());
+    let upload_id = generate_upload_id();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
@@ -873,6 +873,7 @@ fn read_upload_session_object<S: ObjectStore + ?Sized>(
     upload_id: &str,
 ) -> Result<LoadedUploadSessionObject, CoreError> {
     NamespaceId::parse(namespace_id.as_str()).map_err(CoreError::from)?;
+    validate_upload_id(upload_id).map_err(CoreError::InvalidUploadId)?;
     let object_key = upload_session(namespace_id.as_str(), upload_id);
     let metadata = store
         .head(&object_key)

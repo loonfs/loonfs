@@ -1,6 +1,6 @@
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
-use loon_api::{AuthoritativePathEntry, MutationResult, NamespaceId, NamespaceSummary};
+use loon_api::{AuthoritativePathEntry, CommitId, MutationResult, NamespaceId, NamespaceSummary};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_core::{
     bootstrap_namespace, copy_file_path, delete_path_non_recursive, fork_namespace,
@@ -9,7 +9,6 @@ use loon_core::{
 };
 use loon_objectstore::ConfiguredObjectStore;
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
@@ -284,13 +283,15 @@ fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
 }
 
 fn generated_commit_id() -> String {
-    format!("c_{}", Uuid::new_v4().simple())
+    CommitId::generate().to_string()
 }
 
 fn map_core_error(error: CoreError) -> CliError {
     if matches!(
         error.kind(),
-        CoreErrorKind::InvalidNamespaceId | CoreErrorKind::InvalidCommitId
+        CoreErrorKind::InvalidNamespaceId
+            | CoreErrorKind::InvalidCommitId
+            | CoreErrorKind::InvalidUploadId
     ) {
         return CliError::invalid_input(error.to_string());
     }
@@ -299,6 +300,7 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::InvalidPath => "invalid_path",
         CoreErrorKind::InvalidNamespaceId => unreachable!("handled before code mapping"),
         CoreErrorKind::InvalidCommitId => unreachable!("handled before code mapping"),
+        CoreErrorKind::InvalidUploadId => unreachable!("handled before code mapping"),
         CoreErrorKind::NamespaceNotFound => "namespace_not_found",
         CoreErrorKind::NamespaceExists => "namespace_exists",
         CoreErrorKind::NamespacePartial => "namespace_partial",

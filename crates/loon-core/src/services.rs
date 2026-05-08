@@ -34,7 +34,6 @@ use loon_objectstore::keys::{
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use uuid::Uuid;
 
 pub use crate::context::MutationContext;
 pub use crate::error::{CoreError, CoreErrorKind};
@@ -198,7 +197,7 @@ fn create_new_content_store<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<ContentStoreId, BootstrapNamespaceError> {
     for _attempt in 0..CONTENT_STORE_ID_RETRY_LIMIT {
-        let content_store_id = ContentStoreId::from(format!("cs_{}", Uuid::new_v4().simple()));
+        let content_store_id = ContentStoreId::generate();
         let descriptor = ContentStoreDescriptorEnvelope::from_state(
             ControlObjectKind::ContentStoreDescriptor,
             &context.writer_version,
@@ -540,7 +539,7 @@ enum PathFingerprintInput {
 }
 
 fn generated_commit_id() -> CommitId {
-    CommitId::from(format!("c_{}", Uuid::new_v4().simple()))
+    CommitId::generate()
 }
 
 fn normalized_commit_id(commit_id: Option<&str>) -> Result<CommitId, CoreError> {

@@ -1,4 +1,4 @@
-use crate::keys::{derived_progress, namespace_head, namespace_lease};
+use crate::keys::{derived_progress, namespace_head, namespace_lease, DerivedWorkClass};
 use crate::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -132,7 +132,10 @@ fn probe_visibility_after_write<S: ObjectStore + ?Sized>(
     store: &S,
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
-    let key = derived_progress(&probe_namespace(run_id, "visibility"), "BuildSnapshot");
+    let key = derived_progress(
+        &probe_namespace(run_id, "visibility"),
+        DerivedWorkClass::SnapshotBuilder,
+    );
     let _ = store.delete(&key);
 
     store
@@ -160,7 +163,7 @@ fn probe_visibility_after_delete<S: ObjectStore + ?Sized>(
     run_id: &str,
 ) -> Result<(), ContractProbeError> {
     let namespace = probe_namespace(run_id, "delete");
-    let key = derived_progress(&namespace, "BuildSnapshot");
+    let key = derived_progress(&namespace, DerivedWorkClass::SnapshotBuilder);
     let _ = store.delete(&key);
 
     store
@@ -188,7 +191,7 @@ fn probe_sorted_listing<S: ObjectStore + ?Sized>(
 ) -> Result<(), ContractProbeError> {
     let namespace = probe_namespace(run_id, "sorted");
     let keys = vec![
-        derived_progress(&namespace, "BuildSnapshot"),
+        derived_progress(&namespace, DerivedWorkClass::SnapshotBuilder),
         namespace_head(&namespace),
         namespace_lease(&namespace),
     ];

@@ -17,7 +17,6 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use uuid::Uuid;
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -621,7 +620,7 @@ fn parse_commit_id(commit_id: &str) -> Result<CommitId, ClientError> {
 }
 
 fn generated_commit_id() -> String {
-    format!("c_{}", Uuid::new_v4().simple())
+    CommitId::generate().to_string()
 }
 
 fn file_name_for_path(path: &str) -> Result<String, ClientError> {

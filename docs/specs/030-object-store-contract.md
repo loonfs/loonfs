@@ -36,7 +36,19 @@ The required durable object families and standard key patterns are:
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
 
-## 4. WAL segment rules
+## 4. Durable naming conventions
+
+LoonFS uses distinct naming conventions for distinct surfaces:
+
+- Fixed object-store path segments use lowercase words or lowercase-kebab, e.g. `content-stores`, `committed-commits`, and `control/uploads`.
+- Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_00000000000000000000000000000001`, `upl_00000000000000000000000000000001`, and `seg_00000000000000000000000000000001`.
+- Durable work-class names use lowercase-kebab, e.g. `snapshot-builder`.
+- JSON enum values use snake_case.
+- Namespace IDs are human/operator slugs; prefer lowercase kebab-case while preserving the namespace grammar.
+
+Underscores are reserved for generated opaque ID prefixes and JSON snake_case values. Fixed object-store path-family names should not use underscores.
+
+## 5. WAL segment rules
 
 The metadata log has five important rules.
 
@@ -46,7 +58,7 @@ The metadata log has five important rules.
 4. The visible WAL chain must be deterministically recoverable from the head plus referenced segment metadata. A head field such as `wal_tip_segment_id`, together with segment metadata such as `segment_id`, `start_seq`, `end_seq`, `base_head_seq`, and `prev_visible_segment_id`, is one conforming shape. Equivalent semantics are acceptable.
 5. Orphan WAL segments are permitted and harmless when a writer loses the head compare-and-swap.
 
-## 5. Immutable content rules
+## 6. Immutable content rules
 
 The content model has four rules.
 
@@ -59,13 +71,13 @@ In v0, file content is stored as one whole-file object whose `content_ref.kind` 
 
 A reader or writer resolves content through the namespace descriptor: `namespace_id -> content_store_id -> content-stores/{content_store_id}/...`. File revisions and change-feed payloads store only `content_ref`; they do not store content-store ids or object-store paths.
 
-## 6. Mutable control-object rules
+## 7. Mutable control-object rules
 
 Small mutable objects such as the namespace head or a lease must use compare-and-swap semantics. These objects must remain small enough that guarded rewrite is practical.
 
 Large immutable file data may use multipart upload or another provider-specific optimization. Small mutable control objects should not depend on those mechanisms.
 
-## 7. Provider conformance
+## 8. Provider conformance
 
 The spec standardizes the required behaviors, not a brand name such as "S3 compatible." A provider is conforming only when those behaviors are verified by conformance tests.
 
