@@ -41,7 +41,7 @@ These key shapes are part of the interoperable storage contract. Implementations
 LoonFS uses distinct naming conventions for distinct surfaces:
 
 - Fixed object-store path segments use lowercase words or lowercase-kebab, e.g. `content-stores`, `committed-commits`, and `control/uploads`.
-- Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_00000000000000000000000000000001`, `upl_00000000000000000000000000000001`, and `seg_00000000000000000000000000000001`.
+- Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, and `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`.
 - Durable work-class names use lowercase-kebab, e.g. `snapshot-builder`.
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs; prefer lowercase kebab-case while preserving the namespace grammar.
