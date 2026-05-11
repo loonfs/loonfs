@@ -4,7 +4,7 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::loading::read_head_object;
 use crate::metadata::{
-    DirentryRecord, InodeRecord, MetadataState, RequestReceiptRecord, RevisionRecord,
+    CommitReceiptRecord, DirentryRecord, InodeRecord, MetadataState, RevisionRecord,
     SubtreeTombstoneRecord,
 };
 use loon_api::{
@@ -33,7 +33,7 @@ const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 5] = [
     CheckpointTableFamily::Direntries,
     CheckpointTableFamily::Revisions,
     CheckpointTableFamily::Tombstones,
-    CheckpointTableFamily::RequestReceipts,
+    CheckpointTableFamily::CommitReceipts,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -980,19 +980,17 @@ fn append_rows_to_metadata(
                     tombstone_op_index: *tombstone_op_index,
                 }),
             (
-                CheckpointTableFamily::RequestReceipts,
-                CheckpointRow::RequestReceipt {
-                    request_id,
-                    semantic_fingerprint_sha256,
-                    committed_seq,
+                CheckpointTableFamily::CommitReceipts,
+                CheckpointRow::CommitReceipt {
                     commit_id,
+                    request_fingerprint_sha256,
+                    committed_seq,
                     results,
                 },
-            ) => metadata_state.request_receipts.push(RequestReceiptRecord {
-                request_id: request_id.clone(),
-                semantic_fingerprint_sha256: semantic_fingerprint_sha256.clone(),
-                committed_seq: *committed_seq,
+            ) => metadata_state.commit_receipts.push(CommitReceiptRecord {
                 commit_id: commit_id.clone(),
+                request_fingerprint_sha256: request_fingerprint_sha256.clone(),
+                committed_seq: *committed_seq,
                 results: results.clone(),
             }),
             _ => {
@@ -1059,15 +1057,14 @@ fn checkpoint_rows_for_family(
                 tombstone_op_index: tombstone.tombstone_op_index,
             })
             .collect::<Vec<_>>(),
-        CheckpointTableFamily::RequestReceipts => metadata_state
-            .request_receipts
+        CheckpointTableFamily::CommitReceipts => metadata_state
+            .commit_receipts
             .iter()
-            .map(|receipt| CheckpointRow::RequestReceipt {
-                request_id: receipt.request_id.clone(),
-                semantic_fingerprint_sha256: receipt.semantic_fingerprint_sha256.clone(),
-                committed_seq: receipt.committed_seq,
-                commit_id: receipt.commit_id.clone(),
-                results: receipt.results.clone(),
+            .map(|record| CheckpointRow::CommitReceipt {
+                commit_id: record.commit_id.clone(),
+                request_fingerprint_sha256: record.request_fingerprint_sha256.clone(),
+                committed_seq: record.committed_seq,
+                results: record.results.clone(),
             })
             .collect::<Vec<_>>(),
     };
@@ -1081,7 +1078,7 @@ fn snapshot_table_family(family: CheckpointTableFamily) -> SnapshotTableFamily {
         CheckpointTableFamily::Direntries => SnapshotTableFamily::Direntries,
         CheckpointTableFamily::Revisions => SnapshotTableFamily::Revisions,
         CheckpointTableFamily::Tombstones => SnapshotTableFamily::Tombstones,
-        CheckpointTableFamily::RequestReceipts => SnapshotTableFamily::RequestReceipts,
+        CheckpointTableFamily::CommitReceipts => SnapshotTableFamily::CommitReceipts,
     }
 }
 
@@ -1091,7 +1088,7 @@ fn checkpoint_row_kind(row: &CheckpointRow) -> &'static str {
         CheckpointRow::Direntry { .. } => "direntry",
         CheckpointRow::Revision { .. } => "revision",
         CheckpointRow::Tombstone { .. } => "tombstone",
-        CheckpointRow::RequestReceipt { .. } => "request_receipt",
+        CheckpointRow::CommitReceipt { .. } => "commit_receipt",
     }
 }
 

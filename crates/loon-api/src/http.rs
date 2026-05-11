@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, ContentRef, NamespaceId};
+use crate::{ChangeSeq, CommitId, ContentRef, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,7 +63,7 @@ pub enum FilesystemOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilesystemOperationRequest {
-    pub request_id: String,
+    pub commit_id: CommitId,
     pub operation: FilesystemOperation,
 }
 

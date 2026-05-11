@@ -3,7 +3,7 @@ mod provider_env;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, derived_progress, namespace_descriptor, namespace_head,
-    namespace_lease, queue_shard, snapshot_manifest, snapshot_table, wal_commit,
+    namespace_lease, queue_shard, snapshot_manifest, snapshot_table, wal_segment,
     SnapshotTableFamily,
 };
 use loon_objectstore::probes::run_contract_probes;
@@ -146,8 +146,8 @@ fn key_builders_cover_locked_object_families() {
         "content-stores/cs-1/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     );
     assert_eq!(
-        wal_commit("ns-1", 420, "commit-1"),
-        "namespaces/ns-1/wal/00000000000000000420-commit-1.cbor.zst"
+        wal_segment("ns-1", 420, 420, "seg-1"),
+        "namespaces/ns-1/wal/00000000000000000420-00000000000000000420-seg-1.cbor.zst"
     );
     assert_eq!(
         snapshot_manifest("ns-1", 420),
@@ -156,6 +156,10 @@ fn key_builders_cover_locked_object_families() {
     assert_eq!(
         snapshot_table("ns-1", 420, SnapshotTableFamily::Inodes, 3),
         "namespaces/ns-1/snapshots/00000000000000000420/tables/inodes-00003.sst.zst"
+    );
+    assert_eq!(
+        snapshot_table("ns-1", 420, SnapshotTableFamily::CommitReceipts, 0),
+        "namespaces/ns-1/snapshots/00000000000000000420/tables/commit-receipts-00000.sst.zst"
     );
     assert_eq!(
         derived_progress("ns-1", "BuildSnapshot"),
@@ -451,7 +455,7 @@ fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
 }
 
 fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
-    let key = wal_commit("ns-1", 420, "commit-1");
+    let key = wal_segment("ns-1", 420, 420, "seg-1");
     let _ = store.delete(&key);
 
     store

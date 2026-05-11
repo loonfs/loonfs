@@ -1,6 +1,8 @@
 use crate::digest::sha256_hex;
 use crate::v0::CommitOpResult;
-use crate::{ChangeSeq, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo};
+use crate::{
+    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
+};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -27,7 +29,7 @@ pub enum CheckpointTableFamily {
     Direntries,
     Revisions,
     Tombstones,
-    RequestReceipts,
+    CommitReceipts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,11 +91,10 @@ pub enum CheckpointRow {
         #[serde(default)]
         tombstone_op_index: u32,
     },
-    RequestReceipt {
-        request_id: String,
-        semantic_fingerprint_sha256: String,
+    CommitReceipt {
+        commit_id: CommitId,
+        request_fingerprint_sha256: String,
         committed_seq: ChangeSeq,
-        commit_id: String,
         results: Vec<CommitOpResult>,
     },
 }
@@ -150,11 +151,11 @@ impl CheckpointRow {
                     )
                 }
             }
-            Self::RequestReceipt {
-                request_id,
+            Self::CommitReceipt {
                 committed_seq,
+                commit_id,
                 ..
-            } => format!("request-receipt-{request_id}-{:020}", committed_seq.0),
+            } => format!("commit-receipt-{commit_id}-{:020}", committed_seq.0),
         }
     }
 }

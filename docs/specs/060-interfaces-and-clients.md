@@ -37,7 +37,7 @@ A commit request carries the following logical fields:
 
 | Field | Meaning |
 | --- | --- |
-| `request_id` | Client-generated stable idempotency key for this logical commit request. The same value must be reused for safe retries. |
+| `commit_id` | Client-generated stable idempotency key for this logical commit request. The same value must be reused for safe retries. |
 | `planned_head_seq` | The history point the client planned against. Preconditions are evaluated against authoritative state at this boundary. |
 | `preconditions` | Explicit checks such as `HeadSeqIs`, `InodeRevisionIs`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
 | `ops` | Ordered list of mutation operations. Operation order is preserved through validation, logical commit creation, and change-feed output. |
@@ -46,7 +46,7 @@ A commit request carries the following logical fields:
 
 The server validates each request against authoritative namespace state. A request may be rejected immediately. If it is tentatively accepted into a publication batch, the server may assign it a `seq`, but the request is not yet committed or successful at that point. It becomes one committed logical commit only after its WAL segment is durably written and the head update succeeds. If the WAL segment is written but the head update fails, the segment is orphaned and the request is not committed.
 
-The server may publish multiple committed logical commits in one WAL segment and one head update, but it must preserve per-request idempotency, ordering, and change-feed identity.
+The server may publish multiple committed logical commits in one WAL segment and one head update, but it must preserve per-commit idempotency, ordering, and change-feed identity.
 
 Annotations may be used to correlate multiple logical commits that belong to one higher-level workflow, for example with fields such as `operation_id`, `operation_kind`, or `operation_part`.
 
@@ -141,7 +141,7 @@ Representative request:
 
 ```json
 {
-  "request_id": "req_01J...",
+  "commit_id": "c_01j...",
   "message": "move report and publish new bytes",
   "annotations": {
     "source": "cli"
@@ -256,7 +256,7 @@ Representative request:
 
 ```json
 {
-  "request_id": "req_01J...",
+  "commit_id": "c_01j...",
   "planned_head_seq": 418,
   "message": "replace report bytes",
   "annotations": {
@@ -300,7 +300,7 @@ Representative response:
 ```json
 {
   "namespace_id": "demo",
-  "commit_id": "c_01J...",
+  "commit_id": "c_01j...",
   "committed_seq": 419,
   "results": [
     {
@@ -322,8 +322,7 @@ Representative response:
   "changes": [
     {
       "seq": 419,
-      "commit_id": "c_01J...",
-      "request_id": "req_01J...",
+      "commit_id": "c_01j...",
       "message": "replace report bytes",
       "ops": [
         {
@@ -394,7 +393,7 @@ This client uses the upload, commit, and change-feed surface more directly. It s
 Typical behavior:
 
 - content hashing and upload;
-- explicit commit with preconditions and request ids;
+- explicit commit with preconditions and commit ids;
 - change-feed reads or cursors where incremental observation is needed.
 
 ### 4.4 Operator or admin tool
@@ -420,6 +419,6 @@ The following table summarizes the core split. For more detailed command-oriente
 | --- | --- | --- |
 | Path resolution | Authoritative | Supplies user intent by path when using the filesystem surface. |
 | Content hashing and upload | May accept direct bytes, proxy uploads, or issue upload capabilities, but must verify that any content referenced by a commit is already durable. | Usually responsible for reading local bytes, computing content hashes, and uploading missing content when originating new data. |
-| Commit validation | Authoritative | Supplies preconditions and request ids where needed. |
+| Commit validation | Authoritative | Supplies preconditions and commit ids where needed. |
 | Namespace visibility | Authoritative | Observes committed results. |
 | Long-running transfer progress | Authoritative for sessions that affect correctness | Responsible for local temp files, local progress, retry behavior, and any higher-level orchestration outside the core model. |

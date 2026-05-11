@@ -2,7 +2,7 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, CoreErrorKind};
 use crate::services::PutFileBehavior;
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
-use loon_api::{ContentRef, MutationResult, NamespaceId};
+use loon_api::{CommitId, ContentRef, MutationResult, NamespaceId};
 use loon_objectstore::ObjectStore;
 
 const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
@@ -10,57 +10,57 @@ const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathMutationIntent {
     PutFile {
-        request_id: String,
+        commit_id: CommitId,
         absolute_path: String,
         content_ref: ContentRef,
         behavior: PutFileBehavior,
     },
     DeletePath {
-        request_id: String,
+        commit_id: CommitId,
         absolute_path: String,
         recursive: bool,
     },
     MovePath {
-        request_id: String,
+        commit_id: CommitId,
         from_path: String,
         to_path: String,
     },
     CopyFilePath {
-        request_id: String,
+        commit_id: CommitId,
         from_path: String,
         to_path: String,
     },
 }
 
 impl PathMutationIntent {
-    pub fn request_id(&self) -> &str {
+    pub fn commit_id(&self) -> &CommitId {
         match self {
-            Self::PutFile { request_id, .. }
-            | Self::DeletePath { request_id, .. }
-            | Self::MovePath { request_id, .. }
-            | Self::CopyFilePath { request_id, .. } => request_id,
+            Self::PutFile { commit_id, .. }
+            | Self::DeletePath { commit_id, .. }
+            | Self::MovePath { commit_id, .. }
+            | Self::CopyFilePath { commit_id, .. } => commit_id,
         }
     }
 
-    pub fn source_request_checksum_sha256(
+    pub fn request_fingerprint_sha256(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<String, CoreError> {
-        crate::services::source_request_checksum_for_path_intent(namespace_id, self)
+        crate::services::request_fingerprint_for_path_intent(namespace_id, self)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedPathMutation {
-    pub request_id: String,
-    pub source_request_checksum_sha256: String,
+    pub commit_id: CommitId,
+    pub request_fingerprint_sha256: String,
     pub commit_request: ApiCommitRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedNamespaceMutation {
     pub commit_request: ApiCommitRequest,
-    pub source_request_checksum_sha256: Option<String>,
+    pub request_fingerprint_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

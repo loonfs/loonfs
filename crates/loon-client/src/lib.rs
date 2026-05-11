@@ -7,7 +7,7 @@ use loon_api::{
         CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         UploadContentResponse,
     },
-    ApiError, AuthoritativePathEntry, ChangeSeq, ContentRef, CreateNamespaceRequest,
+    ApiError, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, ListNamespacesResponse, MutationResult,
     NamespaceId, NamespaceSummary,
@@ -62,6 +62,8 @@ pub enum ClientError {
     ConfigValidation { field: &'static str, reason: String },
     #[error("invalid namespace path `{0}`")]
     InvalidNamespacePath(String),
+    #[error("invalid commit_id `{0}`")]
+    InvalidCommitId(String),
     #[error("http error: {0}")]
     Http(String),
     #[error("server returned {status} {code}: {message}")]
@@ -296,21 +298,22 @@ impl Client {
         bytes: &[u8],
         force: bool,
     ) -> Result<MutationResult, ClientError> {
-        self.put_file_bytes_with_request_id(spec, bytes, force, &Uuid::new_v4().to_string())
+        self.put_file_bytes_with_commit_id(spec, bytes, force, &generated_commit_id())
     }
 
-    pub fn put_file_bytes_with_request_id(
+    pub fn put_file_bytes_with_commit_id(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
         force: bool,
-        request_id: &str,
+        commit_id: &str,
     ) -> Result<MutationResult, ClientError> {
+        let commit_id = parse_commit_id(commit_id)?;
         let content_ref = self.stage_bytes_as_content_ref(&spec.namespace, bytes)?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
             &FilesystemOperationRequest {
-                request_id: request_id.to_owned(),
+                commit_id,
                 operation: FilesystemOperation::PutFile {
                     path: spec.absolute_path.clone(),
                     content_ref,
@@ -330,31 +333,32 @@ impl Client {
         spec: &NamespacePath,
         bytes: &[u8],
     ) -> Result<MutationResult, ClientError> {
-        self.write_file_bytes_with_request_id(spec, bytes, &Uuid::new_v4().to_string())
+        self.write_file_bytes_with_commit_id(spec, bytes, &generated_commit_id())
     }
 
-    pub fn write_file_bytes_with_request_id(
+    pub fn write_file_bytes_with_commit_id(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        request_id: &str,
+        commit_id: &str,
     ) -> Result<MutationResult, ClientError> {
-        self.put_file_bytes_with_request_id(spec, bytes, true, request_id)
+        self.put_file_bytes_with_commit_id(spec, bytes, true, commit_id)
     }
 
     pub fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
-        self.delete_path_with_request_id(spec, &Uuid::new_v4().to_string())
+        self.delete_path_with_commit_id(spec, &generated_commit_id())
     }
 
-    pub fn delete_path_with_request_id(
+    pub fn delete_path_with_commit_id(
         &self,
         spec: &NamespacePath,
-        request_id: &str,
+        commit_id: &str,
     ) -> Result<MutationResult, ClientError> {
+        let commit_id = parse_commit_id(commit_id)?;
         let response = self.apply_filesystem_operation(
             &spec.namespace,
             &FilesystemOperationRequest {
-                request_id: request_id.to_owned(),
+                commit_id,
                 operation: FilesystemOperation::DeletePath {
                     path: spec.absolute_path.clone(),
                 },
@@ -368,14 +372,14 @@ impl Client {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, ClientError> {
-        self.move_path_with_request_id(from, to, &Uuid::new_v4().to_string())
+        self.move_path_with_commit_id(from, to, &generated_commit_id())
     }
 
-    pub fn move_path_with_request_id(
+    pub fn move_path_with_commit_id(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        request_id: &str,
+        commit_id: &str,
     ) -> Result<MutationResult, ClientError> {
         if from.namespace != to.namespace {
             return Err(ClientError::InvalidNamespacePath(format!(
@@ -383,10 +387,11 @@ impl Client {
                 from.namespace, to.namespace
             )));
         }
+        let commit_id = parse_commit_id(commit_id)?;
         let response = self.apply_filesystem_operation(
             &from.namespace,
             &FilesystemOperationRequest {
-                request_id: request_id.to_owned(),
+                commit_id,
                 operation: FilesystemOperation::MovePath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
@@ -401,14 +406,14 @@ impl Client {
         from: &NamespacePath,
         to: &NamespacePath,
     ) -> Result<MutationResult, ClientError> {
-        self.copy_path_with_request_id(from, to, &Uuid::new_v4().to_string())
+        self.copy_path_with_commit_id(from, to, &generated_commit_id())
     }
 
-    pub fn copy_path_with_request_id(
+    pub fn copy_path_with_commit_id(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        request_id: &str,
+        commit_id: &str,
     ) -> Result<MutationResult, ClientError> {
         if from.namespace != to.namespace {
             return Err(ClientError::InvalidNamespacePath(format!(
@@ -416,10 +421,11 @@ impl Client {
                 from.namespace, to.namespace
             )));
         }
+        let commit_id = parse_commit_id(commit_id)?;
         let response = self.apply_filesystem_operation(
             &from.namespace,
             &FilesystemOperationRequest {
-                request_id: request_id.to_owned(),
+                commit_id,
                 operation: FilesystemOperation::CopyPath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
@@ -608,6 +614,14 @@ fn namespace_url_segment(namespace: &str) -> Result<&str, ClientError> {
 
 fn invalid_namespace_id_error(error: loon_api::NamespaceIdValidationError) -> ClientError {
     ClientError::InvalidNamespacePath(error.to_string())
+}
+
+fn parse_commit_id(commit_id: &str) -> Result<CommitId, ClientError> {
+    CommitId::parse(commit_id).map_err(|error| ClientError::InvalidCommitId(error.to_string()))
+}
+
+fn generated_commit_id() -> String {
+    format!("c_{}", Uuid::new_v4().simple())
 }
 
 fn file_name_for_path(path: &str) -> Result<String, ClientError> {

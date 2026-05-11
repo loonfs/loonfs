@@ -119,7 +119,7 @@ pub fn prepare_wal_segment(
 
     let mut payload_records: Vec<WalCommitPayload> = Vec::with_capacity(records.len());
     for record in records {
-        let payload_record = build_wal_commit_payload(&namespace_id, record)?;
+        let payload_record = build_wal_record_payload(&namespace_id, record)?;
         if let Some(previous) = payload_records.last() {
             let expected = previous
                 .seq
@@ -185,7 +185,7 @@ pub fn prepare_wal_segment(
     })
 }
 
-pub(crate) fn build_wal_commit_payload(
+pub(crate) fn build_wal_record_payload(
     namespace_id: &NamespaceId,
     record: &PreparedWalRecord,
 ) -> Result<WalCommitPayload, WalBuildError> {
@@ -210,16 +210,10 @@ pub(crate) fn build_wal_commit_payload(
         seq: record.plan.next_seq,
         base_head_seq: record.plan.base_head_seq,
         commit_id: record.plan.commit_id.clone(),
-        request_id: record.request.request_id.clone(),
-        request_checksum_sha256: record
+        request_fingerprint_sha256: record
             .request
-            .request_checksum_sha256()
+            .request_fingerprint_sha256()
             .map_err(|err| WalBuildError::Codec(err.to_string()))?,
-        semantic_fingerprint_sha256: record
-            .request
-            .semantic_fingerprint_sha256()
-            .map_err(|err| WalBuildError::Codec(err.to_string()))?,
-        source_request_checksum_sha256: record.request.source_request_checksum_sha256.clone(),
         writer_id: record.request.writer_id.clone(),
         writer_fence_token: record.request.writer_fence_token,
         message: record.request.message.clone(),
@@ -577,19 +571,19 @@ impl From<&Precondition> for WalPrecondition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loon_api::{v0::CommitOpResult, FenceToken};
+    use loon_api::{v0::CommitOpResult, CommitId, FenceToken};
 
     #[test]
-    fn build_wal_commit_payload_matches_segment_record_payload() {
+    fn build_wal_record_payload_matches_segment_record_payload() {
         let namespace_id = NamespaceId::from("demo");
         let record = PreparedWalRecord {
             request: CommitRequest {
                 namespace_id: namespace_id.clone(),
-                request_id: "req-wal-payload".to_owned(),
+                commit_id: CommitId::from("c_wal_payload"),
                 writer_id: "writer-a".to_owned(),
                 writer_fence_token: FenceToken(1),
                 planned_head_seq: ChangeSeq(0),
-                source_request_checksum_sha256: None,
+                request_fingerprint_sha256: None,
                 ops: vec![CommitOp::CreateDir {
                     parent_inode: InodeId(1),
                     display_name: "docs".to_owned(),
@@ -600,7 +594,7 @@ mod tests {
             },
             plan: CommitPlan {
                 namespace_id: namespace_id.clone(),
-                commit_id: "commit-wal-payload".to_owned(),
+                commit_id: CommitId::from("c_wal_payload"),
                 base_head_seq: ChangeSeq(0),
                 next_seq: ChangeSeq(1),
                 allocated_inode_ids: vec![InodeId(2)],
@@ -619,7 +613,7 @@ mod tests {
         };
 
         let payload =
-            build_wal_commit_payload(&namespace_id, &record).expect("build commit payload");
+            build_wal_record_payload(&namespace_id, &record).expect("build commit payload");
         let segment = prepare_wal_segment(namespace_id, None, &[record], "test-writer")
             .expect("prepare wal segment");
 

@@ -36,7 +36,7 @@ LoonFS supports multiple client profiles. These profiles are defined by the prot
 | Client profile | Primary surface | Typical state |
 | --- | --- | --- |
 | **Path-oriented client** | Filesystem operations such as `ls`, `stat`, `get`, `put`, `mv`, and `cp` | Often little or no durable local state beyond transient request context. |
-| **Explicit-commit client** | Staged upload, request ids, explicit commit, and change cursors | Durable retry state for in-flight uploads and requests, but not necessarily a full local projection. |
+| **Explicit-commit client** | Staged upload, commit ids, explicit commit, and change cursors | Durable retry state for in-flight uploads and requests, but not necessarily a full local projection. |
 | **Sync client** | Change feed plus durable local projection, with optional writes | Durable local state, cursors, and restart-safe reconciliation state. |
 | **Operator or admin client** | Recovery, inspection, repair, and low-level operations | Implementation-specific. |
 

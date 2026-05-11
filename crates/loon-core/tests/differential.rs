@@ -211,7 +211,7 @@ fn core_bootstrap_state() -> CoreMetadataState {
         direntries: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
-        request_receipts: Vec::new(),
+        commit_receipts: Vec::new(),
     }
 }
 

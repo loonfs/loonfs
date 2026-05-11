@@ -4,9 +4,9 @@ use loon_api::{
         CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
         CompleteUploadRequest,
     },
-    ChangeSeq, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope, ControlObjectKind,
-    FenceToken, HeadState, InodeId, InodeKind, LeaseState, NamespaceDescriptorEnvelope,
-    NamespaceDescriptorState, NamespaceId, RevisionNo,
+    ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope,
+    ControlObjectKind, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
+    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
@@ -51,11 +51,11 @@ fn stale_head_precondition_is_rejected() {
     let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        request_id: "stale-head".to_owned(),
+        commit_id: CommitId::from("stale-head"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(2),
-        source_request_checksum_sha256: None,
+        request_fingerprint_sha256: None,
         ops: vec![CommitOp::DeleteFile {
             inode_id: InodeId(3),
         }],
@@ -100,11 +100,11 @@ fn stale_revision_precondition_is_rejected() {
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        request_id: "stale-revision".to_owned(),
+        commit_id: CommitId::from("stale-revision"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(3),
-        source_request_checksum_sha256: None,
+        request_fingerprint_sha256: None,
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
@@ -152,11 +152,11 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let create_error = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            request_id: "create-under-tombstone".to_owned(),
+            commit_id: CommitId::from("create-under-tombstone"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            source_request_checksum_sha256: None,
+            request_fingerprint_sha256: None,
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(2),
                 display_name: "new.txt".to_owned(),
@@ -180,11 +180,11 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let replace_error = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            request_id: "replace-under-tombstone".to_owned(),
+            commit_id: CommitId::from("replace-under-tombstone"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            source_request_checksum_sha256: None,
+            request_fingerprint_sha256: None,
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
                 base_revision: RevisionNo(1),
@@ -217,11 +217,11 @@ fn restore_revision_validation_rejects_missing_inode() {
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        request_id: "restore-missing-inode".to_owned(),
+        commit_id: CommitId::from("restore-missing-inode"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        source_request_checksum_sha256: None,
+        request_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(99),
             source_revision: RevisionNo(1),
@@ -252,11 +252,11 @@ fn restore_revision_validation_rejects_non_file_target() {
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        request_id: "restore-non-file".to_owned(),
+        commit_id: CommitId::from("restore-non-file"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        source_request_checksum_sha256: None,
+        request_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision: RevisionNo(1),
@@ -305,11 +305,11 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let stale_base = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            request_id: "restore-stale-base".to_owned(),
+            commit_id: CommitId::from("restore-stale-base"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            source_request_checksum_sha256: None,
+            request_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(1),
@@ -334,11 +334,11 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let missing_source = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            request_id: "restore-missing-source".to_owned(),
+            commit_id: CommitId::from("restore-missing-source"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            source_request_checksum_sha256: None,
+            request_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(99),
@@ -382,11 +382,11 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let plan = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            request_id: "restore-same-request-source".to_owned(),
+            commit_id: CommitId::from("restore-same-request-source"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(2),
-            source_request_checksum_sha256: None,
+            request_fingerprint_sha256: None,
             ops: vec![
                 CommitOp::ReplaceFile {
                     inode_id: InodeId(3),
@@ -440,11 +440,11 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     let plan = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            request_id: "restore-after-restore-same-request".to_owned(),
+            commit_id: CommitId::from("restore-after-restore-same-request"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            source_request_checksum_sha256: None,
+            request_fingerprint_sha256: None,
             ops: vec![
                 CommitOp::RestoreRevision {
                     inode_id: InodeId(3),
@@ -499,11 +499,11 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     let error = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            request_id: "restore-under-tombstone".to_owned(),
+            commit_id: CommitId::from("restore-under-tombstone"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            source_request_checksum_sha256: None,
+            request_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(1),
@@ -556,16 +556,16 @@ fn restore_revision_overflow_is_rejected() {
             content_ref: content_ref("content-max"),
         }],
         subtree_tombstones: Vec::new(),
-        request_receipts: Vec::new(),
+        commit_receipts: Vec::new(),
     };
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        request_id: "restore-overflow".to_owned(),
+        commit_id: CommitId::from("restore-overflow"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        source_request_checksum_sha256: None,
+        request_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision: RevisionNo(u64::MAX),
@@ -738,6 +738,39 @@ fn public_namespace_operations_reject_invalid_namespace_id_before_key_constructi
 }
 
 #[test]
+fn commit_operations_reject_invalid_commit_id_before_wal_key_construction() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let error = commit_operations(
+        &store,
+        &namespace_id,
+        ApiCommitRequest {
+            commit_id: CommitId::from("bad/commit"),
+            planned_head_seq: ChangeSeq(0),
+            preconditions: Vec::new(),
+            ops: vec![ApiCommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: "docs".to_owned(),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("invalid commit_id should be rejected");
+
+    assert_eq!(error.kind(), CoreErrorKind::InvalidCommitId);
+    assert_eq!(
+        store.list_prefix("namespaces/demo/wal/").expect("list wal"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn batch_commit_writes_one_segment_and_expands_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -750,7 +783,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
         &namespace_id,
         vec![
             ApiCommitRequest {
-                request_id: "req-batch-a".to_owned(),
+                commit_id: CommitId::from("req-batch-a"),
                 planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
@@ -761,7 +794,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
                 annotations: None,
             },
             ApiCommitRequest {
-                request_id: "req-batch-b".to_owned(),
+                commit_id: CommitId::from("req-batch-b"),
                 planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
@@ -798,8 +831,8 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
     assert_eq!(changes.changes.len(), 2);
-    assert_eq!(changes.changes[0].request_id, "req-batch-a");
-    assert_eq!(changes.changes[1].request_id, "req-batch-b");
+    assert_eq!(changes.changes[0].commit_id, CommitId::from("req-batch-a"));
+    assert_eq!(changes.changes[1].commit_id, CommitId::from("req-batch-b"));
 }
 
 #[test]
@@ -816,7 +849,7 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::PutFile {
-                request_id: "retry-after-orphan".to_owned(),
+                commit_id: CommitId::from("retry-after-orphan"),
                 absolute_path: "/retry.txt".to_owned(),
                 content_ref: content.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
@@ -855,17 +888,20 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     assert_eq!(visible_segment.payload.end_seq, ChangeSeq(1));
     assert_eq!(visible_segment.payload.records.len(), 1);
     assert_eq!(
-        visible_segment.payload.records[0].request_id,
-        "retry-after-orphan"
+        visible_segment.payload.records[0].commit_id,
+        CommitId::from("retry-after-orphan")
     );
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
     assert_eq!(changes.changes.len(), 1);
-    assert_eq!(changes.changes[0].request_id, "retry-after-orphan");
+    assert_eq!(
+        changes.changes[0].commit_id,
+        CommitId::from("retry-after-orphan")
+    );
 }
 
 #[test]
-fn batch_commit_aliases_duplicate_request_id_with_same_fingerprint() {
+fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::from("demo");
@@ -873,7 +909,7 @@ fn batch_commit_aliases_duplicate_request_id_with_same_fingerprint() {
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
     let request = ApiCommitRequest {
-        request_id: "req-duplicate".to_owned(),
+        commit_id: CommitId::from("req-duplicate"),
         planned_head_seq: ChangeSeq(0),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDir {
@@ -905,11 +941,14 @@ fn batch_commit_aliases_duplicate_request_id_with_same_fingerprint() {
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
     assert_eq!(changes.changes.len(), 1);
-    assert_eq!(changes.changes[0].request_id, "req-duplicate");
+    assert_eq!(
+        changes.changes[0].commit_id,
+        CommitId::from("req-duplicate")
+    );
 }
 
 #[test]
-fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
+fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::from("demo");
@@ -921,7 +960,7 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
         &namespace_id,
         vec![
             ApiCommitRequest {
-                request_id: "req-conflict".to_owned(),
+                commit_id: CommitId::from("req-conflict"),
                 planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
@@ -932,7 +971,7 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
                 annotations: None,
             },
             ApiCommitRequest {
-                request_id: "req-conflict".to_owned(),
+                commit_id: CommitId::from("req-conflict"),
                 planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
@@ -950,7 +989,7 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
     let error = responses[1].as_ref().expect_err("duplicate conflict");
     assert!(matches!(
         error,
-        CoreError::RequestIdConflict(request_id) if request_id == "req-conflict"
+        CoreError::CommitIdReuseConflict(commit_id) if commit_id == "req-conflict"
     ));
 
     let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
@@ -964,7 +1003,7 @@ fn batch_commit_rejects_duplicate_request_id_with_different_fingerprint() {
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
     assert_eq!(changes.changes.len(), 1);
-    assert_eq!(changes.changes[0].request_id, "req-conflict");
+    assert_eq!(changes.changes[0].commit_id, CommitId::from("req-conflict"));
 }
 
 #[test]
@@ -981,7 +1020,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::PutFile {
-                request_id: "put-path".to_owned(),
+                commit_id: CommitId::from("put-path"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
                 behavior: PutFileBehavior::CreateOnly,
@@ -996,7 +1035,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::MovePath {
-                request_id: "move-path".to_owned(),
+                commit_id: CommitId::from("move-path"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
             },
@@ -1010,7 +1049,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::CopyFilePath {
-                request_id: "copy-path".to_owned(),
+                commit_id: CommitId::from("copy-path"),
                 from_path: "/docs/b.txt".to_owned(),
                 to_path: "/docs/c.txt".to_owned(),
             },
@@ -1024,7 +1063,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::DeletePath {
-                request_id: "delete-path".to_owned(),
+                commit_id: CommitId::from("delete-path"),
                 absolute_path: "/docs/b.txt".to_owned(),
                 recursive: false,
             },
@@ -1040,7 +1079,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
 }
 
 #[test]
-fn direct_publisher_uses_durable_path_request_id_receipts() {
+fn direct_publisher_uses_durable_path_commit_receipt_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::from("demo");
@@ -1050,7 +1089,7 @@ fn direct_publisher_uses_durable_path_request_id_receipts() {
     let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
 
     let intent = PathMutationIntent::PutFile {
-        request_id: "same-path-request".to_owned(),
+        commit_id: CommitId::from("same-path-request"),
         absolute_path: "/same.txt".to_owned(),
         content_ref: content.content_ref.clone(),
         behavior: PutFileBehavior::CreateOnly,
@@ -1072,7 +1111,7 @@ fn direct_publisher_uses_durable_path_request_id_receipts() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::DeletePath {
-                request_id: "same-path-request".to_owned(),
+                commit_id: CommitId::from("same-path-request"),
                 absolute_path: "/same.txt".to_owned(),
                 recursive: false,
             },
@@ -1082,7 +1121,7 @@ fn direct_publisher_uses_durable_path_request_id_receipts() {
         .expect_err("conflicting retry");
     assert!(matches!(
         conflict,
-        CoreError::RequestIdConflict(request_id) if request_id == "same-path-request"
+        CoreError::CommitIdReuseConflict(commit_id) if commit_id == "same-path-request"
     ));
 
     let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
@@ -1103,13 +1142,13 @@ fn path_intents_in_one_batch_see_tentative_state() {
         &namespace_id,
         vec![
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                request_id: "put-batched-path".to_owned(),
+                commit_id: CommitId::from("put-batched-path"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
-                request_id: "move-batched-path".to_owned(),
+                commit_id: CommitId::from("move-batched-path"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
             }),
@@ -1483,7 +1522,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "restore-create".to_owned(),
+            commit_id: CommitId::from("restore-create"),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
@@ -1509,7 +1548,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "restore-replace".to_owned(),
+            commit_id: CommitId::from("restore-replace"),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
@@ -1537,7 +1576,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "restore-missing-content".to_owned(),
+            commit_id: CommitId::from("restore-missing-content"),
             planned_head_seq: ChangeSeq(2),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(2),
@@ -1585,7 +1624,7 @@ fn metadata_only_commit_does_not_validate_content_store_refs() {
         &guarded_store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "metadata-only-delete".to_owned(),
+            commit_id: CommitId::from("metadata-only-delete"),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
@@ -1617,7 +1656,7 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "create-missing-parent-missing-content".to_owned(),
+            commit_id: CommitId::from("create-missing-parent-missing-content"),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
@@ -1664,7 +1703,7 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "replace-stale-missing-content".to_owned(),
+            commit_id: CommitId::from("replace-stale-missing-content"),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
@@ -1711,7 +1750,7 @@ fn restore_revision_missing_source_is_revision_not_found() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "restore-missing-source".to_owned(),
+            commit_id: CommitId::from("restore-missing-source"),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
@@ -1742,7 +1781,7 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "resolve-before-durable-check-create".to_owned(),
+            commit_id: CommitId::from("resolve-before-durable-check-create"),
             planned_head_seq: ChangeSeq(0),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(0),
@@ -1775,7 +1814,7 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            request_id: "resolve-before-durable-check-commit".to_owned(),
+            commit_id: CommitId::from("resolve-before-durable-check-commit"),
             planned_head_seq: ChangeSeq(1),
             preconditions: vec![CommitPrecondition::HeadSeqIs {
                 expected_seq: ChangeSeq(1),
@@ -2247,7 +2286,7 @@ fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {
         direntries: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
-        request_receipts: Vec::new(),
+        commit_receipts: Vec::new(),
     };
 
     for (index, ops) in sequences.iter().enumerate() {

@@ -1,6 +1,6 @@
 use crate::config::ServerConfig;
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
-use loon_api::{payload_checksum_sha256, NamespaceId};
+use loon_api::{payload_checksum_sha256, CommitId, NamespaceId};
 use loon_core::{
     commit::CommitHeadPublishError, publish_namespace_mutations_batch, CoreError, MutationContext,
     NamespaceMutationCandidate, PathMutationIntent, PlannedNamespaceMutation,
@@ -90,7 +90,7 @@ struct NamespacePublisher {
 
 struct NamespacePublisherState {
     batch: Option<OpenBatch>,
-    in_flight: HashMap<String, InFlightRequest>,
+    in_flight: HashMap<CommitId, InFlightRequest>,
     publishing: bool,
     next_allowed_cas_at: Instant,
 }
@@ -102,7 +102,7 @@ struct OpenBatch {
 
 #[derive(Clone)]
 struct BatchCandidate {
-    request_id: String,
+    commit_id: CommitId,
     candidate: NamespaceMutationCandidate,
 }
 
@@ -127,10 +127,10 @@ impl NamespacePublisher {
     }
 
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
-        let request_id = candidate_request_id(&candidate).to_owned();
+        let commit_id = candidate_commit_id(&candidate).clone();
         let fingerprint = candidate_fingerprint(&self.namespace_id, &candidate)?;
         let (sender, receiver) = oneshot::channel();
-        self.admit(request_id, candidate, fingerprint, sender)?;
+        self.admit(commit_id, candidate, fingerprint, sender)?;
         receiver
             .await
             .unwrap_or_else(|_| Err(CoreError::Store("publisher task stopped".to_owned())))
@@ -138,7 +138,7 @@ impl NamespacePublisher {
 
     fn admit(
         &self,
-        request_id: String,
+        commit_id: CommitId,
         candidate: NamespaceMutationCandidate,
         fingerprint: String,
         waiter: oneshot::Sender<CommitResult>,
@@ -150,9 +150,9 @@ impl NamespacePublisher {
                 .state
                 .lock()
                 .expect("namespace publisher mutex poisoned");
-            if let Some(existing) = state.in_flight.get_mut(&request_id) {
+            if let Some(existing) = state.in_flight.get_mut(&commit_id) {
                 if existing.fingerprint != fingerprint {
-                    return Err(CoreError::RequestIdConflict(request_id));
+                    return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
                 }
                 existing.waiters.push(waiter);
                 return Ok(());
@@ -172,13 +172,13 @@ impl NamespacePublisher {
                     return Err(CoreError::CommitQueueFull);
                 }
                 batch.candidates.push(BatchCandidate {
-                    request_id: request_id.clone(),
+                    commit_id: commit_id.clone(),
                     candidate: candidate.clone(),
                 });
                 (batch.candidates.len(), batch.notify.clone())
             };
             state.in_flight.insert(
-                request_id,
+                commit_id,
                 InFlightRequest {
                     fingerprint,
                     waiters: vec![waiter],
@@ -324,7 +324,7 @@ impl NamespacePublisher {
                         "publisher returned too few batch results".to_owned(),
                     ))
                 });
-                if let Some(in_flight) = state.in_flight.remove(&candidate.request_id) {
+                if let Some(in_flight) = state.in_flight.remove(&candidate.commit_id) {
                     for waiter in in_flight.waiters {
                         deliveries.push((waiter, result.clone()));
                     }
@@ -353,13 +353,13 @@ fn is_head_publish_stale(result: &CommitResult) -> bool {
     )
 }
 
-fn candidate_request_id(candidate: &NamespaceMutationCandidate) -> &str {
+fn candidate_commit_id(candidate: &NamespaceMutationCandidate) -> &CommitId {
     match candidate {
-        NamespaceMutationCandidate::Commit(request) => &request.request_id,
+        NamespaceMutationCandidate::Commit(request) => &request.commit_id,
         NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
             commit_request, ..
-        }) => &commit_request.request_id,
-        NamespaceMutationCandidate::Path(intent) => intent.request_id(),
+        }) => &commit_request.commit_id,
+        NamespaceMutationCandidate::Path(intent) => intent.commit_id(),
     }
 }
 
@@ -368,27 +368,24 @@ fn candidate_fingerprint(
     candidate: &NamespaceMutationCandidate,
 ) -> Result<String, CoreError> {
     match candidate {
-        NamespaceMutationCandidate::Commit(request) => semantic_fingerprint(namespace_id, request)
+        NamespaceMutationCandidate::Commit(request) => request_fingerprint(namespace_id, request)
             .map_err(|err| CoreError::Store(err.to_string())),
         NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
-            source_request_checksum_sha256: Some(source),
+            request_fingerprint_sha256: Some(source),
             ..
         }) => Ok(source.clone()),
         NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
             commit_request,
-            source_request_checksum_sha256: None,
-        }) => semantic_fingerprint(namespace_id, commit_request)
+            request_fingerprint_sha256: None,
+        }) => request_fingerprint(namespace_id, commit_request)
             .map_err(|err| CoreError::Store(err.to_string())),
-        NamespaceMutationCandidate::Path(intent) => {
-            intent.source_request_checksum_sha256(namespace_id)
-        }
+        NamespaceMutationCandidate::Path(intent) => intent.request_fingerprint_sha256(namespace_id),
     }
 }
 
 #[derive(Serialize)]
-struct SemanticCommit<'a> {
+struct CanonicalCommitRequest<'a> {
     namespace_id: &'a NamespaceId,
-    request_id: &'a str,
     planned_head_seq: loon_api::ChangeSeq,
     preconditions: &'a [loon_api::v0::CommitPrecondition],
     ops: &'a [loon_api::v0::CommitOp],
@@ -396,13 +393,12 @@ struct SemanticCommit<'a> {
     annotations: &'a Option<loon_api::v0::CommitAnnotations>,
 }
 
-fn semantic_fingerprint(
+fn request_fingerprint(
     namespace_id: &NamespaceId,
     request: &ApiCommitRequest,
 ) -> Result<String, serde_json::Error> {
-    payload_checksum_sha256(&SemanticCommit {
+    payload_checksum_sha256(&CanonicalCommitRequest {
         namespace_id,
-        request_id: &request.request_id,
         planned_head_seq: request.planned_head_seq,
         preconditions: &request.preconditions,
         ops: &request.ops,
@@ -562,11 +558,11 @@ mod tests {
     }
 
     fn create_dir_request(
-        request_id: impl Into<String>,
+        commit_id: impl Into<String>,
         display_name: impl Into<String>,
     ) -> CommitRequest {
         CommitRequest {
-            request_id: request_id.into(),
+            commit_id: CommitId::from(commit_id.into()),
             planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
@@ -591,11 +587,11 @@ mod tests {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
-        let request_id = request.request_id.clone();
+        let commit_id = request.commit_id.clone();
         let candidate = NamespaceMutationCandidate::Commit(request);
         let fingerprint = candidate_fingerprint(namespace_id, &candidate)?;
         let (sender, receiver) = oneshot::channel();
-        publisher.admit(request_id, candidate, fingerprint, sender)?;
+        publisher.admit(commit_id, candidate, fingerprint, sender)?;
         Ok(receiver)
     }
 
@@ -703,7 +699,7 @@ mod tests {
         );
         assert!(matches!(
             conflict,
-            Err(CoreError::RequestIdConflict(request_id)) if request_id == "active"
+            Err(CoreError::CommitIdReuseConflict(commit_id)) if commit_id == "active"
         ));
 
         store.release_head_cas();
@@ -758,7 +754,7 @@ mod tests {
         );
         assert!(matches!(
             conflict,
-            Err(CoreError::RequestIdConflict(request_id)) if request_id == "pending-0"
+            Err(CoreError::CommitIdReuseConflict(commit_id)) if commit_id == "pending-0"
         ));
 
         let overflow = try_admit_commit(
@@ -855,7 +851,7 @@ mod tests {
         let registry = PublisherRegistry::new(store.clone(), config);
 
         let request_a = CommitRequest {
-            request_id: "req-a".to_owned(),
+            commit_id: CommitId::from("req-a"),
             planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
@@ -866,7 +862,7 @@ mod tests {
             annotations: None,
         };
         let request_b = CommitRequest {
-            request_id: "req-b".to_owned(),
+            commit_id: CommitId::from("req-b"),
             planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
@@ -916,7 +912,7 @@ mod tests {
         let registry = PublisherRegistry::new(store.clone(), config);
 
         let explicit = CommitRequest {
-            request_id: "explicit-commit".to_owned(),
+            commit_id: CommitId::from("explicit-commit"),
             planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
@@ -927,7 +923,7 @@ mod tests {
             annotations: None,
         };
         let path_intent = PathMutationIntent::PutFile {
-            request_id: "path-put".to_owned(),
+            commit_id: CommitId::from("path-put"),
             absolute_path: "/file.txt".to_owned(),
             content_ref: content.content_ref,
             behavior: PutFileBehavior::CreateOnly,

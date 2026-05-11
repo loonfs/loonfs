@@ -1,6 +1,6 @@
 use loon_api::{
-    name_key_for_display_name, v0::CommitOpResult, ChangeSeq, ContentRef, InodeId, InodeKind,
-    NamePolicy, RevisionNo, WalCommitPayload, WalOp,
+    name_key_for_display_name, v0::CommitOpResult, ChangeSeq, CommitId, ContentRef, InodeId,
+    InodeKind, NamePolicy, RevisionNo, WalCommitPayload, WalOp,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -17,7 +17,7 @@ pub struct MetadataState {
     #[serde(default)]
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
-    pub request_receipts: Vec<RequestReceiptRecord>,
+    pub commit_receipts: Vec<CommitReceiptRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,11 +57,10 @@ pub struct SubtreeTombstoneRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequestReceiptRecord {
-    pub request_id: String,
-    pub semantic_fingerprint_sha256: String,
+pub struct CommitReceiptRecord {
+    pub commit_id: CommitId,
+    pub request_fingerprint_sha256: String,
     pub committed_seq: ChangeSeq,
-    pub commit_id: String,
     pub results: Vec<CommitOpResult>,
 }
 
@@ -293,17 +292,16 @@ impl MetadataState {
         let mut applied = self.apply_committed_wal_ops(record.seq, &record.ops)?;
         applied
             .metadata_state
-            .request_receipts
-            .push(RequestReceiptRecord {
-                request_id: record.request_id.clone(),
-                semantic_fingerprint_sha256: record.semantic_fingerprint_sha256.clone(),
-                committed_seq: record.seq,
+            .commit_receipts
+            .push(CommitReceiptRecord {
                 commit_id: record.commit_id.clone(),
+                request_fingerprint_sha256: record.request_fingerprint_sha256.clone(),
+                committed_seq: record.seq,
                 results: record.results.clone(),
             });
         push_unique_invariant(
             &mut applied.checked_invariants,
-            "wal_replay_records_request_receipt",
+            "wal_replay_records_commit_receipt",
         );
         Ok(applied)
     }
