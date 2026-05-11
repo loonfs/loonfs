@@ -29,7 +29,7 @@ pub enum CheckpointTableFamily {
     Direntries,
     Revisions,
     Tombstones,
-    CommittedCommits,
+    CommitReceipts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ pub enum CheckpointRow {
         #[serde(default)]
         tombstone_op_index: u32,
     },
-    CommittedCommit {
+    CommitReceipt {
         commit_id: CommitId,
         request_fingerprint_sha256: String,
         committed_seq: ChangeSeq,
@@ -151,11 +151,11 @@ impl CheckpointRow {
                     )
                 }
             }
-            Self::CommittedCommit {
+            Self::CommitReceipt {
                 committed_seq,
                 commit_id,
                 ..
-            } => format!("committed-commit-{commit_id}-{:020}", committed_seq.0),
+            } => format!("commit-receipt-{commit_id}-{:020}", committed_seq.0),
         }
     }
 }

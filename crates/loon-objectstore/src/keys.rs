@@ -6,7 +6,7 @@ pub enum SnapshotTableFamily {
     Direntries,
     Revisions,
     Tombstones,
-    CommittedCommits,
+    CommitReceipts,
 }
 
 impl SnapshotTableFamily {
@@ -16,7 +16,7 @@ impl SnapshotTableFamily {
             Self::Direntries => "direntries",
             Self::Revisions => "revisions",
             Self::Tombstones => "tombstones",
-            Self::CommittedCommits => "committed-commits",
+            Self::CommitReceipts => "commit-receipts",
         }
     }
 }
@@ -139,6 +139,10 @@ mod tests {
         assert_eq!(
             snapshot_table("ns-1", 400, SnapshotTableFamily::Direntries, 7),
             "namespaces/ns-1/snapshots/00000000000000000400/tables/direntries-00007.sst.zst"
+        );
+        assert_eq!(
+            snapshot_table("ns-1", 400, SnapshotTableFamily::CommitReceipts, 0),
+            "namespaces/ns-1/snapshots/00000000000000000400/tables/commit-receipts-00000.sst.zst"
         );
         assert_eq!(
             derived_progress("ns-1", "BuildSnapshot"),

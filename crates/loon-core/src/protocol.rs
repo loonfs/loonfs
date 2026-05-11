@@ -7,7 +7,7 @@ use crate::commit::{
 use crate::content::{validate_durable_content_reference, write_immutable_object};
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::metadata::{CommittedCommitRecord, MetadataState};
+use crate::metadata::{CommitReceiptRecord, MetadataState};
 use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::publisher::{NamespaceMutationCandidate, PlannedNamespaceMutation};
 use crate::wal::{
@@ -581,15 +581,12 @@ fn record_primary_request_or_complete_idempotent(
     commit_id: &CommitId,
     request_fingerprint: &str,
 ) -> bool {
-    if let Some(existing) = find_committed_commit(visible_metadata_state, commit_id) {
+    if let Some(existing) = find_commit_receipt(visible_metadata_state, commit_id) {
         outcomes[index] = Some(
             if existing.request_fingerprint_sha256 != request_fingerprint {
                 Err(CoreError::CommitIdReuseConflict(commit_id.to_string()))
             } else {
-                Ok(commit_response_from_committed_commit(
-                    namespace_id,
-                    existing,
-                ))
+                Ok(commit_response_from_commit_receipt(namespace_id, existing))
             },
         );
         return false;
@@ -970,20 +967,20 @@ fn load_wal_range<S: ObjectStore + ?Sized>(
     Ok(out)
 }
 
-fn find_committed_commit<'a>(
+fn find_commit_receipt<'a>(
     metadata_state: &'a crate::metadata::MetadataState,
     commit_id: &CommitId,
-) -> Option<&'a CommittedCommitRecord> {
+) -> Option<&'a CommitReceiptRecord> {
     metadata_state
-        .committed_commits
+        .commit_receipts
         .iter()
         .filter(|record| record.commit_id == *commit_id)
         .max_by_key(|record| record.committed_seq)
 }
 
-fn commit_response_from_committed_commit(
+fn commit_response_from_commit_receipt(
     namespace_id: &NamespaceId,
-    record: &CommittedCommitRecord,
+    record: &CommitReceiptRecord,
 ) -> ApiCommitResponse {
     ApiCommitResponse {
         namespace_id: namespace_id.clone(),

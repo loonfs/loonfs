@@ -158,6 +158,10 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/snapshots/00000000000000000420/tables/inodes-00003.sst.zst"
     );
     assert_eq!(
+        snapshot_table("ns-1", 420, SnapshotTableFamily::CommitReceipts, 0),
+        "namespaces/ns-1/snapshots/00000000000000000420/tables/commit-receipts-00000.sst.zst"
+    );
+    assert_eq!(
         derived_progress("ns-1", "BuildSnapshot"),
         "namespaces/ns-1/derived/BuildSnapshot/progress.json"
     );

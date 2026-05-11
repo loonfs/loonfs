@@ -556,7 +556,7 @@ fn restore_revision_overflow_is_rejected() {
             content_ref: content_ref("content-max"),
         }],
         subtree_tombstones: Vec::new(),
-        committed_commits: Vec::new(),
+        commit_receipts: Vec::new(),
     };
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
@@ -1079,7 +1079,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
 }
 
 #[test]
-fn direct_publisher_uses_durable_path_committed_commit_index() {
+fn direct_publisher_uses_durable_path_commit_receipt_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::from("demo");
@@ -2286,7 +2286,7 @@ fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {
         direntries: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
-        committed_commits: Vec::new(),
+        commit_receipts: Vec::new(),
     };
 
     for (index, ops) in sequences.iter().enumerate() {

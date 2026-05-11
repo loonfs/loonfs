@@ -17,7 +17,7 @@ pub struct MetadataState {
     #[serde(default)]
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
-    pub committed_commits: Vec<CommittedCommitRecord>,
+    pub commit_receipts: Vec<CommitReceiptRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ pub struct SubtreeTombstoneRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommittedCommitRecord {
+pub struct CommitReceiptRecord {
     pub commit_id: CommitId,
     pub request_fingerprint_sha256: String,
     pub committed_seq: ChangeSeq,
@@ -292,8 +292,8 @@ impl MetadataState {
         let mut applied = self.apply_committed_wal_ops(record.seq, &record.ops)?;
         applied
             .metadata_state
-            .committed_commits
-            .push(CommittedCommitRecord {
+            .commit_receipts
+            .push(CommitReceiptRecord {
                 commit_id: record.commit_id.clone(),
                 request_fingerprint_sha256: record.request_fingerprint_sha256.clone(),
                 committed_seq: record.seq,
@@ -301,7 +301,7 @@ impl MetadataState {
             });
         push_unique_invariant(
             &mut applied.checked_invariants,
-            "wal_replay_records_committed_commit",
+            "wal_replay_records_commit_receipt",
         );
         Ok(applied)
     }
