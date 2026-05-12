@@ -17,14 +17,11 @@ pub use self::api_adapter::{
     commit_request_from_v0, commit_request_from_v0_with_semantic_fingerprint, CommitConversionError,
 };
 pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
-pub use self::identity::{
-    commit_identity, durable_commit_checksum_sha256, semantic_commit_fingerprint_sha256,
-    source_api_commit_checksum_sha256, CommitIdentityError,
-};
+pub use self::identity::{semantic_commit_fingerprint_sha256, CommitFingerprintError};
 pub use self::ordered::build_commit_plan;
 pub(crate) use self::ordered::resolve_restore_content_refs;
 pub use self::prepared::{
-    CommitExecutionContext, CommitIdentity, CommitPrepareError, MaterializedCommit, PreparedCommit,
+    CommitExecutionContext, CommitPrepareError, MaterializedCommit, PreparedCommit,
 };
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 

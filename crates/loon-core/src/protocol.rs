@@ -2,10 +2,9 @@ use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::commit::{
     build_commit_plan, commit_request_from_v0_with_semantic_fingerprint,
     prepare_commit_head_publish, publish_commit_head, resolve_restore_content_refs,
-    semantic_commit_fingerprint_sha256, source_api_commit_checksum_sha256,
-    wal_payload_from_materialized_commit, CommitExecutionContext, CommitOp,
-    CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
-    PreparedCommit,
+    semantic_commit_fingerprint_sha256, wal_payload_from_materialized_commit,
+    CommitExecutionContext, CommitOp, CommitRequest as CoreCommitRequest, CommitValidationContext,
+    MaterializedCommit, PreparedCommit,
 };
 use crate::content::{validate_durable_content_reference, write_immutable_object};
 use crate::context::MutationContext;
@@ -45,7 +44,6 @@ struct InBatchRequest {
 
 struct CandidateCoreRequest {
     request: CoreCommitRequest,
-    source_api_commit_checksum_sha256: Option<String>,
 }
 
 pub fn begin_upload<S: ObjectStore + ?Sized>(
@@ -340,11 +338,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             &plan.allocated_inode_ids,
             &plan.resolved_restore_content_refs,
         );
-        let prepared = match PreparedCommit::new(
-            request,
-            plan.clone(),
-            candidate_request.source_api_commit_checksum_sha256,
-        ) {
+        let prepared = match PreparedCommit::new(request, plan.clone()) {
             Ok(value) => value,
             Err(error) => {
                 outcomes[index] = Some(Err(CoreError::Store(format!(
@@ -468,13 +462,6 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let source_api_checksum = match source_api_commit_checksum_sha256(&request) {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
-                    return None;
-                }
-            };
             let request = match commit_request_from_v0_with_semantic_fingerprint(
                 conversion_context,
                 request,
@@ -505,10 +492,7 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             ) {
                 return None;
             }
-            Some(CandidateCoreRequest {
-                request,
-                source_api_commit_checksum_sha256: source_api_checksum,
-            })
+            Some(CandidateCoreRequest { request })
         }
         NamespaceMutationCandidate::Planned(planned) => {
             if let Err(error) = validate_commit_id(&planned.commit_request.commit_id) {
@@ -545,10 +529,7 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             ) {
                 return None;
             }
-            Some(CandidateCoreRequest {
-                request,
-                source_api_commit_checksum_sha256: None,
-            })
+            Some(CandidateCoreRequest { request })
         }
         NamespaceMutationCandidate::Path(intent) => {
             if let Err(error) = validate_commit_id(intent.commit_id()) {
@@ -601,10 +582,7 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                     return None;
                 }
             };
-            Some(CandidateCoreRequest {
-                request,
-                source_api_commit_checksum_sha256: None,
-            })
+            Some(CandidateCoreRequest { request })
         }
     }
 }

@@ -21,10 +21,7 @@ pub fn wal_payload_from_materialized_commit(
         seq: prepared.plan.next_seq,
         base_head_seq: prepared.plan.base_head_seq,
         commit_id: prepared.plan.commit_id.clone(),
-        semantic_commit_fingerprint_sha256: prepared
-            .identity
-            .semantic_commit_fingerprint_sha256
-            .clone(),
+        semantic_commit_fingerprint_sha256: prepared.semantic_commit_fingerprint_sha256.clone(),
         writer_id: prepared.request.writer_id.clone(),
         writer_fence_token: prepared.request.writer_fence_token,
         message: prepared.request.message.clone(),
@@ -210,7 +207,7 @@ mod tests {
             metadata_preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
             checked_invariants: Vec::new(),
         };
-        let prepared = PreparedCommit::new(request, plan, None).expect("prepare commit");
+        let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
         let materialized = MaterializedCommit {
             prepared,
             results: vec![CommitOpResult::CreateDir {

@@ -1,4 +1,6 @@
-use super::{commit_identity, CommitIdentityError, CommitPlan, CommitRequest};
+use super::{
+    semantic_commit_fingerprint_sha256, CommitFingerprintError, CommitPlan, CommitRequest,
+};
 use loon_api::{FenceToken, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -11,17 +13,10 @@ pub struct CommitExecutionContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitIdentity {
-    pub source_api_commit_checksum_sha256: Option<String>,
-    pub durable_commit_checksum_sha256: String,
-    pub semantic_commit_fingerprint_sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedCommit {
     pub request: CommitRequest,
     pub plan: CommitPlan,
-    pub identity: CommitIdentity,
+    pub semantic_commit_fingerprint_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,15 +35,11 @@ pub enum CommitPrepareError {
     #[error("prepared commit id mismatch")]
     CommitIdMismatch,
     #[error(transparent)]
-    Identity(#[from] CommitIdentityError),
+    Fingerprint(#[from] CommitFingerprintError),
 }
 
 impl PreparedCommit {
-    pub fn new(
-        request: CommitRequest,
-        plan: CommitPlan,
-        source_api_commit_checksum_sha256: Option<String>,
-    ) -> Result<Self, CommitPrepareError> {
+    pub fn new(request: CommitRequest, plan: CommitPlan) -> Result<Self, CommitPrepareError> {
         if request.namespace_id != plan.namespace_id {
             return Err(CommitPrepareError::NamespaceMismatch {
                 request: request.namespace_id.clone(),
@@ -58,12 +49,12 @@ impl PreparedCommit {
         if request.commit_id != plan.commit_id {
             return Err(CommitPrepareError::CommitIdMismatch);
         }
-        let identity = commit_identity(source_api_commit_checksum_sha256, &request)?;
+        let semantic_commit_fingerprint_sha256 = semantic_commit_fingerprint_sha256(&request)?;
 
         Ok(Self {
             request,
             plan,
-            identity,
+            semantic_commit_fingerprint_sha256,
         })
     }
 }
@@ -115,7 +106,7 @@ mod tests {
         plan.namespace_id = NamespaceId::from("other");
 
         assert!(matches!(
-            PreparedCommit::new(request(), plan, None),
+            PreparedCommit::new(request(), plan),
             Err(CommitPrepareError::NamespaceMismatch { .. })
         ));
     }
@@ -126,7 +117,7 @@ mod tests {
         plan.commit_id = CommitId::from("commit-b");
 
         assert!(matches!(
-            PreparedCommit::new(request(), plan, None),
+            PreparedCommit::new(request(), plan),
             Err(CommitPrepareError::CommitIdMismatch)
         ));
     }
@@ -136,6 +127,6 @@ mod tests {
         let mut plan = plan();
         plan.base_head_seq = ChangeSeq(9);
 
-        PreparedCommit::new(request(), plan, None).expect("prepare commit");
+        PreparedCommit::new(request(), plan).expect("prepare commit");
     }
 }

@@ -432,7 +432,7 @@ mod tests {
             metadata_preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
             checked_invariants: Vec::new(),
         };
-        let prepared = PreparedCommit::new(request, plan, None).expect("prepare commit");
+        let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
         let record = MaterializedCommit {
             prepared,
             results: vec![CommitOpResult::CreateDir {
