@@ -976,6 +976,44 @@ fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
 }
 
 #[test]
+fn visible_commit_id_retry_aliases_across_writer_takeover() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let writer_a = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &writer_a, false).expect("bootstrap");
+
+    let request = ApiCommitRequest {
+        commit_id: CommitId::from("retry-across-writer"),
+        planned_head_seq: ChangeSeq(0),
+        preconditions: Vec::new(),
+        ops: vec![ApiCommitOp::CreateDir {
+            parent_inode: InodeId(1),
+            display_name: "alpha".to_owned(),
+        }],
+        message: None,
+        annotations: None,
+    };
+
+    let first = commit_operations(&store, &namespace_id, request.clone(), &writer_a)
+        .expect("writer a commit");
+    let writer_b = MutationContext {
+        writer_id: "writer-b".to_owned(),
+        writer_version: "writer-b/0.1.0".to_owned(),
+        now_ms: writer_a
+            .now_ms
+            .saturating_add(writer_a.lease_duration_ms)
+            .saturating_add(1),
+        lease_duration_ms: writer_a.lease_duration_ms,
+    };
+
+    let retry =
+        commit_operations(&store, &namespace_id, request, &writer_b).expect("writer b retry");
+
+    assert_eq!(first, retry);
+}
+
+#[test]
 fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

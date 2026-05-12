@@ -56,8 +56,6 @@ pub fn semantic_commit_fingerprint_sha256(
     struct CanonicalSemanticCommit<'a> {
         domain: &'static str,
         namespace_id: &'a loon_api::NamespaceId,
-        commit_id: &'a loon_api::CommitId,
-        writer_id: &'a str,
         planned_head_seq: loon_api::ChangeSeq,
         preconditions: &'a [super::Precondition],
         ops: &'a [super::CommitOp],
@@ -68,8 +66,6 @@ pub fn semantic_commit_fingerprint_sha256(
     payload_checksum_sha256(&CanonicalSemanticCommit {
         domain: SEMANTIC_CORE_COMMIT_DOMAIN,
         namespace_id: &request.namespace_id,
-        commit_id: &request.commit_id,
-        writer_id: &request.writer_id,
         planned_head_seq: request.planned_head_seq,
         preconditions: &request.preconditions,
         ops: &request.ops,
@@ -127,13 +123,23 @@ mod tests {
     }
 
     #[test]
-    fn semantic_fingerprint_excludes_writer_fence_token() {
+    fn semantic_fingerprint_excludes_writer_context_and_commit_id() {
         let left = semantic_commit_fingerprint_sha256(&core_request(FenceToken(1)))
             .expect("left fingerprint");
-        let right = semantic_commit_fingerprint_sha256(&core_request(FenceToken(2)))
-            .expect("right fingerprint");
+        let different_fence = semantic_commit_fingerprint_sha256(&core_request(FenceToken(2)))
+            .expect("different fence fingerprint");
+        let mut different_writer = core_request(FenceToken(1));
+        different_writer.writer_id = "writer-b".to_owned();
+        let different_writer = semantic_commit_fingerprint_sha256(&different_writer)
+            .expect("different writer fingerprint");
+        let mut different_commit_id = core_request(FenceToken(1));
+        different_commit_id.commit_id = CommitId::from("commit-b");
+        let different_commit_id = semantic_commit_fingerprint_sha256(&different_commit_id)
+            .expect("different commit id fingerprint");
 
-        assert_eq!(left, right);
+        assert_eq!(left, different_fence);
+        assert_eq!(left, different_writer);
+        assert_eq!(left, different_commit_id);
     }
 
     #[test]
