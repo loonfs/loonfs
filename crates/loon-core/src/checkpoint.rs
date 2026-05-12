@@ -984,13 +984,13 @@ fn append_rows_to_metadata(
                 CheckpointTableFamily::CommitReceipts,
                 CheckpointRow::CommitReceipt {
                     commit_id,
-                    request_fingerprint_sha256,
+                    semantic_commit_fingerprint_sha256,
                     committed_seq,
                     results,
                 },
             ) => metadata_state.commit_receipts.push(CommitReceiptRecord {
                 commit_id: commit_id.clone(),
-                request_fingerprint_sha256: request_fingerprint_sha256.clone(),
+                semantic_commit_fingerprint_sha256: semantic_commit_fingerprint_sha256.clone(),
                 committed_seq: *committed_seq,
                 results: results.clone(),
             }),
@@ -1063,7 +1063,9 @@ fn checkpoint_rows_for_family(
             .iter()
             .map(|record| CheckpointRow::CommitReceipt {
                 commit_id: record.commit_id.clone(),
-                request_fingerprint_sha256: record.request_fingerprint_sha256.clone(),
+                semantic_commit_fingerprint_sha256: record
+                    .semantic_commit_fingerprint_sha256
+                    .clone(),
                 committed_seq: record.committed_seq,
                 results: record.results.clone(),
             })

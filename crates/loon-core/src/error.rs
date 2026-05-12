@@ -1,5 +1,5 @@
 use crate::basis::BasisLoadError;
-use crate::commit::{CommitHeadPublishError, CommitValidationError};
+use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
 use crate::content::{DurableContentValidationError, ImmutableObjectWriteError};
 use crate::lease::LeaseAcquireError;
 use crate::loading::ControlObjectLoadError;
@@ -141,6 +141,14 @@ impl From<MetadataApplyError> for CoreError {
 impl From<CommitHeadPublishError> for CoreError {
     fn from(value: CommitHeadPublishError) -> Self {
         Self::HeadPublish(value)
+    }
+}
+
+impl From<CommitConversionError> for CoreError {
+    fn from(value: CommitConversionError) -> Self {
+        match value {
+            CommitConversionError::InvalidCommitId(error) => Self::InvalidCommitId(error),
+        }
     }
 }
 

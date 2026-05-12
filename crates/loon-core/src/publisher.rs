@@ -42,25 +42,25 @@ impl PathMutationIntent {
         }
     }
 
-    pub fn request_fingerprint_sha256(
+    pub fn semantic_commit_fingerprint_sha256(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<String, CoreError> {
-        crate::services::request_fingerprint_for_path_intent(namespace_id, self)
+        crate::services::semantic_commit_fingerprint_for_path_intent(namespace_id, self)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedPathMutation {
     pub commit_id: CommitId,
-    pub request_fingerprint_sha256: String,
+    pub semantic_commit_fingerprint_sha256: String,
     pub commit_request: ApiCommitRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedNamespaceMutation {
     pub commit_request: ApiCommitRequest,
-    pub request_fingerprint_sha256: Option<String>,
+    pub semantic_commit_fingerprint_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

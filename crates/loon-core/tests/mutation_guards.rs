@@ -56,7 +56,7 @@ fn stale_head_precondition_is_rejected() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(2),
-        request_fingerprint_sha256: None,
+        semantic_commit_fingerprint_sha256: None,
         ops: vec![CommitOp::DeleteFile {
             inode_id: InodeId(3),
         }],
@@ -105,7 +105,7 @@ fn stale_revision_precondition_is_rejected() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(3),
-        request_fingerprint_sha256: None,
+        semantic_commit_fingerprint_sha256: None,
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
@@ -157,7 +157,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
+            semantic_commit_fingerprint_sha256: None,
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(2),
                 display_name: "new.txt".to_owned(),
@@ -185,7 +185,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
+            semantic_commit_fingerprint_sha256: None,
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
                 base_revision: RevisionNo(1),
@@ -222,7 +222,7 @@ fn restore_revision_validation_rejects_missing_inode() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        request_fingerprint_sha256: None,
+        semantic_commit_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(99),
             source_revision: RevisionNo(1),
@@ -257,7 +257,7 @@ fn restore_revision_validation_rejects_non_file_target() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        request_fingerprint_sha256: None,
+        semantic_commit_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision: RevisionNo(1),
@@ -310,7 +310,7 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
+            semantic_commit_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(1),
@@ -339,7 +339,7 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
+            semantic_commit_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(99),
@@ -387,7 +387,7 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(2),
-            request_fingerprint_sha256: None,
+            semantic_commit_fingerprint_sha256: None,
             ops: vec![
                 CommitOp::ReplaceFile {
                     inode_id: InodeId(3),
@@ -445,7 +445,7 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
+            semantic_commit_fingerprint_sha256: None,
             ops: vec![
                 CommitOp::RestoreRevision {
                     inode_id: InodeId(3),
@@ -504,7 +504,7 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
+            semantic_commit_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(1),
@@ -566,7 +566,7 @@ fn restore_revision_overflow_is_rejected() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        request_fingerprint_sha256: None,
+        semantic_commit_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision: RevisionNo(u64::MAX),

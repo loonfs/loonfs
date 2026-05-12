@@ -1,21 +1,21 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::commit::{
-    build_commit_plan, prepare_commit_head_publish, publish_commit_head,
-    resolve_restore_content_refs, CommitOp, CommitRequest as CoreCommitRequest,
-    CommitValidationContext, Precondition,
+    build_commit_plan, commit_request_from_v0_with_semantic_fingerprint,
+    prepare_commit_head_publish, publish_commit_head, resolve_restore_content_refs,
+    semantic_commit_fingerprint_sha256, source_api_commit_checksum_sha256,
+    wal_payload_from_materialized_commit, CommitExecutionContext, CommitOp,
+    CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
+    PreparedCommit,
 };
 use crate::content::{validate_durable_content_reference, write_immutable_object};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use crate::namespace::catalog::load_namespace_content_store_id;
-use crate::publisher::{NamespaceMutationCandidate, PlannedNamespaceMutation};
-use crate::wal::{
-    build_wal_record_payload, prepare_wal_segment, PreparedWalRecord, StoredWalObject,
-};
+use crate::publisher::NamespaceMutationCandidate;
+use crate::wal::{prepare_wal_segment, StoredWalObject};
 use loon_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitOp as ApiCommitOp, CommitOpResult,
-    CommitPrecondition as ApiCommitPrecondition, CommitRequest as ApiCommitRequest,
+    BeginUploadResponse, ChangesResponse, CommitOpResult, CommitRequest as ApiCommitRequest,
     CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
@@ -40,7 +40,12 @@ struct LoadedUploadSessionObject {
 #[derive(Debug, Clone)]
 struct InBatchRequest {
     primary_index: usize,
-    request_fingerprint_sha256: String,
+    semantic_commit_fingerprint_sha256: String,
+}
+
+struct CandidateCoreRequest {
+    request: CoreCommitRequest,
+    source_api_commit_checksum_sha256: Option<String>,
 }
 
 pub fn begin_upload<S: ObjectStore + ?Sized>(
@@ -223,7 +228,14 @@ pub fn commit_operations<S: ObjectStore + ?Sized>(
     request: ApiCommitRequest,
     context: &MutationContext,
 ) -> Result<ApiCommitResponse, CoreError> {
-    commit_operations_with_request_fingerprint(store, namespace_id, request, None, context)
+    publish_namespace_mutations_batch(
+        store,
+        namespace_id,
+        vec![NamespaceMutationCandidate::Commit(request)],
+        context,
+    )
+    .pop()
+    .unwrap_or_else(|| Err(CoreError::Store("empty commit batch".to_owned())))
 }
 
 pub fn commit_operations_batch<S: ObjectStore + ?Sized>(
@@ -250,28 +262,6 @@ pub(crate) fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
     commit_namespace_mutations_batch(store, namespace_id, candidates, context)
-}
-
-fn commit_operations_with_request_fingerprint<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    request: ApiCommitRequest,
-    request_fingerprint_sha256: Option<String>,
-    context: &MutationContext,
-) -> Result<ApiCommitResponse, CoreError> {
-    publish_namespace_mutations_batch(
-        store,
-        namespace_id,
-        vec![NamespaceMutationCandidate::Planned(
-            PlannedNamespaceMutation {
-                commit_request: request,
-                request_fingerprint_sha256,
-            },
-        )],
-        context,
-    )
-    .pop()
-    .unwrap_or_else(|| Err(CoreError::Store("empty commit batch".to_owned())))
 }
 
 fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
@@ -301,12 +291,12 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         (0..candidates.len()).map(|_| None).collect();
     let mut current_head = basis.head.clone();
     let mut current_metadata_state = basis.metadata_state.clone();
-    let mut accepted: Vec<(usize, PreparedWalRecord)> = Vec::new();
+    let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
     let mut in_batch_requests: HashMap<CommitId, InBatchRequest> = HashMap::new();
     let mut aliases: Vec<(usize, usize)> = Vec::new();
 
     for (index, candidate) in candidates.into_iter().enumerate() {
-        let Some(request) = prepare_candidate_request(
+        let Some(candidate_request) = prepare_candidate_request(
             store,
             namespace_id,
             &basis,
@@ -327,6 +317,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             now_ms: context.now_ms,
             metadata_state: current_metadata_state.clone(),
         };
+        let request = candidate_request.request;
         let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
         if let Err(error) = validate_commit_content_references(
             store,
@@ -349,12 +340,21 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             &plan.allocated_inode_ids,
             &plan.resolved_restore_content_refs,
         );
-        let record = PreparedWalRecord {
+        let prepared = match PreparedCommit::new(
             request,
-            plan: plan.clone(),
-            results,
+            plan.clone(),
+            candidate_request.source_api_commit_checksum_sha256,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                outcomes[index] = Some(Err(CoreError::Store(format!(
+                    "commit preparation failed: {error}"
+                ))));
+                continue;
+            }
         };
-        let preview = match build_wal_record_payload(namespace_id, &record) {
+        let materialized = MaterializedCommit { prepared, results };
+        let preview = match wal_payload_from_materialized_commit(&materialized) {
             Ok(payload) => payload,
             Err(error) => {
                 outcomes[index] = Some(Err(error.into()));
@@ -366,7 +366,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
                 current_metadata_state = applied.metadata_state;
                 current_head.seq = plan.next_seq;
                 current_head.next_inode_id = plan.resulting_next_inode_id;
-                accepted.push((index, record));
+                accepted.push((index, materialized));
             }
             Err(error) => outcomes[index] = Some(Err(error.into())),
         }
@@ -404,7 +404,11 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         }
     }
 
-    let last_plan = &records.last().expect("non-empty accepted records").plan;
+    let last_plan = &records
+        .last()
+        .expect("non-empty accepted records")
+        .prepared
+        .plan;
     let head_publish = prepare_commit_head_publish(
         &basis.head,
         last_plan,
@@ -431,7 +435,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
         outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
             namespace_id: namespace_id.clone(),
-            commit_id: record.request.commit_id,
+            commit_id: record.prepared.request.commit_id,
             committed_seq: wal.envelope.payload.records[accepted_index].seq,
             results: record.results,
         }));
@@ -452,18 +456,40 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
     in_batch_requests: &mut HashMap<CommitId, InBatchRequest>,
     aliases: &mut Vec<(usize, usize)>,
-) -> Option<CoreCommitRequest> {
+) -> Option<CandidateCoreRequest> {
+    let conversion_context = CommitExecutionContext {
+        namespace_id: namespace_id.clone(),
+        writer_id: context.writer_id.clone(),
+        writer_fence_token: basis.head.active_fence_token,
+    };
     match candidate {
         NamespaceMutationCandidate::Commit(request) => {
             if let Err(error) = validate_commit_id(&request.commit_id) {
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let request = map_commit_request(namespace_id, basis, request, None, context);
-            let request_fingerprint = match request.request_fingerprint_sha256() {
+            let source_api_checksum = match source_api_commit_checksum_sha256(&request) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
+                    return None;
+                }
+            };
+            let request = match commit_request_from_v0_with_semantic_fingerprint(
+                conversion_context,
+                request,
+                None,
+            ) {
                 Ok(value) => value,
-                Err(err) => {
-                    outcomes[index] = Some(Err(CoreError::Store(err.to_string())));
+                Err(error) => {
+                    outcomes[index] = Some(Err(error.into()));
+                    return None;
+                }
+            };
+            let semantic_fingerprint = match semantic_commit_fingerprint_sha256(&request) {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
                     return None;
                 }
             };
@@ -475,28 +501,35 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 aliases,
                 index,
                 &request.commit_id,
-                &request_fingerprint,
+                &semantic_fingerprint,
             ) {
                 return None;
             }
-            Some(request)
+            Some(CandidateCoreRequest {
+                request,
+                source_api_commit_checksum_sha256: source_api_checksum,
+            })
         }
         NamespaceMutationCandidate::Planned(planned) => {
             if let Err(error) = validate_commit_id(&planned.commit_request.commit_id) {
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let request = map_commit_request(
-                namespace_id,
-                basis,
+            let request = match commit_request_from_v0_with_semantic_fingerprint(
+                conversion_context,
                 planned.commit_request,
-                planned.request_fingerprint_sha256,
-                context,
-            );
-            let request_fingerprint = match request.request_fingerprint_sha256() {
+                planned.semantic_commit_fingerprint_sha256,
+            ) {
                 Ok(value) => value,
-                Err(err) => {
-                    outcomes[index] = Some(Err(CoreError::Store(err.to_string())));
+                Err(error) => {
+                    outcomes[index] = Some(Err(error.into()));
+                    return None;
+                }
+            };
+            let semantic_fingerprint = match semantic_commit_fingerprint_sha256(&request) {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
                     return None;
                 }
             };
@@ -508,18 +541,22 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 aliases,
                 index,
                 &request.commit_id,
-                &request_fingerprint,
+                &semantic_fingerprint,
             ) {
                 return None;
             }
-            Some(request)
+            Some(CandidateCoreRequest {
+                request,
+                source_api_commit_checksum_sha256: None,
+            })
         }
         NamespaceMutationCandidate::Path(intent) => {
             if let Err(error) = validate_commit_id(intent.commit_id()) {
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let request_fingerprint = match intent.request_fingerprint_sha256(namespace_id) {
+            let semantic_fingerprint = match intent.semantic_commit_fingerprint_sha256(namespace_id)
+            {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(error));
@@ -535,7 +572,7 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 aliases,
                 index,
                 &commit_id,
-                &request_fingerprint,
+                &semantic_fingerprint,
             ) {
                 return None;
             }
@@ -553,13 +590,21 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                     return None;
                 }
             };
-            Some(map_commit_request(
-                namespace_id,
-                basis,
+            let request = match commit_request_from_v0_with_semantic_fingerprint(
+                conversion_context,
                 planned.commit_request,
-                Some(planned.request_fingerprint_sha256),
-                context,
-            ))
+                Some(planned.semantic_commit_fingerprint_sha256),
+            ) {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(error.into()));
+                    return None;
+                }
+            };
+            Some(CandidateCoreRequest {
+                request,
+                source_api_commit_checksum_sha256: None,
+            })
         }
     }
 }
@@ -579,11 +624,11 @@ fn record_primary_request_or_complete_idempotent(
     aliases: &mut Vec<(usize, usize)>,
     index: usize,
     commit_id: &CommitId,
-    request_fingerprint: &str,
+    semantic_commit_fingerprint: &str,
 ) -> bool {
     if let Some(existing) = find_commit_receipt(visible_metadata_state, commit_id) {
         outcomes[index] = Some(
-            if existing.request_fingerprint_sha256 != request_fingerprint {
+            if existing.semantic_commit_fingerprint_sha256 != semantic_commit_fingerprint {
                 Err(CoreError::CommitIdReuseConflict(commit_id.to_string()))
             } else {
                 Ok(commit_response_from_commit_receipt(namespace_id, existing))
@@ -592,7 +637,7 @@ fn record_primary_request_or_complete_idempotent(
         return false;
     }
     if let Some(existing) = in_batch_requests.get(commit_id) {
-        if existing.request_fingerprint_sha256 != request_fingerprint {
+        if existing.semantic_commit_fingerprint_sha256 != semantic_commit_fingerprint {
             outcomes[index] = Some(Err(CoreError::CommitIdReuseConflict(commit_id.to_string())));
         } else {
             aliases.push((index, existing.primary_index));
@@ -603,7 +648,7 @@ fn record_primary_request_or_complete_idempotent(
         commit_id.clone(),
         InBatchRequest {
             primary_index: index,
-            request_fingerprint_sha256: request_fingerprint.to_owned(),
+            semantic_commit_fingerprint_sha256: semantic_commit_fingerprint.to_owned(),
         },
     );
     true
@@ -730,104 +775,6 @@ fn derive_commit_results(
             }
         })
         .collect()
-}
-
-fn map_commit_request(
-    namespace_id: &NamespaceId,
-    basis: &crate::VerifiedNamespaceBasis,
-    request: ApiCommitRequest,
-    request_fingerprint_sha256: Option<String>,
-    context: &MutationContext,
-) -> CoreCommitRequest {
-    CoreCommitRequest {
-        namespace_id: namespace_id.clone(),
-        commit_id: request.commit_id,
-        writer_id: context.writer_id.clone(),
-        writer_fence_token: basis.head.active_fence_token,
-        planned_head_seq: request.planned_head_seq,
-        request_fingerprint_sha256,
-        ops: request.ops.into_iter().map(map_commit_op).collect(),
-        preconditions: request
-            .preconditions
-            .into_iter()
-            .map(map_commit_precondition)
-            .collect(),
-        message: request.message,
-        annotations: request.annotations,
-    }
-}
-
-fn map_commit_op(op: ApiCommitOp) -> CommitOp {
-    match op {
-        ApiCommitOp::CreateDir {
-            parent_inode,
-            display_name,
-        } => CommitOp::CreateDir {
-            parent_inode,
-            display_name,
-        },
-        ApiCommitOp::CreateFile {
-            parent_inode,
-            display_name,
-            content_ref,
-        } => CommitOp::CreateFile {
-            parent_inode,
-            display_name,
-            content_ref,
-        },
-        ApiCommitOp::ReplaceFile {
-            inode_id,
-            base_revision_no,
-            content_ref,
-        } => CommitOp::ReplaceFile {
-            inode_id,
-            base_revision: base_revision_no,
-            content_ref,
-        },
-        ApiCommitOp::RestoreRevision {
-            inode_id,
-            source_revision_no,
-            base_revision_no,
-        } => CommitOp::RestoreRevision {
-            inode_id,
-            source_revision: source_revision_no,
-            base_revision: base_revision_no,
-        },
-        ApiCommitOp::DeleteFile { inode_id } => CommitOp::DeleteFile { inode_id },
-        ApiCommitOp::Rename {
-            inode_id,
-            new_parent_inode,
-            new_display_name,
-        } => CommitOp::Rename {
-            inode_id,
-            new_parent_inode,
-            new_display_name,
-        },
-        ApiCommitOp::DeleteSubtree { root_inode } => CommitOp::DeleteSubtree { root_inode },
-    }
-}
-
-fn map_commit_precondition(precondition: ApiCommitPrecondition) -> Precondition {
-    match precondition {
-        ApiCommitPrecondition::HeadSeqIs { expected_seq } => Precondition::HeadSeqIs(expected_seq),
-        ApiCommitPrecondition::InodeRevisionIs {
-            inode_id,
-            revision_no,
-        } => Precondition::InodeRevisionIs {
-            inode_id,
-            revision: revision_no,
-        },
-        ApiCommitPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
-            Precondition::AncestorsNotSubtreeDeleted { inode_id }
-        }
-        ApiCommitPrecondition::ChildNameAbsent {
-            parent_inode,
-            name_key,
-        } => Precondition::ChildNameAbsent {
-            parent_inode,
-            name_key,
-        },
-    }
 }
 
 fn validate_commit_content_references<S: ObjectStore + ?Sized>(

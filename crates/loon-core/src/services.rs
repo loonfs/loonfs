@@ -551,11 +551,13 @@ fn normalized_commit_id(commit_id: Option<&str>) -> Result<CommitId, CoreError> 
     Ok(commit_id)
 }
 
-fn request_fingerprint_sha256(identity: &PathFingerprintInput) -> Result<String, CoreError> {
+fn semantic_commit_fingerprint_sha256(
+    identity: &PathFingerprintInput,
+) -> Result<String, CoreError> {
     payload_checksum_sha256(identity).map_err(|err| CoreError::Store(err.to_string()))
 }
 
-pub(crate) fn request_fingerprint_for_path_intent(
+pub(crate) fn semantic_commit_fingerprint_for_path_intent(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
 ) -> Result<String, CoreError> {
@@ -595,7 +597,7 @@ pub(crate) fn request_fingerprint_for_path_intent(
             to_path: to_path.clone(),
         },
     };
-    request_fingerprint_sha256(&identity)
+    semantic_commit_fingerprint_sha256(&identity)
 }
 
 pub fn put_file_bytes<S: ObjectStore + ?Sized>(
@@ -688,7 +690,7 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
 ) -> Result<PlannedPathMutation, CoreError> {
     let commit_id = intent.commit_id().clone();
-    let request_fingerprint = request_fingerprint_for_path_intent(namespace_id, intent)?;
+    let semantic_fingerprint = semantic_commit_fingerprint_for_path_intent(namespace_id, intent)?;
     let view = PathPlanningView {
         head,
         metadata_state,
@@ -722,7 +724,7 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
     };
     Ok(PlannedPathMutation {
         commit_id,
-        request_fingerprint_sha256: request_fingerprint,
+        semantic_commit_fingerprint_sha256: semantic_fingerprint,
         commit_request,
     })
 }
