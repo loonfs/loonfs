@@ -3,6 +3,7 @@ use crate::checkpoint::{
     create_checkpoint, load_verified_checkpoint_materialization,
     write_verified_checkpoint_from_metadata, CheckpointMetadataWriteRequest,
 };
+use crate::commit::SemanticCommitFingerprint;
 use crate::content::{
     read_durable_content_bytes, validate_durable_content_reference, write_immutable_object,
 };
@@ -551,16 +552,18 @@ fn normalized_commit_id(commit_id: Option<&str>) -> Result<CommitId, CoreError> 
     Ok(commit_id)
 }
 
-fn semantic_commit_fingerprint_sha256(
+fn path_semantic_commit_fingerprint(
     identity: &PathFingerprintInput,
-) -> Result<String, CoreError> {
-    payload_checksum_sha256(identity).map_err(|err| CoreError::Store(err.to_string()))
+) -> Result<SemanticCommitFingerprint, CoreError> {
+    payload_checksum_sha256(identity)
+        .map(SemanticCommitFingerprint::new_unchecked)
+        .map_err(|err| CoreError::Store(err.to_string()))
 }
 
 pub(crate) fn semantic_commit_fingerprint_for_path_intent(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
-) -> Result<String, CoreError> {
+) -> Result<SemanticCommitFingerprint, CoreError> {
     let identity = match intent {
         PathMutationIntent::PutFile {
             absolute_path,
@@ -597,7 +600,7 @@ pub(crate) fn semantic_commit_fingerprint_for_path_intent(
             to_path: to_path.clone(),
         },
     };
-    semantic_commit_fingerprint_sha256(&identity)
+    path_semantic_commit_fingerprint(&identity)
 }
 
 pub fn put_file_bytes<S: ObjectStore + ?Sized>(
@@ -724,7 +727,7 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
     };
     Ok(PlannedPathMutation {
         commit_id,
-        semantic_commit_fingerprint_sha256: semantic_fingerprint,
+        semantic_commit_fingerprint: semantic_fingerprint,
         commit_request,
     })
 }

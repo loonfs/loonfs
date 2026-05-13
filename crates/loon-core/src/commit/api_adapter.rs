@@ -12,14 +12,6 @@ pub fn commit_request_from_v0(
     ctx: CommitExecutionContext,
     request: api_v0::CommitRequest,
 ) -> Result<CommitRequest, CommitConversionError> {
-    commit_request_from_v0_with_semantic_fingerprint(ctx, request, None)
-}
-
-pub fn commit_request_from_v0_with_semantic_fingerprint(
-    ctx: CommitExecutionContext,
-    request: api_v0::CommitRequest,
-    semantic_commit_fingerprint_sha256: Option<String>,
-) -> Result<CommitRequest, CommitConversionError> {
     loon_api::CommitId::parse(request.commit_id.as_str())?;
     Ok(CommitRequest {
         namespace_id: ctx.namespace_id,
@@ -27,7 +19,6 @@ pub fn commit_request_from_v0_with_semantic_fingerprint(
         writer_id: ctx.writer_id,
         writer_fence_token: ctx.writer_fence_token,
         planned_head_seq: request.planned_head_seq,
-        semantic_commit_fingerprint_sha256,
         ops: request.ops.into_iter().map(commit_op_from_v0).collect(),
         preconditions: request
             .preconditions
@@ -39,7 +30,7 @@ pub fn commit_request_from_v0_with_semantic_fingerprint(
     })
 }
 
-fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
+pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
     match op {
         api_v0::CommitOp::CreateDir {
             parent_inode,
@@ -89,7 +80,9 @@ fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
     }
 }
 
-fn commit_precondition_from_v0(precondition: api_v0::CommitPrecondition) -> Precondition {
+pub(super) fn commit_precondition_from_v0(
+    precondition: api_v0::CommitPrecondition,
+) -> Precondition {
     match precondition {
         api_v0::CommitPrecondition::HeadSeqIs { expected_seq } => {
             Precondition::HeadSeqIs(expected_seq)

@@ -1,10 +1,10 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::commit::{
-    build_commit_plan, commit_request_from_v0_with_semantic_fingerprint,
-    prepare_commit_head_publish, publish_commit_head, resolve_restore_content_refs,
-    semantic_commit_fingerprint_sha256, wal_payload_from_materialized_commit,
-    CommitExecutionContext, CommitOp, CommitRequest as CoreCommitRequest, CommitValidationContext,
-    MaterializedCommit, PreparedCommit,
+    build_commit_plan, commit_request_from_v0, materialize_commit, prepare_commit_head_publish,
+    publish_commit_head, resolve_restore_content_refs, semantic_commit_fingerprint,
+    wal_payload_from_materialized_commit, CommitExecutionContext, CommitFingerprintSource,
+    CommitOp, CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
+    PreparedCommit, SemanticCommitFingerprint,
 };
 use crate::content::{validate_durable_content_reference, write_immutable_object};
 use crate::context::MutationContext;
@@ -14,14 +14,14 @@ use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{prepare_wal_segment, StoredWalObject};
 use loon_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitOpResult, CommitRequest as ApiCommitRequest,
+    BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
     CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::{
     decode_wal_segment_envelope_zstd, generate_upload_id, validate_upload_id, ChangeSeq, CommitId,
-    CompletedUpload, ContentRef, ControlObjectKind, HeadState, InodeId, NamespaceId,
-    UploadSessionEnvelope, UploadSessionState,
+    CompletedUpload, ContentRef, ControlObjectKind, HeadState, NamespaceId, UploadSessionEnvelope,
+    UploadSessionState,
 };
 use loon_objectstore::keys::{content_blob, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -39,11 +39,12 @@ struct LoadedUploadSessionObject {
 #[derive(Debug, Clone)]
 struct InBatchRequest {
     primary_index: usize,
-    semantic_commit_fingerprint_sha256: String,
+    semantic_commit_fingerprint: SemanticCommitFingerprint,
 }
 
 struct CandidateCoreRequest {
     request: CoreCommitRequest,
+    fingerprint_source: CommitFingerprintSource,
 }
 
 pub fn begin_upload<S: ObjectStore + ?Sized>(
@@ -333,12 +334,11 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
                 continue;
             }
         };
-        let results = derive_commit_results(
-            &request.ops,
-            &plan.allocated_inode_ids,
-            &plan.resolved_restore_content_refs,
-        );
-        let prepared = match PreparedCommit::new(request, plan.clone()) {
+        let prepared = match PreparedCommit::prepare(
+            request,
+            plan.clone(),
+            candidate_request.fingerprint_source,
+        ) {
             Ok(value) => value,
             Err(error) => {
                 outcomes[index] = Some(Err(CoreError::Store(format!(
@@ -347,7 +347,15 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
                 continue;
             }
         };
-        let materialized = MaterializedCommit { prepared, results };
+        let materialized = match materialize_commit(prepared) {
+            Ok(value) => value,
+            Err(error) => {
+                outcomes[index] = Some(Err(CoreError::Store(format!(
+                    "commit materialization failed: {error}"
+                ))));
+                continue;
+            }
+        };
         let preview = match wal_payload_from_materialized_commit(&materialized) {
             Ok(payload) => payload,
             Err(error) => {
@@ -431,7 +439,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
             commit_id: record.prepared.request.commit_id,
             committed_seq: wal.envelope.payload.records[accepted_index].seq,
-            results: record.results,
+            results: record.ops.into_iter().map(|op| op.result).collect(),
         }));
     }
     finish_batch_outcomes_with_aliases(outcomes, &aliases)
@@ -462,18 +470,14 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let request = match commit_request_from_v0_with_semantic_fingerprint(
-                conversion_context,
-                request,
-                None,
-            ) {
+            let request = match commit_request_from_v0(conversion_context, request) {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(error.into()));
                     return None;
                 }
             };
-            let semantic_fingerprint = match semantic_commit_fingerprint_sha256(&request) {
+            let semantic_fingerprint = match semantic_commit_fingerprint(&request) {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
@@ -492,29 +496,38 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             ) {
                 return None;
             }
-            Some(CandidateCoreRequest { request })
+            Some(CandidateCoreRequest {
+                request,
+                fingerprint_source: CommitFingerprintSource::ComputeFromRequest,
+            })
         }
         NamespaceMutationCandidate::Planned(planned) => {
             if let Err(error) = validate_commit_id(&planned.commit_request.commit_id) {
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let request = match commit_request_from_v0_with_semantic_fingerprint(
-                conversion_context,
-                planned.commit_request,
-                planned.semantic_commit_fingerprint_sha256,
-            ) {
+            let trusted_fingerprint = planned.semantic_commit_fingerprint;
+            let request = match commit_request_from_v0(conversion_context, planned.commit_request) {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(error.into()));
                     return None;
                 }
             };
-            let semantic_fingerprint = match semantic_commit_fingerprint_sha256(&request) {
-                Ok(value) => value,
-                Err(error) => {
-                    outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
-                    return None;
+            let (semantic_fingerprint, fingerprint_source) = match trusted_fingerprint {
+                Some(fingerprint) => (
+                    fingerprint.clone(),
+                    CommitFingerprintSource::TrustedPrecomputed(fingerprint),
+                ),
+                None => {
+                    let fingerprint = match semantic_commit_fingerprint(&request) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
+                            return None;
+                        }
+                    };
+                    (fingerprint, CommitFingerprintSource::ComputeFromRequest)
                 }
             };
             if !record_primary_request_or_complete_idempotent(
@@ -529,15 +542,17 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             ) {
                 return None;
             }
-            Some(CandidateCoreRequest { request })
+            Some(CandidateCoreRequest {
+                request,
+                fingerprint_source,
+            })
         }
         NamespaceMutationCandidate::Path(intent) => {
             if let Err(error) = validate_commit_id(intent.commit_id()) {
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let semantic_fingerprint = match intent.semantic_commit_fingerprint_sha256(namespace_id)
-            {
+            let semantic_fingerprint = match intent.semantic_commit_fingerprint(namespace_id) {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(error));
@@ -571,18 +586,19 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                     return None;
                 }
             };
-            let request = match commit_request_from_v0_with_semantic_fingerprint(
-                conversion_context,
-                planned.commit_request,
-                Some(planned.semantic_commit_fingerprint_sha256),
-            ) {
+            let request = match commit_request_from_v0(conversion_context, planned.commit_request) {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(error.into()));
                     return None;
                 }
             };
-            Some(CandidateCoreRequest { request })
+            Some(CandidateCoreRequest {
+                request,
+                fingerprint_source: CommitFingerprintSource::TrustedPrecomputed(
+                    planned.semantic_commit_fingerprint,
+                ),
+            })
         }
     }
 }
@@ -602,11 +618,11 @@ fn record_primary_request_or_complete_idempotent(
     aliases: &mut Vec<(usize, usize)>,
     index: usize,
     commit_id: &CommitId,
-    semantic_commit_fingerprint: &str,
+    semantic_commit_fingerprint: &SemanticCommitFingerprint,
 ) -> bool {
     if let Some(existing) = find_commit_receipt(visible_metadata_state, commit_id) {
         outcomes[index] = Some(
-            if existing.semantic_commit_fingerprint_sha256 != semantic_commit_fingerprint {
+            if existing.semantic_commit_fingerprint_sha256 != semantic_commit_fingerprint.as_str() {
                 Err(CoreError::CommitIdReuseConflict(commit_id.to_string()))
             } else {
                 Ok(commit_response_from_commit_receipt(namespace_id, existing))
@@ -615,7 +631,7 @@ fn record_primary_request_or_complete_idempotent(
         return false;
     }
     if let Some(existing) = in_batch_requests.get(commit_id) {
-        if existing.semantic_commit_fingerprint_sha256 != semantic_commit_fingerprint {
+        if existing.semantic_commit_fingerprint != *semantic_commit_fingerprint {
             outcomes[index] = Some(Err(CoreError::CommitIdReuseConflict(commit_id.to_string())));
         } else {
             aliases.push((index, existing.primary_index));
@@ -626,7 +642,7 @@ fn record_primary_request_or_complete_idempotent(
         commit_id.clone(),
         InBatchRequest {
             primary_index: index,
-            semantic_commit_fingerprint_sha256: semantic_commit_fingerprint.to_owned(),
+            semantic_commit_fingerprint: semantic_commit_fingerprint.clone(),
         },
     );
     true
@@ -677,82 +693,6 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
         through_seq: basis.head.seq,
         changes,
     })
-}
-
-fn derive_commit_results(
-    ops: &[CommitOp],
-    allocated_inode_ids: &[InodeId],
-    resolved_restore_content_refs: &[Option<ContentRef>],
-) -> Vec<CommitOpResult> {
-    let mut allocated = allocated_inode_ids.iter().copied();
-    ops.iter()
-        .enumerate()
-        .map(|(index, op)| {
-            let op_index = u32::try_from(index).expect("commit op index should fit in u32");
-            match op {
-                CommitOp::CreateDir { .. } => CommitOpResult::CreateDir {
-                    op_index,
-                    inode_id: allocated
-                        .next()
-                        .expect("allocated inode ids should cover create ops"),
-                },
-                CommitOp::CreateFile { content_ref, .. } => CommitOpResult::CreateFile {
-                    op_index,
-                    inode_id: allocated
-                        .next()
-                        .expect("allocated inode ids should cover create ops"),
-                    revision_no: loon_api::RevisionNo(1),
-                    content_ref: content_ref.clone(),
-                },
-                CommitOp::ReplaceFile {
-                    inode_id,
-                    base_revision,
-                    content_ref,
-                } => CommitOpResult::ReplaceFile {
-                    op_index,
-                    inode_id: *inode_id,
-                    revision_no: loon_api::RevisionNo(
-                        base_revision
-                            .0
-                            .checked_add(1)
-                            .expect("replace_file revision increment validated"),
-                    ),
-                    content_ref: content_ref.clone(),
-                },
-                CommitOp::RestoreRevision {
-                    inode_id,
-                    source_revision,
-                    base_revision,
-                } => CommitOpResult::RestoreRevision {
-                    op_index,
-                    inode_id: *inode_id,
-                    source_revision_no: *source_revision,
-                    revision_no: loon_api::RevisionNo(
-                        base_revision
-                            .0
-                            .checked_add(1)
-                            .expect("restore_revision increment validated"),
-                    ),
-                    content_ref: resolved_restore_content_refs[index]
-                        .as_ref()
-                        .expect("resolved restore content ref should be present")
-                        .clone(),
-                },
-                CommitOp::DeleteFile { inode_id } => CommitOpResult::DeleteFile {
-                    op_index,
-                    inode_id: *inode_id,
-                },
-                CommitOp::Rename { inode_id, .. } => CommitOpResult::Rename {
-                    op_index,
-                    inode_id: *inode_id,
-                },
-                CommitOp::DeleteSubtree { root_inode } => CommitOpResult::DeleteSubtree {
-                    op_index,
-                    root_inode: *root_inode,
-                },
-            }
-        })
-        .collect()
 }
 
 fn validate_commit_content_references<S: ObjectStore + ?Sized>(

@@ -1,3 +1,4 @@
+use crate::commit::SemanticCommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, CoreErrorKind};
 use crate::services::PutFileBehavior;
@@ -42,10 +43,10 @@ impl PathMutationIntent {
         }
     }
 
-    pub fn semantic_commit_fingerprint_sha256(
+    pub fn semantic_commit_fingerprint(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<String, CoreError> {
+    ) -> Result<SemanticCommitFingerprint, CoreError> {
         crate::services::semantic_commit_fingerprint_for_path_intent(namespace_id, self)
     }
 }
@@ -53,14 +54,14 @@ impl PathMutationIntent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedPathMutation {
     pub commit_id: CommitId,
-    pub semantic_commit_fingerprint_sha256: String,
+    pub semantic_commit_fingerprint: SemanticCommitFingerprint,
     pub commit_request: ApiCommitRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedNamespaceMutation {
     pub commit_request: ApiCommitRequest,
-    pub semantic_commit_fingerprint_sha256: Option<String>,
+    pub semantic_commit_fingerprint: Option<SemanticCommitFingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

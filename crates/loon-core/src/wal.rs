@@ -20,7 +20,6 @@ pub struct PreparedWalSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalBuildError {
     EmptyWriterVersion,
-    WalWriteNotRequired,
     EmptySegment,
     NamespaceMismatch {
         request: NamespaceId,
@@ -29,10 +28,6 @@ pub enum WalBuildError {
     BaseHeadSeqMismatch {
         request: ChangeSeq,
         plan: ChangeSeq,
-    },
-    AllocatedInodeCountMismatch {
-        request_create_ops: usize,
-        plan_allocated_count: usize,
     },
     NonContiguousSeq {
         expected: ChangeSeq,
@@ -397,8 +392,10 @@ fn push_invariant(checked_invariants: &mut Vec<String>, invariant: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{CommitOp, CommitPlan, CommitRequest, Precondition, PreparedCommit};
-    use loon_api::{v0::CommitOpResult, CommitId, FenceToken};
+    use crate::commit::{
+        materialize_commit, CommitOp, CommitPlan, CommitRequest, Precondition, PreparedCommit,
+    };
+    use loon_api::{CommitId, FenceToken};
 
     #[test]
     fn build_wal_record_payload_matches_segment_record_payload() {
@@ -409,7 +406,6 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(0),
-            semantic_commit_fingerprint_sha256: None,
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
@@ -426,20 +422,11 @@ mod tests {
             allocated_inode_ids: vec![InodeId(2)],
             resolved_restore_content_refs: vec![None],
             resulting_next_inode_id: InodeId(3),
-            durable_content_required: false,
-            wal_object_must_be_written: true,
-            head_cas_must_succeed: true,
             metadata_preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-        let record = MaterializedCommit {
-            prepared,
-            results: vec![CommitOpResult::CreateDir {
-                op_index: 0,
-                inode_id: InodeId(2),
-            }],
-        };
+        let record = materialize_commit(prepared).expect("materialize commit");
 
         let segment = prepare_wal_segment(
             namespace_id,

@@ -1,10 +1,10 @@
 use crate::config::ServerConfig;
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
-use loon_api::{CommitId, FenceToken, NamespaceId};
+use loon_api::{CommitId, NamespaceId};
 use loon_core::{
     commit::{
-        commit_request_from_v0, commit_request_from_v0_with_semantic_fingerprint,
-        semantic_commit_fingerprint_sha256, CommitExecutionContext, CommitHeadPublishError,
+        semantic_commit_fingerprint_for_v0_request, CommitHeadPublishError,
+        SemanticCommitFingerprint,
     },
     publish_namespace_mutations_batch, CoreError, MutationContext, NamespaceMutationCandidate,
     PathMutationIntent, PlannedNamespaceMutation,
@@ -110,7 +110,7 @@ struct BatchCandidate {
 }
 
 struct InFlightRequest {
-    fingerprint: String,
+    fingerprint: SemanticCommitFingerprint,
     waiters: Vec<oneshot::Sender<CommitResult>>,
 }
 
@@ -131,11 +131,7 @@ impl NamespacePublisher {
 
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
         let commit_id = candidate_commit_id(&candidate).clone();
-        let fingerprint = candidate_semantic_commit_fingerprint(
-            &self.namespace_id,
-            &self.config.writer_id,
-            &candidate,
-        )?;
+        let fingerprint = candidate_semantic_commit_fingerprint(&self.namespace_id, &candidate)?;
         let (sender, receiver) = oneshot::channel();
         self.admit(commit_id, candidate, fingerprint, sender)?;
         receiver
@@ -147,7 +143,7 @@ impl NamespacePublisher {
         &self,
         commit_id: CommitId,
         candidate: NamespaceMutationCandidate,
-        fingerprint: String,
+        fingerprint: SemanticCommitFingerprint,
         waiter: oneshot::Sender<CommitResult>,
     ) -> Result<(), CoreError> {
         let mut should_spawn = false;
@@ -372,44 +368,24 @@ fn candidate_commit_id(candidate: &NamespaceMutationCandidate) -> &CommitId {
 
 fn candidate_semantic_commit_fingerprint(
     namespace_id: &NamespaceId,
-    writer_id: &str,
     candidate: &NamespaceMutationCandidate,
-) -> Result<String, CoreError> {
+) -> Result<SemanticCommitFingerprint, CoreError> {
     match candidate {
         NamespaceMutationCandidate::Commit(request) => {
-            let request = commit_request_from_v0(
-                CommitExecutionContext {
-                    namespace_id: namespace_id.clone(),
-                    writer_id: writer_id.to_owned(),
-                    writer_fence_token: FenceToken(0),
-                },
-                request.clone(),
-            )?;
-            semantic_commit_fingerprint_sha256(&request)
+            semantic_commit_fingerprint_for_v0_request(namespace_id, request)
                 .map_err(|err| CoreError::Store(err.to_string()))
         }
         NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
-            semantic_commit_fingerprint_sha256: Some(source),
+            semantic_commit_fingerprint: Some(source),
             ..
         }) => Ok(source.clone()),
         NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
             commit_request,
-            semantic_commit_fingerprint_sha256: None,
-        }) => {
-            let request = commit_request_from_v0_with_semantic_fingerprint(
-                CommitExecutionContext {
-                    namespace_id: namespace_id.clone(),
-                    writer_id: writer_id.to_owned(),
-                    writer_fence_token: FenceToken(0),
-                },
-                commit_request.clone(),
-                None,
-            )?;
-            semantic_commit_fingerprint_sha256(&request)
-                .map_err(|err| CoreError::Store(err.to_string()))
-        }
+            semantic_commit_fingerprint: None,
+        }) => semantic_commit_fingerprint_for_v0_request(namespace_id, commit_request)
+            .map_err(|err| CoreError::Store(err.to_string())),
         NamespaceMutationCandidate::Path(intent) => {
-            intent.semantic_commit_fingerprint_sha256(namespace_id)
+            intent.semantic_commit_fingerprint(namespace_id)
         }
     }
 }
@@ -596,11 +572,7 @@ mod tests {
     ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
         let commit_id = request.commit_id.clone();
         let candidate = NamespaceMutationCandidate::Commit(request);
-        let fingerprint = candidate_semantic_commit_fingerprint(
-            namespace_id,
-            &publisher.config.writer_id,
-            &candidate,
-        )?;
+        let fingerprint = candidate_semantic_commit_fingerprint(namespace_id, &candidate)?;
         let (sender, receiver) = oneshot::channel();
         publisher.admit(commit_id, candidate, fingerprint, sender)?;
         Ok(receiver)

@@ -13,15 +13,18 @@ mod ordered;
 mod prepared;
 mod publish;
 
-pub use self::api_adapter::{
-    commit_request_from_v0, commit_request_from_v0_with_semantic_fingerprint, CommitConversionError,
-};
+pub use self::api_adapter::{commit_request_from_v0, CommitConversionError};
 pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
-pub use self::identity::{semantic_commit_fingerprint_sha256, CommitFingerprintError};
+pub use self::identity::{
+    semantic_commit_fingerprint, semantic_commit_fingerprint_for_v0_request,
+    CommitFingerprintError, SemanticCommitFingerprint,
+};
 pub use self::ordered::build_commit_plan;
 pub(crate) use self::ordered::resolve_restore_content_refs;
 pub use self::prepared::{
-    CommitExecutionContext, CommitPrepareError, MaterializedCommit, PreparedCommit,
+    materialize_commit, CommitExecutionContext, CommitFingerprintSource,
+    CommitMaterializationError, CommitPrepareError, MaterializedCommit, MaterializedCommitOp,
+    PreparedCommit,
 };
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 
@@ -32,8 +35,6 @@ pub struct CommitRequest {
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     pub planned_head_seq: ChangeSeq,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_commit_fingerprint_sha256: Option<String>,
     pub ops: Vec<CommitOp>,
     pub preconditions: Vec<Precondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,9 +102,6 @@ pub struct CommitPlan {
     pub allocated_inode_ids: Vec<InodeId>,
     pub resolved_restore_content_refs: Vec<Option<ContentRef>>,
     pub resulting_next_inode_id: InodeId,
-    pub durable_content_required: bool,
-    pub wal_object_must_be_written: bool,
-    pub head_cas_must_succeed: bool,
     pub metadata_preconditions: Vec<Precondition>,
     pub checked_invariants: Vec<String>,
 }

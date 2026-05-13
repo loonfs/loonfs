@@ -1,13 +1,13 @@
 use super::frame::validate_commit_request_frame;
+use super::prepared::materialize_commit_op;
 use super::{
-    push_unique_invariant, CommitOp, CommitPlan, CommitRequest, CommitValidationContext,
-    CommitValidationError,
+    push_unique_invariant, CommitMaterializationError, CommitOp, CommitPlan, CommitRequest,
+    CommitValidationContext, CommitValidationError,
 };
 use crate::invariants::INVARIANTS;
 use crate::metadata::MetadataState;
 use loon_api::{
     name_key_for_display_name, ChangeSeq, ContentRef, InodeId, InodeKind, NamePolicy, RevisionNo,
-    WalOp,
 };
 use std::collections::BTreeMap;
 
@@ -93,14 +93,6 @@ pub fn build_commit_plan(
         &mut checked_invariants,
     )?;
 
-    let durable_content_required = request.ops.iter().any(|op| {
-        matches!(
-            op,
-            CommitOp::CreateFile { .. }
-                | CommitOp::ReplaceFile { .. }
-                | CommitOp::RestoreRevision { .. }
-        )
-    });
     if !shape.allocated_inode_ids.is_empty() {
         push_unique_invariant(
             &mut checked_invariants,
@@ -146,9 +138,6 @@ pub fn build_commit_plan(
         allocated_inode_ids: shape.allocated_inode_ids,
         resolved_restore_content_refs,
         resulting_next_inode_id: shape.resulting_next_inode_id,
-        durable_content_required,
-        wal_object_must_be_written: true,
-        head_cas_must_succeed: true,
         metadata_preconditions: request.preconditions.clone(),
         checked_invariants,
     })
@@ -357,12 +346,14 @@ fn validate_metadata_preconditions(
         let applied_metadata = ephemeral_metadata_state
             .apply_committed_wal_ops(
                 committed_seq,
-                &[materialize_simulated_wal_op(
+                &[materialize_commit_op(
                     op,
                     op_index,
                     resolved_restore_content_ref.as_ref(),
                     &mut allocated_inode_ids,
-                )?],
+                )
+                .map_err(|err| materialization_error_to_validation_error(err, op))?
+                .wal_op],
             )
             .expect("validated commit ops should always apply into ephemeral metadata state");
         ephemeral_metadata_state = applied_metadata.metadata_state;
@@ -371,84 +362,47 @@ fn validate_metadata_preconditions(
     Ok(resolved_restore_content_refs)
 }
 
-fn materialize_simulated_wal_op(
+fn materialization_error_to_validation_error(
+    error: CommitMaterializationError,
     op: &CommitOp,
-    op_index: u32,
-    resolved_restore_content_ref: Option<&ContentRef>,
-    allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
-) -> Result<WalOp, CommitValidationError> {
-    Ok(match op {
-        CommitOp::CreateDir {
-            parent_inode,
-            display_name,
-        } => WalOp::CreateDir {
-            op_index,
-            inode_id: allocated_inode_ids
-                .next()
-                .ok_or(CommitValidationError::NextInodeOverflow)?,
-            parent_inode: *parent_inode,
-            display_name: display_name.clone(),
+) -> CommitValidationError {
+    match (error, op) {
+        (
+            CommitMaterializationError::MissingResolvedRestoreContentRef { .. },
+            CommitOp::RestoreRevision {
+                inode_id,
+                source_revision,
+                ..
+            },
+        ) => CommitValidationError::RestoreRevisionSourceRevisionMissing {
+            inode_id: *inode_id,
+            source_revision: *source_revision,
         },
-        CommitOp::CreateFile {
-            parent_inode,
-            display_name,
-            content_ref,
-        } => WalOp::CreateFile {
-            op_index,
-            inode_id: allocated_inode_ids
-                .next()
-                .ok_or(CommitValidationError::NextInodeOverflow)?,
-            parent_inode: *parent_inode,
-            display_name: display_name.clone(),
-            content_ref: content_ref.clone(),
-        },
-        CommitOp::ReplaceFile {
-            inode_id,
-            base_revision,
-            content_ref,
-        } => WalOp::ReplaceFile {
-            op_index,
+        (
+            CommitMaterializationError::ReplaceRevisionOverflow { .. },
+            CommitOp::ReplaceFile {
+                inode_id,
+                base_revision,
+                ..
+            },
+        ) => CommitValidationError::ReplaceFileRevisionOverflow {
             inode_id: *inode_id,
             base_revision: *base_revision,
-            content_ref: content_ref.clone(),
         },
-        CommitOp::RestoreRevision {
-            inode_id,
-            source_revision,
-            base_revision,
-        } => WalOp::RestoreRevision {
-            op_index,
+        (
+            CommitMaterializationError::RestoreRevisionOverflow { .. },
+            CommitOp::RestoreRevision {
+                inode_id,
+                base_revision,
+                ..
+            },
+        ) => CommitValidationError::RestoreRevisionOverflow {
             inode_id: *inode_id,
-            source_revision_no: *source_revision,
             base_revision: *base_revision,
-            content_ref: resolved_restore_content_ref
-                .ok_or(
-                    CommitValidationError::RestoreRevisionSourceRevisionMissing {
-                        inode_id: *inode_id,
-                        source_revision: *source_revision,
-                    },
-                )?
-                .clone(),
         },
-        CommitOp::DeleteFile { inode_id } => WalOp::DeleteFile {
-            op_index,
-            inode_id: *inode_id,
-        },
-        CommitOp::Rename {
-            inode_id,
-            new_parent_inode,
-            new_display_name,
-        } => WalOp::Rename {
-            op_index,
-            inode_id: *inode_id,
-            new_parent_inode: *new_parent_inode,
-            new_display_name: new_display_name.clone(),
-        },
-        CommitOp::DeleteSubtree { root_inode } => WalOp::DeleteSubtree {
-            op_index,
-            root_inode: *root_inode,
-        },
-    })
+        (CommitMaterializationError::OpIndexOverflow, _) => CommitValidationError::OpIndexOverflow,
+        _ => CommitValidationError::NextInodeOverflow,
+    }
 }
 
 fn validate_child_name_absent(
