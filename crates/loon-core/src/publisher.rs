@@ -59,15 +59,8 @@ pub struct PlannedPathMutation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedNamespaceMutation {
-    pub commit_request: ApiCommitRequest,
-    pub semantic_commit_fingerprint: Option<SemanticCommitFingerprint>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceMutationCandidate {
     Commit(ApiCommitRequest),
-    Planned(PlannedNamespaceMutation),
     Path(PathMutationIntent),
 }
 

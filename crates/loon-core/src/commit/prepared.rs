@@ -16,7 +16,7 @@ pub struct CommitExecutionContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommitFingerprintSource {
+pub(crate) enum CommitFingerprintSource {
     ComputeFromRequest,
     TrustedPrecomputed(SemanticCommitFingerprint),
 }
@@ -86,19 +86,7 @@ impl PreparedCommit {
         Self::prepare(request, plan, CommitFingerprintSource::ComputeFromRequest)
     }
 
-    pub fn new_with_fingerprint(
-        request: CommitRequest,
-        plan: CommitPlan,
-        fingerprint: SemanticCommitFingerprint,
-    ) -> Result<Self, CommitPrepareError> {
-        Self::prepare(
-            request,
-            plan,
-            CommitFingerprintSource::TrustedPrecomputed(fingerprint),
-        )
-    }
-
-    pub fn prepare(
+    pub(crate) fn prepare(
         request: CommitRequest,
         plan: CommitPlan,
         fingerprint_source: CommitFingerprintSource,
@@ -385,8 +373,12 @@ mod tests {
     #[test]
     fn prepared_commit_uses_trusted_precomputed_fingerprint() {
         let fingerprint = SemanticCommitFingerprint::new_unchecked("trusted".to_owned());
-        let prepared = PreparedCommit::new_with_fingerprint(request(), plan(), fingerprint.clone())
-            .expect("prepare commit");
+        let prepared = PreparedCommit::prepare(
+            request(),
+            plan(),
+            CommitFingerprintSource::TrustedPrecomputed(fingerprint.clone()),
+        )
+        .expect("prepare commit");
 
         assert_eq!(prepared.semantic_commit_fingerprint, fingerprint);
     }

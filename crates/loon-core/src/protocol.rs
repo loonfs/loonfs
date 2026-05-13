@@ -501,52 +501,6 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 fingerprint_source: CommitFingerprintSource::ComputeFromRequest,
             })
         }
-        NamespaceMutationCandidate::Planned(planned) => {
-            if let Err(error) = validate_commit_id(&planned.commit_request.commit_id) {
-                outcomes[index] = Some(Err(error));
-                return None;
-            }
-            let trusted_fingerprint = planned.semantic_commit_fingerprint;
-            let request = match commit_request_from_v0(conversion_context, planned.commit_request) {
-                Ok(value) => value,
-                Err(error) => {
-                    outcomes[index] = Some(Err(error.into()));
-                    return None;
-                }
-            };
-            let (semantic_fingerprint, fingerprint_source) = match trusted_fingerprint {
-                Some(fingerprint) => (
-                    fingerprint.clone(),
-                    CommitFingerprintSource::TrustedPrecomputed(fingerprint),
-                ),
-                None => {
-                    let fingerprint = match semantic_commit_fingerprint(&request) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
-                            return None;
-                        }
-                    };
-                    (fingerprint, CommitFingerprintSource::ComputeFromRequest)
-                }
-            };
-            if !record_primary_request_or_complete_idempotent(
-                namespace_id,
-                &basis.metadata_state,
-                outcomes,
-                in_batch_requests,
-                aliases,
-                index,
-                &request.commit_id,
-                &semantic_fingerprint,
-            ) {
-                return None;
-            }
-            Some(CandidateCoreRequest {
-                request,
-                fingerprint_source,
-            })
-        }
         NamespaceMutationCandidate::Path(intent) => {
             if let Err(error) = validate_commit_id(intent.commit_id()) {
                 outcomes[index] = Some(Err(error));

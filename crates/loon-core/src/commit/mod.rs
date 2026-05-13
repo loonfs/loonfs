@@ -21,10 +21,10 @@ pub use self::identity::{
 };
 pub use self::ordered::build_commit_plan;
 pub(crate) use self::ordered::resolve_restore_content_refs;
+pub(crate) use self::prepared::CommitFingerprintSource;
 pub use self::prepared::{
-    materialize_commit, CommitExecutionContext, CommitFingerprintSource,
-    CommitMaterializationError, CommitPrepareError, MaterializedCommit, MaterializedCommitOp,
-    PreparedCommit,
+    materialize_commit, CommitExecutionContext, CommitMaterializationError, CommitPrepareError,
+    MaterializedCommit, MaterializedCommitOp, PreparedCommit,
 };
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 

@@ -10,7 +10,7 @@ const SEMANTIC_CORE_COMMIT_DOMAIN: &str = "loonfs.core.commit.semantic.v0";
 pub struct SemanticCommitFingerprint(String);
 
 impl SemanticCommitFingerprint {
-    pub fn new_unchecked(value: String) -> Self {
+    pub(crate) fn new_unchecked(value: String) -> Self {
         Self(value)
     }
 
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_request_fingerprint_matches_core_request_fingerprint() {
+    fn v0_semantic_fingerprint_matches_core_semantic_fingerprint() {
         let namespace_id = NamespaceId::from("demo");
         let api_request = api_v0::CommitRequest {
             commit_id: CommitId::from("commit-a"),

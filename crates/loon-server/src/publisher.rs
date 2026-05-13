@@ -7,7 +7,7 @@ use loon_core::{
         SemanticCommitFingerprint,
     },
     publish_namespace_mutations_batch, CoreError, MutationContext, NamespaceMutationCandidate,
-    PathMutationIntent, PlannedNamespaceMutation,
+    PathMutationIntent,
 };
 use loon_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -359,9 +359,6 @@ fn is_head_publish_stale(result: &CommitResult) -> bool {
 fn candidate_commit_id(candidate: &NamespaceMutationCandidate) -> &CommitId {
     match candidate {
         NamespaceMutationCandidate::Commit(request) => &request.commit_id,
-        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
-            commit_request, ..
-        }) => &commit_request.commit_id,
         NamespaceMutationCandidate::Path(intent) => intent.commit_id(),
     }
 }
@@ -375,15 +372,6 @@ fn candidate_semantic_commit_fingerprint(
             semantic_commit_fingerprint_for_v0_request(namespace_id, request)
                 .map_err(|err| CoreError::Store(err.to_string()))
         }
-        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
-            semantic_commit_fingerprint: Some(source),
-            ..
-        }) => Ok(source.clone()),
-        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
-            commit_request,
-            semantic_commit_fingerprint: None,
-        }) => semantic_commit_fingerprint_for_v0_request(namespace_id, commit_request)
-            .map_err(|err| CoreError::Store(err.to_string())),
         NamespaceMutationCandidate::Path(intent) => {
             intent.semantic_commit_fingerprint(namespace_id)
         }
