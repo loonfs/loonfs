@@ -359,8 +359,12 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> CoreErrorKind 
         CommitHeadPublishError::EmptyWriterVersion
         | CommitHeadPublishError::EmptyExpectedHeadEtag
         | CommitHeadPublishError::NamespaceMismatch { .. }
-        | CommitHeadPublishError::PlanApplyAfterSeqBeforeHead { .. }
-        | CommitHeadPublishError::PlanAssignedSeqNotAfterHead { .. }
+        | CommitHeadPublishError::WalSegmentNamespaceMismatch { .. }
+        | CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch { .. }
+        | CommitHeadPublishError::WalSegmentStartSeqMismatch { .. }
+        | CommitHeadPublishError::WalSegmentEndSeqMismatch { .. }
+        | CommitHeadPublishError::EmptyWalSegment
+        | CommitHeadPublishError::SeqOverflow
         | CommitHeadPublishError::Codec(_)
         | CommitHeadPublishError::Store(_) => CoreErrorKind::ServerError,
     }

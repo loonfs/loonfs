@@ -310,14 +310,24 @@ pub enum CommitHeadPublishError {
         head: NamespaceId,
         plan: NamespaceId,
     },
-    PlanApplyAfterSeqBeforeHead {
-        head: ChangeSeq,
-        plan: ChangeSeq,
+    WalSegmentNamespaceMismatch {
+        head: NamespaceId,
+        wal: NamespaceId,
     },
-    PlanAssignedSeqNotAfterHead {
-        head: ChangeSeq,
-        plan: ChangeSeq,
+    WalSegmentBaseHeadSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
     },
+    WalSegmentStartSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    WalSegmentEndSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    EmptyWalSegment,
+    SeqOverflow,
     StaleHead,
     Codec(String),
     Store(String),

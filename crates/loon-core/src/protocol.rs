@@ -411,12 +411,8 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         .expect("non-empty accepted records")
         .prepared
         .plan;
-    let head_publish = prepare_commit_head_publish(
-        &basis.head,
-        last_plan,
-        wal.envelope.pointer(wal.object_key.clone()),
-        &context.writer_version,
-    );
+    let head_publish =
+        prepare_commit_head_publish(&basis.head, last_plan, &wal, &context.writer_version);
     let head_publish = match head_publish {
         Ok(value) => value,
         Err(error) => {
