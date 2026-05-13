@@ -307,6 +307,7 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::PathNotFound => "path_not_found",
         CoreErrorKind::RevisionNotFound => "revision_not_found",
         CoreErrorKind::PathConflict => "path_conflict",
+        CoreErrorKind::DirectoryNotEmpty => "directory_not_empty",
         CoreErrorKind::StaleHead => "stale_head",
         CoreErrorKind::StaleRevision => "stale_revision",
         CoreErrorKind::TombstoneConflict => "tombstone_conflict",

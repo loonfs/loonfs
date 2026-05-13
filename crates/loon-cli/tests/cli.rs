@@ -156,7 +156,7 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 
     let rm_dir = harness.run(&["--json", "rm", "/docs"]);
     assert_failure(&rm_dir);
-    assert_eq!(json_error(&rm_dir)["code"], "path_conflict");
+    assert_eq!(json_error(&rm_dir)["code"], "directory_not_empty");
 
     let rm = harness.run(&["--json", "rm", "/docs/final.txt"]);
     assert_success(&rm);

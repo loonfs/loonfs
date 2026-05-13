@@ -1,6 +1,5 @@
-use super::{CommitRequest, CommitValidationContext, CommitValidationError, Precondition};
+use super::{CommitRequest, CommitValidationContext, CommitValidationError};
 use crate::namespace::head_and_lease_fence_tokens_agree;
-use loon_api::ChangeSeq;
 
 pub(super) fn validate_commit_request_frame(
     request: &CommitRequest,
@@ -27,8 +26,6 @@ pub(super) fn validate_commit_request_frame(
         });
     }
 
-    validate_head_seq_preconditions(&request.preconditions, context.head.seq)?;
-
     if request.writer_fence_token != context.head.active_fence_token {
         return Err(CommitValidationError::StaleWriterFenceToken {
             active: context.head.active_fence_token,
@@ -48,24 +45,6 @@ pub(super) fn validate_commit_request_frame(
             lease_expires_at_ms: context.lease.lease_expires_at_ms,
             now_ms: context.now_ms,
         });
-    }
-
-    Ok(())
-}
-
-fn validate_head_seq_preconditions(
-    preconditions: &[Precondition],
-    current_head_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    for precondition in preconditions {
-        if let Precondition::HeadSeqIs(actual) = precondition {
-            if *actual != current_head_seq {
-                return Err(CommitValidationError::ConflictingHeadSeqPrecondition {
-                    expected: current_head_seq,
-                    actual: *actual,
-                });
-            }
-        }
     }
 
     Ok(())

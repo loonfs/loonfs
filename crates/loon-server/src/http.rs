@@ -548,6 +548,7 @@ impl ApiResponseError {
             CoreErrorKind::PathNotFound => (StatusCode::NOT_FOUND, "path_not_found"),
             CoreErrorKind::RevisionNotFound => (StatusCode::CONFLICT, "revision_not_found"),
             CoreErrorKind::PathConflict => (StatusCode::CONFLICT, "path_conflict"),
+            CoreErrorKind::DirectoryNotEmpty => (StatusCode::CONFLICT, "directory_not_empty"),
             CoreErrorKind::StaleHead => (StatusCode::CONFLICT, "stale_head"),
             CoreErrorKind::StaleRevision => (StatusCode::CONFLICT, "stale_revision"),
             CoreErrorKind::TombstoneConflict => (StatusCode::CONFLICT, "tombstone_conflict"),
@@ -604,8 +605,7 @@ impl IntoResponse for ApiResponseError {
 mod tests {
     use super::{app_with_store, SharedStore};
     use crate::{ServerConfig, StoreConfig};
-    use loon_api::v0::{CommitOp, CommitPrecondition, CommitRequest};
-    use loon_api::{ChangeSeq, InodeId};
+    use loon_api::ChangeSeq;
     use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
     use loon_core::{bootstrap_namespace, delete_path, write_file_bytes, MutationContext};
     use loon_objectstore::fs::LocalFsStore;
@@ -899,47 +899,6 @@ mod tests {
                 .write_file_bytes(&target, b"race")
                 .expect("path write retries stale head");
             assert_eq!(result.committed_seq, ChangeSeq(1));
-        })
-        .await
-        .expect("join blocking task");
-
-        harness.server.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn http_explicit_stale_head_precondition_surfaces_as_409() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
-        let now_ms = now_ms();
-        bootstrap_namespace(
-            store.as_ref(),
-            &"demo".into(),
-            &context("server-writer", now_ms),
-            false,
-        )
-        .expect("bootstrap namespace");
-
-        let harness = start_server(store, temp_dir.path(), "server-writer").await;
-        tokio::task::spawn_blocking(move || {
-            let request = CommitRequest {
-                commit_id: loon_api::CommitId::from("stale-explicit"),
-                planned_head_seq: ChangeSeq(1),
-                preconditions: vec![CommitPrecondition::HeadSeqIs {
-                    expected_seq: ChangeSeq(1),
-                }],
-                ops: vec![CommitOp::CreateDir {
-                    parent_inode: InodeId(1),
-                    display_name: "late".to_owned(),
-                }],
-                message: None,
-                annotations: None,
-            };
-            assert_api_error(
-                harness.client.commit_operations("demo", &request),
-                409,
-                "stale_head",
-                None,
-            );
         })
         .await
         .expect("join blocking task");

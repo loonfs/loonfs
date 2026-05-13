@@ -21,23 +21,23 @@ pub fn prepare_commit_head_publish(
         });
     }
 
-    if plan.base_head_seq < current_head.seq {
-        return Err(CommitHeadPublishError::PlanBaseHeadSeqMismatch {
+    if plan.apply_after_seq < current_head.seq {
+        return Err(CommitHeadPublishError::PlanApplyAfterSeqBeforeHead {
             head: current_head.seq,
-            plan: plan.base_head_seq,
+            plan: plan.apply_after_seq,
         });
     }
 
-    if plan.next_seq <= current_head.seq {
-        return Err(CommitHeadPublishError::PlanNextSeqMismatch {
+    if plan.assigned_seq <= current_head.seq {
+        return Err(CommitHeadPublishError::PlanAssignedSeqNotAfterHead {
             head: current_head.seq,
-            plan: plan.next_seq,
+            plan: plan.assigned_seq,
         });
     }
 
     let resulting_head = HeadState {
         namespace_id: current_head.namespace_id.clone(),
-        seq: plan.next_seq,
+        seq: plan.assigned_seq,
         active_fence_token: current_head.active_fence_token,
         next_inode_id: plan.resulting_next_inode_id,
         name_policy: current_head.name_policy,

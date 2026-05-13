@@ -366,7 +366,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         match current_metadata_state.apply_committed_wal_record(&preview) {
             Ok(applied) => {
                 current_metadata_state = applied.metadata_state;
-                current_head.seq = plan.next_seq;
+                current_head.seq = plan.assigned_seq;
                 current_head.next_inode_id = plan.resulting_next_inode_id;
                 accepted.push((index, materialized));
             }

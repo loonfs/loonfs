@@ -126,9 +126,9 @@ pub fn prepare_wal_segment(
                     actual: payload_record.seq,
                 });
             }
-            if payload_record.base_head_seq != previous.seq {
+            if payload_record.apply_after_seq != previous.seq {
                 return Err(WalBuildError::BaseHeadSeqMismatch {
-                    request: payload_record.base_head_seq,
+                    request: payload_record.apply_after_seq,
                     plan: previous.seq,
                 });
             }
@@ -149,7 +149,7 @@ pub fn prepare_wal_segment(
         namespace_id,
         segment_id: segment_id.clone(),
         prev_visible_segment,
-        base_head_seq: payload_records[0].base_head_seq,
+        base_head_seq: payload_records[0].apply_after_seq,
         start_seq,
         end_seq,
         records: payload_records,
@@ -392,9 +392,7 @@ fn push_invariant(checked_invariants: &mut Vec<String>, invariant: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{
-        materialize_commit, CommitOp, CommitPlan, CommitRequest, Precondition, PreparedCommit,
-    };
+    use crate::commit::{materialize_commit, CommitOp, CommitPlan, CommitRequest, PreparedCommit};
     use loon_api::{CommitId, FenceToken};
 
     #[test]
@@ -405,24 +403,23 @@ mod tests {
             commit_id: CommitId::from("c_wal_payload"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(0),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
+            preconditions: Vec::new(),
             message: Some("create docs".to_owned()),
             annotations: None,
         };
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),
             commit_id: CommitId::from("c_wal_payload"),
-            base_head_seq: ChangeSeq(0),
-            next_seq: ChangeSeq(1),
+            apply_after_seq: ChangeSeq(0),
+            assigned_seq: ChangeSeq(1),
             allocated_inode_ids: vec![InodeId(2)],
             resolved_restore_content_refs: vec![None],
             resulting_next_inode_id: InodeId(3),
-            metadata_preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
+            metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");

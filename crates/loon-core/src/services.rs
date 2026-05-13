@@ -738,6 +738,31 @@ struct PathPlanningView<'a> {
     content_store_id: &'a ContentStoreId,
 }
 
+fn child_name_is_precondition(
+    view: &PathPlanningView<'_>,
+    resolved: &ResolvedVisiblePath,
+) -> Result<ApiCommitPrecondition, CoreError> {
+    let parent_inode = resolved
+        .parent_inode_id
+        .ok_or(CoreError::RootMutationForbidden)?;
+    Ok(ApiCommitPrecondition::ChildNameIs {
+        parent_inode,
+        name_key: name_key_for_display_name(view.head.name_policy, &resolved.display_name),
+        child_inode: resolved.inode_id,
+    })
+}
+
+fn child_name_absent_precondition(
+    view: &PathPlanningView<'_>,
+    parent_inode: InodeId,
+    display_name: &str,
+) -> ApiCommitPrecondition {
+    ApiCommitPrecondition::ChildNameAbsent {
+        parent_inode,
+        name_key: name_key_for_display_name(view.head.name_policy, display_name),
+    }
+}
+
 fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     absolute_path: &str,
@@ -765,9 +790,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
         &mut op_index,
     )?;
     let final_name = final_component(absolute_path)?;
-    let mut preconditions = vec![ApiCommitPrecondition::HeadSeqIs {
-        expected_seq: view.head.seq,
-    }];
+    let mut preconditions = Vec::new();
 
     match target {
         Ok(existing) => {
@@ -784,6 +807,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
                 .metadata_state
                 .latest_revision_head_at_seq(existing.inode_id, view.head.seq)
                 .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
+            preconditions.push(child_name_is_precondition(view, &existing)?);
             ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision_no: revision.revision_no,
@@ -803,20 +827,26 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
                 display_name: final_name.clone(),
                 content_ref,
             });
-            preconditions.push(ApiCommitPrecondition::ChildNameAbsent {
-                parent_inode: final_parent_inode,
-                name_key: name_key_for_display_name(view.head.name_policy, &final_name),
-            });
-            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: final_parent_inode,
-            });
+            if view
+                .metadata_state
+                .visible_inode(final_parent_inode, view.head.seq)
+                .is_some()
+            {
+                preconditions.push(child_name_absent_precondition(
+                    view,
+                    final_parent_inode,
+                    &final_name,
+                ));
+                preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                    inode_id: final_parent_inode,
+                });
+            }
         }
         Err(other) => return Err(other.into()),
     }
 
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        planned_head_seq: view.head.seq,
         ops,
         preconditions,
         message: None,
@@ -945,13 +975,16 @@ fn plan_delete_path(
             });
         }
     };
+    let mut preconditions = vec![child_name_is_precondition(view, &resolved)?];
+    if !recursive && resolved.inode_kind == InodeKind::Dir {
+        preconditions.push(ApiCommitPrecondition::DirectoryEmpty {
+            inode_id: resolved.inode_id,
+        });
+    }
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        planned_head_seq: view.head.seq,
         ops: vec![op],
-        preconditions: vec![ApiCommitPrecondition::HeadSeqIs {
-            expected_seq: view.head.seq,
-        }],
+        preconditions,
         message: None,
         annotations: None,
     })
@@ -977,15 +1010,21 @@ fn plan_move_path(
     }
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        planned_head_seq: view.head.seq,
         ops: vec![ApiCommitOp::Rename {
             inode_id: source.inode_id,
             new_parent_inode: target_parent,
-            new_display_name: target_name,
+            new_display_name: target_name.clone(),
         }],
-        preconditions: vec![ApiCommitPrecondition::HeadSeqIs {
-            expected_seq: view.head.seq,
-        }],
+        preconditions: vec![
+            child_name_is_precondition(view, &source)?,
+            child_name_absent_precondition(view, target_parent, &target_name),
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: source.inode_id,
+            },
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: target_parent,
+            },
+        ],
         message: None,
         annotations: None,
     })
@@ -1026,23 +1065,23 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
 
     let target_parent = resolve_parent_directory(view.metadata_state, to_path, view.head.seq)?;
     let target_name = final_component(to_path)?;
-    let target_name_key = name_key_for_display_name(view.head.name_policy, &target_name);
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
-        planned_head_seq: view.head.seq,
         ops: vec![ApiCommitOp::CreateFile {
             parent_inode: target_parent,
             display_name: target_name.clone(),
             content_ref: revision.content_ref,
         }],
         preconditions: vec![
-            ApiCommitPrecondition::HeadSeqIs {
-                expected_seq: view.head.seq,
+            child_name_is_precondition(view, &source)?,
+            ApiCommitPrecondition::InodeRevisionIs {
+                inode_id: source.inode_id,
+                revision_no: revision.revision_no,
             },
-            ApiCommitPrecondition::ChildNameAbsent {
-                parent_inode: target_parent,
-                name_key: target_name_key,
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: source.inode_id,
             },
+            child_name_absent_precondition(view, target_parent, &target_name),
             ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: target_parent,
             },

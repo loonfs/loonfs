@@ -306,7 +306,7 @@ pub(super) fn materialize_commit_op(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{CommitOp, Precondition};
+    use crate::commit::CommitOp;
     use loon_api::{ChangeSeq, CommitId};
 
     fn request() -> CommitRequest {
@@ -315,12 +315,11 @@ mod tests {
             commit_id: CommitId::from("commit-a"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(0),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
+            preconditions: Vec::new(),
             message: None,
             annotations: None,
         }
@@ -330,12 +329,12 @@ mod tests {
         CommitPlan {
             namespace_id: NamespaceId::from("demo"),
             commit_id: CommitId::from("commit-a"),
-            base_head_seq: ChangeSeq(0),
-            next_seq: ChangeSeq(1),
+            apply_after_seq: ChangeSeq(0),
+            assigned_seq: ChangeSeq(1),
             allocated_inode_ids: vec![InodeId(2)],
             resolved_restore_content_refs: vec![None],
             resulting_next_inode_id: InodeId(3),
-            metadata_preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(0))],
+            metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         }
     }
@@ -363,9 +362,9 @@ mod tests {
     }
 
     #[test]
-    fn prepared_commit_allows_ephemeral_batch_base_seq() {
+    fn prepared_commit_allows_ephemeral_batch_apply_after_seq() {
         let mut plan = plan();
-        plan.base_head_seq = ChangeSeq(9);
+        plan.apply_after_seq = ChangeSeq(9);
 
         PreparedCommit::new(request(), plan).expect("prepare commit");
     }

@@ -40,7 +40,6 @@ pub struct CompleteUploadResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitRequest {
     pub commit_id: CommitId,
-    pub planned_head_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preconditions: Vec<CommitPrecondition>,
     pub ops: Vec<CommitOp>,
@@ -96,9 +95,6 @@ pub enum CommitOp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommitPrecondition {
-    HeadSeqIs {
-        expected_seq: ChangeSeq,
-    },
     InodeRevisionIs {
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -109,6 +105,14 @@ pub enum CommitPrecondition {
     ChildNameAbsent {
         parent_inode: InodeId,
         name_key: String,
+    },
+    ChildNameIs {
+        parent_inode: InodeId,
+        name_key: String,
+        child_inode: InodeId,
+    },
+    DirectoryEmpty {
+        inode_id: InodeId,
     },
 }
 

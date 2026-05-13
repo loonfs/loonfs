@@ -10,7 +10,6 @@ use loon_api::{
 };
 use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
-    Precondition,
 };
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
@@ -31,48 +30,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tempfile::tempdir;
-
-#[test]
-fn stale_head_precondition_is_rejected() {
-    let metadata_state = metadata_state_after(&[
-        vec![loon_api::WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![loon_api::WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-    ]);
-    let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
-    let request = CommitRequest {
-        namespace_id: namespace_id(),
-        commit_id: CommitId::from("stale-head"),
-        writer_id: "writer-a".to_owned(),
-        writer_fence_token: FenceToken(1),
-        planned_head_seq: ChangeSeq(2),
-        ops: vec![CommitOp::DeleteFile {
-            inode_id: InodeId(3),
-        }],
-        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
-        message: None,
-        annotations: None,
-    };
-
-    let error = build_commit_plan(&request, &context).expect_err("stale head");
-    assert!(matches!(
-        error,
-        CommitValidationError::ConflictingHeadSeqPrecondition {
-            expected: ChangeSeq(2),
-            actual: ChangeSeq(1),
-        }
-    ));
-}
 
 #[test]
 fn stale_revision_precondition_is_rejected() {
@@ -103,13 +60,12 @@ fn stale_revision_precondition_is_rejected() {
         commit_id: CommitId::from("stale-revision"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
-        planned_head_seq: ChangeSeq(3),
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
             content_ref: content_ref("content-3"),
         }],
-        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+        preconditions: Vec::new(),
         message: None,
         annotations: None,
     };
@@ -154,13 +110,12 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             commit_id: CommitId::from("create-under-tombstone"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(3),
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(2),
                 display_name: "new.txt".to_owned(),
                 content_ref: content_ref("content-2"),
             }],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            preconditions: Vec::new(),
             message: None,
             annotations: None,
         },
@@ -181,13 +136,12 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             commit_id: CommitId::from("replace-under-tombstone"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(3),
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
                 base_revision: RevisionNo(1),
                 content_ref: content_ref("content-2"),
             }],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            preconditions: Vec::new(),
             message: None,
             annotations: None,
         },
@@ -217,13 +171,12 @@ fn restore_revision_validation_rejects_missing_inode() {
         commit_id: CommitId::from("restore-missing-inode"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
-        planned_head_seq: ChangeSeq(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(99),
             source_revision: RevisionNo(1),
             base_revision: RevisionNo(1),
         }],
-        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
+        preconditions: Vec::new(),
         message: None,
         annotations: None,
     };
@@ -251,13 +204,12 @@ fn restore_revision_validation_rejects_non_file_target() {
         commit_id: CommitId::from("restore-non-file"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
-        planned_head_seq: ChangeSeq(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision: RevisionNo(1),
             base_revision: RevisionNo(1),
         }],
-        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
+        preconditions: Vec::new(),
         message: None,
         annotations: None,
     };
@@ -303,13 +255,12 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             commit_id: CommitId::from("restore-stale-base"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(3),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(1),
                 base_revision: RevisionNo(1),
             }],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            preconditions: Vec::new(),
             message: None,
             annotations: None,
         },
@@ -331,13 +282,12 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             commit_id: CommitId::from("restore-missing-source"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(3),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(99),
                 base_revision: RevisionNo(2),
             }],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            preconditions: Vec::new(),
             message: None,
             annotations: None,
         },
@@ -378,7 +328,6 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
             commit_id: CommitId::from("restore-same-request-source"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(2),
             ops: vec![
                 CommitOp::ReplaceFile {
                     inode_id: InodeId(3),
@@ -391,7 +340,7 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
                     base_revision: RevisionNo(2),
                 },
             ],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(2))],
+            preconditions: Vec::new(),
             message: None,
             annotations: None,
         },
@@ -435,7 +384,6 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
             commit_id: CommitId::from("restore-after-restore-same-request"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(3),
             ops: vec![
                 CommitOp::RestoreRevision {
                     inode_id: InodeId(3),
@@ -448,7 +396,7 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
                     base_revision: RevisionNo(3),
                 },
             ],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            preconditions: Vec::new(),
             message: None,
             annotations: None,
         },
@@ -493,13 +441,12 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             commit_id: CommitId::from("restore-under-tombstone"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
-            planned_head_seq: ChangeSeq(3),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(1),
                 base_revision: RevisionNo(1),
             }],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(3))],
+            preconditions: Vec::new(),
             message: None,
             annotations: None,
         },
@@ -554,13 +501,12 @@ fn restore_revision_overflow_is_rejected() {
         commit_id: CommitId::from("restore-overflow"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
-        planned_head_seq: ChangeSeq(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision: RevisionNo(u64::MAX),
             base_revision: RevisionNo(u64::MAX),
         }],
-        preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(1))],
+        preconditions: Vec::new(),
         message: None,
         annotations: None,
     };
@@ -739,7 +685,6 @@ fn commit_operations_reject_invalid_commit_id_before_wal_key_construction() {
         &namespace_id,
         ApiCommitRequest {
             commit_id: CommitId::from("bad/commit"),
-            planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -800,7 +745,6 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
         vec![
             ApiCommitRequest {
                 commit_id: CommitId::from("req-batch-a"),
-                planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
@@ -811,7 +755,6 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
             },
             ApiCommitRequest {
                 commit_id: CommitId::from("req-batch-b"),
-                planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
@@ -849,6 +792,143 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(changes.changes.len(), 2);
     assert_eq!(changes.changes[0].commit_id, CommitId::from("req-batch-a"));
     assert_eq!(changes.changes[1].commit_id, CommitId::from("req-batch-b"));
+}
+
+#[test]
+fn child_name_is_precondition_observes_earlier_batch_candidate() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/readme.txt",
+        b"hello",
+        &context,
+        Some("seed-child-name-is"),
+    )
+    .expect("seed file");
+    let docs_inode = resolve_path(&store, &namespace_id, "/docs")
+        .expect("resolve docs")
+        .inode_id;
+    let file_inode = resolve_path(&store, &namespace_id, "/docs/readme.txt")
+        .expect("resolve file")
+        .inode_id;
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            ApiCommitRequest {
+                commit_id: CommitId::from("move-before-child-name-check"),
+                preconditions: Vec::new(),
+                ops: vec![ApiCommitOp::Rename {
+                    inode_id: file_inode,
+                    new_parent_inode: docs_inode,
+                    new_display_name: "moved.txt".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+            ApiCommitRequest {
+                commit_id: CommitId::from("delete-with-stale-child-name"),
+                preconditions: vec![CommitPrecondition::ChildNameIs {
+                    parent_inode: docs_inode,
+                    name_key: loon_api::name_key_for_display_name(
+                        loon_api::NamePolicy::default(),
+                        "readme.txt",
+                    ),
+                    child_inode: file_inode,
+                }],
+                ops: vec![ApiCommitOp::DeleteFile {
+                    inode_id: file_inode,
+                }],
+                message: None,
+                annotations: None,
+            },
+        ],
+        &context,
+    );
+
+    assert_eq!(
+        responses[0].as_ref().expect("rename").committed_seq,
+        ChangeSeq(2)
+    );
+    let error = responses[1]
+        .as_ref()
+        .expect_err("stale child-name precondition");
+    assert_eq!(error.kind(), CoreErrorKind::PathNotFound);
+}
+
+#[test]
+fn directory_empty_precondition_observes_earlier_batch_candidate() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let seed = commit_operations(
+        &store,
+        &namespace_id,
+        ApiCommitRequest {
+            commit_id: CommitId::from("seed-empty-dir"),
+            preconditions: Vec::new(),
+            ops: vec![ApiCommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: "docs".to_owned(),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect("seed docs");
+    let docs_inode = match seed.results[0] {
+        loon_api::v0::CommitOpResult::CreateDir { inode_id, .. } => inode_id,
+        ref other => panic!("unexpected seed result: {other:?}"),
+    };
+    let content = store_bytes_as_content(&store, &namespace_id, b"child").expect("stage content");
+
+    let responses = commit_operations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            ApiCommitRequest {
+                commit_id: CommitId::from("create-child-before-empty-check"),
+                preconditions: Vec::new(),
+                ops: vec![ApiCommitOp::CreateFile {
+                    parent_inode: docs_inode,
+                    display_name: "child.txt".to_owned(),
+                    content_ref: content.content_ref,
+                }],
+                message: None,
+                annotations: None,
+            },
+            ApiCommitRequest {
+                commit_id: CommitId::from("delete-dir-with-stale-empty-check"),
+                preconditions: vec![CommitPrecondition::DirectoryEmpty {
+                    inode_id: docs_inode,
+                }],
+                ops: vec![ApiCommitOp::DeleteSubtree {
+                    root_inode: docs_inode,
+                }],
+                message: None,
+                annotations: None,
+            },
+        ],
+        &context,
+    );
+
+    assert_eq!(
+        responses[0].as_ref().expect("create child").committed_seq,
+        ChangeSeq(2)
+    );
+    let error = responses[1]
+        .as_ref()
+        .expect_err("directory empty precondition");
+    assert_eq!(error.kind(), CoreErrorKind::DirectoryNotEmpty);
 }
 
 #[test]
@@ -926,7 +1006,6 @@ fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
 
     let request = ApiCommitRequest {
         commit_id: CommitId::from("req-duplicate"),
-        planned_head_seq: ChangeSeq(0),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDir {
             parent_inode: InodeId(1),
@@ -973,7 +1052,6 @@ fn visible_commit_id_retry_aliases_across_writer_takeover() {
 
     let request = ApiCommitRequest {
         commit_id: CommitId::from("retry-across-writer"),
-        planned_head_seq: ChangeSeq(0),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDir {
             parent_inode: InodeId(1),
@@ -1015,7 +1093,6 @@ fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         vec![
             ApiCommitRequest {
                 commit_id: CommitId::from("req-conflict"),
-                planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
@@ -1026,7 +1103,6 @@ fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
             },
             ApiCommitRequest {
                 commit_id: CommitId::from("req-conflict"),
-                planned_head_seq: ChangeSeq(0),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
@@ -1577,10 +1653,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("restore-create"),
-            planned_head_seq: ChangeSeq(0),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(0),
-            }],
+            preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "restore.txt".to_owned(),
@@ -1603,10 +1676,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("restore-replace"),
-            planned_head_seq: ChangeSeq(1),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(1),
-            }],
+            preconditions: Vec::new(),
             ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(1),
@@ -1631,10 +1701,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("restore-missing-content"),
-            planned_head_seq: ChangeSeq(2),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(2),
-            }],
+            preconditions: Vec::new(),
             ops: vec![ApiCommitOp::RestoreRevision {
                 inode_id,
                 source_revision_no: RevisionNo(1),
@@ -1679,10 +1746,7 @@ fn metadata_only_commit_does_not_validate_content_store_refs() {
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("metadata-only-delete"),
-            planned_head_seq: ChangeSeq(1),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(1),
-            }],
+            preconditions: Vec::new(),
             ops: vec![ApiCommitOp::DeleteFile { inode_id }],
             message: None,
             annotations: None,
@@ -1711,10 +1775,7 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("create-missing-parent-missing-content"),
-            planned_head_seq: ChangeSeq(0),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(0),
-            }],
+            preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(99),
                 display_name: "missing.txt".to_owned(),
@@ -1758,10 +1819,7 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("replace-stale-missing-content"),
-            planned_head_seq: ChangeSeq(1),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(1),
-            }],
+            preconditions: Vec::new(),
             ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(99),
@@ -1805,10 +1863,7 @@ fn restore_revision_missing_source_is_revision_not_found() {
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("restore-missing-source"),
-            planned_head_seq: ChangeSeq(1),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(1),
-            }],
+            preconditions: Vec::new(),
             ops: vec![ApiCommitOp::RestoreRevision {
                 inode_id,
                 source_revision_no: RevisionNo(99),
@@ -1836,10 +1891,7 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("resolve-before-durable-check-create"),
-            planned_head_seq: ChangeSeq(0),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(0),
-            }],
+            preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "restore.txt".to_owned(),
@@ -1869,10 +1921,7 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
         &namespace_id(),
         ApiCommitRequest {
             commit_id: CommitId::from("resolve-before-durable-check-commit"),
-            planned_head_seq: ChangeSeq(1),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(1),
-            }],
+            preconditions: Vec::new(),
             ops: vec![
                 ApiCommitOp::ReplaceFile {
                     inode_id,
