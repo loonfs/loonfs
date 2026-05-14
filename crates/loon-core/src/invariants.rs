@@ -54,8 +54,8 @@ pub const BACKGROUND_WORK_QUEUE_SHARD_OBJECT_INVARIANTS: &[&str] = &[
 
 pub const BACKGROUND_WORK_QUEUE_MUTATION_INVARIANTS: &[&str] = &[
     "lost_enqueue_repair_enqueues_when_head_outpaces_progress",
-    "snapshot_repair_dedupe_key_is_namespace_scoped",
-    "snapshot_repair_claimed_job_gets_follow_up",
+    "checkpoint_repair_dedupe_key_is_namespace_scoped",
+    "checkpoint_repair_claimed_job_gets_follow_up",
     "broker_lease_takeover_increments_epoch",
     "active_broker_lease_required_for_shard_mutation",
     "claim_timeout_allows_steal",
@@ -66,7 +66,7 @@ pub const BACKGROUND_WORK_QUEUE_MUTATION_INVARIANTS: &[&str] = &[
 
 pub const BACKGROUND_WORK_CHECKPOINT_HEAD_PUBLISH_INVARIANTS: &[&str] = &[
     "checkpoint_publish_requires_verified_checkpoint",
-    "snapshot_hint_seq_advances_monotonically",
+    "checkpoint_hint_seq_advances_monotonically",
     "retention_floor_seq_advances_monotonically",
     "retention_floor_seq_requires_checkpoint_coverage",
     "retention_floor_seq_requires_derived_progress",
@@ -255,14 +255,14 @@ pub const INVARIANTS: &[&str] = &[
     "queue_shard_key_matches_shard_id",
     "queue_shard_cas_protects_updates",
     "checkpoint_publish_requires_verified_checkpoint",
-    "snapshot_hint_seq_advances_monotonically",
+    "checkpoint_hint_seq_advances_monotonically",
     "retention_floor_seq_advances_monotonically",
     "retention_floor_seq_requires_checkpoint_coverage",
     "retention_floor_seq_requires_derived_progress",
     "retention_floor_seq_respects_policy_gate",
     "lost_enqueue_repair_enqueues_when_head_outpaces_progress",
-    "snapshot_repair_dedupe_key_is_namespace_scoped",
-    "snapshot_repair_claimed_job_gets_follow_up",
+    "checkpoint_repair_dedupe_key_is_namespace_scoped",
+    "checkpoint_repair_claimed_job_gets_follow_up",
     "broker_lease_takeover_increments_epoch",
     "active_broker_lease_required_for_shard_mutation",
     "claim_timeout_allows_steal",

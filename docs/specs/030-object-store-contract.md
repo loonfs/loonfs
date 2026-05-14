@@ -31,8 +31,8 @@ The required durable object families and standard key patterns are:
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq}-{end_seq}-{segment_id}.cbor.zst` |
-| **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/manifest.json` |
-| **Checkpoint segments** | Immutable | Store verified checkpoint data. | `namespaces/{namespace_id}/snapshots/{checkpoint_seq}/tables/{family}-{segment_index}.sst.zst` |
+| **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced checkpoint data. | `namespaces/{namespace_id}/checkpoints/{checkpoint_seq}/manifest.json` |
+| **Checkpoint segments** | Immutable | Store verified checkpoint data. | `namespaces/{namespace_id}/checkpoints/{checkpoint_seq}/tables/{family}-{segment_index}.sst.zst` |
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
 
@@ -42,7 +42,7 @@ LoonFS uses distinct naming conventions for distinct surfaces:
 
 - Fixed object-store path segments use lowercase words or lowercase-kebab, e.g. `content-stores`, `commit-receipts`, and `control/uploads`.
 - Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, and `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`.
-- Durable work-class names use lowercase-kebab, e.g. `snapshot-builder`.
+- Durable work-class names use lowercase-kebab, e.g. `checkpoint-builder`.
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs; prefer lowercase kebab-case while preserving the namespace grammar.
 

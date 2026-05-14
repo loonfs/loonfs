@@ -257,7 +257,7 @@ pub fn fork_namespace<S: ObjectStore + ?Sized>(
         active_fence_token: FenceToken(0),
         next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
         name_policy: source_basis.head.name_policy,
-        snapshot_hint_seq: Some(fork_seq),
+        checkpoint_hint_seq: Some(fork_seq),
         retention_floor_seq: fork_seq,
         visible_wal_tip: None,
     };

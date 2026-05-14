@@ -100,7 +100,7 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
             })?;
 
     let (initial_head, initial_metadata_state) = if let Some(checkpoint_seq) =
-        loaded_head.envelope.state.snapshot_hint_seq
+        loaded_head.envelope.state.checkpoint_hint_seq
     {
         let materialized =
             load_verified_checkpoint_materialization(store, expected_namespace, checkpoint_seq)?;
@@ -145,7 +145,7 @@ fn ensure_reconstructed_head_matches(
         || current_head.seq != reconstructed.seq
         || current_head.next_inode_id != reconstructed.next_inode_id
         || current_head.name_policy != reconstructed.name_policy
-        || current_head.snapshot_hint_seq != reconstructed.snapshot_hint_seq
+        || current_head.checkpoint_hint_seq != reconstructed.checkpoint_hint_seq
         || current_head.retention_floor_seq != reconstructed.retention_floor_seq
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)

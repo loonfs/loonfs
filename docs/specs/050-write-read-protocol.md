@@ -82,8 +82,8 @@ A read reconstructs the visible filesystem state from durable artifacts on objec
 The reader builds an in-memory metadata state from two kinds of durable object:
 
 1. Read the namespace descriptor and content-store descriptor to learn the namespace's immutable content-store relationship.
-2. Read the namespace **head** object to learn the current `seq`, `snapshot_hint_seq`, and visible WAL tip.
-3. If `snapshot_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint materializes metadata state through that `seq` across four append-only tables: inodes, direntries, revisions, and subtree tombstones.
+2. Read the namespace **head** object to learn the current `seq`, `checkpoint_hint_seq`, and visible WAL tip.
+3. If `checkpoint_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint materializes metadata state through that `seq` across four append-only tables: inodes, direntries, revisions, and subtree tombstones.
 4. Use the visible WAL tip named by the head to identify the visible segment chain after the checkpoint `seq` (or from genesis, if no checkpoint exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends rows to the same four tables.
 
 The result is a complete metadata state pinned to one `seq`.
@@ -201,7 +201,7 @@ A namespace may advance a retention floor to say:
 
 > Incremental replay older than this point is no longer promised.
 
-Clients older than the retention floor must re-bootstrap from a fresh snapshot instead of replaying from an obsolete cursor.
+Clients older than the retention floor must re-bootstrap from a fresh checkpoint instead of replaying from an obsolete cursor.
 
 The retention floor may advance only after the system has enough verified material to keep replay safe at or after that point.
 

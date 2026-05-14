@@ -77,8 +77,8 @@ pub struct FilesystemOperationResponse {
 pub struct CreateCheckpointResponse {
     pub namespace_id: NamespaceId,
     pub checkpoint_seq: ChangeSeq,
-    pub snapshot_hint_seq: Option<ChangeSeq>,
-    pub snapshot_hint_points_at_checkpoint: bool,
+    pub checkpoint_hint_seq: Option<ChangeSeq>,
+    pub checkpoint_hint_points_at_checkpoint: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

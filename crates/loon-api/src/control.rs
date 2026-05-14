@@ -44,7 +44,7 @@ pub struct HeadState {
     pub next_inode_id: InodeId,
     #[serde(default)]
     pub name_policy: NamePolicy,
-    pub snapshot_hint_seq: Option<ChangeSeq>,
+    pub checkpoint_hint_seq: Option<ChangeSeq>,
     pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
@@ -58,7 +58,7 @@ impl HeadState {
             active_fence_token: FenceToken(0),
             next_inode_id: InodeId(2),
             name_policy: NamePolicy::default(),
-            snapshot_hint_seq: None,
+            checkpoint_hint_seq: None,
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
         }

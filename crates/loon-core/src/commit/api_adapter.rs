@@ -53,7 +53,7 @@ pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
             content_ref,
         } => CommitOp::ReplaceFile {
             inode_id,
-            base_revision: base_revision_no,
+            base_revision_no,
             content_ref,
         },
         api_v0::CommitOp::RestoreRevision {
@@ -62,8 +62,8 @@ pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
             base_revision_no,
         } => CommitOp::RestoreRevision {
             inode_id,
-            source_revision: source_revision_no,
-            base_revision: base_revision_no,
+            source_revision_no,
+            base_revision_no,
         },
         api_v0::CommitOp::DeleteFile { inode_id } => CommitOp::DeleteFile { inode_id },
         api_v0::CommitOp::Rename {
@@ -88,7 +88,7 @@ pub(super) fn commit_precondition_from_v0(
             revision_no,
         } => Precondition::InodeRevisionIs {
             inode_id,
-            revision: revision_no,
+            revision_no,
         },
         api_v0::CommitPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
             Precondition::AncestorsNotSubtreeDeleted { inode_id }

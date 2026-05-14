@@ -472,7 +472,7 @@ mod tests {
         let error = map_core_error(CoreError::CommitValidation(
             CommitValidationError::RestoreRevisionSourceRevisionMissing {
                 inode_id: InodeId(42),
-                source_revision: RevisionNo(7),
+                source_revision_no: RevisionNo(7),
             },
         ));
 

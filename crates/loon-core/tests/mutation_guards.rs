@@ -50,7 +50,7 @@ fn stale_revision_precondition_is_rejected() {
         vec![loon_api::WalOp::ReplaceFile {
             op_index: 0,
             inode_id: InodeId(3),
-            base_revision: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-2"),
         }],
     ]);
@@ -62,7 +62,7 @@ fn stale_revision_precondition_is_rejected() {
         writer_fence_token: FenceToken(1),
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
-            base_revision: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-3"),
         }],
         preconditions: Vec::new(),
@@ -138,7 +138,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
-                base_revision: RevisionNo(1),
+                base_revision_no: RevisionNo(1),
                 content_ref: content_ref("content-2"),
             }],
             preconditions: Vec::new(),
@@ -173,8 +173,8 @@ fn restore_revision_validation_rejects_missing_inode() {
         writer_fence_token: FenceToken(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(99),
-            source_revision: RevisionNo(1),
-            base_revision: RevisionNo(1),
+            source_revision_no: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
         }],
         preconditions: Vec::new(),
         message: None,
@@ -206,8 +206,8 @@ fn restore_revision_validation_rejects_non_file_target() {
         writer_fence_token: FenceToken(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
-            source_revision: RevisionNo(1),
-            base_revision: RevisionNo(1),
+            source_revision_no: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
         }],
         preconditions: Vec::new(),
         message: None,
@@ -243,7 +243,7 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
         vec![loon_api::WalOp::ReplaceFile {
             op_index: 0,
             inode_id: InodeId(3),
-            base_revision: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-2"),
         }],
     ]);
@@ -257,8 +257,8 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
-                source_revision: RevisionNo(1),
-                base_revision: RevisionNo(1),
+                source_revision_no: RevisionNo(1),
+                base_revision_no: RevisionNo(1),
             }],
             preconditions: Vec::new(),
             message: None,
@@ -284,8 +284,8 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
-                source_revision: RevisionNo(99),
-                base_revision: RevisionNo(2),
+                source_revision_no: RevisionNo(99),
+                base_revision_no: RevisionNo(2),
             }],
             preconditions: Vec::new(),
             message: None,
@@ -298,7 +298,7 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
         missing_source,
         CommitValidationError::RestoreRevisionSourceRevisionMissing {
             inode_id: InodeId(3),
-            source_revision: RevisionNo(99),
+            source_revision_no: RevisionNo(99),
         }
     ));
 }
@@ -331,13 +331,13 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
             ops: vec![
                 CommitOp::ReplaceFile {
                     inode_id: InodeId(3),
-                    base_revision: RevisionNo(1),
+                    base_revision_no: RevisionNo(1),
                     content_ref: content_ref("content-2"),
                 },
                 CommitOp::RestoreRevision {
                     inode_id: InodeId(3),
-                    source_revision: RevisionNo(2),
-                    base_revision: RevisionNo(2),
+                    source_revision_no: RevisionNo(2),
+                    base_revision_no: RevisionNo(2),
                 },
             ],
             preconditions: Vec::new(),
@@ -372,7 +372,7 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
         vec![loon_api::WalOp::ReplaceFile {
             op_index: 0,
             inode_id: InodeId(3),
-            base_revision: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-2"),
         }],
     ]);
@@ -387,13 +387,13 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
             ops: vec![
                 CommitOp::RestoreRevision {
                     inode_id: InodeId(3),
-                    source_revision: RevisionNo(1),
-                    base_revision: RevisionNo(2),
+                    source_revision_no: RevisionNo(1),
+                    base_revision_no: RevisionNo(2),
                 },
                 CommitOp::RestoreRevision {
                     inode_id: InodeId(3),
-                    source_revision: RevisionNo(3),
-                    base_revision: RevisionNo(3),
+                    source_revision_no: RevisionNo(3),
+                    base_revision_no: RevisionNo(3),
                 },
             ],
             preconditions: Vec::new(),
@@ -443,8 +443,8 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
-                source_revision: RevisionNo(1),
-                base_revision: RevisionNo(1),
+                source_revision_no: RevisionNo(1),
+                base_revision_no: RevisionNo(1),
             }],
             preconditions: Vec::new(),
             message: None,
@@ -503,8 +503,8 @@ fn restore_revision_overflow_is_rejected() {
         writer_fence_token: FenceToken(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
-            source_revision: RevisionNo(u64::MAX),
-            base_revision: RevisionNo(u64::MAX),
+            source_revision_no: RevisionNo(u64::MAX),
+            base_revision_no: RevisionNo(u64::MAX),
         }],
         preconditions: Vec::new(),
         message: None,
@@ -516,7 +516,7 @@ fn restore_revision_overflow_is_rejected() {
         error,
         CommitValidationError::RestoreRevisionOverflow {
             inode_id: InodeId(2),
-            base_revision: RevisionNo(u64::MAX),
+            base_revision_no: RevisionNo(u64::MAX),
         }
     ));
 }
@@ -1384,7 +1384,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         load_verified_namespace_basis(&store, &clone_namespace_id).expect("clone basis");
     assert_eq!(clone_basis.content_store_id, content_store_id);
     assert_eq!(clone_basis.head.seq, ChangeSeq(1));
-    assert_eq!(clone_basis.head.snapshot_hint_seq, Some(ChangeSeq(1)));
+    assert_eq!(clone_basis.head.checkpoint_hint_seq, Some(ChangeSeq(1)));
     assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
 
     let duplicate_error =
@@ -1496,7 +1496,7 @@ fn fork_target_head_reservation_failure_writes_no_checkpoint_artifacts() {
     assert!(
         store
             .list_prefix(&format!(
-                "namespaces/{}/snapshots/",
+                "namespaces/{}/checkpoints/",
                 clone_namespace_id.as_str()
             ))
             .expect("list target snapshots")
@@ -1515,7 +1515,7 @@ fn fork_failure_after_target_head_reserves_partial_namespace() {
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyMatcher::Prefix(format!(
-            "namespaces/{}/snapshots/",
+            "namespaces/{}/checkpoints/",
             clone_namespace_id.as_str()
         )),
         InjectedCreateFailure::Transport {
@@ -1578,7 +1578,7 @@ fn fork_failure_after_target_checkpoint_artifacts_remains_partial() {
     );
     let target_snapshot_keys = store
         .list_prefix(&format!(
-            "namespaces/{}/snapshots/",
+            "namespaces/{}/checkpoints/",
             clone_namespace_id.as_str()
         ))
         .expect("list target snapshots");
@@ -2414,7 +2414,7 @@ fn validation_context(
         active_fence_token: FenceToken(1),
         next_inode_id,
         name_policy: loon_api::NamePolicy::default(),
-        snapshot_hint_seq: Some(ChangeSeq(0)),
+        checkpoint_hint_seq: Some(ChangeSeq(0)),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
     };
