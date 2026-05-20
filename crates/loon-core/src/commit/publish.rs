@@ -68,7 +68,7 @@ pub fn prepare_commit_head_publish(
         active_fence_token: current_head.active_fence_token,
         next_inode_id: plan.resulting_next_inode_id,
         name_policy: current_head.name_policy,
-        snapshot_hint_seq: current_head.snapshot_hint_seq,
+        checkpoint_hint_seq: current_head.checkpoint_hint_seq,
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: Some(wal.envelope.pointer(wal.object_key.clone())),
     };
@@ -135,7 +135,7 @@ mod tests {
             active_fence_token: FenceToken(1),
             next_inode_id: InodeId(10),
             name_policy: loon_api::NamePolicy::default(),
-            snapshot_hint_seq: Some(ChangeSeq(0)),
+            checkpoint_hint_seq: Some(ChangeSeq(0)),
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
         }

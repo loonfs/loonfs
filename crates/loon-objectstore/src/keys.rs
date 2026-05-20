@@ -1,7 +1,7 @@
 use crate::ObjectStoreError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnapshotTableFamily {
+pub enum CheckpointTableFamily {
     Inodes,
     Direntries,
     Revisions,
@@ -9,7 +9,7 @@ pub enum SnapshotTableFamily {
     CommitReceipts,
 }
 
-impl SnapshotTableFamily {
+impl CheckpointTableFamily {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inodes => "inodes",
@@ -23,13 +23,13 @@ impl SnapshotTableFamily {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DerivedWorkClass {
-    SnapshotBuilder,
+    CheckpointBuilder,
 }
 
 impl DerivedWorkClass {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::SnapshotBuilder => "snapshot-builder",
+            Self::CheckpointBuilder => "checkpoint-builder",
         }
     }
 }
@@ -80,18 +80,18 @@ pub fn upload_session_prefix(namespace: &str) -> String {
     format!("namespaces/{namespace}/control/uploads/")
 }
 
-pub fn snapshot_manifest(namespace: &str, seq: u64) -> String {
-    format!("namespaces/{namespace}/snapshots/{seq:020}/manifest.json")
+pub fn checkpoint_manifest(namespace: &str, seq: u64) -> String {
+    format!("namespaces/{namespace}/checkpoints/{seq:020}/manifest.json")
 }
 
-pub fn snapshot_table(
+pub fn checkpoint_table(
     namespace: &str,
     seq: u64,
-    family: SnapshotTableFamily,
+    family: CheckpointTableFamily,
     segment_index: u32,
 ) -> String {
     format!(
-        "namespaces/{namespace}/snapshots/{seq:020}/tables/{}-{segment_index:05}.sst.zst",
+        "namespaces/{namespace}/checkpoints/{seq:020}/tables/{}-{segment_index:05}.sst.zst",
         family.as_str()
     )
 }
@@ -124,10 +124,10 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
-        derived_progress, namespace_descriptor, namespace_head, namespace_lease, queue_shard,
-        sha256_hex_from_digest, snapshot_manifest, snapshot_table, upload_session,
-        upload_session_prefix, wal_segment, DerivedWorkClass, SnapshotTableFamily,
+        checkpoint_manifest, checkpoint_table, conflict_artifact, conflict_artifact_prefix,
+        content_blob, content_store_descriptor, derived_progress, namespace_descriptor,
+        namespace_head, namespace_lease, queue_shard, sha256_hex_from_digest, upload_session,
+        upload_session_prefix, wal_segment, CheckpointTableFamily, DerivedWorkClass,
     };
 
     #[test]
@@ -147,20 +147,20 @@ mod tests {
             "namespaces/ns-1/wal/00000000000000000420-00000000000000000425-seg_00000000000000000000000000000001.cbor.zst"
         );
         assert_eq!(
-            snapshot_manifest("ns-1", 400),
-            "namespaces/ns-1/snapshots/00000000000000000400/manifest.json"
+            checkpoint_manifest("ns-1", 400),
+            "namespaces/ns-1/checkpoints/00000000000000000400/manifest.json"
         );
         assert_eq!(
-            snapshot_table("ns-1", 400, SnapshotTableFamily::Direntries, 7),
-            "namespaces/ns-1/snapshots/00000000000000000400/tables/direntries-00007.sst.zst"
+            checkpoint_table("ns-1", 400, CheckpointTableFamily::Direntries, 7),
+            "namespaces/ns-1/checkpoints/00000000000000000400/tables/direntries-00007.sst.zst"
         );
         assert_eq!(
-            snapshot_table("ns-1", 400, SnapshotTableFamily::CommitReceipts, 0),
-            "namespaces/ns-1/snapshots/00000000000000000400/tables/commit-receipts-00000.sst.zst"
+            checkpoint_table("ns-1", 400, CheckpointTableFamily::CommitReceipts, 0),
+            "namespaces/ns-1/checkpoints/00000000000000000400/tables/commit-receipts-00000.sst.zst"
         );
         assert_eq!(
-            derived_progress("ns-1", DerivedWorkClass::SnapshotBuilder),
-            "namespaces/ns-1/derived/snapshot-builder/progress.json"
+            derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder),
+            "namespaces/ns-1/derived/checkpoint-builder/progress.json"
         );
         assert_eq!(queue_shard(17), "queue/shards/00017.json");
         assert_eq!(

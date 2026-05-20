@@ -44,7 +44,7 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
     let replace_file = vec![WalOp::ReplaceFile {
         op_index: 0,
         inode_id: InodeId(3),
-        base_revision: RevisionNo(1),
+        base_revision_no: RevisionNo(1),
         content_ref: content_ref("content-2"),
     }];
 
@@ -117,14 +117,14 @@ fn metadata_apply_matches_model_for_restore_revision() {
         vec![WalOp::ReplaceFile {
             op_index: 0,
             inode_id: InodeId(3),
-            base_revision: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-2"),
         }],
         vec![WalOp::RestoreRevision {
             op_index: 0,
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(1),
-            base_revision: RevisionNo(2),
+            base_revision_no: RevisionNo(2),
             content_ref: content_ref("content-1"),
         }],
     ]);
@@ -150,7 +150,7 @@ fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
             op_index: 0,
             inode_id: InodeId(3),
             source_revision_no: RevisionNo(1),
-            base_revision: RevisionNo(1),
+            base_revision_no: RevisionNo(1),
             content_ref: content_ref("content-1"),
         }],
     ]);

@@ -10,7 +10,7 @@ Background work reduces read cost, supports safe retention, and cleans up durabl
 
 A checkpoint summarizes namespace metadata at one chosen `seq`.
 
-A checkpoint is useful only after it is verified. Readers must prefer verified checkpoints plus the visible WAL segment chain over unverified or partial snapshots.
+A checkpoint is useful only after it is verified. Readers must prefer verified checkpoints plus the visible WAL segment chain over unverified or partial checkpoints.
 
 ### 2.2 Retention management
 

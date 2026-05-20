@@ -69,15 +69,15 @@ pub enum CommitMaterializationError {
     MissingAllocatedInode { op_index: u32 },
     #[error("missing resolved restore content ref for op index {op_index}")]
     MissingResolvedRestoreContentRef { op_index: u32 },
-    #[error("replace_file revision overflow for inode {inode_id:?} at base {base_revision:?}")]
+    #[error("replace_file revision overflow for inode {inode_id:?} at base {base_revision_no:?}")]
     ReplaceRevisionOverflow {
         inode_id: InodeId,
-        base_revision: RevisionNo,
+        base_revision_no: RevisionNo,
     },
-    #[error("restore_revision overflow for inode {inode_id:?} at base {base_revision:?}")]
+    #[error("restore_revision overflow for inode {inode_id:?} at base {base_revision_no:?}")]
     RestoreRevisionOverflow {
         inode_id: InodeId,
-        base_revision: RevisionNo,
+        base_revision_no: RevisionNo,
     },
 }
 
@@ -202,13 +202,13 @@ pub(super) fn materialize_commit_op(
         }
         CommitOp::ReplaceFile {
             inode_id,
-            base_revision,
+            base_revision_no,
             content_ref,
         } => {
-            let revision_no = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
+            let revision_no = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
                 CommitMaterializationError::ReplaceRevisionOverflow {
                     inode_id: *inode_id,
-                    base_revision: *base_revision,
+                    base_revision_no: *base_revision_no,
                 },
             )?;
             MaterializedCommitOp {
@@ -216,7 +216,7 @@ pub(super) fn materialize_commit_op(
                 wal_op: WalOp::ReplaceFile {
                     op_index,
                     inode_id: *inode_id,
-                    base_revision: *base_revision,
+                    base_revision_no: *base_revision_no,
                     content_ref: content_ref.clone(),
                 },
                 result: CommitOpResult::ReplaceFile {
@@ -229,16 +229,16 @@ pub(super) fn materialize_commit_op(
         }
         CommitOp::RestoreRevision {
             inode_id,
-            source_revision,
-            base_revision,
+            source_revision_no,
+            base_revision_no,
         } => {
             let content_ref = resolved_restore_content_ref
                 .ok_or(CommitMaterializationError::MissingResolvedRestoreContentRef { op_index })?
                 .clone();
-            let revision_no = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
+            let revision_no = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
                 CommitMaterializationError::RestoreRevisionOverflow {
                     inode_id: *inode_id,
-                    base_revision: *base_revision,
+                    base_revision_no: *base_revision_no,
                 },
             )?;
             MaterializedCommitOp {
@@ -246,14 +246,14 @@ pub(super) fn materialize_commit_op(
                 wal_op: WalOp::RestoreRevision {
                     op_index,
                     inode_id: *inode_id,
-                    source_revision_no: *source_revision,
-                    base_revision: *base_revision,
+                    source_revision_no: *source_revision_no,
+                    base_revision_no: *base_revision_no,
                     content_ref: content_ref.clone(),
                 },
                 result: CommitOpResult::RestoreRevision {
                     op_index,
                     inode_id: *inode_id,
-                    source_revision_no: *source_revision,
+                    source_revision_no: *source_revision_no,
                     revision_no,
                     content_ref,
                 },

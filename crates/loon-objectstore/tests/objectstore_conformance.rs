@@ -2,9 +2,9 @@ mod provider_env;
 
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    content_blob, content_store_descriptor, derived_progress, namespace_descriptor, namespace_head,
-    namespace_lease, queue_shard, snapshot_manifest, snapshot_table, wal_segment, DerivedWorkClass,
-    SnapshotTableFamily,
+    checkpoint_manifest, checkpoint_table, content_blob, content_store_descriptor,
+    derived_progress, namespace_descriptor, namespace_head, namespace_lease, queue_shard,
+    wal_segment, CheckpointTableFamily, DerivedWorkClass,
 };
 use loon_objectstore::probes::run_contract_probes;
 use loon_objectstore::provider::{Expectation, AWS_S3, CLOUDFLARE_R2, LOCAL_FS};
@@ -150,20 +150,20 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/wal/00000000000000000420-00000000000000000420-seg_00000000000000000000000000000001.cbor.zst"
     );
     assert_eq!(
-        snapshot_manifest("ns-1", 420),
-        "namespaces/ns-1/snapshots/00000000000000000420/manifest.json"
+        checkpoint_manifest("ns-1", 420),
+        "namespaces/ns-1/checkpoints/00000000000000000420/manifest.json"
     );
     assert_eq!(
-        snapshot_table("ns-1", 420, SnapshotTableFamily::Inodes, 3),
-        "namespaces/ns-1/snapshots/00000000000000000420/tables/inodes-00003.sst.zst"
+        checkpoint_table("ns-1", 420, CheckpointTableFamily::Inodes, 3),
+        "namespaces/ns-1/checkpoints/00000000000000000420/tables/inodes-00003.sst.zst"
     );
     assert_eq!(
-        snapshot_table("ns-1", 420, SnapshotTableFamily::CommitReceipts, 0),
-        "namespaces/ns-1/snapshots/00000000000000000420/tables/commit-receipts-00000.sst.zst"
+        checkpoint_table("ns-1", 420, CheckpointTableFamily::CommitReceipts, 0),
+        "namespaces/ns-1/checkpoints/00000000000000000420/tables/commit-receipts-00000.sst.zst"
     );
     assert_eq!(
-        derived_progress("ns-1", DerivedWorkClass::SnapshotBuilder),
-        "namespaces/ns-1/derived/snapshot-builder/progress.json"
+        derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder),
+        "namespaces/ns-1/derived/checkpoint-builder/progress.json"
     );
     assert_eq!(queue_shard(12), "queue/shards/00012.json");
 }
@@ -402,7 +402,7 @@ fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
 }
 
 fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
-    let key = derived_progress("ns-1", DerivedWorkClass::SnapshotBuilder);
+    let key = derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder);
     let _ = store.delete(&key);
 
     store
@@ -424,7 +424,7 @@ fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
 
 fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
     let keys = vec![
-        derived_progress("ns-sort", DerivedWorkClass::SnapshotBuilder),
+        derived_progress("ns-sort", DerivedWorkClass::CheckpointBuilder),
         namespace_head("ns-sort"),
         namespace_lease("ns-sort"),
     ];

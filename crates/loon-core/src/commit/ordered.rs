@@ -29,10 +29,10 @@ pub(crate) fn resolve_restore_content_refs(
         .map(|op| match op {
             CommitOp::ReplaceFile {
                 inode_id,
-                base_revision,
+                base_revision_no,
                 content_ref,
             } => {
-                if let Some(next_revision) = base_revision.0.checked_add(1).map(RevisionNo) {
+                if let Some(next_revision) = base_revision_no.0.checked_add(1).map(RevisionNo) {
                     resolved_request_revisions
                         .insert((*inode_id, next_revision), content_ref.clone());
                 }
@@ -40,20 +40,20 @@ pub(crate) fn resolve_restore_content_refs(
             }
             CommitOp::RestoreRevision {
                 inode_id,
-                source_revision,
-                base_revision,
+                source_revision_no,
+                base_revision_no,
             } => {
                 let resolved = resolved_request_revisions
-                    .get(&(*inode_id, *source_revision))
+                    .get(&(*inode_id, *source_revision_no))
                     .cloned()
                     .or_else(|| {
                         context
                             .metadata_state
-                            .revision_at_seq(*inode_id, *source_revision, context.head.seq)
+                            .revision_at_seq(*inode_id, *source_revision_no, context.head.seq)
                             .map(|revision| revision.content_ref)
                     });
                 if let (Some(next_revision), Some(content_ref)) = (
-                    base_revision.0.checked_add(1).map(RevisionNo),
+                    base_revision_no.0.checked_add(1).map(RevisionNo),
                     resolved.clone(),
                 ) {
                     resolved_request_revisions.insert((*inode_id, next_revision), content_ref);
@@ -213,25 +213,25 @@ fn validate_metadata_preconditions(
         let resolved_restore_content_ref = match op {
             CommitOp::RestoreRevision {
                 inode_id,
-                source_revision,
-                base_revision,
+                source_revision_no,
+                base_revision_no,
             } => {
                 validate_restore_target(
                     &ephemeral_metadata_state,
                     *inode_id,
-                    *base_revision,
+                    *base_revision_no,
                     committed_seq,
                 )?;
-                let source_revision = validate_restore_source_revision(
+                let source_revision_no = validate_restore_source_revision(
                     &ephemeral_metadata_state,
                     *inode_id,
-                    *source_revision,
+                    *source_revision_no,
                     committed_seq,
                 )?;
-                if base_revision.0.checked_add(1).is_none() {
+                if base_revision_no.0.checked_add(1).is_none() {
                     return Err(CommitValidationError::RestoreRevisionOverflow {
                         inode_id: *inode_id,
-                        base_revision: *base_revision,
+                        base_revision_no: *base_revision_no,
                     });
                 }
                 validate_restore_not_covered(
@@ -240,7 +240,7 @@ fn validate_metadata_preconditions(
                     committed_seq,
                     checked_invariants,
                 )?;
-                Some(source_revision.content_ref)
+                Some(source_revision_no.content_ref)
             }
             _ => None,
         };
@@ -270,19 +270,19 @@ fn validate_metadata_preconditions(
             }
             CommitOp::ReplaceFile {
                 inode_id,
-                base_revision,
+                base_revision_no,
                 ..
             } => {
                 validate_inode_revision_is(
                     &ephemeral_metadata_state,
                     *inode_id,
-                    *base_revision,
+                    *base_revision_no,
                     committed_seq,
                 )?;
-                if base_revision.0.checked_add(1).is_none() {
+                if base_revision_no.0.checked_add(1).is_none() {
                     return Err(CommitValidationError::ReplaceFileRevisionOverflow {
                         inode_id: *inode_id,
-                        base_revision: *base_revision,
+                        base_revision_no: *base_revision_no,
                     });
                 }
                 validate_ancestors_not_subtree_deleted(
@@ -378,34 +378,34 @@ fn materialization_error_to_validation_error(
             CommitMaterializationError::MissingResolvedRestoreContentRef { .. },
             CommitOp::RestoreRevision {
                 inode_id,
-                source_revision,
+                source_revision_no,
                 ..
             },
         ) => CommitValidationError::RestoreRevisionSourceRevisionMissing {
             inode_id: *inode_id,
-            source_revision: *source_revision,
+            source_revision_no: *source_revision_no,
         },
         (
             CommitMaterializationError::ReplaceRevisionOverflow { .. },
             CommitOp::ReplaceFile {
                 inode_id,
-                base_revision,
+                base_revision_no,
                 ..
             },
         ) => CommitValidationError::ReplaceFileRevisionOverflow {
             inode_id: *inode_id,
-            base_revision: *base_revision,
+            base_revision_no: *base_revision_no,
         },
         (
             CommitMaterializationError::RestoreRevisionOverflow { .. },
             CommitOp::RestoreRevision {
                 inode_id,
-                base_revision,
+                base_revision_no,
                 ..
             },
         ) => CommitValidationError::RestoreRevisionOverflow {
             inode_id: *inode_id,
-            base_revision: *base_revision,
+            base_revision_no: *base_revision_no,
         },
         (CommitMaterializationError::OpIndexOverflow, _) => CommitValidationError::OpIndexOverflow,
         _ => CommitValidationError::NextInodeOverflow,
@@ -420,8 +420,11 @@ fn validate_explicit_preconditions(
 ) -> Result<(), CommitValidationError> {
     for precondition in preconditions {
         match precondition {
-            Precondition::InodeRevisionIs { inode_id, revision } => {
-                validate_inode_revision_is(metadata_state, *inode_id, *revision, base_seq)?;
+            Precondition::InodeRevisionIs {
+                inode_id,
+                revision_no,
+            } => {
+                validate_inode_revision_is(metadata_state, *inode_id, *revision_no, base_seq)?;
             }
             Precondition::AncestorsNotSubtreeDeleted { inode_id } => {
                 validate_ancestors_not_subtree_deleted(
@@ -588,7 +591,7 @@ fn validate_child_name_absent(
 fn validate_inode_revision_is(
     metadata_state: &MetadataState,
     inode_id: InodeId,
-    expected_revision: RevisionNo,
+    expected_revision_no: RevisionNo,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let inode = metadata_state
@@ -601,14 +604,14 @@ fn validate_inode_revision_is(
         });
     }
 
-    let actual_revision = metadata_state
+    let actual_revision_no = metadata_state
         .latest_revision_head_at_seq(inode_id, base_seq)
         .map(|revision| revision.revision_no);
-    if actual_revision != Some(expected_revision) {
+    if actual_revision_no != Some(expected_revision_no) {
         return Err(CommitValidationError::ReplaceFileBaseRevisionMismatch {
             inode_id,
-            expected: expected_revision,
-            actual: actual_revision,
+            expected: expected_revision_no,
+            actual: actual_revision_no,
         });
     }
 
@@ -618,7 +621,7 @@ fn validate_inode_revision_is(
 fn validate_restore_target(
     metadata_state: &MetadataState,
     inode_id: InodeId,
-    expected_revision: RevisionNo,
+    expected_revision_no: RevisionNo,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
     let inode = metadata_state
@@ -631,14 +634,14 @@ fn validate_restore_target(
         });
     }
 
-    let actual_revision = metadata_state
+    let actual_revision_no = metadata_state
         .latest_revision_head_at_seq(inode_id, base_seq)
         .map(|revision| revision.revision_no);
-    if actual_revision != Some(expected_revision) {
+    if actual_revision_no != Some(expected_revision_no) {
         return Err(CommitValidationError::RestoreRevisionBaseRevisionMismatch {
             inode_id,
-            expected: expected_revision,
-            actual: actual_revision,
+            expected: expected_revision_no,
+            actual: actual_revision_no,
         });
     }
 
@@ -648,15 +651,15 @@ fn validate_restore_target(
 fn validate_restore_source_revision(
     metadata_state: &MetadataState,
     inode_id: InodeId,
-    source_revision: RevisionNo,
+    source_revision_no: RevisionNo,
     base_seq: ChangeSeq,
 ) -> Result<crate::metadata::RevisionRecord, CommitValidationError> {
     metadata_state
-        .revision_at_seq(inode_id, source_revision, base_seq)
+        .revision_at_seq(inode_id, source_revision_no, base_seq)
         .ok_or(
             CommitValidationError::RestoreRevisionSourceRevisionMissing {
                 inode_id,
-                source_revision,
+                source_revision_no,
             },
         )
 }

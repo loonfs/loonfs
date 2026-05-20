@@ -34,7 +34,7 @@ pub enum WalOp {
         #[serde(default)]
         op_index: u32,
         inode_id: InodeId,
-        base_revision: RevisionNo,
+        base_revision_no: RevisionNo,
         content_ref: ContentRef,
     },
     RestoreRevision {
@@ -42,7 +42,7 @@ pub enum WalOp {
         op_index: u32,
         inode_id: InodeId,
         source_revision_no: RevisionNo,
-        base_revision: RevisionNo,
+        base_revision_no: RevisionNo,
         content_ref: ContentRef,
     },
     DeleteFile {
@@ -68,7 +68,7 @@ pub enum WalOp {
 pub enum WalPrecondition {
     InodeRevisionIs {
         inode_id: InodeId,
-        revision: RevisionNo,
+        revision_no: RevisionNo,
     },
     AncestorsNotSubtreeDeleted {
         inode_id: InodeId,

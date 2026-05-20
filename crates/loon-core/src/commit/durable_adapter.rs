@@ -40,9 +40,12 @@ pub fn wal_payload_from_materialized_commit(
 impl From<&Precondition> for WalPrecondition {
     fn from(value: &Precondition) -> Self {
         match value {
-            Precondition::InodeRevisionIs { inode_id, revision } => Self::InodeRevisionIs {
+            Precondition::InodeRevisionIs {
+                inode_id,
+                revision_no,
+            } => Self::InodeRevisionIs {
                 inode_id: *inode_id,
-                revision: *revision,
+                revision_no: *revision_no,
             },
             Precondition::AncestorsNotSubtreeDeleted { inode_id } => {
                 Self::AncestorsNotSubtreeDeleted {

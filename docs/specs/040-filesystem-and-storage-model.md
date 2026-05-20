@@ -213,7 +213,7 @@ The head summarizes the current visible boundary and replay hints, including at 
 
 - `seq`
 - `next_inode_id`
-- `snapshot_hint_seq`
+- `checkpoint_hint_seq`
 - `retention_floor_seq`
 - `wal_tip_segment_id` or an equivalent visible tail pointer
 

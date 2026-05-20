@@ -55,13 +55,13 @@ pub enum CommitOp {
     },
     ReplaceFile {
         inode_id: InodeId,
-        base_revision: RevisionNo,
+        base_revision_no: RevisionNo,
         content_ref: ContentRef,
     },
     RestoreRevision {
         inode_id: InodeId,
-        source_revision: RevisionNo,
-        base_revision: RevisionNo,
+        source_revision_no: RevisionNo,
+        base_revision_no: RevisionNo,
     },
     DeleteFile {
         inode_id: InodeId,
@@ -80,7 +80,7 @@ pub enum CommitOp {
 pub enum Precondition {
     InodeRevisionIs {
         inode_id: InodeId,
-        revision: RevisionNo,
+        revision_no: RevisionNo,
     },
     AncestorsNotSubtreeDeleted {
         inode_id: InodeId,
@@ -209,7 +209,7 @@ pub enum CommitValidationError {
     },
     RestoreRevisionSourceRevisionMissing {
         inode_id: InodeId,
-        source_revision: RevisionNo,
+        source_revision_no: RevisionNo,
     },
     RestoreRevisionUnderSubtreeTombstone {
         inode_id: InodeId,
@@ -279,11 +279,11 @@ pub enum CommitValidationError {
     },
     RestoreRevisionOverflow {
         inode_id: InodeId,
-        base_revision: RevisionNo,
+        base_revision_no: RevisionNo,
     },
     ReplaceFileRevisionOverflow {
         inode_id: InodeId,
-        base_revision: RevisionNo,
+        base_revision_no: RevisionNo,
     },
     StaleWriterFenceToken {
         active: FenceToken,

@@ -91,7 +91,7 @@ pub enum VisiblePathError {
 pub enum MetadataApplyError {
     RevisionOverflow {
         inode_id: InodeId,
-        base_revision: RevisionNo,
+        base_revision_no: RevisionNo,
     },
 }
 
@@ -165,13 +165,13 @@ impl MetadataState {
                 WalOp::ReplaceFile {
                     op_index,
                     inode_id,
-                    base_revision,
+                    base_revision_no,
                     content_ref,
                 } => {
-                    let next_revision = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
+                    let next_revision = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
                         MetadataApplyError::RevisionOverflow {
                             inode_id: *inode_id,
-                            base_revision: *base_revision,
+                            base_revision_no: *base_revision_no,
                         },
                     )?;
                     metadata_state.revisions.push(RevisionRecord {
@@ -189,14 +189,14 @@ impl MetadataState {
                 WalOp::RestoreRevision {
                     op_index,
                     inode_id,
-                    base_revision,
+                    base_revision_no,
                     content_ref,
                     ..
                 } => {
-                    let next_revision = base_revision.0.checked_add(1).map(RevisionNo).ok_or(
+                    let next_revision = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
                         MetadataApplyError::RevisionOverflow {
                             inode_id: *inode_id,
-                            base_revision: *base_revision,
+                            base_revision_no: *base_revision_no,
                         },
                     )?;
                     metadata_state.revisions.push(RevisionRecord {

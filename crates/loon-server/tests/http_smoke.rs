@@ -7,7 +7,7 @@ use loon_api::{
     CreateCheckpointResponse, InodeId, LeaseStateEnvelope, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loon_objectstore::keys::{namespace_lease, snapshot_manifest};
+use loon_objectstore::keys::{checkpoint_manifest, namespace_lease};
 use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loon_server::{app, ServerConfig, StoreConfig};
 use serde_json::json;
@@ -816,8 +816,8 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 
         let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
         assert_eq!(first.checkpoint_seq, ChangeSeq(1));
-        assert_eq!(first.snapshot_hint_seq, Some(ChangeSeq(1)));
-        assert!(first.snapshot_hint_points_at_checkpoint);
+        assert_eq!(first.checkpoint_hint_seq, Some(ChangeSeq(1)));
+        assert!(first.checkpoint_hint_points_at_checkpoint);
 
         let repeated = post_checkpoint(&server_url, namespace).expect("repeat checkpoint");
         assert_eq!(repeated, first);
@@ -907,7 +907,7 @@ async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
         let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
             .expect("construct store");
         store
-            .put_overwrite(&snapshot_manifest(namespace, 1), br#"{"bad":"json"}"#)
+            .put_overwrite(&checkpoint_manifest(namespace, 1), br#"{"bad":"json"}"#)
             .expect("corrupt manifest");
 
         match client.stat_path(&target) {

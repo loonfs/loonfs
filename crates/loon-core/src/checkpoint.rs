@@ -17,7 +17,8 @@ use loon_api::{
     CreateCheckpointResponse, FenceToken, HeadState, HeadStateEnvelope, InodeId, NamespaceId,
 };
 use loon_objectstore::keys::{
-    derived_progress, snapshot_manifest, snapshot_table, DerivedWorkClass, SnapshotTableFamily,
+    checkpoint_manifest, checkpoint_table, derived_progress,
+    CheckpointTableFamily as ObjectStoreCheckpointTableFamily, DerivedWorkClass,
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
@@ -197,7 +198,7 @@ pub fn create_checkpoint<S: ObjectStore + ?Sized>(
                 store,
                 namespace_id,
                 checkpoint_seq,
-                &snapshot_manifest(namespace_id.as_str(), checkpoint_seq.0),
+                &checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0),
                 &tables,
             )
             .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
@@ -228,13 +229,13 @@ pub fn create_checkpoint<S: ObjectStore + ?Sized>(
     }
 
     let resulting_head =
-        publish_snapshot_hint_seq(store, namespace_id, checkpoint_seq, &context.writer_version)?;
+        publish_checkpoint_hint_seq(store, namespace_id, checkpoint_seq, &context.writer_version)?;
 
     Ok(CreateCheckpointResponse {
         namespace_id: namespace_id.clone(),
         checkpoint_seq,
-        snapshot_hint_seq: resulting_head.snapshot_hint_seq,
-        snapshot_hint_points_at_checkpoint: resulting_head.snapshot_hint_seq
+        checkpoint_hint_seq: resulting_head.checkpoint_hint_seq,
+        checkpoint_hint_points_at_checkpoint: resulting_head.checkpoint_hint_seq
             == Some(checkpoint_seq),
     })
 }
@@ -264,7 +265,7 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
         store,
         request.namespace_id,
         request.checkpoint_seq,
-        &snapshot_manifest(request.namespace_id.as_str(), request.checkpoint_seq.0),
+        &checkpoint_manifest(request.namespace_id.as_str(), request.checkpoint_seq.0),
         &tables,
     )
     .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
@@ -300,7 +301,7 @@ pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let loaded_head = read_head_object(store, namespace_id)
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let head = loaded_head.envelope.state;
-        let Some(target_floor) = head.snapshot_hint_seq else {
+        let Some(target_floor) = head.checkpoint_hint_seq else {
             return Err(CoreError::CheckpointUnavailable(format!(
                 "namespace `{}` has no published checkpoint",
                 namespace_id.as_str()
@@ -323,7 +324,7 @@ pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
             active_fence_token: head.active_fence_token,
             next_inode_id: head.next_inode_id,
             name_policy: head.name_policy,
-            snapshot_hint_seq: head.snapshot_hint_seq,
+            checkpoint_hint_seq: head.checkpoint_hint_seq,
             retention_floor_seq: target_floor,
             visible_wal_tip: head.visible_wal_tip.clone(),
         };
@@ -357,7 +358,7 @@ pub(crate) fn load_verified_checkpoint_materialization<S: ObjectStore + ?Sized>(
 ) -> Result<LoadedCheckpointMaterialization, CheckpointLoadError> {
     load_verified_checkpoint_materialization_if_present(store, namespace_id, checkpoint_seq)?
         .ok_or_else(|| CheckpointLoadError::MissingManifest {
-            object_key: snapshot_manifest(namespace_id.as_str(), checkpoint_seq.0),
+            object_key: checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0),
         })
 }
 
@@ -373,7 +374,7 @@ pub(crate) fn checkpoint_basis_head(
         active_fence_token: manifest.payload.active_fence_token,
         next_inode_id: manifest.payload.next_inode_id,
         name_policy: current_head.name_policy,
-        snapshot_hint_seq: current_head.snapshot_hint_seq,
+        checkpoint_hint_seq: current_head.checkpoint_hint_seq,
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: None,
     }
@@ -384,7 +385,7 @@ fn load_verified_checkpoint_materialization_if_present<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_seq: ChangeSeq,
 ) -> Result<Option<LoadedCheckpointMaterialization>, CheckpointLoadError> {
-    let manifest_key = snapshot_manifest(namespace_id.as_str(), checkpoint_seq.0);
+    let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
     let Some(manifest_bytes) =
         store
             .get(&manifest_key, None)
@@ -455,10 +456,10 @@ fn build_checkpoint_tables<S: ObjectStore + ?Sized>(
             .map_err(|err| CoreError::Store(err.to_string()))?;
         let encoded = encode_checkpoint_segment_envelope_zstd(&envelope)
             .map_err(|err| CoreError::Store(err.to_string()))?;
-        let object_key = snapshot_table(
+        let object_key = checkpoint_table(
             namespace_id.as_str(),
             checkpoint_seq.0,
-            snapshot_table_family(family),
+            checkpoint_table_family(family),
             0,
         );
         write_immutable_object(store, &object_key, &encoded)?;
@@ -487,7 +488,7 @@ fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &CheckpointManifestEnvelope,
 ) -> Result<(), BasisLoadError> {
-    let manifest_key = snapshot_manifest(
+    let manifest_key = checkpoint_manifest(
         manifest.payload.namespace_id.as_str(),
         manifest.payload.checkpoint_seq.0,
     );
@@ -534,7 +535,7 @@ fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
     }
 }
 
-fn publish_snapshot_hint_seq<S: ObjectStore + ?Sized>(
+fn publish_checkpoint_hint_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_seq: ChangeSeq,
@@ -544,7 +545,7 @@ fn publish_snapshot_hint_seq<S: ObjectStore + ?Sized>(
         let loaded_head = read_head_object(store, namespace_id)
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let current_head = loaded_head.envelope.state;
-        if current_head.snapshot_hint_seq >= Some(checkpoint_seq) {
+        if current_head.checkpoint_hint_seq >= Some(checkpoint_seq) {
             return Ok(current_head);
         }
 
@@ -554,7 +555,7 @@ fn publish_snapshot_hint_seq<S: ObjectStore + ?Sized>(
             active_fence_token: current_head.active_fence_token,
             next_inode_id: current_head.next_inode_id,
             name_policy: current_head.name_policy,
-            snapshot_hint_seq: Some(checkpoint_seq),
+            checkpoint_hint_seq: Some(checkpoint_seq),
             retention_floor_seq: current_head.retention_floor_seq,
             visible_wal_tip: current_head.visible_wal_tip.clone(),
         };
@@ -669,10 +670,10 @@ fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
 
     for table in ordered_tables {
         for descriptor in &table.segments {
-            let expected_key = snapshot_table(
+            let expected_key = checkpoint_table(
                 namespace_id.as_str(),
                 checkpoint_seq.0,
-                snapshot_table_family(table.family),
+                checkpoint_table_family(table.family),
                 descriptor.segment_index,
             );
             if descriptor.object_key != expected_key {
@@ -1075,13 +1076,13 @@ fn checkpoint_rows_for_family(
     rows
 }
 
-fn snapshot_table_family(family: CheckpointTableFamily) -> SnapshotTableFamily {
+fn checkpoint_table_family(family: CheckpointTableFamily) -> ObjectStoreCheckpointTableFamily {
     match family {
-        CheckpointTableFamily::Inodes => SnapshotTableFamily::Inodes,
-        CheckpointTableFamily::Direntries => SnapshotTableFamily::Direntries,
-        CheckpointTableFamily::Revisions => SnapshotTableFamily::Revisions,
-        CheckpointTableFamily::Tombstones => SnapshotTableFamily::Tombstones,
-        CheckpointTableFamily::CommitReceipts => SnapshotTableFamily::CommitReceipts,
+        CheckpointTableFamily::Inodes => ObjectStoreCheckpointTableFamily::Inodes,
+        CheckpointTableFamily::Direntries => ObjectStoreCheckpointTableFamily::Direntries,
+        CheckpointTableFamily::Revisions => ObjectStoreCheckpointTableFamily::Revisions,
+        CheckpointTableFamily::Tombstones => ObjectStoreCheckpointTableFamily::Tombstones,
+        CheckpointTableFamily::CommitReceipts => ObjectStoreCheckpointTableFamily::CommitReceipts,
     }
 }
 
@@ -1100,7 +1101,7 @@ mod tests {
     use super::{
         advance_retention_floor, build_checkpoint_tables, checkpoint_basis_head, create_checkpoint,
         load_verified_checkpoint_materialization, metadata_states_equivalent,
-        publish_snapshot_hint_seq, write_checkpoint_manifest, CheckpointLoadError,
+        publish_checkpoint_hint_seq, write_checkpoint_manifest, CheckpointLoadError,
     };
     use crate::{
         bootstrap_namespace, load_verified_namespace_basis, put_file_bytes, write_file_bytes,
@@ -1108,7 +1109,7 @@ mod tests {
     };
     use loon_api::{ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{snapshot_manifest, snapshot_table, SnapshotTableFamily};
+    use loon_objectstore::keys::{checkpoint_manifest, checkpoint_table, CheckpointTableFamily};
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -1153,7 +1154,7 @@ mod tests {
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
 
-        assert_eq!(after.head.snapshot_hint_seq, Some(before.head.seq));
+        assert_eq!(after.head.checkpoint_hint_seq, Some(before.head.seq));
         assert_eq!(before.head.seq, after.head.seq);
         assert!(metadata_states_equivalent(
             &before.metadata_state,
@@ -1171,7 +1172,7 @@ mod tests {
 
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        assert_eq!(basis.head.snapshot_hint_seq, Some(ChangeSeq(0)));
+        assert_eq!(basis.head.checkpoint_hint_seq, Some(ChangeSeq(0)));
     }
 
     #[test]
@@ -1192,7 +1193,7 @@ mod tests {
         .expect("write hello");
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
 
-        let manifest_key = snapshot_manifest(namespace_id.as_str(), 1);
+        let manifest_key = checkpoint_manifest(namespace_id.as_str(), 1);
         store
             .put_overwrite(&manifest_key, br#"{"bad":"json"}"#)
             .expect("corrupt manifest");
@@ -1208,7 +1209,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::from("demo");
         let context = test_context();
-        let manifest_key = snapshot_manifest(namespace_id.as_str(), 1);
+        let manifest_key = checkpoint_manifest(namespace_id.as_str(), 1);
         let store = ConflictOnManifestCreateStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             manifest_key,
@@ -1233,7 +1234,7 @@ mod tests {
         }
 
         let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        assert_eq!(basis.head.snapshot_hint_seq, None);
+        assert_eq!(basis.head.checkpoint_hint_seq, None);
     }
 
     #[test]
@@ -1273,7 +1274,7 @@ mod tests {
             1
         );
         assert!(store
-            .head(&snapshot_manifest(namespace_id.as_str(), 1))
+            .head(&checkpoint_manifest(namespace_id.as_str(), 1))
             .expect("manifest head")
             .is_some());
     }
@@ -1307,8 +1308,12 @@ mod tests {
             &current.metadata_state
         ));
 
-        let segment_key =
-            snapshot_table(namespace_id.as_str(), 1, SnapshotTableFamily::Revisions, 0);
+        let segment_key = checkpoint_table(
+            namespace_id.as_str(),
+            1,
+            CheckpointTableFamily::Revisions,
+            0,
+        );
         assert!(store.head(&segment_key).expect("head segment").is_some());
     }
 
@@ -1362,7 +1367,7 @@ mod tests {
             None,
         )
         .expect("write second");
-        let published = publish_snapshot_hint_seq(
+        let published = publish_checkpoint_hint_seq(
             &store,
             &namespace_id,
             basis_before.head.seq,
@@ -1371,11 +1376,11 @@ mod tests {
         .expect("publish snapshot hint");
 
         assert_eq!(published.seq, ChangeSeq(2));
-        assert_eq!(published.snapshot_hint_seq, Some(ChangeSeq(1)));
+        assert_eq!(published.checkpoint_hint_seq, Some(ChangeSeq(1)));
 
         let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
         assert_eq!(after.head.seq, ChangeSeq(2));
-        assert_eq!(after.head.snapshot_hint_seq, Some(ChangeSeq(1)));
+        assert_eq!(after.head.checkpoint_hint_seq, Some(ChangeSeq(1)));
     }
 
     fn test_context() -> MutationContext {
