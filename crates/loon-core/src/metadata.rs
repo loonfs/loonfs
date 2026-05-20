@@ -59,7 +59,7 @@ pub struct SubtreeTombstoneRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitReceiptRecord {
     pub commit_id: CommitId,
-    pub request_fingerprint_sha256: String,
+    pub semantic_commit_fingerprint_sha256: String,
     pub committed_seq: ChangeSeq,
     pub results: Vec<CommitOpResult>,
 }
@@ -295,7 +295,9 @@ impl MetadataState {
             .commit_receipts
             .push(CommitReceiptRecord {
                 commit_id: record.commit_id.clone(),
-                request_fingerprint_sha256: record.request_fingerprint_sha256.clone(),
+                semantic_commit_fingerprint_sha256: record
+                    .semantic_commit_fingerprint_sha256
+                    .clone(),
                 committed_seq: record.seq,
                 results: record.results.clone(),
             });

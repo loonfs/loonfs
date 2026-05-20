@@ -1,12 +1,15 @@
 use crate::config::ServerConfig;
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
-use loon_api::{payload_checksum_sha256, CommitId, NamespaceId};
+use loon_api::{CommitId, NamespaceId};
 use loon_core::{
-    commit::CommitHeadPublishError, publish_namespace_mutations_batch, CoreError, MutationContext,
-    NamespaceMutationCandidate, PathMutationIntent, PlannedNamespaceMutation,
+    commit::{
+        semantic_commit_fingerprint_for_v0_request, CommitHeadPublishError,
+        SemanticCommitFingerprint,
+    },
+    publish_namespace_mutations_batch, CoreError, MutationContext, NamespaceMutationCandidate,
+    PathMutationIntent,
 };
 use loon_objectstore::ObjectStore;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,7 +110,7 @@ struct BatchCandidate {
 }
 
 struct InFlightRequest {
-    fingerprint: String,
+    fingerprint: SemanticCommitFingerprint,
     waiters: Vec<oneshot::Sender<CommitResult>>,
 }
 
@@ -128,7 +131,7 @@ impl NamespacePublisher {
 
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
         let commit_id = candidate_commit_id(&candidate).clone();
-        let fingerprint = candidate_fingerprint(&self.namespace_id, &candidate)?;
+        let fingerprint = candidate_semantic_commit_fingerprint(&self.namespace_id, &candidate)?;
         let (sender, receiver) = oneshot::channel();
         self.admit(commit_id, candidate, fingerprint, sender)?;
         receiver
@@ -140,7 +143,7 @@ impl NamespacePublisher {
         &self,
         commit_id: CommitId,
         candidate: NamespaceMutationCandidate,
-        fingerprint: String,
+        fingerprint: SemanticCommitFingerprint,
         waiter: oneshot::Sender<CommitResult>,
     ) -> Result<(), CoreError> {
         let mut should_spawn = false;
@@ -356,55 +359,23 @@ fn is_head_publish_stale(result: &CommitResult) -> bool {
 fn candidate_commit_id(candidate: &NamespaceMutationCandidate) -> &CommitId {
     match candidate {
         NamespaceMutationCandidate::Commit(request) => &request.commit_id,
-        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
-            commit_request, ..
-        }) => &commit_request.commit_id,
         NamespaceMutationCandidate::Path(intent) => intent.commit_id(),
     }
 }
 
-fn candidate_fingerprint(
+fn candidate_semantic_commit_fingerprint(
     namespace_id: &NamespaceId,
     candidate: &NamespaceMutationCandidate,
-) -> Result<String, CoreError> {
+) -> Result<SemanticCommitFingerprint, CoreError> {
     match candidate {
-        NamespaceMutationCandidate::Commit(request) => request_fingerprint(namespace_id, request)
-            .map_err(|err| CoreError::Store(err.to_string())),
-        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
-            request_fingerprint_sha256: Some(source),
-            ..
-        }) => Ok(source.clone()),
-        NamespaceMutationCandidate::Planned(PlannedNamespaceMutation {
-            commit_request,
-            request_fingerprint_sha256: None,
-        }) => request_fingerprint(namespace_id, commit_request)
-            .map_err(|err| CoreError::Store(err.to_string())),
-        NamespaceMutationCandidate::Path(intent) => intent.request_fingerprint_sha256(namespace_id),
+        NamespaceMutationCandidate::Commit(request) => {
+            semantic_commit_fingerprint_for_v0_request(namespace_id, request)
+                .map_err(|err| CoreError::Store(err.to_string()))
+        }
+        NamespaceMutationCandidate::Path(intent) => {
+            intent.semantic_commit_fingerprint(namespace_id)
+        }
     }
-}
-
-#[derive(Serialize)]
-struct CanonicalCommitRequest<'a> {
-    namespace_id: &'a NamespaceId,
-    planned_head_seq: loon_api::ChangeSeq,
-    preconditions: &'a [loon_api::v0::CommitPrecondition],
-    ops: &'a [loon_api::v0::CommitOp],
-    message: &'a Option<String>,
-    annotations: &'a Option<loon_api::v0::CommitAnnotations>,
-}
-
-fn request_fingerprint(
-    namespace_id: &NamespaceId,
-    request: &ApiCommitRequest,
-) -> Result<String, serde_json::Error> {
-    payload_checksum_sha256(&CanonicalCommitRequest {
-        namespace_id,
-        planned_head_seq: request.planned_head_seq,
-        preconditions: &request.preconditions,
-        ops: &request.ops,
-        message: &request.message,
-        annotations: &request.annotations,
-    })
 }
 
 fn mutation_context(config: &ServerConfig) -> MutationContext {
@@ -589,7 +560,7 @@ mod tests {
     ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
         let commit_id = request.commit_id.clone();
         let candidate = NamespaceMutationCandidate::Commit(request);
-        let fingerprint = candidate_fingerprint(namespace_id, &candidate)?;
+        let fingerprint = candidate_semantic_commit_fingerprint(namespace_id, &candidate)?;
         let (sender, receiver) = oneshot::channel();
         publisher.admit(commit_id, candidate, fingerprint, sender)?;
         Ok(receiver)

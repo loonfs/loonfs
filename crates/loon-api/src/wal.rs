@@ -86,7 +86,7 @@ pub struct WalCommitPayload {
     pub seq: ChangeSeq,
     pub base_head_seq: ChangeSeq,
     pub commit_id: CommitId,
-    pub request_fingerprint_sha256: String,
+    pub semantic_commit_fingerprint_sha256: String,
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     #[serde(default, skip_serializing_if = "Option::is_none")]

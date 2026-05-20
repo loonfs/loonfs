@@ -5,12 +5,27 @@ use loon_api::{
 };
 use serde::{Deserialize, Serialize};
 
+mod api_adapter;
+mod durable_adapter;
 mod frame;
+mod identity;
 mod ordered;
+mod prepared;
 mod publish;
 
+pub use self::api_adapter::{commit_request_from_v0, CommitConversionError};
+pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
+pub use self::identity::{
+    semantic_commit_fingerprint, semantic_commit_fingerprint_for_v0_request,
+    CommitFingerprintError, SemanticCommitFingerprint,
+};
 pub use self::ordered::build_commit_plan;
 pub(crate) use self::ordered::resolve_restore_content_refs;
+pub(crate) use self::prepared::CommitFingerprintSource;
+pub use self::prepared::{
+    materialize_commit, CommitExecutionContext, CommitMaterializationError, CommitPrepareError,
+    MaterializedCommit, MaterializedCommitOp, PreparedCommit,
+};
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,8 +35,6 @@ pub struct CommitRequest {
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
     pub planned_head_seq: ChangeSeq,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_fingerprint_sha256: Option<String>,
     pub ops: Vec<CommitOp>,
     pub preconditions: Vec<Precondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,9 +102,6 @@ pub struct CommitPlan {
     pub allocated_inode_ids: Vec<InodeId>,
     pub resolved_restore_content_refs: Vec<Option<ContentRef>>,
     pub resulting_next_inode_id: InodeId,
-    pub durable_content_required: bool,
-    pub wal_object_must_be_written: bool,
-    pub head_cas_must_succeed: bool,
     pub metadata_preconditions: Vec<Precondition>,
     pub checked_invariants: Vec<String>,
 }
@@ -294,32 +304,5 @@ pub enum CommitHeadPublishError {
 pub(crate) fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
     if !invariants.iter().any(|existing| existing == name) {
         invariants.push(name.to_owned());
-    }
-}
-
-impl CommitRequest {
-    pub fn request_fingerprint_sha256(&self) -> Result<String, serde_json::Error> {
-        if let Some(fingerprint) = &self.request_fingerprint_sha256 {
-            return Ok(fingerprint.clone());
-        }
-        #[derive(Serialize)]
-        struct CanonicalCommitRequest<'a> {
-            namespace_id: &'a NamespaceId,
-            planned_head_seq: ChangeSeq,
-            ops: &'a [CommitOp],
-            preconditions: &'a [Precondition],
-            message: &'a Option<String>,
-            annotations: &'a Option<CommitAnnotations>,
-        }
-        let request = CanonicalCommitRequest {
-            namespace_id: &self.namespace_id,
-            planned_head_seq: self.planned_head_seq,
-            ops: &self.ops,
-            preconditions: &self.preconditions,
-            message: &self.message,
-            annotations: &self.annotations,
-        };
-        let bytes = serde_json::to_vec(&request)?;
-        Ok(loon_api::sha256_digest(&bytes))
     }
 }

@@ -3,11 +3,11 @@ use loon_api::{
         CommitAnnotations, CommitOp, CommitOpResult, CommitPrecondition,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
-    AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
-    InodeId, RevisionNo,
+    AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, ControlObjectKind,
+    CreateCheckpointResponse, InodeId, LeaseStateEnvelope, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loon_objectstore::keys::snapshot_manifest;
+use loon_objectstore::keys::{namespace_lease, snapshot_manifest};
 use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loon_server::{app, ServerConfig, StoreConfig};
 use serde_json::json;
@@ -951,18 +951,20 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
         store_root.clone(),
         "loon-server-a",
         "two-server-smoke",
-        200,
+        60_000,
     ))
     .await;
     let server_b = start_server(test_config(
         store_root,
         "loon-server-b",
         "two-server-smoke",
-        200,
+        60_000,
     ))
     .await;
     let client_a = server_a.client.clone();
     let client_b = server_b.client.clone();
+    let store_root = server_a.store_root.clone();
+    let store_key_prefix = server_a.store_key_prefix.clone();
 
     tokio::task::spawn_blocking(move || {
         client_a.create_namespace("demo").expect("create namespace");
@@ -976,6 +978,7 @@ async fn two_servers_share_one_store_and_handoff_the_lease() {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "lease_conflict"),
             other => panic!("expected lease_conflict, got {other:?}"),
         }
+        force_expire_namespace_lease(&store_root, store_key_prefix.as_deref(), "demo");
 
         let committed_seq = retry_until_lease_handoff(&client_b, &host_a_target, &host_b_target);
         assert!(
@@ -1121,6 +1124,34 @@ fn retry_until_lease_handoff(client: &Client, from: &NamespacePath, to: &Namespa
     }
 
     panic!("timed out waiting for lease handoff");
+}
+
+fn force_expire_namespace_lease(
+    store_root: &std::path::Path,
+    key_prefix: Option<&str>,
+    namespace: &str,
+) {
+    let store =
+        ConfiguredObjectStore::local_fs(store_root, key_prefix).expect("construct test store");
+    let lease_key = namespace_lease(namespace);
+    let bytes = store
+        .get(&lease_key, None)
+        .expect("read namespace lease")
+        .expect("namespace lease exists");
+    let mut envelope: LeaseStateEnvelope =
+        serde_json::from_slice(&bytes).expect("decode namespace lease");
+    envelope.state.lease_expires_at_ms = 0;
+    let writer_version = envelope.writer_version;
+    let envelope = LeaseStateEnvelope::from_state(
+        ControlObjectKind::NamespaceLease,
+        writer_version,
+        envelope.state,
+    )
+    .expect("encode expired namespace lease");
+    let bytes = serde_json::to_vec(&envelope).expect("serialize expired namespace lease");
+    store
+        .put_overwrite(&lease_key, &bytes)
+        .expect("write expired namespace lease");
 }
 
 fn stage_uploaded_content_ref(client: &Client, namespace: &str, file_bytes: &[u8]) -> ContentRef {

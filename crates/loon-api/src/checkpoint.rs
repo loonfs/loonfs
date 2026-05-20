@@ -93,7 +93,7 @@ pub enum CheckpointRow {
     },
     CommitReceipt {
         commit_id: CommitId,
-        request_fingerprint_sha256: String,
+        semantic_commit_fingerprint_sha256: String,
         committed_seq: ChangeSeq,
         results: Vec<CommitOpResult>,
     },

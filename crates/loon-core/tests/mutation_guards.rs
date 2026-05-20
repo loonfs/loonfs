@@ -56,7 +56,6 @@ fn stale_head_precondition_is_rejected() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(2),
-        request_fingerprint_sha256: None,
         ops: vec![CommitOp::DeleteFile {
             inode_id: InodeId(3),
         }],
@@ -105,7 +104,6 @@ fn stale_revision_precondition_is_rejected() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(3),
-        request_fingerprint_sha256: None,
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
             base_revision: RevisionNo(1),
@@ -157,7 +155,6 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(2),
                 display_name: "new.txt".to_owned(),
@@ -185,7 +182,6 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
                 base_revision: RevisionNo(1),
@@ -222,7 +218,6 @@ fn restore_revision_validation_rejects_missing_inode() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        request_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(99),
             source_revision: RevisionNo(1),
@@ -257,7 +252,6 @@ fn restore_revision_validation_rejects_non_file_target() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        request_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision: RevisionNo(1),
@@ -310,7 +304,6 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(1),
@@ -339,7 +332,6 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(99),
@@ -387,7 +379,6 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(2),
-            request_fingerprint_sha256: None,
             ops: vec![
                 CommitOp::ReplaceFile {
                     inode_id: InodeId(3),
@@ -445,7 +436,6 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
             ops: vec![
                 CommitOp::RestoreRevision {
                     inode_id: InodeId(3),
@@ -504,7 +494,6 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             planned_head_seq: ChangeSeq(3),
-            request_fingerprint_sha256: None,
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
                 source_revision: RevisionNo(1),
@@ -566,7 +555,6 @@ fn restore_revision_overflow_is_rejected() {
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         planned_head_seq: ChangeSeq(1),
-        request_fingerprint_sha256: None,
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
             source_revision: RevisionNo(u64::MAX),
@@ -973,6 +961,44 @@ fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
         changes.changes[0].commit_id,
         CommitId::from("req-duplicate")
     );
+}
+
+#[test]
+fn visible_commit_id_retry_aliases_across_writer_takeover() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let writer_a = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &writer_a, false).expect("bootstrap");
+
+    let request = ApiCommitRequest {
+        commit_id: CommitId::from("retry-across-writer"),
+        planned_head_seq: ChangeSeq(0),
+        preconditions: Vec::new(),
+        ops: vec![ApiCommitOp::CreateDir {
+            parent_inode: InodeId(1),
+            display_name: "alpha".to_owned(),
+        }],
+        message: None,
+        annotations: None,
+    };
+
+    let first = commit_operations(&store, &namespace_id, request.clone(), &writer_a)
+        .expect("writer a commit");
+    let writer_b = MutationContext {
+        writer_id: "writer-b".to_owned(),
+        writer_version: "writer-b/0.1.0".to_owned(),
+        now_ms: writer_a
+            .now_ms
+            .saturating_add(writer_a.lease_duration_ms)
+            .saturating_add(1),
+        lease_duration_ms: writer_a.lease_duration_ms,
+    };
+
+    let retry =
+        commit_operations(&store, &namespace_id, request, &writer_b).expect("writer b retry");
+
+    assert_eq!(first, retry);
 }
 
 #[test]
