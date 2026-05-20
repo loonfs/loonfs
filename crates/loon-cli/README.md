@@ -100,13 +100,13 @@ Profile options
     loon profile create
 
   Generic profile selection:
-    --mode <local|remote>
+    --mode <embedded|remote>
 
-  Local profile options:
+  Embedded/direct profile options:
     --store-kind <local-fs|aws-s3|cloudflare-r2>
     --key-prefix <prefix>
 
-  Local filesystem store:
+  Local-fs provider:
     --root <path>
 
   AWS S3 store:
@@ -136,7 +136,7 @@ Update options
   Shared:
     --key-prefix <prefix>
 
-  Local filesystem profile updates:
+  Local-fs provider updates:
     --root <path>
 
   AWS S3 profile updates:

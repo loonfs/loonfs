@@ -15,7 +15,7 @@ All other state is cache, coordination, or other rebuildable state.
 
 LoonFS can be exposed as:
 
-- a direct filesystem service with commands such as `ls`, `get`, `put`, `mv`, and `cp`
+- an embedded/direct filesystem runtime with commands such as `ls`, `get`, `put`, `mv`, and `cp`
 - an advanced writer surface for staged upload, explicit commit, and incremental change consumption
 - a foundation for sync clients, batch writers, and operator tooling
 
@@ -56,7 +56,7 @@ The design goals are:
       ls / stat / get / put / mkdir / mv / cp / rm
                          |
                          v
-                authoritative LoonFS service
+                authoritative LoonFS runtime
           path resolution, validation, commit, reads
              /                    |                 \
             /                     |                  \

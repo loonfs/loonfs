@@ -12,20 +12,20 @@ use tempfile::TempDir;
 fn profile_create_list_show_remove_work() {
     let harness = Harness::new();
 
-    let add_local = harness.run(&[
+    let add_embedded = harness.run(&[
         "--json",
         "profile",
         "create",
         "default",
         "--mode",
-        "local",
+        "embedded",
         "--store-kind",
         "local-fs",
         "--root",
         harness.store_root("default").to_str().unwrap(),
     ]);
-    assert_success(&add_local);
-    assert_eq!(json_data(&add_local)["mode"], "local");
+    assert_success(&add_embedded);
+    assert_eq!(json_data(&add_embedded)["mode"], "embedded");
 
     let external = harness
         .start_external_server(harness.write_server_config("remote", "profile-create-remote"));
@@ -61,7 +61,7 @@ fn profile_create_list_show_remove_work() {
 
     let show_default = harness.run(&["--json", "profile", "show"]);
     assert_success(&show_default);
-    assert_eq!(json_data(&show_default)["mode"], "local");
+    assert_eq!(json_data(&show_default)["mode"], "embedded");
 
     let remove_default = harness.run(&["--json", "profile", "remove", "default"]);
     assert_success(&remove_default);
@@ -80,9 +80,9 @@ fn profile_create_list_show_remove_work() {
 }
 
 #[test]
-fn local_profile_filesystem_flow_works_end_to_end() {
+fn embedded_profile_filesystem_flow_works_end_to_end() {
     let harness = Harness::new();
-    harness.add_local_profile("default");
+    harness.add_embedded_profile("default");
 
     let upload_path = harness.temp_dir.path().join("upload.txt");
     let download_path = harness.temp_dir.path().join("downloaded.txt");
@@ -163,9 +163,9 @@ fn local_profile_filesystem_flow_works_end_to_end() {
 }
 
 #[test]
-fn local_profile_namespace_fork_reads_shared_content_and_diverges() {
+fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
     let harness = Harness::new();
-    harness.add_local_profile("default");
+    harness.add_embedded_profile("default");
 
     let upload_path = harness.temp_dir.path().join("upload.txt");
     let clone_upload_path = harness.temp_dir.path().join("clone-upload.txt");
@@ -208,7 +208,7 @@ fn local_profile_namespace_fork_reads_shared_content_and_diverges() {
 }
 
 #[test]
-fn init_creates_local_profile_and_current_reports_namespace_unset() {
+fn init_creates_embedded_profile_and_current_reports_namespace_unset() {
     let harness = Harness::new();
 
     let init = harness.run(&[
@@ -216,18 +216,18 @@ fn init_creates_local_profile_and_current_reports_namespace_unset() {
         "init",
         "mystore",
         "--mode",
-        "local",
+        "embedded",
         "--store-kind",
         "local-fs",
         "--root",
         harness.store_root("mystore").to_str().unwrap(),
     ]);
     assert_success(&init);
-    assert_eq!(json_data(&init)["mode"], "local");
+    assert_eq!(json_data(&init)["mode"], "embedded");
 
     let show = harness.run(&["--json", "profile", "show"]);
     assert_success(&show);
-    assert_eq!(json_data(&show)["mode"], "local");
+    assert_eq!(json_data(&show)["mode"], "embedded");
 
     let current = harness.run(&["--json", "current"]);
     assert_success(&current);
@@ -241,9 +241,33 @@ fn init_creates_local_profile_and_current_reports_namespace_unset() {
 }
 
 #[test]
+fn legacy_local_mode_is_rejected() {
+    let harness = Harness::new();
+
+    let result = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "local",
+        "--store-kind",
+        "local-fs",
+        "--root",
+        harness.store_root("default").to_str().unwrap(),
+    ]);
+
+    assert_failure(&result);
+    let error = json_error(&result);
+    assert_eq!(error["code"], "invalid_input");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("expected embedded or remote"));
+}
+
+#[test]
 fn removing_last_profile_leaves_empty_config() {
     let harness = Harness::new();
-    harness.add_local_profile("default");
+    harness.add_embedded_profile("default");
 
     let remove = harness.run(&["--json", "--no-input", "profile", "remove", "default"]);
     assert_success(&remove);
@@ -266,8 +290,8 @@ fn removing_last_profile_leaves_empty_config() {
 #[test]
 fn removing_default_profile_requires_explicit_reselection() {
     let harness = Harness::new();
-    harness.add_local_profile("alpha");
-    harness.add_local_profile("beta");
+    harness.add_embedded_profile("alpha");
+    harness.add_embedded_profile("beta");
 
     let remove = harness.run(&["--json", "--no-input", "profile", "remove", "alpha"]);
     assert_success(&remove);
@@ -295,13 +319,13 @@ fn removing_default_profile_requires_explicit_reselection() {
 
     let show_after = harness.run(&["--json", "profile", "show"]);
     assert_success(&show_after);
-    assert_eq!(json_data(&show_after)["mode"], "local");
+    assert_eq!(json_data(&show_after)["mode"], "embedded");
 }
 
 #[test]
 fn profile_update_changes_fields() {
     let harness = Harness::new();
-    harness.add_local_profile("default");
+    harness.add_embedded_profile("default");
 
     let new_root = harness.store_root("updated");
     let update = harness.run(&[
@@ -323,8 +347,8 @@ fn profile_update_changes_fields() {
 #[test]
 fn profile_use_switches_default() {
     let harness = Harness::new();
-    harness.add_local_profile("alpha");
-    harness.add_local_profile("beta");
+    harness.add_embedded_profile("alpha");
+    harness.add_embedded_profile("beta");
 
     let use_profile = harness.run(&["--json", "profile", "use", "beta"]);
     assert_success(&use_profile);
@@ -338,7 +362,7 @@ fn profile_use_switches_default() {
 #[test]
 fn profile_use_rejects_missing_profile() {
     let harness = Harness::new();
-    harness.add_local_profile("default");
+    harness.add_embedded_profile("default");
 
     let result = harness.run(&["--json", "profile", "use", "nonexistent"]);
     assert_failure(&result);
@@ -354,7 +378,7 @@ fn reserved_profile_names_are_rejected() {
         "init",
         "default_profile",
         "--mode",
-        "local",
+        "embedded",
         "--store-kind",
         "local-fs",
         "--root",
@@ -369,7 +393,7 @@ fn reserved_profile_names_are_rejected() {
         "create",
         "config_version",
         "--mode",
-        "local",
+        "embedded",
         "--store-kind",
         "local-fs",
         "--root",
@@ -388,7 +412,7 @@ config_version = 1
 default_profile = "default"
 
 [default]
-mode = "local"
+mode = "embedded"
 
 [default.store]
 kind = "local-fs"
@@ -403,7 +427,7 @@ root = "{}"
         "init",
         "mystore",
         "--mode",
-        "local",
+        "embedded",
         "--store-kind",
         "local-fs",
         "--root",
@@ -430,7 +454,7 @@ fn reserved_profile_names_in_config_are_rejected() {
 config_version = 1
 
 [default_profile]
-mode = "local"
+mode = "embedded"
 
 [default_profile.store]
 kind = "local-fs"
@@ -493,7 +517,7 @@ config_version = 1
 default_profile = "default"
 
 [default]
-mode = "local"
+mode = "embedded"
 
 [default.store]
 kind = "local-fs"
@@ -520,7 +544,7 @@ config_version = 1
 default_profile = "default"
 
 [default]
-mode = "local"
+mode = "embedded"
 default_namespace = "bad/name"
 
 [default.store]
@@ -541,9 +565,9 @@ root = "{}"
 }
 
 #[test]
-fn local_namespace_commands_reject_invalid_namespace_ids() {
+fn embedded_namespace_commands_reject_invalid_namespace_ids() {
     let harness = Harness::new();
-    harness.add_local_profile("default");
+    harness.add_embedded_profile("default");
 
     let create = harness.run(&["--json", "namespace", "create", "bad/name"]);
     assert_failure(&create);
@@ -666,7 +690,7 @@ fn external_remote_profile_executes_through_http() {
 #[test]
 fn filesystem_requires_default_namespace_when_omitted() {
     let harness = Harness::new();
-    harness.add_local_profile("default");
+    harness.add_embedded_profile("default");
 
     let output = harness.run(&["--json", "ls", "/"]);
     assert_failure(&output);
@@ -675,9 +699,9 @@ fn filesystem_requires_default_namespace_when_omitted() {
 }
 
 #[test]
-fn local_profile_missing_namespace_reports_user_facing_message() {
+fn embedded_profile_missing_namespace_reports_user_facing_message() {
     let harness = Harness::new();
-    harness.add_local_profile("default");
+    harness.add_embedded_profile("default");
 
     let output = harness.run(&["--json", "ls", "--namespace", "missing", "/"]);
     assert_failure(&output);
@@ -715,8 +739,8 @@ fn remote_profile_missing_namespace_reports_user_facing_message() {
 #[test]
 fn current_reports_profile_specific_namespace() {
     let harness = Harness::new();
-    harness.add_local_profile("alpha");
-    harness.add_local_profile("beta");
+    harness.add_embedded_profile("alpha");
+    harness.add_embedded_profile("beta");
 
     assert_success(&harness.run(&["namespace", "create", "--profile", "alpha", "alpha-ns"]));
     assert_success(&harness.run(&["use", "--profile", "alpha", "alpha-ns"]));
@@ -743,7 +767,7 @@ fn current_does_not_require_backend_resolution() {
 default_profile = "broken"
 
 [broken]
-mode = "local"
+mode = "embedded"
 default_namespace = "demo"
 
 [broken.store]
@@ -819,14 +843,14 @@ impl Harness {
         self.temp_dir.path().join(format!("{name}-store"))
     }
 
-    fn add_local_profile(&self, name: &str) {
+    fn add_embedded_profile(&self, name: &str) {
         let output = self.run(&[
             "--json",
             "profile",
             "create",
             name,
             "--mode",
-            "local",
+            "embedded",
             "--store-kind",
             "local-fs",
             "--root",

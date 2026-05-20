@@ -4,5 +4,5 @@ assertion_line: 225
 expression: human_success(&output)
 ---
 NAME	MODE	STORE	DEFAULT
-default	local	local-fs	*
+default	embedded	local-fs	*
 prod	remote	-

@@ -133,7 +133,7 @@ fn map_client_error(error: ClientError) -> CliError {
     }
 }
 
-// --- Direct backend (calls loon-core directly) ---
+// --- Direct backend (embedded/direct mode calls loon-core directly) ---
 
 pub struct DirectBackend {
     store: ConfiguredObjectStore,
@@ -366,11 +366,11 @@ fn default_writer_id() -> String {
 // --- Target resolution ---
 
 pub enum ResolvedTarget {
-    Local(Box<LocalTarget>),
+    Embedded(Box<EmbeddedTarget>),
     Remote(RemoteTarget),
 }
 
-pub struct LocalTarget {
+pub struct EmbeddedTarget {
     backend: DirectBackend,
 }
 
@@ -381,13 +381,13 @@ pub struct RemoteTarget {
 impl ResolvedTarget {
     pub fn resolve(profile_name: &str, profile: &ProfileConfig) -> Result<Self, CliError> {
         match profile {
-            ProfileConfig::Local {
+            ProfileConfig::Embedded {
                 store,
                 writer_id,
                 writer_version,
                 lease_duration_ms,
                 ..
-            } => Ok(Self::Local(Box::new(LocalTarget::new(
+            } => Ok(Self::Embedded(Box::new(EmbeddedTarget::new(
                 store,
                 writer_id.as_deref(),
                 writer_version.as_deref(),
@@ -407,20 +407,20 @@ impl ResolvedTarget {
 
     pub fn mode_str(&self) -> &'static str {
         match self {
-            ResolvedTarget::Local(_) => "local",
+            ResolvedTarget::Embedded(_) => "embedded",
             ResolvedTarget::Remote(_) => "remote",
         }
     }
 
     pub fn backend(&self) -> &dyn Backend {
         match self {
-            ResolvedTarget::Local(target) => &target.backend,
+            ResolvedTarget::Embedded(target) => &target.backend,
             ResolvedTarget::Remote(target) => &target.backend,
         }
     }
 }
 
-impl LocalTarget {
+impl EmbeddedTarget {
     fn new(
         store_config: &StoreConfig,
         writer_id: Option<&str>,
@@ -460,7 +460,7 @@ impl RemoteTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_core_error, Backend, LocalTarget, DEFAULT_LEASE_DURATION_MS};
+    use super::{map_core_error, Backend, EmbeddedTarget, DEFAULT_LEASE_DURATION_MS};
     use crate::config::StoreConfig;
     use loon_api::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
     use loon_client::NamespacePath;
@@ -480,21 +480,21 @@ mod tests {
     }
 
     #[test]
-    fn local_target_uses_five_second_default_lease_when_unset() {
+    fn embedded_target_uses_five_second_default_lease_when_unset() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
 
-        let target = LocalTarget::new(&store, None, None, None).expect("build local target");
+        let target = EmbeddedTarget::new(&store, None, None, None).expect("build embedded target");
 
         assert_eq!(target.backend.lease_duration_ms, DEFAULT_LEASE_DURATION_MS);
         assert_eq!(target.backend.lease_duration_ms, 5_000);
     }
 
     #[test]
-    fn local_target_preserves_explicit_lease_duration() {
+    fn embedded_target_preserves_explicit_lease_duration() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
@@ -502,19 +502,19 @@ mod tests {
         };
 
         let target =
-            LocalTarget::new(&store, None, None, Some(12_345)).expect("build local target");
+            EmbeddedTarget::new(&store, None, None, Some(12_345)).expect("build embedded target");
 
         assert_eq!(target.backend.lease_duration_ms, 12_345);
     }
 
     #[test]
-    fn direct_backend_generates_non_empty_commit_id_for_local_put() {
+    fn direct_backend_generates_non_empty_commit_id_for_embedded_put() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        let target = LocalTarget::new(&store, None, None, None).expect("build local target");
+        let target = EmbeddedTarget::new(&store, None, None, None).expect("build embedded target");
         target
             .backend
             .create_namespace("demo")

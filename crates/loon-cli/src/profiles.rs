@@ -117,7 +117,7 @@ pub fn resolve_profile<'a>(
 
 pub fn default_namespace(profile: &ProfileConfig) -> Option<&str> {
     match profile {
-        ProfileConfig::Local {
+        ProfileConfig::Embedded {
             default_namespace, ..
         }
         | ProfileConfig::Remote {
@@ -136,7 +136,7 @@ pub fn set_default_namespace(
         .get_mut(profile_name)
         .ok_or_else(|| CliError::profile_not_found(profile_name))?;
     match profile {
-        ProfileConfig::Local {
+        ProfileConfig::Embedded {
             default_namespace, ..
         }
         | ProfileConfig::Remote {

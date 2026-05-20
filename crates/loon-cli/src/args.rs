@@ -43,7 +43,7 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct InitArgs {
     pub name: Option<String>,
-    #[arg(long)]
+    #[arg(long, value_name = "embedded|remote")]
     pub mode: Option<String>,
     #[arg(long)]
     pub store_kind: Option<String>,
@@ -86,7 +86,7 @@ pub enum ProfileCommand {
 #[derive(Debug, Args)]
 pub struct ProfileCreateArgs {
     pub name: String,
-    #[arg(long)]
+    #[arg(long, value_name = "embedded|remote")]
     pub mode: Option<String>,
     #[arg(long)]
     pub store_kind: Option<String>,

@@ -231,7 +231,7 @@ mod tests {
                 profiles: vec![
                     ProfileSummary {
                         name: "default".to_owned(),
-                        mode: "local".to_owned(),
+                        mode: "embedded".to_owned(),
                         store_kind: Some("local-fs".to_owned()),
                     },
                     ProfileSummary {
@@ -283,8 +283,8 @@ mod tests {
         let output = CommandOutput {
             kind: CommandKind::ProfileShow,
             profile: Some("default".to_owned()),
-            mode: Some("local".to_owned()),
-            data: CommandData::Profile(ProfileConfig::Local {
+            mode: Some("embedded".to_owned()),
+            data: CommandData::Profile(ProfileConfig::Embedded {
                 store: StoreConfig::LocalFs {
                     root: "/tmp/store".to_owned(),
                     key_prefix: None,
