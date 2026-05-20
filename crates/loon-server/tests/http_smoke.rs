@@ -85,6 +85,41 @@ async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_upload_content_rejects_invalid_upload_id() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-test",
+        "http-invalid-upload-id",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace("demo")
+            .expect("create namespace");
+
+        let invalid_upload_id = ["upl", "123"].join("-");
+        match harness
+            .client
+            .upload_content("demo", &invalid_upload_id, b"hello")
+        {
+            Err(ClientError::Api { status, code, .. }) => {
+                assert_eq!(status, 400);
+                assert_eq!(code, "invalid_upload_id");
+            }
+            other => panic!("expected invalid_upload_id, got {other:?}"),
+        }
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_create_only_and_copy_preserve_cli_semantics() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(

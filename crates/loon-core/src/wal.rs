@@ -1,13 +1,13 @@
 use crate::commit::{CommitOp, CommitPlan, CommitRequest, Precondition};
 use crate::metadata::{MetadataApplyError, MetadataState};
 use loon_api::{
-    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, v0::CommitOpResult,
-    ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitPayload, WalOp, WalPrecondition,
-    WalSegmentEnvelope, WalSegmentPayload, WalSegmentPointer,
+    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, generate_wal_segment_id,
+    v0::CommitOpResult, validate_wal_segment_id, ChangeSeq, HeadState, InodeId, NamespaceId,
+    WalCommitPayload, WalOp, WalPrecondition, WalSegmentEnvelope, WalSegmentPayload,
+    WalSegmentPointer,
 };
 use loon_objectstore::keys::wal_segment;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedWalRecord {
@@ -151,7 +151,7 @@ pub fn prepare_wal_segment(
         .last()
         .map(|record| record.seq)
         .ok_or(WalBuildError::EmptySegment)?;
-    let segment_id = format!("seg_{}", Uuid::new_v4().simple());
+    let segment_id = generate_wal_segment_id();
     let payload = WalSegmentPayload {
         namespace_id,
         segment_id: segment_id.clone(),
@@ -439,6 +439,8 @@ fn decode_and_validate_replayed_wal(
     wal_object: &StoredWalObject,
 ) -> Result<WalSegmentEnvelope, WalReplayError> {
     let envelope = decode_wal_segment_envelope_zstd(&wal_object.encoded_bytes)
+        .map_err(|err| WalReplayError::Codec(err.to_string()))?;
+    validate_wal_segment_id(&envelope.payload.segment_id)
         .map_err(|err| WalReplayError::Codec(err.to_string()))?;
     let expected_object_key = wal_segment(
         envelope.payload.namespace_id.as_str(),

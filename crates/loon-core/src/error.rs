@@ -7,7 +7,8 @@ use crate::metadata::{MetadataApplyError, VisiblePathError};
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::wal::WalBuildError;
 use loon_api::{
-    ChangeSeq, CommitIdValidationError, InodeId, InodeKind, NamespaceId, NamespaceIdValidationError,
+    ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind,
+    NamespaceId, NamespaceIdValidationError,
 };
 use thiserror::Error;
 
@@ -16,6 +17,7 @@ pub enum CoreErrorKind {
     InvalidPath,
     InvalidNamespaceId,
     InvalidCommitId,
+    InvalidUploadId,
     NamespaceNotFound,
     NamespaceExists,
     NamespacePartial,
@@ -65,6 +67,8 @@ pub enum CoreError {
     InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error(transparent)]
     InvalidCommitId(#[from] CommitIdValidationError),
+    #[error(transparent)]
+    InvalidUploadId(GeneratedIdValidationError),
     #[error("path not found `{0}`")]
     MissingPath(String),
     #[error("expected file at `{path}` but found `{kind:?}`")]
@@ -170,6 +174,7 @@ impl CoreError {
             }
             CoreError::InvalidNamespaceId(_) => CoreErrorKind::InvalidNamespaceId,
             CoreError::InvalidCommitId(_) => CoreErrorKind::InvalidCommitId,
+            CoreError::InvalidUploadId(_) => CoreErrorKind::InvalidUploadId,
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
             CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
             CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,

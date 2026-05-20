@@ -1325,6 +1325,7 @@ dependencies = [
  "thiserror 2.0.18",
  "unicode-casefold",
  "unicode-normalization",
+ "uuid",
  "zstd",
 ]
 
@@ -1346,7 +1347,6 @@ dependencies = [
  "tempfile",
  "toml",
  "ureq",
- "uuid",
 ]
 
 [[package]]
@@ -1362,7 +1362,6 @@ dependencies = [
  "toml",
  "ureq",
  "urlencoding",
- "uuid",
  "walkdir",
 ]
 
@@ -1378,7 +1377,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
- "uuid",
 ]
 
 [[package]]

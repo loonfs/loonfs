@@ -541,6 +541,7 @@ impl ApiResponseError {
             CoreErrorKind::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path"),
             CoreErrorKind::InvalidNamespaceId => (StatusCode::BAD_REQUEST, "invalid_namespace_id"),
             CoreErrorKind::InvalidCommitId => (StatusCode::BAD_REQUEST, "invalid_commit_id"),
+            CoreErrorKind::InvalidUploadId => (StatusCode::BAD_REQUEST, "invalid_upload_id"),
             CoreErrorKind::NamespaceNotFound => (StatusCode::NOT_FOUND, "namespace_not_found"),
             CoreErrorKind::NamespaceExists => (StatusCode::CONFLICT, "namespace_exists"),
             CoreErrorKind::NamespacePartial => (StatusCode::CONFLICT, "namespace_partial"),

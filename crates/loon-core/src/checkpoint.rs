@@ -17,7 +17,7 @@ use loon_api::{
     CreateCheckpointResponse, FenceToken, HeadState, HeadStateEnvelope, InodeId, NamespaceId,
 };
 use loon_objectstore::keys::{
-    derived_progress, snapshot_manifest, snapshot_table, SnapshotTableFamily,
+    derived_progress, snapshot_manifest, snapshot_table, DerivedWorkClass, SnapshotTableFamily,
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
 // V1 does not require any derived work classes to be caught up before the
 // retention floor advances. This hook stays in place so future retention gates
 // can add progress requirements without restructuring the flow.
-const REQUIRED_RETENTION_PROGRESS_CLASSES: &[&str] = &[];
+const REQUIRED_RETENTION_PROGRESS_CLASSES: &[DerivedWorkClass] = &[];
 const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 5] = [
     CheckpointTableFamily::Inodes,
     CheckpointTableFamily::Direntries,
@@ -605,13 +605,14 @@ fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
     target_floor: ChangeSeq,
 ) -> Result<(), CoreError> {
     for work_class in REQUIRED_RETENTION_PROGRESS_CLASSES {
-        let object_key = derived_progress(namespace_id.as_str(), work_class);
+        let object_key = derived_progress(namespace_id.as_str(), *work_class);
+        let work_class_name = work_class.as_str();
         let Some(bytes) = store
             .get(&object_key, None)
             .map_err(|err| CoreError::Store(err.to_string()))?
         else {
             return Err(CoreError::CheckpointUnavailable(format!(
-                "required derived progress `{work_class}` is missing for namespace `{}`",
+                "required derived progress `{work_class_name}` is missing for namespace `{}`",
                 namespace_id.as_str()
             )));
         };
@@ -619,7 +620,7 @@ fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
             serde_json::from_slice(&bytes).map_err(|err| CoreError::Store(err.to_string()))?;
         if progress.state.through_seq < target_floor {
             return Err(CoreError::CheckpointUnavailable(format!(
-                "required derived progress `{work_class}` only covers {:?} for namespace `{}`",
+                "required derived progress `{work_class_name}` only covers {:?} for namespace `{}`",
                 progress.state.through_seq,
                 namespace_id.as_str()
             )));

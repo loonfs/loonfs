@@ -24,6 +24,6 @@
 | **ACL** | An access-control rule granting a principal a role over a namespace or subtree. ACLs are not part of namespace metadata history. |
 | **Share** | An access grant to a namespace or subtree. A share may later be presented through a mount in another tree. |
 | **Precondition** | A rule that must still hold at an explicit namespace history point before a commit is accepted. |
-| **Request id** | A stable client-generated id used for idempotent retries of one commit request. |
+| **Commit id** | A stable client-generated id used for idempotent retries of one commit request. |
 | **Operation id** | Optional commit metadata used to correlate multiple commits that belong to one higher-level workflow. |
 | **Control object** | A server-side control-plane object used to preserve authoritative state across multiple requests, such as a pinned read snapshot, a resumable upload, or a stable destination binding. |

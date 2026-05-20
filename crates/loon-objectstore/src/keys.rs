@@ -21,6 +21,19 @@ impl SnapshotTableFamily {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DerivedWorkClass {
+    SnapshotBuilder,
+}
+
+impl DerivedWorkClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SnapshotBuilder => "snapshot-builder",
+        }
+    }
+}
+
 pub fn namespace_head(namespace: &str) -> String {
     format!("namespaces/{namespace}/head.json")
 }
@@ -83,7 +96,8 @@ pub fn snapshot_table(
     )
 }
 
-pub fn derived_progress(namespace: &str, work_class: &str) -> String {
+pub fn derived_progress(namespace: &str, work_class: DerivedWorkClass) -> String {
+    let work_class = work_class.as_str();
     format!("namespaces/{namespace}/derived/{work_class}/progress.json")
 }
 
@@ -113,7 +127,7 @@ mod tests {
         conflict_artifact, conflict_artifact_prefix, content_blob, content_store_descriptor,
         derived_progress, namespace_descriptor, namespace_head, namespace_lease, queue_shard,
         sha256_hex_from_digest, snapshot_manifest, snapshot_table, upload_session,
-        upload_session_prefix, wal_segment, SnapshotTableFamily,
+        upload_session_prefix, wal_segment, DerivedWorkClass, SnapshotTableFamily,
     };
 
     #[test]
@@ -125,12 +139,12 @@ mod tests {
         );
         assert_eq!(namespace_lease("ns-1"), "namespaces/ns-1/lease.json");
         assert_eq!(
-            content_store_descriptor("cs-1"),
-            "content-stores/cs-1/descriptor.json"
+            content_store_descriptor("cs_00000000000000000000000000000001"),
+            "content-stores/cs_00000000000000000000000000000001/descriptor.json"
         );
         assert_eq!(
-            wal_segment("ns-1", 420, 425, "seg-123"),
-            "namespaces/ns-1/wal/00000000000000000420-00000000000000000425-seg-123.cbor.zst"
+            wal_segment("ns-1", 420, 425, "seg_00000000000000000000000000000001"),
+            "namespaces/ns-1/wal/00000000000000000420-00000000000000000425-seg_00000000000000000000000000000001.cbor.zst"
         );
         assert_eq!(
             snapshot_manifest("ns-1", 400),
@@ -145,17 +159,17 @@ mod tests {
             "namespaces/ns-1/snapshots/00000000000000000400/tables/commit-receipts-00000.sst.zst"
         );
         assert_eq!(
-            derived_progress("ns-1", "BuildSnapshot"),
-            "namespaces/ns-1/derived/BuildSnapshot/progress.json"
+            derived_progress("ns-1", DerivedWorkClass::SnapshotBuilder),
+            "namespaces/ns-1/derived/snapshot-builder/progress.json"
         );
         assert_eq!(queue_shard(17), "queue/shards/00017.json");
         assert_eq!(
             content_blob(
-                "cs-1",
+                "cs_00000000000000000000000000000001",
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
             )
             .expect("content key"),
-            "content-stores/cs-1/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         );
         assert_eq!(
             conflict_artifact("ns-1", "conflict-deadbeef"),
@@ -166,8 +180,8 @@ mod tests {
             "namespaces/ns-1/conflicts/"
         );
         assert_eq!(
-            upload_session("ns-1", "upl-123"),
-            "namespaces/ns-1/control/uploads/upl-123.json"
+            upload_session("ns-1", "upl_00000000000000000000000000000001"),
+            "namespaces/ns-1/control/uploads/upl_00000000000000000000000000000001.json"
         );
         assert_eq!(
             upload_session_prefix("ns-1"),

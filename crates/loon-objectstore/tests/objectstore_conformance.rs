@@ -3,7 +3,7 @@ mod provider_env;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, derived_progress, namespace_descriptor, namespace_head,
-    namespace_lease, queue_shard, snapshot_manifest, snapshot_table, wal_segment,
+    namespace_lease, queue_shard, snapshot_manifest, snapshot_table, wal_segment, DerivedWorkClass,
     SnapshotTableFamily,
 };
 use loon_objectstore::probes::run_contract_probes;
@@ -134,20 +134,20 @@ fn key_builders_cover_locked_object_families() {
     assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/head.json");
     assert_eq!(namespace_lease("ns-1"), "namespaces/ns-1/lease.json");
     assert_eq!(
-        content_store_descriptor("cs-1"),
-        "content-stores/cs-1/descriptor.json"
+        content_store_descriptor("cs_00000000000000000000000000000001"),
+        "content-stores/cs_00000000000000000000000000000001/descriptor.json"
     );
     assert_eq!(
         content_blob(
-            "cs-1",
+            "cs_00000000000000000000000000000001",
             "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         )
         .expect("content blob key"),
-        "content-stores/cs-1/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     );
     assert_eq!(
-        wal_segment("ns-1", 420, 420, "seg-1"),
-        "namespaces/ns-1/wal/00000000000000000420-00000000000000000420-seg-1.cbor.zst"
+        wal_segment("ns-1", 420, 420, "seg_00000000000000000000000000000001"),
+        "namespaces/ns-1/wal/00000000000000000420-00000000000000000420-seg_00000000000000000000000000000001.cbor.zst"
     );
     assert_eq!(
         snapshot_manifest("ns-1", 420),
@@ -162,8 +162,8 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/snapshots/00000000000000000420/tables/commit-receipts-00000.sst.zst"
     );
     assert_eq!(
-        derived_progress("ns-1", "BuildSnapshot"),
-        "namespaces/ns-1/derived/BuildSnapshot/progress.json"
+        derived_progress("ns-1", DerivedWorkClass::SnapshotBuilder),
+        "namespaces/ns-1/derived/snapshot-builder/progress.json"
     );
     assert_eq!(queue_shard(12), "queue/shards/00012.json");
 }
@@ -402,7 +402,7 @@ fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
 }
 
 fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
-    let key = derived_progress("ns-1", "BuildSnapshot");
+    let key = derived_progress("ns-1", DerivedWorkClass::SnapshotBuilder);
     let _ = store.delete(&key);
 
     store
@@ -424,7 +424,7 @@ fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
 
 fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
     let keys = vec![
-        derived_progress("ns-sort", "BuildSnapshot"),
+        derived_progress("ns-sort", DerivedWorkClass::SnapshotBuilder),
         namespace_head("ns-sort"),
         namespace_lease("ns-sort"),
     ];
@@ -455,7 +455,7 @@ fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
 }
 
 fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
-    let key = wal_segment("ns-1", 420, 420, "seg-1");
+    let key = wal_segment("ns-1", 420, 420, "seg_00000000000000000000000000000001");
     let _ = store.delete(&key);
 
     store

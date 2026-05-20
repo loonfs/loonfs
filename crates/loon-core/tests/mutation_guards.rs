@@ -17,13 +17,14 @@ use loon_core::{
     bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
     copy_file_path, delete_path, delete_path_non_recursive, fork_namespace, list_changes_after,
     list_namespaces, load_verified_namespace_basis, move_path, publish_namespace_mutations_batch,
-    put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes,
-    CoreError, CoreErrorKind, DirectObjectStorePublisher, MutationContext,
+    put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content, upload_content,
+    write_file_bytes, CoreError, CoreErrorKind, DirectObjectStorePublisher, MutationContext,
     NamespaceMutationCandidate, PathMutationIntent, PublishOptions, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
+    upload_session_prefix,
 };
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::path::Path;
@@ -766,6 +767,33 @@ fn commit_operations_reject_invalid_commit_id_before_wal_key_construction() {
     assert_eq!(error.kind(), CoreErrorKind::InvalidCommitId);
     assert_eq!(
         store.list_prefix("namespaces/demo/wal/").expect("list wal"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn upload_content_rejects_invalid_upload_id_before_key_construction() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let invalid_upload_id = ["upl", "123"].join("-");
+    let error = upload_content(
+        &store,
+        &namespace_id,
+        &invalid_upload_id,
+        b"hello",
+        &context,
+    )
+    .expect_err("invalid upload_id should be rejected");
+
+    assert_eq!(error.kind(), CoreErrorKind::InvalidUploadId);
+    assert_eq!(
+        store
+            .list_prefix(&upload_session_prefix(namespace_id.as_str()))
+            .expect("list upload sessions"),
         Vec::<String>::new()
     );
 }
@@ -1855,7 +1883,7 @@ fn move_path_into_occupied_target_is_path_conflict() {
         &store,
         &namespace_id(),
         "/docs/a.txt",
-        b"docs-a",
+        b"alpha",
         &context,
         Some("seed-docs"),
     )

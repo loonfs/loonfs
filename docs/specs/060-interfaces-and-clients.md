@@ -141,7 +141,7 @@ Representative request:
 
 ```json
 {
-  "commit_id": "c_01j...",
+  "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "message": "move report and publish new bytes",
   "annotations": {
     "source": "cli"
@@ -205,7 +205,7 @@ Representative begin-upload response:
 ```json
 {
   "namespace_id": "demo",
-  "upload_id": "upl_01J...",
+  "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "mode": "service_proxied"
 }
 ```
@@ -215,7 +215,7 @@ Representative content-upload response:
 ```json
 {
   "namespace_id": "demo",
-  "upload_id": "upl_01J...",
+  "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "content_ref": {
     "kind": "whole_file_v0",
     "digest": "sha256:7ab...",
@@ -241,7 +241,7 @@ Representative complete-upload response:
 ```json
 {
   "namespace_id": "demo",
-  "upload_id": "upl_01J...",
+  "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "content_ref": {
     "kind": "whole_file_v0",
     "digest": "sha256:7ab...",
@@ -256,7 +256,7 @@ Representative request:
 
 ```json
 {
-  "commit_id": "c_01j...",
+  "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "planned_head_seq": 418,
   "message": "replace report bytes",
   "annotations": {
@@ -300,7 +300,7 @@ Representative response:
 ```json
 {
   "namespace_id": "demo",
-  "commit_id": "c_01j...",
+  "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
   "committed_seq": 419,
   "results": [
     {
@@ -322,7 +322,7 @@ Representative response:
   "changes": [
     {
       "seq": 419,
-      "commit_id": "c_01j...",
+      "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
       "message": "replace report bytes",
       "ops": [
         {
