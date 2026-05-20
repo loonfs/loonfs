@@ -24,6 +24,7 @@ pub enum CoreErrorKind {
     PathNotFound,
     RevisionNotFound,
     PathConflict,
+    DirectoryNotEmpty,
     StaleHead,
     StaleRevision,
     TombstoneConflict,
@@ -196,8 +197,8 @@ impl CoreError {
             CoreError::RebootstrapRequired { .. } => CoreErrorKind::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
-            | CoreError::DirectoryNotEmpty(_)
             | CoreError::DestinationExists(_) => CoreErrorKind::PathConflict,
+            CoreError::DirectoryNotEmpty(_) => CoreErrorKind::DirectoryNotEmpty,
             CoreError::TombstoneConflict { .. } => CoreErrorKind::TombstoneConflict,
             CoreError::NonDirectoryPathComponent(_) => CoreErrorKind::InvalidPath,
         }
@@ -291,9 +292,6 @@ fn classify_lease_acquire_error(error: &LeaseAcquireError) -> CoreErrorKind {
 
 fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorKind {
     match error {
-        CommitValidationError::PlannedHeadSeqMismatch { .. }
-        | CommitValidationError::MissingHeadSeqPrecondition { .. }
-        | CommitValidationError::ConflictingHeadSeqPrecondition { .. } => CoreErrorKind::StaleHead,
         CommitValidationError::ReplaceFileBaseRevisionMismatch { .. }
         | CommitValidationError::RestoreRevisionBaseRevisionMismatch { .. } => {
             CoreErrorKind::StaleRevision
@@ -311,23 +309,34 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
             CoreErrorKind::TombstoneConflict
         }
         CommitValidationError::CreateChildNameCollision { .. }
+        | CommitValidationError::ChildNamePreconditionParentNotDirectory { .. }
+        | CommitValidationError::ChildNamePreconditionMismatch { .. }
         | CommitValidationError::CreateParentNotDirectory { .. }
         | CommitValidationError::ReplaceFileInodeNotFile { .. }
         | CommitValidationError::RestoreRevisionInodeNotFile { .. }
         | CommitValidationError::DeleteFileInodeNotFile { .. }
         | CommitValidationError::RenameTargetParentNotDirectory { .. }
         | CommitValidationError::RenameTargetNameCollision { .. }
-        | CommitValidationError::DeleteSubtreeRootNotDirectory { .. } => {
+        | CommitValidationError::DeleteSubtreeRootNotDirectory { .. }
+        | CommitValidationError::DirectoryEmptyPreconditionInodeNotDirectory { .. } => {
             CoreErrorKind::PathConflict
         }
+        CommitValidationError::DirectoryEmptyPreconditionNotEmpty { .. } => {
+            CoreErrorKind::DirectoryNotEmpty
+        }
         CommitValidationError::CreateParentMissing { .. }
+        | CommitValidationError::ChildNamePreconditionParentMissing { .. }
+        | CommitValidationError::ChildNamePreconditionMissing { .. }
         | CommitValidationError::ReplaceFileInodeMissing { .. }
         | CommitValidationError::RestoreRevisionInodeMissing { .. }
         | CommitValidationError::DeleteFileInodeMissing { .. }
         | CommitValidationError::RenameInodeMissing { .. }
         | CommitValidationError::RenameSourceBindingMissing { .. }
         | CommitValidationError::RenameTargetParentMissing { .. }
-        | CommitValidationError::DeleteSubtreeRootMissing { .. } => CoreErrorKind::PathNotFound,
+        | CommitValidationError::DeleteSubtreeRootMissing { .. }
+        | CommitValidationError::DirectoryEmptyPreconditionInodeMissing { .. } => {
+            CoreErrorKind::PathNotFound
+        }
         CommitValidationError::RenameWouldCycleDirectory { .. } => CoreErrorKind::WouldCycle,
         CommitValidationError::StaleWriterFenceToken { .. }
         | CommitValidationError::LeaseHolderMismatch { .. }
@@ -350,8 +359,12 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> CoreErrorKind 
         CommitHeadPublishError::EmptyWriterVersion
         | CommitHeadPublishError::EmptyExpectedHeadEtag
         | CommitHeadPublishError::NamespaceMismatch { .. }
-        | CommitHeadPublishError::PlanBaseHeadSeqMismatch { .. }
-        | CommitHeadPublishError::PlanNextSeqMismatch { .. }
+        | CommitHeadPublishError::WalSegmentNamespaceMismatch { .. }
+        | CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch { .. }
+        | CommitHeadPublishError::WalSegmentStartSeqMismatch { .. }
+        | CommitHeadPublishError::WalSegmentEndSeqMismatch { .. }
+        | CommitHeadPublishError::EmptyWalSegment
+        | CommitHeadPublishError::SeqOverflow
         | CommitHeadPublishError::Codec(_)
         | CommitHeadPublishError::Store(_) => CoreErrorKind::ServerError,
     }

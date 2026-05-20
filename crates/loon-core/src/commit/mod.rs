@@ -34,7 +34,6 @@ pub struct CommitRequest {
     pub commit_id: CommitId,
     pub writer_id: String,
     pub writer_fence_token: FenceToken,
-    pub planned_head_seq: ChangeSeq,
     pub ops: Vec<CommitOp>,
     pub preconditions: Vec<Precondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,7 +78,6 @@ pub enum CommitOp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Precondition {
-    HeadSeqIs(ChangeSeq),
     InodeRevisionIs {
         inode_id: InodeId,
         revision: RevisionNo,
@@ -91,14 +89,22 @@ pub enum Precondition {
         parent_inode: InodeId,
         name_key: String,
     },
+    ChildNameIs {
+        parent_inode: InodeId,
+        name_key: String,
+        child_inode: InodeId,
+    },
+    DirectoryEmpty {
+        inode_id: InodeId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitPlan {
     pub namespace_id: NamespaceId,
     pub commit_id: CommitId,
-    pub base_head_seq: ChangeSeq,
-    pub next_seq: ChangeSeq,
+    pub apply_after_seq: ChangeSeq,
+    pub assigned_seq: ChangeSeq,
     pub allocated_inode_ids: Vec<InodeId>,
     pub resolved_restore_content_refs: Vec<Option<ContentRef>>,
     pub resulting_next_inode_id: InodeId,
@@ -133,16 +139,32 @@ pub enum CommitValidationError {
         head: FenceToken,
         lease: FenceToken,
     },
-    PlannedHeadSeqMismatch {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
+    ChildNamePreconditionParentMissing {
+        parent_inode: InodeId,
     },
-    MissingHeadSeqPrecondition {
-        expected: ChangeSeq,
+    ChildNamePreconditionParentNotDirectory {
+        parent_inode: InodeId,
+        actual_kind: InodeKind,
     },
-    ConflictingHeadSeqPrecondition {
-        expected: ChangeSeq,
-        actual: ChangeSeq,
+    ChildNamePreconditionMissing {
+        parent_inode: InodeId,
+        name_key: String,
+    },
+    ChildNamePreconditionMismatch {
+        parent_inode: InodeId,
+        name_key: String,
+        expected_child_inode: InodeId,
+        actual_child_inode: InodeId,
+    },
+    DirectoryEmptyPreconditionInodeMissing {
+        inode_id: InodeId,
+    },
+    DirectoryEmptyPreconditionInodeNotDirectory {
+        inode_id: InodeId,
+        actual_kind: InodeKind,
+    },
+    DirectoryEmptyPreconditionNotEmpty {
+        inode_id: InodeId,
     },
     CreateParentMissing {
         parent_inode: InodeId,
@@ -288,14 +310,24 @@ pub enum CommitHeadPublishError {
         head: NamespaceId,
         plan: NamespaceId,
     },
-    PlanBaseHeadSeqMismatch {
-        head: ChangeSeq,
-        plan: ChangeSeq,
+    WalSegmentNamespaceMismatch {
+        head: NamespaceId,
+        wal: NamespaceId,
     },
-    PlanNextSeqMismatch {
-        head: ChangeSeq,
-        plan: ChangeSeq,
+    WalSegmentBaseHeadSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
     },
+    WalSegmentStartSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    WalSegmentEndSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    EmptyWalSegment,
+    SeqOverflow,
     StaleHead,
     Codec(String),
     Store(String),

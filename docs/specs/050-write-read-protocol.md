@@ -177,10 +177,11 @@ The core kinds of precondition are:
 
 | Kind of check | Example use |
 | --- | --- |
-| **Head-based** | "Apply this only if I planned against the current head." |
 | **Name-slot based** | "Create this child only if that name slot is still empty." |
+| **Name-binding based** | "Move or delete this item only if this name still points at the inode I saw." |
 | **Revision-based** | "Replace this file only if it is still at the revision I saw." |
 | **Ancestor-visibility based** | "Apply this only if no ancestor was tombstoned." |
+| **Directory-contents based** | "Delete this directory non-recursively only if it is still empty." |
 
 The exact wire shape of preconditions may vary by transport binding, but the semantics must match these checks.
 

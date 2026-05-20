@@ -1,7 +1,7 @@
 use loon_api::{
     v0::{
-        CommitAnnotations, CommitOp, CommitOpResult, CommitPrecondition,
-        CommitRequest as ApiCommitRequest, CompleteUploadRequest,
+        CommitAnnotations, CommitOp, CommitOpResult, CommitRequest as ApiCommitRequest,
+        CompleteUploadRequest,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, ControlObjectKind,
     CreateCheckpointResponse, InodeId, LeaseStateEnvelope, RevisionNo,
@@ -333,10 +333,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         annotations.insert("kind".to_owned(), json!("service-proxied"));
         let commit_request = ApiCommitRequest {
             commit_id: CommitId::from("req-phase-2a-create-file"),
-            planned_head_seq: ChangeSeq(0),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(0),
-            }],
+            preconditions: Vec::new(),
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "uploaded.txt".to_owned(),
@@ -434,10 +431,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                 namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::from("req-restore-create"),
-                    planned_head_seq: ChangeSeq(0),
-                    preconditions: vec![CommitPrecondition::HeadSeqIs {
-                        expected_seq: ChangeSeq(0),
-                    }],
+                    preconditions: Vec::new(),
                     ops: vec![CommitOp::CreateFile {
                         parent_inode: InodeId(1),
                         display_name: "restore.txt".to_owned(),
@@ -461,10 +455,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                 namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::from("req-restore-replace"),
-                    planned_head_seq: ChangeSeq(1),
-                    preconditions: vec![CommitPrecondition::HeadSeqIs {
-                        expected_seq: ChangeSeq(1),
-                    }],
+                    preconditions: Vec::new(),
                     ops: vec![CommitOp::ReplaceFile {
                         inode_id,
                         base_revision_no: RevisionNo(1),
@@ -483,10 +474,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                 namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::from("req-restore-restore"),
-                    planned_head_seq: ChangeSeq(2),
-                    preconditions: vec![CommitPrecondition::HeadSeqIs {
-                        expected_seq: ChangeSeq(2),
-                    }],
+                    preconditions: Vec::new(),
                     ops: vec![CommitOp::RestoreRevision {
                         inode_id,
                         source_revision_no: RevisionNo(1),
@@ -564,10 +552,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
                 namespace,
                 &ApiCommitRequest {
                     commit_id: CommitId::from("req-restore-missing-source-create"),
-                    planned_head_seq: ChangeSeq(0),
-                    preconditions: vec![CommitPrecondition::HeadSeqIs {
-                        expected_seq: ChangeSeq(0),
-                    }],
+                    preconditions: Vec::new(),
                     ops: vec![CommitOp::CreateFile {
                         parent_inode: InodeId(1),
                         display_name: "restore.txt".to_owned(),
@@ -587,10 +572,7 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
             namespace,
             &ApiCommitRequest {
                 commit_id: CommitId::from("req-restore-missing-source-restore"),
-                planned_head_seq: ChangeSeq(1),
-                preconditions: vec![CommitPrecondition::HeadSeqIs {
-                    expected_seq: ChangeSeq(1),
-                }],
+                preconditions: Vec::new(),
                 ops: vec![CommitOp::RestoreRevision {
                     inode_id,
                     source_revision_no: RevisionNo(99),
@@ -635,10 +617,7 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
             stage_uploaded_content_ref(&harness.client, namespace, b"first payload\n");
         let first_request = ApiCommitRequest {
             commit_id: CommitId::from("req-phase-2a-conflict"),
-            planned_head_seq: ChangeSeq(0),
-            preconditions: vec![CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(0),
-            }],
+            preconditions: Vec::new(),
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(1),
                 display_name: "first.txt".to_owned(),
@@ -658,7 +637,6 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
         changed_annotations.insert("source".to_owned(), json!("changed"));
         let conflicting_request = ApiCommitRequest {
             commit_id: first_request.commit_id.clone(),
-            planned_head_seq: ChangeSeq(0),
             preconditions: first_request.preconditions.clone(),
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(1),

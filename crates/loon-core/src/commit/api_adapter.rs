@@ -18,7 +18,6 @@ pub fn commit_request_from_v0(
         commit_id: request.commit_id,
         writer_id: ctx.writer_id,
         writer_fence_token: ctx.writer_fence_token,
-        planned_head_seq: request.planned_head_seq,
         ops: request.ops.into_iter().map(commit_op_from_v0).collect(),
         preconditions: request
             .preconditions
@@ -84,9 +83,6 @@ pub(super) fn commit_precondition_from_v0(
     precondition: api_v0::CommitPrecondition,
 ) -> Precondition {
     match precondition {
-        api_v0::CommitPrecondition::HeadSeqIs { expected_seq } => {
-            Precondition::HeadSeqIs(expected_seq)
-        }
         api_v0::CommitPrecondition::InodeRevisionIs {
             inode_id,
             revision_no,
@@ -104,6 +100,18 @@ pub(super) fn commit_precondition_from_v0(
             parent_inode,
             name_key,
         },
+        api_v0::CommitPrecondition::ChildNameIs {
+            parent_inode,
+            name_key,
+            child_inode,
+        } => Precondition::ChildNameIs {
+            parent_inode,
+            name_key,
+            child_inode,
+        },
+        api_v0::CommitPrecondition::DirectoryEmpty { inode_id } => {
+            Precondition::DirectoryEmpty { inode_id }
+        }
     }
 }
 
@@ -112,7 +120,7 @@ mod tests {
     use super::*;
     use loon_api::{
         v0::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition},
-        ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, NamespaceId, RevisionNo,
+        CommitId, ContentRef, FenceToken, InodeId, NamespaceId, RevisionNo,
     };
 
     #[test]
@@ -120,11 +128,7 @@ mod tests {
         let content_ref = ContentRef::whole_file_v0(b"hello");
         let request = api_v0::CommitRequest {
             commit_id: CommitId::from("commit-a"),
-            planned_head_seq: ChangeSeq(10),
             preconditions: vec![
-                ApiCommitPrecondition::HeadSeqIs {
-                    expected_seq: ChangeSeq(10),
-                },
                 ApiCommitPrecondition::InodeRevisionIs {
                     inode_id: InodeId(2),
                     revision_no: RevisionNo(3),
@@ -135,6 +139,14 @@ mod tests {
                 ApiCommitPrecondition::ChildNameAbsent {
                     parent_inode: InodeId(1),
                     name_key: "docs".to_owned(),
+                },
+                ApiCommitPrecondition::ChildNameIs {
+                    parent_inode: InodeId(1),
+                    name_key: "file.txt".to_owned(),
+                    child_inode: InodeId(2),
+                },
+                ApiCommitPrecondition::DirectoryEmpty {
+                    inode_id: InodeId(3),
                 },
             ],
             ops: vec![
@@ -184,7 +196,7 @@ mod tests {
         .expect("convert request");
 
         assert_eq!(core.ops.len(), 7);
-        assert_eq!(core.preconditions.len(), 4);
+        assert_eq!(core.preconditions.len(), 5);
         assert_eq!(core.writer_fence_token, FenceToken(9));
     }
 }

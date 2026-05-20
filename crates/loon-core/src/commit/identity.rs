@@ -1,6 +1,6 @@
 use super::api_adapter::{commit_op_from_v0, commit_precondition_from_v0};
 use super::{CommitOp, CommitRequest, Precondition};
-use loon_api::{payload_checksum_sha256, v0 as api_v0, ChangeSeq, NamespaceId};
+use loon_api::{payload_checksum_sha256, v0 as api_v0, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -30,7 +30,6 @@ pub fn semantic_commit_fingerprint(
 ) -> Result<SemanticCommitFingerprint, CommitFingerprintError> {
     semantic_commit_fingerprint_from_parts(
         &request.namespace_id,
-        request.planned_head_seq,
         &request.preconditions,
         &request.ops,
         &request.message,
@@ -56,7 +55,6 @@ pub fn semantic_commit_fingerprint_for_v0_request(
         .collect::<Vec<_>>();
     semantic_commit_fingerprint_from_parts(
         namespace_id,
-        request.planned_head_seq,
         &preconditions,
         &ops,
         &request.message,
@@ -66,7 +64,6 @@ pub fn semantic_commit_fingerprint_for_v0_request(
 
 fn semantic_commit_fingerprint_from_parts(
     namespace_id: &NamespaceId,
-    planned_head_seq: ChangeSeq,
     preconditions: &[Precondition],
     ops: &[CommitOp],
     message: &Option<String>,
@@ -76,7 +73,6 @@ fn semantic_commit_fingerprint_from_parts(
     struct CanonicalSemanticCommit<'a> {
         domain: &'static str,
         namespace_id: &'a NamespaceId,
-        planned_head_seq: ChangeSeq,
         preconditions: &'a [Precondition],
         ops: &'a [CommitOp],
         message: &'a Option<String>,
@@ -86,7 +82,6 @@ fn semantic_commit_fingerprint_from_parts(
     payload_checksum_sha256(&CanonicalSemanticCommit {
         domain: SEMANTIC_CORE_COMMIT_DOMAIN,
         namespace_id,
-        planned_head_seq,
         preconditions,
         ops,
         message,
@@ -99,8 +94,8 @@ fn semantic_commit_fingerprint_from_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{CommitOp, CommitRequest, Precondition};
-    use loon_api::{ChangeSeq, CommitId, FenceToken, InodeId, NamespaceId};
+    use crate::commit::{CommitOp, CommitRequest};
+    use loon_api::{CommitId, FenceToken, InodeId, NamespaceId};
 
     fn core_request(writer_fence_token: FenceToken) -> CommitRequest {
         CommitRequest {
@@ -108,12 +103,11 @@ mod tests {
             commit_id: CommitId::from("commit-a"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token,
-            planned_head_seq: ChangeSeq(7),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
-            preconditions: vec![Precondition::HeadSeqIs(ChangeSeq(7))],
+            preconditions: Vec::new(),
             message: Some("create docs".to_owned()),
             annotations: None,
         }
@@ -169,10 +163,7 @@ mod tests {
         let namespace_id = NamespaceId::from("demo");
         let api_request = api_v0::CommitRequest {
             commit_id: CommitId::from("commit-a"),
-            planned_head_seq: ChangeSeq(7),
-            preconditions: vec![api_v0::CommitPrecondition::HeadSeqIs {
-                expected_seq: ChangeSeq(7),
-            }],
+            preconditions: Vec::new(),
             ops: vec![api_v0::CommitOp::CreateDir {
                 parent_inode: InodeId(1),
                 display_name: "docs".to_owned(),

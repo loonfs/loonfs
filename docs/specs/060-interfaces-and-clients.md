@@ -38,8 +38,7 @@ A commit request carries the following logical fields:
 | Field | Meaning |
 | --- | --- |
 | `commit_id` | Client-generated stable idempotency key for this logical commit request. The same value must be reused for safe retries. |
-| `planned_head_seq` | The history point the client planned against. Preconditions are evaluated against authoritative state at this boundary. |
-| `preconditions` | Explicit checks such as `HeadSeqIs`, `InodeRevisionIs`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
+| `preconditions` | Explicit semantic checks such as `inode_revision_is`, `child_name_is`, `child_name_absent`, `directory_empty`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
 | `ops` | Ordered list of mutation operations. Operation order is preserved through validation, logical commit creation, and change-feed output. |
 | `message` | Optional human-readable description of the mutation event. |
 | `annotations` | Optional structured metadata attached to the logical commit request. |
@@ -257,7 +256,6 @@ Representative request:
 ```json
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "planned_head_seq": 418,
   "message": "replace report bytes",
   "annotations": {
     "source": "sync",
@@ -265,16 +263,12 @@ Representative request:
   },
   "preconditions": [
     {
-      "type": "HeadSeqIs",
-      "expected_seq": 418
-    },
-    {
-      "type": "InodeRevisionIs",
+      "type": "inode_revision_is",
       "inode_id": 42,
       "revision_no": 7
     },
     {
-      "type": "AncestorsNotSubtreeDeleted",
+      "type": "ancestors_not_subtree_deleted",
       "inode_id": 42
     }
   ],

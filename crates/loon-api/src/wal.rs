@@ -66,7 +66,6 @@ pub enum WalOp {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalPrecondition {
-    HeadSeqIs(ChangeSeq),
     InodeRevisionIs {
         inode_id: InodeId,
         revision: RevisionNo,
@@ -78,13 +77,21 @@ pub enum WalPrecondition {
         parent_inode: InodeId,
         name_key: String,
     },
+    ChildNameIs {
+        parent_inode: InodeId,
+        name_key: String,
+        child_inode: InodeId,
+    },
+    DirectoryEmpty {
+        inode_id: InodeId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalCommitPayload {
     pub namespace_id: NamespaceId,
     pub seq: ChangeSeq,
-    pub base_head_seq: ChangeSeq,
+    pub apply_after_seq: ChangeSeq,
     pub commit_id: CommitId,
     pub semantic_commit_fingerprint_sha256: String,
     pub writer_id: String,

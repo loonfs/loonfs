@@ -534,7 +534,6 @@ mod tests {
     ) -> CommitRequest {
         CommitRequest {
             commit_id: CommitId::from(commit_id.into()),
-            planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -823,7 +822,6 @@ mod tests {
 
         let request_a = CommitRequest {
             commit_id: CommitId::from("req-a"),
-            planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -834,7 +832,6 @@ mod tests {
         };
         let request_b = CommitRequest {
             commit_id: CommitId::from("req-b"),
-            planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -884,7 +881,6 @@ mod tests {
 
         let explicit = CommitRequest {
             commit_id: CommitId::from("explicit-commit"),
-            planned_head_seq: ChangeSeq(0),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
