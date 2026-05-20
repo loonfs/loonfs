@@ -1423,6 +1423,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "loonfs"
+version = "0.1.1"
+dependencies = [
+ "loon-api",
+ "loon-core",
+ "loon-objectstore",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "matchit"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

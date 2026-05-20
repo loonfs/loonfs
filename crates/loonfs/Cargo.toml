@@ -1,0 +1,15 @@
+[package]
+name = "loonfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+loon-api = { path = "../loon-api" }
+loon-core = { path = "../loon-core" }
+loon-objectstore = { path = "../loon-objectstore" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
