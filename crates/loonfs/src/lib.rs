@@ -70,17 +70,9 @@ pub struct FsBuilder {
     lease_duration_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CreateNamespaceOptions {
     pub allow_existing: bool,
-}
-
-impl Default for CreateNamespaceOptions {
-    fn default() -> Self {
-        Self {
-            allow_existing: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,19 +90,10 @@ impl Default for PutFileOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteOptions {
     pub recursive: bool,
     pub commit_id: Option<CommitId>,
-}
-
-impl Default for DeleteOptions {
-    fn default() -> Self {
-        Self {
-            recursive: false,
-            commit_id: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
