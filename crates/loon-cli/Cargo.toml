@@ -17,7 +17,7 @@ hostname = "0.4"
 http.workspace = true
 loon-api = { path = "../loon-api" }
 loon-client = { path = "../loon-client" }
-loon-core = { path = "../loon-core" }
+loonfs = { path = "../loonfs" }
 loon-objectstore = { path = "../loon-objectstore" }
 serde.workspace = true
 serde_json.workspace = true
@@ -25,5 +25,6 @@ toml.workspace = true
 
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
+loon-core = { path = "../loon-core" }
 tempfile.workspace = true
 ureq.workspace = true

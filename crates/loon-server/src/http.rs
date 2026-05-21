@@ -17,24 +17,20 @@ use loon_api::{
     FilesystemPutBehavior, ForkNamespaceRequest, ListNamespacesResponse, NamespaceId,
     NamespaceIdValidationError,
 };
-use loon_core::{
-    advance_retention_floor, begin_upload, bootstrap_namespace, complete_upload, create_checkpoint,
-    fork_namespace, list_changes_after, list_namespaces, list_path, read_file_bytes, resolve_path,
-    upload_content, BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext,
-    PathMutationIntent, PutFileBehavior,
+use loonfs::{
+    BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs, FsConfig,
+    PathMutationIntent, PutFileBehavior, RuntimeError, SharedObjectStore,
 };
-use loon_objectstore::ObjectStore;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task;
 
-type SharedStore = Arc<dyn ObjectStore + Send + Sync>;
+type SharedStore = SharedObjectStore;
 
 #[derive(Clone)]
 struct AppState {
     config: Arc<ServerConfig>,
-    store: SharedStore,
+    fs: Arc<Fs>,
     publisher: PublisherRegistry,
 }
 
@@ -50,15 +46,20 @@ struct ChangesQuery {
 
 pub fn app(config: ServerConfig) -> Result<Router, ServerConfigError> {
     let store = Arc::new(config.object_store()?) as SharedStore;
-    Ok(app_with_store(config, store))
+    app_with_store(config, store)
 }
 
-fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
+fn app_with_store(config: ServerConfig, store: SharedStore) -> Result<Router, ServerConfigError> {
+    let fs = Arc::new(build_fs(&config, store)?);
+    Ok(app_with_fs(config, fs))
+}
+
+fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
     let config = Arc::new(config);
-    let publisher = PublisherRegistry::new(store.clone(), config.clone());
+    let publisher = PublisherRegistry::new(fs.clone());
     let state = AppState {
         config,
-        store,
+        fs,
         publisher,
     };
     Router::new()
@@ -115,6 +116,21 @@ fn app_with_store(config: ServerConfig, store: SharedStore) -> Router {
         .with_state(state)
 }
 
+fn build_fs(config: &ServerConfig, store: SharedStore) -> Result<Fs, ServerConfigError> {
+    Fs::open(
+        store,
+        FsConfig {
+            writer_id: config.writer_id.clone(),
+            writer_version: config.writer_version.clone(),
+            lease_duration_ms: config.lease_duration_ms,
+        },
+    )
+    .map_err(|error| ServerConfigError::InvalidField {
+        field: "runtime",
+        reason: error.to_string(),
+    })
+}
+
 pub async fn serve(config: ServerConfig) -> Result<(), String> {
     let bind: SocketAddr = config
         .bind
@@ -139,17 +155,11 @@ async fn create_namespace(
     Json(request): Json<CreateNamespaceRequest>,
 ) -> Result<Json<loon_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(request.namespace_id)?;
     let summary = run_blocking(move || {
-        bootstrap_namespace(
-            store.as_ref(),
-            &namespace_id,
-            &mutation_context(&config),
-            false,
-        )
-        .map_err(ApiResponseError::bootstrap)
+        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .map_err(ApiResponseError::runtime)
     })
     .await?;
     Ok(Json(summary))
@@ -160,10 +170,9 @@ async fn list_namespaces_handler(
     headers: HeaderMap,
 ) -> Result<Json<ListNamespacesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
+    let fs = state.fs.clone();
     let namespaces =
-        run_blocking(move || list_namespaces(store.as_ref()).map_err(ApiResponseError::core))
-            .await?;
+        run_blocking(move || fs.list_namespaces().map_err(ApiResponseError::runtime)).await?;
     Ok(Json(ListNamespacesResponse { namespaces }))
 }
 
@@ -174,18 +183,12 @@ async fn fork_namespace_handler(
     Json(request): Json<ForkNamespaceRequest>,
 ) -> Result<Json<loon_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
+    let fs = state.fs.clone();
     let source_namespace_id = parse_namespace_id(namespace)?;
     let new_namespace_id = parse_namespace_id(request.new_namespace_id)?;
     let summary = run_blocking(move || {
-        fork_namespace(
-            store.as_ref(),
-            &source_namespace_id,
-            &new_namespace_id,
-            &mutation_context(&config),
-        )
-        .map_err(|error| ApiResponseError::core_for_namespace(&source_namespace_id, error))
+        fs.fork_namespace(&source_namespace_id, &new_namespace_id)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))
     })
     .await?;
     Ok(Json(summary))
@@ -198,12 +201,12 @@ async fn list_entries(
     Query(query): Query<PathQuery>,
 ) -> Result<Json<Vec<loon_api::AuthoritativePathEntry>>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let entries = run_blocking(move || {
-        list_path(store.as_ref(), &namespace_id, &path)
-            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+        fs.list_path(&namespace_id, &path)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(entries))
@@ -216,12 +219,12 @@ async fn stat_entry(
     Query(query): Query<PathQuery>,
 ) -> Result<Json<loon_api::AuthoritativePathEntry>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let entry = run_blocking(move || {
-        resolve_path(store.as_ref(), &namespace_id, &path)
-            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+        fs.stat_path(&namespace_id, &path)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(entry))
@@ -234,12 +237,12 @@ async fn get_content(
     Query(query): Query<PathQuery>,
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
     let file = run_blocking(move || {
-        read_file_bytes(store.as_ref(), &namespace_id, &path)
-            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+        fs.read_file_bytes(&namespace_id, &path)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok((StatusCode::OK, file.bytes).into_response())
@@ -302,12 +305,11 @@ async fn begin_upload_handler(
     headers: HeaderMap,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
-        begin_upload(store.as_ref(), &namespace_id, &mutation_context(&config))
-            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+        fs.begin_upload(&namespace_id)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -320,19 +322,12 @@ async fn upload_content_handler(
     body: Bytes,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let bytes = body.to_vec();
     let response = run_blocking(move || {
-        upload_content(
-            store.as_ref(),
-            &namespace_id,
-            &upload_id,
-            &bytes,
-            &mutation_context(&config),
-        )
-        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+        fs.upload_content(&namespace_id, &upload_id, &bytes)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -345,18 +340,11 @@ async fn complete_upload_handler(
     Json(request): Json<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
-        complete_upload(
-            store.as_ref(),
-            &namespace_id,
-            &upload_id,
-            &request,
-            &mutation_context(&config),
-        )
-        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+        fs.complete_upload(&namespace_id, &upload_id, &request)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -385,12 +373,12 @@ async fn list_changes_handler(
     Query(query): Query<ChangesQuery>,
 ) -> Result<Json<ChangesResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let after_seq = loon_api::ChangeSeq(query.after_seq);
     let response = run_blocking(move || {
-        list_changes_after(store.as_ref(), &namespace_id, after_seq)
-            .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))
+        fs.list_changes_after(&namespace_id, after_seq)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok(Json(response))
@@ -402,12 +390,11 @@ async fn create_checkpoint_handler(
     headers: HeaderMap,
 ) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
-        create_checkpoint(store.as_ref(), &namespace_id, &mutation_context(&config))
-            .map_err(ApiResponseError::core)
+        fs.create_checkpoint(&namespace_id)
+            .map_err(ApiResponseError::runtime)
     })
     .await?;
     Ok(Json(response))
@@ -419,12 +406,11 @@ async fn advance_retention_handler(
     headers: HeaderMap,
 ) -> Result<Json<AdvanceRetentionResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let store = state.store.clone();
-    let config = state.config.clone();
+    let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
-        advance_retention_floor(store.as_ref(), &namespace_id, &mutation_context(&config))
-            .map_err(ApiResponseError::core)
+        fs.advance_retention_floor(&namespace_id)
+            .map_err(ApiResponseError::runtime)
     })
     .await?;
     Ok(Json(response))
@@ -446,19 +432,6 @@ fn authorize(config: &ServerConfig, headers: &HeaderMap) -> Result<(), ApiRespon
             "unauthorized",
             "missing or invalid bearer token",
         ))
-    }
-}
-
-fn mutation_context(config: &ServerConfig) -> MutationContext {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    MutationContext {
-        writer_id: config.writer_id.clone(),
-        writer_version: config.writer_version.clone(),
-        now_ms,
-        lease_duration_ms: config.lease_duration_ms,
     }
 }
 
@@ -536,6 +509,16 @@ impl ApiResponseError {
         }
     }
 
+    fn runtime(error: RuntimeError) -> Self {
+        match error {
+            RuntimeError::Core(error) => Self::core(error),
+            RuntimeError::Bootstrap(error) => Self::bootstrap(error),
+            RuntimeError::Config(message) => {
+                Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
+            }
+        }
+    }
+
     fn core(error: CoreError) -> Self {
         let (status, code) = match error.kind() {
             CoreErrorKind::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path"),
@@ -593,6 +576,16 @@ impl ApiResponseError {
 
         Self::core(error)
     }
+
+    fn runtime_for_namespace(namespace: &NamespaceId, error: RuntimeError) -> Self {
+        match error {
+            RuntimeError::Core(error) => Self::core_for_namespace(namespace, error),
+            RuntimeError::Bootstrap(error) => Self::bootstrap(error),
+            RuntimeError::Config(message) => {
+                Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
+            }
+        }
+    }
 }
 
 impl IntoResponse for ApiResponseError {
@@ -605,12 +598,13 @@ impl IntoResponse for ApiResponseError {
 mod tests {
     use super::{app_with_store, SharedStore};
     use crate::{ServerConfig, StoreConfig};
-    use loon_api::ChangeSeq;
+    use loon_api::{ChangeSeq, CommitId, NamespaceId};
     use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
     use loon_core::{bootstrap_namespace, delete_path, write_file_bytes, MutationContext};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use loonfs::{CreateNamespaceOptions, Fs, FsConfig, PutFileBehavior, PutFileOptions};
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -671,6 +665,69 @@ mod tests {
         fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
             self.inner.list_prefix(prefix)
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_created_state_is_readable_through_http() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let fs = test_runtime(store.clone(), "runtime-writer");
+        let namespace_id = NamespaceId::from("demo");
+        fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .expect("create namespace through runtime");
+        fs.put_file_bytes(
+            &namespace_id,
+            "/notes/hello.txt",
+            b"hello from runtime",
+            PutFileOptions {
+                behavior: PutFileBehavior::CreateOnly,
+                commit_id: Some(CommitId::from("runtime-put")),
+            },
+        )
+        .expect("write file through runtime");
+
+        let harness = start_server(store, temp_dir.path(), "server-writer").await;
+        tokio::task::spawn_blocking(move || {
+            let target = NamespacePath::parse("demo:/notes/hello.txt").expect("target");
+            let stat = harness.client.stat_path(&target).expect("stat file");
+            assert_eq!(stat.absolute_path, "/notes/hello.txt");
+            assert_eq!(stat.size_bytes, Some(18));
+            let bytes = harness.client.read_file_bytes(&target).expect("read file");
+            assert_eq!(bytes, b"hello from runtime");
+        })
+        .await
+        .expect("join blocking task");
+
+        harness.server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_created_state_is_readable_through_runtime() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let fs = test_runtime(store.clone(), "runtime-reader");
+        let harness = start_server(store.clone(), temp_dir.path(), "server-writer").await;
+
+        tokio::task::spawn_blocking(move || {
+            harness
+                .client
+                .create_namespace("demo")
+                .expect("create namespace through http");
+            let target = NamespacePath::parse("demo:/notes/from-http.txt").expect("target");
+            harness
+                .client
+                .write_file_bytes(&target, b"hello from http")
+                .expect("write file through http");
+        })
+        .await
+        .expect("join blocking task");
+
+        let file = fs
+            .read_file_bytes(&NamespaceId::from("demo"), "/notes/from-http.txt")
+            .expect("read file through runtime");
+        assert_eq!(file.bytes, b"hello from http");
+
+        harness.server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -946,7 +1003,7 @@ mod tests {
             .await
             .expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
-        let router = app_with_store(config, store);
+        let router = app_with_store(config, store).expect("build app");
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.expect("serve app");
         });
@@ -958,6 +1015,18 @@ mod tests {
             }),
             server,
         }
+    }
+
+    fn test_runtime(store: SharedStore, writer_id: &str) -> Fs {
+        Fs::open(
+            store,
+            FsConfig {
+                writer_id: writer_id.to_owned(),
+                writer_version: format!("{writer_id}/0.1.0"),
+                lease_duration_ms: 60_000,
+            },
+        )
+        .expect("open runtime")
     }
 
     fn test_config(root: &Path, writer_id: &str) -> ServerConfig {

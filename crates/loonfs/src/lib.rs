@@ -14,7 +14,10 @@ pub use loon_api::{
     NamespaceId, NamespaceSummary,
 };
 use loon_core::MutationContext;
-pub use loon_core::{BootstrapNamespaceError, CoreError, CoreErrorKind, PutFileBehavior};
+pub use loon_core::{
+    BootstrapNamespaceError, CoreError, CoreErrorKind, NamespaceMutationCandidate,
+    PathMutationIntent, PutFileBehavior,
+};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
@@ -398,6 +401,22 @@ impl Fs {
             self.store(),
             namespace_id,
             requests,
+            &self.mutation_context(),
+        )
+        .into_iter()
+        .map(|result| result.map_err(RuntimeError::Core))
+        .collect()
+    }
+
+    pub fn publish_namespace_mutations_batch(
+        &self,
+        namespace_id: &NamespaceId,
+        candidates: Vec<NamespaceMutationCandidate>,
+    ) -> Vec<Result<CommitResponse>> {
+        loon_core::publish_namespace_mutations_batch(
+            self.store(),
+            namespace_id,
+            candidates,
             &self.mutation_context(),
         )
         .into_iter()
