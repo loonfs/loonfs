@@ -1,11 +1,11 @@
 use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::namespace_head;
+use loon_objectstore::keys::{namespace_descriptor, namespace_head};
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
-    CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MoveOptions, NamespaceId, PutFileBehavior, PutFileOptions,
-    RuntimeError, SharedObjectStore,
+    CoreErrorKind, CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MoveOptions, NamespaceId, PutFileBehavior,
+    PutFileOptions, RuntimeError, SharedObjectStore,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +35,14 @@ fn assert_config_error(result: loonfs::Result<Fs>, expected: &str) {
         ),
         Err(error) => panic!("expected config error, got {error:?}"),
         Ok(_) => panic!("expected config error"),
+    }
+}
+
+fn assert_core_error_kind<T>(result: loonfs::Result<T>, expected: CoreErrorKind) {
+    match result {
+        Err(RuntimeError::Core(error)) => assert_eq!(error.kind(), expected),
+        Err(error) => panic!("expected core error {expected:?}, got {error:?}"),
+        Ok(_) => panic!("expected core error {expected:?}"),
     }
 }
 
@@ -337,6 +345,49 @@ fn namespace_status_reports_checkpoint_lag_from_head() {
 }
 
 #[test]
+fn namespace_status_and_tick_reject_missing_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "missing-status-test");
+    let namespace_id = namespace();
+
+    assert_core_error_kind(
+        fs.namespace_status(&namespace_id),
+        CoreErrorKind::NamespaceNotFound,
+    );
+    assert_core_error_kind(
+        fs.maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default()),
+        CoreErrorKind::NamespaceNotFound,
+    );
+}
+
+#[test]
+fn namespace_status_and_tick_reject_partial_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("partial-status-test")
+        .build()
+        .expect("build runtime");
+    let namespace_id = namespace();
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    raw_store
+        .delete(&namespace_descriptor(namespace_id.as_str()))
+        .expect("delete namespace descriptor");
+
+    assert_core_error_kind(
+        fs.namespace_status(&namespace_id),
+        CoreErrorKind::NamespacePartial,
+    );
+    assert_core_error_kind(
+        fs.maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default()),
+        CoreErrorKind::NamespacePartial,
+    );
+}
+
+#[test]
 fn maintenance_tick_below_threshold_is_not_needed() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-not-needed-test");
@@ -463,7 +514,7 @@ fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
     assert_eq!(
         tick.outcome,
         MaintenanceTickOutcome::CheckpointPublishRaceLost {
-            attempted_seq: ChangeSeq(1)
+            observed_head_seq: ChangeSeq(1)
         }
     );
     let status = fs

@@ -104,7 +104,7 @@ pub enum MaintenanceTickOutcome {
         checkpoint_hint_seq: ChangeSeq,
     },
     CheckpointPublishRaceLost {
-        attempted_seq: ChangeSeq,
+        observed_head_seq: ChangeSeq,
     },
 }
 
@@ -264,7 +264,7 @@ impl Fs {
         }
 
         let status_before = self.namespace_status(namespace_id)?;
-        let attempted_seq = status_before.head_seq;
+        let observed_head_seq = status_before.head_seq;
         if status_before.uncheckpointed_commits < options.max_uncheckpointed_commits {
             return Ok(MaintenanceTickResult {
                 namespace_id: namespace_id.clone(),
@@ -279,7 +279,9 @@ impl Fs {
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
                     status_before,
-                    outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost { attempted_seq },
+                    outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
+                        observed_head_seq,
+                    },
                 });
             }
             Err(error) => return Err(error),
@@ -296,7 +298,7 @@ impl Fs {
                 )));
             };
             MaintenanceTickOutcome::CheckpointSuperseded {
-                attempted_seq,
+                attempted_seq: checkpoint.checkpoint_seq,
                 checkpoint_hint_seq,
             }
         };
