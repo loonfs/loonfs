@@ -529,6 +529,15 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     let namespace_id = namespace_id();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap namespace");
+    let duplicate_error = bootstrap_namespace(&store, &namespace_id, &context, false)
+        .expect_err("complete namespace id reuse should be rejected");
+    assert!(matches!(
+        duplicate_error,
+        loon_core::BootstrapNamespaceError::NamespaceAlreadyExists { .. }
+    ));
+    let existing =
+        bootstrap_namespace(&store, &namespace_id, &context, true).expect("allow existing");
+    assert_eq!(existing.namespace_id, namespace_id);
 
     let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load namespace basis");
     let descriptor_key = namespace_descriptor(namespace_id.as_str());

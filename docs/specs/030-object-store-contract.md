@@ -46,6 +46,10 @@ LoonFS uses distinct naming conventions for distinct surfaces:
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs; prefer lowercase kebab-case while preserving the namespace grammar.
 
+Namespace IDs are durable storage identities. A `namespace_id` must not be reused after namespace destruction; future user-facing display names or aliases may be reused only by mapping them to a new namespace ID.
+
+Generated runtime IDs must be unguessable, high-entropy, and never reused within the relevant namespace incarnation.
+
 Underscores are reserved for generated opaque ID prefixes and JSON snake_case values. Fixed object-store path-family names should not use underscores.
 
 ## 5. WAL segment rules
@@ -56,7 +60,8 @@ The metadata log has five important rules.
 2. A WAL segment stores one or more logical commits with contiguous `seq` values.
 3. Distinct client commit requests remain distinct logical commits even when they are stored in the same WAL segment.
 4. The visible WAL chain must be deterministically recoverable from the head plus referenced segment metadata. A head field such as `wal_tip_segment_id`, together with segment metadata such as `segment_id`, `start_seq`, `end_seq`, `base_head_seq`, and `prev_visible_segment_id`, is one conforming shape. Equivalent semantics are acceptable.
-5. Orphan WAL segments are permitted and harmless when a writer loses the head compare-and-swap.
+5. `segment_id` must be unique and never reused within a namespace incarnation. It should be generated from at least 128 bits of randomness or an equivalent collision-resistant source, not derived only from the sequence range.
+6. Orphan WAL segments are permitted and harmless when a writer loses the head compare-and-swap.
 
 ## 6. Immutable content rules
 
@@ -74,6 +79,8 @@ A reader or writer resolves content through the namespace descriptor: `namespace
 ## 7. Mutable control-object rules
 
 Small mutable objects such as the namespace head or a lease must use compare-and-swap semantics. These objects must remain small enough that guarded rewrite is practical.
+
+The live namespace lease object must not be physically deleted to represent ordinary expiry. Lease expiry is represented in the payload, and acquisition or transfer rewrites the existing `lease.json` object. In v0, the head `active_fence_token` and lease `fence_token` are the monotonic lease-epoch equivalent: each successful writer takeover advances the fence token, and a writer that observes a higher active fence token than its own must stop publishing.
 
 Large immutable file data may use multipart upload or another provider-specific optimization. Small mutable control objects should not depend on those mechanisms.
 
