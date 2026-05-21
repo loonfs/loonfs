@@ -1,6 +1,7 @@
 use crate::checkpoint::{
     checkpoint_basis_head, load_verified_checkpoint_materialization, CheckpointLoadError,
 };
+use crate::error::CoreError;
 use crate::genesis::bootstrap_basis_metadata_state;
 use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::metadata::MetadataState;
@@ -22,6 +23,14 @@ pub struct VerifiedNamespaceBasis {
     pub head_etag: String,
     pub lease: loon_api::LeaseState,
     pub metadata_state: MetadataState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceHeadSummary {
+    pub namespace_id: NamespaceId,
+    pub head_seq: ChangeSeq,
+    pub checkpoint_hint_seq: Option<ChangeSeq>,
+    pub retention_floor_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -132,6 +141,21 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
         head_etag,
         lease: loaded_lease.envelope.state,
         metadata_state: replayed.resulting_metadata_state,
+    })
+}
+
+pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<NamespaceHeadSummary, CoreError> {
+    let loaded_head = read_head_object(store, expected_namespace)
+        .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+    let head = loaded_head.envelope.state;
+    Ok(NamespaceHeadSummary {
+        namespace_id: head.namespace_id,
+        head_seq: head.seq,
+        checkpoint_hint_seq: head.checkpoint_hint_seq,
+        retention_floor_seq: head.retention_floor_seq,
     })
 }
 

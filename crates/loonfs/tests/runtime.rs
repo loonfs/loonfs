@@ -1,10 +1,14 @@
 use loon_objectstore::fs::LocalFsStore;
+use loon_objectstore::keys::namespace_head;
+use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
-    CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId, MoveOptions, NamespaceId,
-    PutFileBehavior, PutFileOptions, RuntimeError, SharedObjectStore,
+    CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId, MaintenanceTickOptions,
+    MaintenanceTickOutcome, MoveOptions, NamespaceId, PutFileBehavior, PutFileOptions,
+    RuntimeError, SharedObjectStore,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -299,6 +303,177 @@ fn explicit_commit_appears_in_change_feed() {
 }
 
 #[test]
+fn namespace_status_reports_checkpoint_lag_from_head() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "status-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let status = fs
+        .namespace_status(&namespace_id)
+        .expect("status for new namespace");
+    assert_eq!(status.namespace_id, namespace_id);
+    assert_eq!(status.head_seq, ChangeSeq(0));
+    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.uncheckpointed_commits, 0);
+    assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+
+    let status = fs
+        .namespace_status(&namespace_id)
+        .expect("status after commit");
+    assert_eq!(status.head_seq, ChangeSeq(1));
+    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.uncheckpointed_commits, 1);
+    assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+}
+
+#[test]
+fn maintenance_tick_below_threshold_is_not_needed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "tick-not-needed-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+
+    let tick = fs
+        .maintenance_tick_namespace(
+            &namespace_id,
+            MaintenanceTickOptions {
+                max_uncheckpointed_commits: 2,
+            },
+        )
+        .expect("maintenance tick");
+    assert_eq!(tick.namespace_id, namespace_id);
+    assert_eq!(tick.status_before.uncheckpointed_commits, 1);
+    assert_eq!(tick.outcome, MaintenanceTickOutcome::NotNeeded);
+}
+
+#[test]
+fn maintenance_tick_at_threshold_publishes_checkpoint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "tick-publish-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+
+    let tick = fs
+        .maintenance_tick_namespace(
+            &namespace_id,
+            MaintenanceTickOptions {
+                max_uncheckpointed_commits: 1,
+            },
+        )
+        .expect("maintenance tick");
+    assert_eq!(tick.status_before.head_seq, ChangeSeq(1));
+    assert_eq!(
+        tick.outcome,
+        MaintenanceTickOutcome::CheckpointPublished {
+            checkpoint_seq: ChangeSeq(1)
+        }
+    );
+
+    let status = fs
+        .namespace_status(&namespace_id)
+        .expect("status after checkpoint");
+    assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(1)));
+    assert_eq!(status.uncheckpointed_commits, 0);
+}
+
+#[test]
+fn maintenance_tick_rejects_zero_threshold() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "tick-config-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let error = fs
+        .maintenance_tick_namespace(
+            &namespace_id,
+            MaintenanceTickOptions {
+                max_uncheckpointed_commits: 0,
+            },
+        )
+        .expect_err("zero threshold should fail");
+    match error {
+        RuntimeError::Config(message) => assert!(message.contains("max_uncheckpointed_commits")),
+        other => panic!("expected config error, got {other:?}"),
+    }
+}
+
+#[test]
+fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("tick-race-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+
+    raw_store.fail_head_cas();
+    let tick = fs
+        .maintenance_tick_namespace(
+            &namespace_id,
+            MaintenanceTickOptions {
+                max_uncheckpointed_commits: 1,
+            },
+        )
+        .expect("maintenance tick should not fail on checkpoint hint race");
+
+    assert_eq!(
+        tick.outcome,
+        MaintenanceTickOutcome::CheckpointPublishRaceLost {
+            attempted_seq: ChangeSeq(1)
+        }
+    );
+    let status = fs
+        .namespace_status(&namespace_id)
+        .expect("status after lost race");
+    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.uncheckpointed_commits, 1);
+}
+
+#[test]
 fn checkpoint_and_retention_hooks_are_available() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "maintenance-test");
@@ -349,4 +524,62 @@ fn separate_runtime_instances_share_object_store_state() {
         .read_file_bytes(&namespace_id, "/docs/shared.txt")
         .expect("read shared file");
     assert_eq!(file.bytes, b"shared");
+}
+
+#[derive(Debug)]
+struct HeadCasFailureStore {
+    inner: LocalFsStore,
+    head_key: String,
+    fail_head_cas: AtomicBool,
+}
+
+impl HeadCasFailureStore {
+    fn new(root: &Path, namespace: &str) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            head_key: namespace_head(namespace),
+            fail_head_cas: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_head_cas(&self) {
+        self.fail_head_cas.store(true, Ordering::SeqCst);
+    }
+}
+
+impl ObjectStore for HeadCasFailureStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key == self.head_key
+            && matches!(&mode, PutMode::CompareAndSwap { .. })
+            && self.fail_head_cas.load(Ordering::SeqCst)
+        {
+            return Err(ObjectStoreError::PreconditionFailed);
+        }
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
 }

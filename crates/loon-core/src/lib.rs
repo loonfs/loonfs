@@ -17,7 +17,10 @@ pub mod publisher;
 pub mod services;
 pub mod wal;
 
-pub use basis::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
+pub use basis::{
+    load_namespace_head_summary, load_verified_namespace_basis, BasisLoadError,
+    NamespaceHeadSummary, VerifiedNamespaceBasis,
+};
 pub use checkpoint::{
     advance_retention_floor, create_checkpoint, CheckpointLoadError, CheckpointLoadErrorKind,
 };
