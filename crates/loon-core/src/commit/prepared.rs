@@ -3,8 +3,8 @@ use super::{
     ResolvedBinding, SemanticCommitFingerprint,
 };
 use loon_api::{
-    v0::CommitOpResult, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
-    WalDelta,
+    name_key_for_display_name, v0::CommitOpResult, ContentRef, FenceToken, InodeId, InodeKind,
+    NamePolicy, NamespaceId, RevisionNo, WalDelta,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -155,6 +155,7 @@ pub fn materialize_commit(
         let (mut op_deltas, result) = materialize_commit_op(
             op,
             op_index,
+            prepared.plan.name_policy,
             resolved_restore_content_ref,
             resolved_source_binding,
             &mut allocated_inode_ids,
@@ -174,6 +175,7 @@ pub fn materialize_commit(
 pub(super) fn materialize_commit_op(
     op: &CommitOp,
     op_index: u32,
+    name_policy: NamePolicy,
     resolved_restore_content_ref: Option<&ContentRef>,
     resolved_source_binding: Option<&ResolvedBinding>,
     allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
@@ -205,6 +207,7 @@ pub(super) fn materialize_commit_op(
                 WalDelta::BindDirentry {
                     delta_index: 0,
                     parent_inode: *parent_inode,
+                    name_key: name_key_for_display_name(name_policy, display_name),
                     display_name: display_name.clone(),
                     child_inode: inode_id,
                 },
@@ -236,6 +239,7 @@ pub(super) fn materialize_commit_op(
                 WalDelta::BindDirentry {
                     delta_index: 0,
                     parent_inode: *parent_inode,
+                    name_key: name_key_for_display_name(name_policy, display_name),
                     display_name: display_name.clone(),
                     child_inode: inode_id,
                 },
@@ -354,6 +358,7 @@ pub(super) fn materialize_commit_op(
                 WalDelta::BindDirentry {
                     delta_index: 0,
                     parent_inode: *new_parent_inode,
+                    name_key: name_key_for_display_name(name_policy, new_display_name),
                     display_name: new_display_name.clone(),
                     child_inode: *inode_id,
                 },
@@ -478,6 +483,7 @@ mod tests {
             resolved_restore_content_refs: vec![None],
             resolved_source_bindings: vec![None],
             resulting_next_inode_id: InodeId(3),
+            name_policy: loon_api::NamePolicy::default(),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         }

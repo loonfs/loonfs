@@ -151,6 +151,7 @@ mod tests {
             resolved_restore_content_refs: Vec::new(),
             resolved_source_bindings: Vec::new(),
             resulting_next_inode_id: InodeId(10),
+            name_policy: loon_api::NamePolicy::default(),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         }

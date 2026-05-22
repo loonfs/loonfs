@@ -1,8 +1,8 @@
 use loon_api::{
     decode_wal_segment_envelope_zstd, sha256_digest,
     v0::{
-        CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
-        CompleteUploadRequest,
+        CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition,
+        CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
     ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope,
     ControlObjectKind, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
@@ -47,6 +47,10 @@ fn wal_create_dir(
         loon_api::WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
+            name_key: loon_api::name_key_for_display_name(
+                loon_api::NamePolicy::default(),
+                &display_name,
+            ),
             display_name,
             child_inode: inode_id,
         },
@@ -69,6 +73,10 @@ fn wal_create_file(
         loon_api::WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
+            name_key: loon_api::name_key_for_display_name(
+                loon_api::NamePolicy::default(),
+                &display_name,
+            ),
             display_name,
             child_inode: inode_id,
         },
@@ -803,6 +811,20 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(segment.payload.start_seq, ChangeSeq(1));
     assert_eq!(segment.payload.end_seq, ChangeSeq(2));
     assert_eq!(segment.payload.records.len(), 2);
+    assert_eq!(segment.payload.records[0].deltas.len(), 2);
+    assert_eq!(segment.payload.records[0].deltas[0].semantic_op_index, 0);
+    assert_eq!(segment.payload.records[0].deltas[1].semantic_op_index, 0);
+    match &segment.payload.records[0].deltas[1].delta {
+        loon_api::WalDelta::BindDirentry {
+            name_key,
+            display_name,
+            ..
+        } => {
+            assert_eq!(name_key, "alpha");
+            assert_eq!(display_name, "alpha");
+        }
+        delta => panic!("expected bind delta, got {delta:?}"),
+    }
     store
         .put_if_absent(
             "namespaces/demo/wal/00000000000000000999-00000000000000000999-orphan.cbor.zst",
@@ -814,10 +836,31 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(changes.changes.len(), 2);
     assert_eq!(changes.changes[0].commit_id, CommitId::from("req-batch-a"));
     assert_eq!(changes.changes[1].commit_id, CommitId::from("req-batch-b"));
+    assert_eq!(changes.changes[0].ops, first.results);
+    assert_eq!(changes.changes[0].deltas.len(), 2);
+    assert!(matches!(
+        &changes.changes[0].deltas[0],
+        CommitDelta::CreateInode {
+            semantic_op_index: 0,
+            delta_index: 0,
+            inode_kind: InodeKind::Dir,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &changes.changes[0].deltas[1],
+        CommitDelta::BindDirentry {
+            semantic_op_index: 0,
+            delta_index: 1,
+            name_key,
+            display_name,
+            ..
+        } if name_key == "alpha" && display_name == "alpha"
+    ));
 }
 
 #[test]
-fn child_name_is_precondition_observes_earlier_batch_candidate() {
+fn binding_is_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::from("demo");
@@ -838,6 +881,11 @@ fn child_name_is_precondition_observes_earlier_batch_candidate() {
     let file_inode = resolve_path(&store, &namespace_id, "/docs/readme.txt")
         .expect("resolve file")
         .inode_id;
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    let original_binding = basis
+        .metadata_state
+        .current_parent_binding_for_child(file_inode, basis.head.seq)
+        .expect("source binding");
 
     let responses = commit_operations_batch(
         &store,
@@ -856,14 +904,13 @@ fn child_name_is_precondition_observes_earlier_batch_candidate() {
                 annotations: None,
             },
             ApiCommitRequest {
-                commit_id: CommitId::from("delete-with-stale-child-name"),
-                preconditions: vec![CommitPrecondition::ChildNameIs {
+                commit_id: CommitId::from("delete-with-stale-binding"),
+                preconditions: vec![CommitPrecondition::BindingIs {
                     parent_inode: docs_inode,
-                    name_key: loon_api::name_key_for_display_name(
-                        loon_api::NamePolicy::default(),
-                        "readme.txt",
-                    ),
+                    name_key: original_binding.name_key,
                     child_inode: file_inode,
+                    bind_seq: original_binding.bind_seq,
+                    bind_delta_index: original_binding.bind_delta_index,
                 }],
                 ops: vec![ApiCommitOp::DeleteFile {
                     inode_id: file_inode,
@@ -881,8 +928,8 @@ fn child_name_is_precondition_observes_earlier_batch_candidate() {
     );
     let error = responses[1]
         .as_ref()
-        .expect_err("stale child-name precondition");
-    assert_eq!(error.kind(), CoreErrorKind::PathNotFound);
+        .expect_err("stale binding precondition");
+    assert_eq!(error.kind(), CoreErrorKind::PathConflict);
 }
 
 #[test]

@@ -131,12 +131,13 @@ impl MetadataState {
                 WalDelta::BindDirentry {
                     delta_index,
                     parent_inode,
+                    name_key,
                     display_name,
                     child_inode,
                 } => {
                     metadata_state.direntry_binds.push(DirentryBindRecord {
                         parent_inode_id: *parent_inode,
-                        name_key: name_key_for_display_name(NamePolicy::default(), display_name),
+                        name_key: name_key.clone(),
                         display_name: display_name.clone(),
                         child_inode_id: *child_inode,
                         bind_seq: committed_seq,
@@ -578,5 +579,32 @@ fn join_absolute_path(base: &str, component: &str) -> String {
         format!("/{component}")
     } else {
         format!("{base}/{component}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_direntry_replay_uses_persisted_name_key() {
+        let applied = MetadataState::default()
+            .apply_committed_wal_deltas(
+                ChangeSeq(1),
+                &[WalDelta::BindDirentry {
+                    delta_index: 7,
+                    parent_inode: InodeId(1),
+                    name_key: "persisted-key".to_owned(),
+                    display_name: "Report.TXT".to_owned(),
+                    child_inode: InodeId(2),
+                }],
+            )
+            .expect("apply bind delta");
+
+        assert_eq!(applied.metadata_state.direntry_binds.len(), 1);
+        assert_eq!(
+            applied.metadata_state.direntry_binds[0].name_key,
+            "persisted-key"
+        );
     }
 }

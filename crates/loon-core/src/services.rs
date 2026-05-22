@@ -777,7 +777,7 @@ struct PathPlanningView<'a> {
     content_store_id: &'a ContentStoreId,
 }
 
-fn child_name_is_precondition(
+fn binding_is_precondition(
     view: &PathPlanningView<'_>,
     resolved: &ResolvedVisiblePath,
 ) -> Result<ApiCommitPrecondition, CoreError> {
@@ -861,6 +861,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     let final_parent_inode = ensure_parent_directories(
         absolute_path,
         view.head.seq,
+        view.head.name_policy,
         &mut working,
         &mut ops,
         &mut next_inode_id,
@@ -884,7 +885,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
                 .metadata_state
                 .latest_revision_head_at_seq(existing.inode_id, view.head.seq)
                 .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-            preconditions.push(child_name_is_precondition(view, &existing)?);
+            preconditions.push(binding_is_precondition(view, &existing)?);
             ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision_no: revision.revision_no,
@@ -1046,14 +1047,8 @@ fn plan_delete_path(
                 root_inode: resolved.inode_id,
             }
         }
-        kind => {
-            return Err(CoreError::ExpectedFile {
-                path: absolute_path.to_owned(),
-                kind,
-            });
-        }
     };
-    let mut preconditions = vec![child_name_is_precondition(view, &resolved)?];
+    let mut preconditions = vec![binding_is_precondition(view, &resolved)?];
     if !recursive && resolved.inode_kind == InodeKind::Dir {
         preconditions.push(ApiCommitPrecondition::DirectoryEmpty {
             inode_id: resolved.inode_id,
@@ -1101,7 +1096,7 @@ fn plan_move_path(
             mode,
         }],
         preconditions: vec![
-            child_name_is_precondition(view, &source)?,
+            binding_is_precondition(view, &source)?,
             child_name_absent_precondition(view, target_parent, &target_name),
             ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: source.inode_id,
@@ -1158,7 +1153,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
             content_ref: revision.content_ref,
         }],
         preconditions: vec![
-            child_name_is_precondition(view, &source)?,
+            binding_is_precondition(view, &source)?,
             ApiCommitPrecondition::InodeRevisionIs {
                 inode_id: source.inode_id,
                 revision_no: revision.revision_no,
@@ -1179,6 +1174,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
 fn ensure_parent_directories(
     absolute_path: &str,
     committed_seq: ChangeSeq,
+    name_policy: loon_api::NamePolicy,
     working: &mut MetadataState,
     ops: &mut Vec<ApiCommitOp>,
     next_inode_id: &mut InodeId,
@@ -1220,6 +1216,7 @@ fn ensure_parent_directories(
                 loon_api::WalDelta::BindDirentry {
                     delta_index: delta_index.saturating_add(1),
                     parent_inode: current_inode,
+                    name_key: name_key_for_display_name(name_policy, component),
                     display_name: component.clone(),
                     child_inode: allocated,
                 },

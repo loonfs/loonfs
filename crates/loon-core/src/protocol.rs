@@ -14,14 +14,14 @@ use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{prepare_wal_segment, StoredWalObject};
 use loon_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
+    BeginUploadResponse, ChangesResponse, CommitDelta, CommitRequest as ApiCommitRequest,
     CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::{
     decode_wal_segment_envelope_zstd, generate_upload_id, validate_upload_id, ChangeSeq, CommitId,
     CompletedUpload, ContentRef, ControlObjectKind, HeadState, NamespaceId, UploadSessionEnvelope,
-    UploadSessionState,
+    UploadSessionState, WalCommitDelta, WalDelta,
 };
 use loon_objectstore::keys::{content_blob, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -632,6 +632,7 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
                     message: record.message,
                     annotations: record.annotations,
                     ops: record.results,
+                    deltas: record.deltas.iter().map(commit_delta_from_wal).collect(),
                 });
             }
         }
@@ -643,6 +644,72 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
         through_seq: basis.head.seq,
         changes,
     })
+}
+
+fn commit_delta_from_wal(delta: &WalCommitDelta) -> CommitDelta {
+    let semantic_op_index = delta.semantic_op_index;
+    match &delta.delta {
+        WalDelta::CreateInode {
+            delta_index,
+            inode_id,
+            inode_kind,
+        } => CommitDelta::CreateInode {
+            semantic_op_index,
+            delta_index: *delta_index,
+            inode_id: *inode_id,
+            inode_kind: inode_kind.clone(),
+        },
+        WalDelta::BindDirentry {
+            delta_index,
+            parent_inode,
+            name_key,
+            display_name,
+            child_inode,
+        } => CommitDelta::BindDirentry {
+            semantic_op_index,
+            delta_index: *delta_index,
+            parent_inode: *parent_inode,
+            name_key: name_key.clone(),
+            display_name: display_name.clone(),
+            child_inode: *child_inode,
+        },
+        WalDelta::UnbindDirentry {
+            delta_index,
+            parent_inode,
+            name_key,
+            child_inode,
+            bind_seq,
+            bind_delta_index,
+        } => CommitDelta::UnbindDirentry {
+            semantic_op_index,
+            delta_index: *delta_index,
+            parent_inode: *parent_inode,
+            name_key: name_key.clone(),
+            child_inode: *child_inode,
+            bind_seq: *bind_seq,
+            bind_delta_index: *bind_delta_index,
+        },
+        WalDelta::AppendFileRevision {
+            delta_index,
+            inode_id,
+            revision_no,
+            content_ref,
+        } => CommitDelta::AppendFileRevision {
+            semantic_op_index,
+            delta_index: *delta_index,
+            inode_id: *inode_id,
+            revision_no: *revision_no,
+            content_ref: content_ref.clone(),
+        },
+        WalDelta::TombstoneSubtree {
+            delta_index,
+            root_inode,
+        } => CommitDelta::TombstoneSubtree {
+            semantic_op_index,
+            delta_index: *delta_index,
+            root_inode: *root_inode,
+        },
+    }
 }
 
 fn validate_commit_content_references<S: ObjectStore + ?Sized>(

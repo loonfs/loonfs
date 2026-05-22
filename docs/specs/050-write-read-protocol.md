@@ -102,7 +102,7 @@ To resolve an absolute path at seq N:
 
 1. Start at the root inode (inode id 1).
 2. For each path component, find the active directory binding whose normalized `name_key` matches the component under the namespace's `NamePolicy`.
-3. Follow the binding to its `child_inode_id`. Mount traversal is reserved future work; v0 path resolution does not cross mounts.
+3. Follow the binding to its `child_inode_id`; v0 path resolution does not cross mounts, and mount traversal is reserved future work.
 4. If any component has no matching visible binding, the path does not exist.
 
 ### 2.4 File content retrieval
@@ -170,6 +170,8 @@ The first standard lower-level mutation set includes:
 
 The path-oriented filesystem surface may compile higher-level operations into these lower-level mutations.
 
+`rename` accepts the explicit mode shape for forward compatibility, but v0 implements only `no_replace`. Reserved modes such as `replace_existing` and `exchange` must fail with `unsupported_rename_mode`.
+
 These are semantic commit operations. Durable WAL payloads store normalized metadata deltas derived from the semantic operations: `create_inode`, `bind_direntry`, `unbind_direntry`, `append_file_revision`, and `tombstone_subtree`. Raw bind/unbind/create-inode deltas are not standard client-facing commit operations.
 
 ## 6. Preconditions
@@ -199,6 +201,11 @@ A namespace exposes an ordered change feed. The feed answers the question:
 This feed is the basis for sync engines, replication, and other incremental consumers.
 
 The change feed is ordered by logical commit, not by physical WAL segment. A segment containing N logical commits produces N ordered change events.
+
+Each change event exposes both layers of the committed mutation:
+
+- semantic operation results, keyed by `op_index`, describe the client-facing operation outcome; and
+- materialized WAL deltas, keyed by `semantic_op_index` and `delta_index`, describe the authoritative metadata facts that replay/projectors should apply.
 
 ## 8. Retention floor
 

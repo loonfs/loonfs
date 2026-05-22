@@ -486,9 +486,6 @@ impl Client {
                     bytes_written,
                 })
             }
-            kind => Err(ClientError::InvalidNamespacePath(format!(
-                "unsupported inode kind for get: {kind:?}"
-            ))),
         }
     }
 
@@ -563,7 +560,6 @@ impl Client {
                     let bytes = self.read_file_bytes(&child_spec)?;
                     bytes_written += write_local_file(&child_dest, &bytes)?;
                 }
-                _ => {}
             }
         }
         Ok(bytes_written)

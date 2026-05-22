@@ -1,7 +1,7 @@
 use loon_api::{
     v0::{
-        CommitAnnotations, CommitOp, CommitOpResult, CommitRequest as ApiCommitRequest,
-        CompleteUploadRequest,
+        CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
+        CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, ControlObjectKind,
     CreateCheckpointResponse, InodeId, InodeKind, LeaseStateEnvelope, RevisionNo,
@@ -402,6 +402,17 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         assert_eq!(change.message.as_deref(), Some("upload over http"));
         assert_eq!(change.annotations, Some(annotations));
         assert_eq!(change.ops, commit.results);
+        assert_eq!(change.deltas.len(), 3);
+        assert!(matches!(
+            &change.deltas[1],
+            CommitDelta::BindDirentry {
+                semantic_op_index: 0,
+                delta_index: 1,
+                name_key,
+                display_name,
+                ..
+            } if name_key == "uploaded.txt" && display_name == "uploaded.txt"
+        ));
 
         let empty = harness
             .client

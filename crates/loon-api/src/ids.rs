@@ -377,7 +377,6 @@ pub struct NameKey(pub String);
 pub enum InodeKind {
     File,
     Dir,
-    Mount,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

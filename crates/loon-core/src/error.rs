@@ -311,7 +311,6 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         }
         CommitValidationError::CreateChildNameCollision { .. }
         | CommitValidationError::ChildNamePreconditionParentNotDirectory { .. }
-        | CommitValidationError::ChildNamePreconditionMismatch { .. }
         | CommitValidationError::BindingPreconditionMissing { .. }
         | CommitValidationError::BindingPreconditionMismatch { .. }
         | CommitValidationError::CreateParentNotDirectory { .. }
@@ -329,7 +328,6 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         }
         CommitValidationError::CreateParentMissing { .. }
         | CommitValidationError::ChildNamePreconditionParentMissing { .. }
-        | CommitValidationError::ChildNamePreconditionMissing { .. }
         | CommitValidationError::ReplaceFileInodeMissing { .. }
         | CommitValidationError::RestoreRevisionInodeMissing { .. }
         | CommitValidationError::DeleteFileInodeMissing { .. }

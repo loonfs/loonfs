@@ -1,6 +1,6 @@
 use super::{MaterializedCommit, Precondition};
 use crate::wal::WalBuildError;
-use loon_api::{WalCommitPayload, WalPrecondition};
+use loon_api::{WalCommitDelta, WalCommitPayload, WalPrecondition};
 
 pub fn wal_payload_from_materialized_commit(
     commit: &MaterializedCommit,
@@ -29,7 +29,10 @@ pub fn wal_payload_from_materialized_commit(
         deltas: commit
             .deltas
             .iter()
-            .map(|delta| delta.wal_delta.clone())
+            .map(|delta| WalCommitDelta {
+                semantic_op_index: delta.semantic_op_index,
+                delta: delta.wal_delta.clone(),
+            })
             .collect(),
         preconditions: prepared
             .request
@@ -62,15 +65,6 @@ impl From<&Precondition> for WalPrecondition {
             } => Self::ChildNameAbsent {
                 parent_inode: *parent_inode,
                 name_key: name_key.clone(),
-            },
-            Precondition::ChildNameIs {
-                parent_inode,
-                name_key,
-                child_inode,
-            } => Self::ChildNameIs {
-                parent_inode: *parent_inode,
-                name_key: name_key.clone(),
-                child_inode: *child_inode,
             },
             Precondition::BindingIs {
                 parent_inode,
@@ -123,6 +117,7 @@ mod tests {
             resolved_restore_content_refs: vec![None],
             resolved_source_bindings: vec![None],
             resulting_next_inode_id: InodeId(3),
+            name_policy: loon_api::NamePolicy::default(),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         };

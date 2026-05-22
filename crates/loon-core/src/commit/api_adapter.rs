@@ -102,15 +102,6 @@ pub(super) fn commit_precondition_from_v0(
             parent_inode,
             name_key,
         },
-        api_v0::CommitPrecondition::ChildNameIs {
-            parent_inode,
-            name_key,
-            child_inode,
-        } => Precondition::ChildNameIs {
-            parent_inode,
-            name_key,
-            child_inode,
-        },
         api_v0::CommitPrecondition::BindingIs {
             parent_inode,
             name_key,
@@ -155,10 +146,12 @@ mod tests {
                     parent_inode: InodeId(1),
                     name_key: "docs".to_owned(),
                 },
-                ApiCommitPrecondition::ChildNameIs {
+                ApiCommitPrecondition::BindingIs {
                     parent_inode: InodeId(1),
                     name_key: "file.txt".to_owned(),
                     child_inode: InodeId(2),
+                    bind_seq: loon_api::ChangeSeq(4),
+                    bind_delta_index: 1,
                 },
                 ApiCommitPrecondition::DirectoryEmpty {
                     inode_id: InodeId(3),

@@ -95,6 +95,7 @@ pub fn build_commit_plan(
         &context.metadata_state,
         shape.assigned_seq,
         &shape.allocated_inode_ids,
+        context.head.name_policy,
         &mut checked_invariants,
     )?;
 
@@ -144,6 +145,7 @@ pub fn build_commit_plan(
         resolved_restore_content_refs: resolved_metadata.resolved_restore_content_refs,
         resolved_source_bindings: resolved_metadata.resolved_source_bindings,
         resulting_next_inode_id: shape.resulting_next_inode_id,
+        name_policy: context.head.name_policy,
         metadata_preconditions: request.preconditions.clone(),
         checked_invariants,
     })
@@ -200,6 +202,7 @@ fn validate_metadata_preconditions(
     metadata_state: &MetadataState,
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
+    name_policy: NamePolicy,
     checked_invariants: &mut Vec<String>,
 ) -> Result<ResolvedMetadataPreconditions, CommitValidationError> {
     let mut ephemeral_metadata_state = metadata_state.clone();
@@ -291,6 +294,7 @@ fn validate_metadata_preconditions(
                     *parent_inode,
                     display_name,
                     committed_seq,
+                    name_policy,
                 )?;
                 validate_ancestors_not_subtree_deleted(
                     &ephemeral_metadata_state,
@@ -347,6 +351,7 @@ fn validate_metadata_preconditions(
                     *new_parent_inode,
                     new_display_name,
                     committed_seq,
+                    name_policy,
                 )?;
                 validate_rename_does_not_cycle(
                     &ephemeral_metadata_state,
@@ -387,6 +392,7 @@ fn validate_metadata_preconditions(
         let (deltas, _result) = materialize_commit_op(
             op,
             op_index,
+            name_policy,
             resolved_restore_content_ref.as_ref(),
             resolved_source_binding.as_ref(),
             &mut allocated_inode_ids,
@@ -507,19 +513,6 @@ fn validate_explicit_preconditions(
                     base_seq,
                 )?;
             }
-            Precondition::ChildNameIs {
-                parent_inode,
-                name_key,
-                child_inode,
-            } => {
-                validate_child_name_is_precondition(
-                    metadata_state,
-                    *parent_inode,
-                    name_key,
-                    *child_inode,
-                    base_seq,
-                )?;
-            }
             Precondition::BindingIs {
                 parent_inode,
                 name_key,
@@ -569,43 +562,6 @@ fn validate_child_name_absent_precondition(
             parent_inode,
             name_key: name_key.to_owned(),
             child_inode: existing.child_inode_id,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_child_name_is_precondition(
-    metadata_state: &MetadataState,
-    parent_inode: InodeId,
-    name_key: &str,
-    child_inode: InodeId,
-    base_seq: ChangeSeq,
-) -> Result<(), CommitValidationError> {
-    let parent = metadata_state
-        .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::ChildNamePreconditionParentMissing { parent_inode })?;
-    if parent.inode_kind != InodeKind::Dir {
-        return Err(
-            CommitValidationError::ChildNamePreconditionParentNotDirectory {
-                parent_inode,
-                actual_kind: parent.inode_kind,
-            },
-        );
-    }
-
-    let Some(existing) = metadata_state.visible_child(parent_inode, name_key, base_seq) else {
-        return Err(CommitValidationError::ChildNamePreconditionMissing {
-            parent_inode,
-            name_key: name_key.to_owned(),
-        });
-    };
-    if existing.child_inode_id != child_inode {
-        return Err(CommitValidationError::ChildNamePreconditionMismatch {
-            parent_inode,
-            name_key: name_key.to_owned(),
-            expected_child_inode: child_inode,
-            actual_child_inode: existing.child_inode_id,
         });
     }
 
@@ -704,6 +660,7 @@ fn validate_child_name_absent(
     parent_inode: InodeId,
     display_name: &str,
     base_seq: ChangeSeq,
+    name_policy: NamePolicy,
 ) -> Result<(), CommitValidationError> {
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
@@ -718,7 +675,7 @@ fn validate_child_name_absent(
     if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
         return Err(CommitValidationError::CreateChildNameCollision {
             parent_inode,
-            name_key: name_key_for_display_name(NamePolicy::default(), display_name),
+            name_key: name_key_for_display_name(name_policy, display_name),
             child_inode: existing.child_inode_id,
         });
     }
@@ -956,6 +913,7 @@ fn validate_rename_target_name_absent(
     parent_inode: InodeId,
     display_name: &str,
     base_seq: ChangeSeq,
+    name_policy: NamePolicy,
 ) -> Result<(), CommitValidationError> {
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
@@ -970,7 +928,7 @@ fn validate_rename_target_name_absent(
     if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
         return Err(CommitValidationError::RenameTargetNameCollision {
             parent_inode,
-            name_key: name_key_for_display_name(NamePolicy::default(), display_name),
+            name_key: name_key_for_display_name(name_policy, display_name),
             child_inode: existing.child_inode_id,
         });
     }

@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, RevisionNo};
+use crate::{ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -120,11 +120,6 @@ pub enum CommitPrecondition {
         parent_inode: InodeId,
         name_key: String,
     },
-    ChildNameIs {
-        parent_inode: InodeId,
-        name_key: String,
-        child_inode: InodeId,
-    },
     BindingIs {
         parent_inode: InodeId,
         name_key: String,
@@ -178,6 +173,46 @@ pub enum CommitOpResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "delta", rename_all = "snake_case")]
+pub enum CommitDelta {
+    CreateInode {
+        semantic_op_index: u32,
+        delta_index: u32,
+        inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    BindDirentry {
+        semantic_op_index: u32,
+        delta_index: u32,
+        parent_inode: InodeId,
+        name_key: String,
+        display_name: String,
+        child_inode: InodeId,
+    },
+    UnbindDirentry {
+        semantic_op_index: u32,
+        delta_index: u32,
+        parent_inode: InodeId,
+        name_key: String,
+        child_inode: InodeId,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
+    },
+    AppendFileRevision {
+        semantic_op_index: u32,
+        delta_index: u32,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        content_ref: ContentRef,
+    },
+    TombstoneSubtree {
+        semantic_op_index: u32,
+        delta_index: u32,
+        root_inode: InodeId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedChange {
     pub seq: ChangeSeq,
     pub commit_id: CommitId,
@@ -186,6 +221,7 @@ pub struct CommittedChange {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<CommitAnnotations>,
     pub ops: Vec<CommitOpResult>,
+    pub deltas: Vec<CommitDelta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
