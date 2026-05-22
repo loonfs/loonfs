@@ -547,14 +547,12 @@ fn validate_child_name_absent_precondition(
 ) -> Result<(), CommitValidationError> {
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::ChildNamePreconditionParentMissing { parent_inode })?;
+        .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode })?;
     if parent.inode_kind != InodeKind::Dir {
-        return Err(
-            CommitValidationError::ChildNamePreconditionParentNotDirectory {
-                parent_inode,
-                actual_kind: parent.inode_kind,
-            },
-        );
+        return Err(CommitValidationError::NamePreconditionParentNotDirectory {
+            parent_inode,
+            actual_kind: parent.inode_kind,
+        });
     }
 
     if let Some(existing) = metadata_state.visible_child(parent_inode, name_key, base_seq) {
@@ -597,14 +595,12 @@ fn validate_binding_is_precondition(
 ) -> Result<(), CommitValidationError> {
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
-        .ok_or(CommitValidationError::ChildNamePreconditionParentMissing { parent_inode })?;
+        .ok_or(CommitValidationError::NamePreconditionParentMissing { parent_inode })?;
     if parent.inode_kind != InodeKind::Dir {
-        return Err(
-            CommitValidationError::ChildNamePreconditionParentNotDirectory {
-                parent_inode,
-                actual_kind: parent.inode_kind,
-            },
-        );
+        return Err(CommitValidationError::NamePreconditionParentNotDirectory {
+            parent_inode,
+            actual_kind: parent.inode_kind,
+        });
     }
 
     let Some(existing) = metadata_state.visible_child(parent_inode, name_key, base_seq) else {

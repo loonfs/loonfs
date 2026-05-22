@@ -352,7 +352,7 @@ impl<'de> Deserialize<'de> for ContentStoreId {
     }
 }
 
-/// Numeric identity of a file, directory, or mount within a namespace.
+/// Numeric identity of a file or directory within a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InodeId(pub u64);
 

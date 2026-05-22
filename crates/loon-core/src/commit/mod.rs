@@ -155,10 +155,10 @@ pub enum CommitValidationError {
         head: FenceToken,
         lease: FenceToken,
     },
-    ChildNamePreconditionParentMissing {
+    NamePreconditionParentMissing {
         parent_inode: InodeId,
     },
-    ChildNamePreconditionParentNotDirectory {
+    NamePreconditionParentNotDirectory {
         parent_inode: InodeId,
         actual_kind: InodeKind,
     },

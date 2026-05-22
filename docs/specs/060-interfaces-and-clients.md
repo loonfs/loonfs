@@ -309,7 +309,12 @@ Representative response:
           "op_index": 0,
           "op": "replace_file",
           "inode_id": 42,
-          "revision_no": 8
+          "revision_no": 8,
+          "content_ref": {
+            "kind": "whole_file_v0",
+            "digest": "sha256:7ab...",
+            "size_bytes": 20591
+          }
         }
       ],
       "deltas": [
