@@ -1,4 +1,5 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::commit::CommitHeadPublishError;
 use crate::content::write_immutable_object;
 use crate::context::MutationContext;
 use crate::error::CoreError;
@@ -572,9 +573,7 @@ fn publish_checkpoint_hint_seq<S: ObjectStore + ?Sized>(
         }
     }
 
-    Err(CoreError::Store(
-        "snapshot hint compare-and-swap retry exhausted".to_owned(),
-    ))
+    Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
 }
 
 fn compare_and_swap_head<S: ObjectStore + ?Sized>(
@@ -1105,11 +1104,13 @@ mod tests {
     };
     use crate::{
         bootstrap_namespace, load_verified_namespace_basis, put_file_bytes, write_file_bytes,
-        BasisLoadError, CoreError, MutationContext, PutFileBehavior,
+        BasisLoadError, CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
     };
     use loon_api::{ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
-    use loon_objectstore::keys::{checkpoint_manifest, checkpoint_table, CheckpointTableFamily};
+    use loon_objectstore::keys::{
+        checkpoint_manifest, checkpoint_table, namespace_head, CheckpointTableFamily,
+    };
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -1383,12 +1384,98 @@ mod tests {
         assert_eq!(after.head.checkpoint_hint_seq, Some(ChangeSeq(1)));
     }
 
+    #[test]
+    fn checkpoint_hint_cas_retry_exhaustion_is_stale_head() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::from("demo");
+        let context = test_context();
+        let store = HeadCasFailureStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_head(namespace_id.as_str()),
+        );
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+        store.fail_head_cas();
+        let error = publish_checkpoint_hint_seq(
+            &store,
+            &namespace_id,
+            ChangeSeq(0),
+            &context.writer_version,
+        )
+        .expect_err("checkpoint hint publication should exhaust CAS retries");
+
+        assert_eq!(error.kind(), CoreErrorKind::StaleHead);
+    }
+
     fn test_context() -> MutationContext {
         MutationContext {
             writer_id: "test-writer".to_owned(),
             writer_version: "test-writer/0.1.0".to_owned(),
             now_ms: 1_000,
             lease_duration_ms: 60_000,
+        }
+    }
+
+    struct HeadCasFailureStore {
+        inner: LocalFsStore,
+        head_key: String,
+        fail_head_cas: Mutex<bool>,
+    }
+
+    impl HeadCasFailureStore {
+        fn new(inner: LocalFsStore, head_key: String) -> Self {
+            Self {
+                inner,
+                head_key,
+                fail_head_cas: Mutex::new(false),
+            }
+        }
+
+        fn fail_head_cas(&self) {
+            *self
+                .fail_head_cas
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        }
+    }
+
+    impl ObjectStore for HeadCasFailureStore {
+        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key)
+        }
+
+        fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+            self.inner.get(key, range)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            if key == self.head_key
+                && matches!(&mode, PutMode::CompareAndSwap { .. })
+                && *self
+                    .fail_head_cas
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            {
+                return Err(ObjectStoreError::PreconditionFailed);
+            }
+            self.inner.put(key, bytes, mode)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key)
+        }
+
+        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+            self.inner.list_prefix(prefix)
         }
     }
 

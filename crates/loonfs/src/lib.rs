@@ -22,6 +22,7 @@ pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
+pub const DEFAULT_MAX_UNCHECKPOINTED_COMMITS: u64 = 1_000;
 
 pub type SharedObjectStore = Arc<dyn ObjectStore + Send + Sync>;
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -68,6 +69,50 @@ pub struct FsBuilder {
     writer_id: Option<String>,
     writer_version: String,
     lease_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceStatus {
+    pub namespace_id: NamespaceId,
+    pub head_seq: ChangeSeq,
+    pub checkpoint_hint_seq: Option<ChangeSeq>,
+    pub uncheckpointed_commits: u64,
+    pub retention_floor_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaintenanceTickOptions {
+    pub max_uncheckpointed_commits: u64,
+}
+
+impl Default for MaintenanceTickOptions {
+    fn default() -> Self {
+        Self {
+            max_uncheckpointed_commits: DEFAULT_MAX_UNCHECKPOINTED_COMMITS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaintenanceTickOutcome {
+    NotNeeded,
+    CheckpointPublished {
+        checkpoint_seq: ChangeSeq,
+    },
+    CheckpointSuperseded {
+        attempted_seq: ChangeSeq,
+        checkpoint_hint_seq: ChangeSeq,
+    },
+    CheckpointPublishRaceLost {
+        observed_head_seq: ChangeSeq,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceTickResult {
+    pub namespace_id: NamespaceId,
+    pub status_before: NamespaceStatus,
+    pub outcome: MaintenanceTickOutcome,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -190,6 +235,79 @@ impl Fs {
 
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
         Ok(loon_core::list_namespaces(self.store())?)
+    }
+
+    pub fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
+        let summary = loon_core::load_namespace_head_summary(self.store(), namespace_id)?;
+        let checkpoint_seq = summary
+            .checkpoint_hint_seq
+            .map(|seq| seq.0)
+            .unwrap_or_default();
+        Ok(NamespaceStatus {
+            namespace_id: summary.namespace_id,
+            head_seq: summary.head_seq,
+            checkpoint_hint_seq: summary.checkpoint_hint_seq,
+            uncheckpointed_commits: summary.head_seq.0.saturating_sub(checkpoint_seq),
+            retention_floor_seq: summary.retention_floor_seq,
+        })
+    }
+
+    pub fn maintenance_tick_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MaintenanceTickOptions,
+    ) -> Result<MaintenanceTickResult> {
+        if options.max_uncheckpointed_commits == 0 {
+            return Err(RuntimeError::Config(
+                "max_uncheckpointed_commits must be greater than zero".to_owned(),
+            ));
+        }
+
+        let status_before = self.namespace_status(namespace_id)?;
+        let observed_head_seq = status_before.head_seq;
+        if status_before.uncheckpointed_commits < options.max_uncheckpointed_commits {
+            return Ok(MaintenanceTickResult {
+                namespace_id: namespace_id.clone(),
+                status_before,
+                outcome: MaintenanceTickOutcome::NotNeeded,
+            });
+        }
+
+        let checkpoint = match self.create_checkpoint(namespace_id) {
+            Ok(checkpoint) => checkpoint,
+            Err(RuntimeError::Core(error)) if error.kind() == CoreErrorKind::StaleHead => {
+                return Ok(MaintenanceTickResult {
+                    namespace_id: namespace_id.clone(),
+                    status_before,
+                    outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
+                        observed_head_seq,
+                    },
+                });
+            }
+            Err(error) => return Err(error),
+        };
+
+        let outcome = if checkpoint.checkpoint_hint_points_at_checkpoint {
+            MaintenanceTickOutcome::CheckpointPublished {
+                checkpoint_seq: checkpoint.checkpoint_seq,
+            }
+        } else {
+            let Some(checkpoint_hint_seq) = checkpoint.checkpoint_hint_seq else {
+                return Err(RuntimeError::Core(CoreError::Store(
+                    "checkpoint hint publication returned no checkpoint hint".to_owned(),
+                )));
+            };
+            MaintenanceTickOutcome::CheckpointSuperseded {
+                attempted_seq: checkpoint.checkpoint_seq,
+                checkpoint_hint_seq,
+            }
+        };
+
+        Ok(MaintenanceTickResult {
+            namespace_id: namespace_id.clone(),
+            status_before,
+            outcome,
+        })
     }
 
     pub fn stat_path(

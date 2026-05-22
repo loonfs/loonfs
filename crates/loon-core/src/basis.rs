@@ -1,16 +1,20 @@
 use crate::checkpoint::{
     checkpoint_basis_head, load_verified_checkpoint_materialization, CheckpointLoadError,
 };
+use crate::error::CoreError;
 use crate::genesis::bootstrap_basis_metadata_state;
 use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::metadata::MetadataState;
-use crate::namespace::catalog::{load_namespace_catalog_entry, NamespaceCatalogLoadError};
+use crate::namespace::catalog::{
+    load_namespace_catalog_entry, namespace_initialization_state, NamespaceCatalogLoadError,
+    NamespaceInitializationError, NamespaceInitializationState,
+};
 use crate::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
 use loon_api::{
     decode_wal_segment_envelope_zstd, ChangeSeq, ContentStoreId, HeadState,
     NamespaceDescriptorState, NamespaceId, WalSegmentPointer,
 };
-use loon_objectstore::ObjectStore;
+use loon_objectstore::{keys::namespace_descriptor, ObjectStore};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -22,6 +26,14 @@ pub struct VerifiedNamespaceBasis {
     pub head_etag: String,
     pub lease: loon_api::LeaseState,
     pub metadata_state: MetadataState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceHeadSummary {
+    pub namespace_id: NamespaceId,
+    pub head_seq: ChangeSeq,
+    pub checkpoint_hint_seq: Option<ChangeSeq>,
+    pub retention_floor_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -133,6 +145,57 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
         lease: loaded_lease.envelope.state,
         metadata_state: replayed.resulting_metadata_state,
     })
+}
+
+pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<NamespaceHeadSummary, CoreError> {
+    match namespace_initialization_state(store, expected_namespace) {
+        Ok(NamespaceInitializationState::Complete) => {}
+        Ok(NamespaceInitializationState::Absent) => {
+            return Err(CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(
+                ControlObjectLoadError::MissingObject {
+                    object_key: namespace_descriptor(expected_namespace.as_str()),
+                },
+            )));
+        }
+        Ok(NamespaceInitializationState::Partial) => {
+            return Err(CoreError::NamespacePartiallyInitialized {
+                namespace_id: expected_namespace.clone(),
+            });
+        }
+        Err(error) => return Err(map_namespace_initialization_error_to_core(error)),
+    }
+
+    let loaded_head = read_head_object(store, expected_namespace)
+        .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+    let head = loaded_head.envelope.state;
+    Ok(NamespaceHeadSummary {
+        namespace_id: head.namespace_id,
+        head_seq: head.seq,
+        checkpoint_hint_seq: head.checkpoint_hint_seq,
+        retention_floor_seq: head.retention_floor_seq,
+    })
+}
+
+fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {
+    match error {
+        NamespaceInitializationError::InvalidNamespaceId(error) => {
+            CoreError::InvalidNamespaceId(error)
+        }
+        NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
+            CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(error))
+        }
+        NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
+            CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(error))
+        }
+        NamespaceInitializationError::InspectNamespaceDescriptor(_)
+        | NamespaceInitializationError::InspectNamespaceHead(_)
+        | NamespaceInitializationError::InspectNamespaceLease(_) => {
+            CoreError::Store(error.to_string())
+        }
+    }
 }
 
 fn ensure_reconstructed_head_matches(
