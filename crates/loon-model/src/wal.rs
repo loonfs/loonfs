@@ -1,5 +1,5 @@
 use crate::metadata::{MetadataApplyError, MetadataState};
-use loon_api::{ChangeSeq, HeadState, InodeId, WalOp};
+use loon_api::{ChangeSeq, HeadState, InodeId, WalDelta};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,17 +16,17 @@ pub enum WalReplayError {
 pub fn replay_wal_tail_with_metadata(
     basis_head: &HeadState,
     basis_metadata_state: &MetadataState,
-    wal_tail: &[(ChangeSeq, Vec<WalOp>)],
+    wal_tail: &[(ChangeSeq, Vec<WalDelta>)],
 ) -> Result<ReplayedWalTail, WalReplayError> {
     let mut current_head = basis_head.clone();
     let mut current_metadata_state = basis_metadata_state.clone();
 
-    for (seq, ops) in wal_tail {
+    for (seq, deltas) in wal_tail {
         let applied = current_metadata_state
-            .apply_committed_wal_ops(*seq, ops)
+            .apply_committed_wal_deltas(*seq, deltas)
             .map_err(WalReplayError::MetadataApply)?;
         current_head.seq = *seq;
-        current_head.next_inode_id = replay_next_inode_id(current_head.next_inode_id, ops);
+        current_head.next_inode_id = replay_next_inode_id(current_head.next_inode_id, deltas);
         current_metadata_state = applied.metadata_state;
     }
 
@@ -36,10 +36,12 @@ pub fn replay_wal_tail_with_metadata(
     })
 }
 
-fn replay_next_inode_id(current: InodeId, ops: &[WalOp]) -> InodeId {
-    let create_count = ops
-        .iter()
-        .filter(|op| matches!(op, WalOp::CreateDir { .. } | WalOp::CreateFile { .. }))
-        .count() as u64;
-    InodeId(current.0.saturating_add(create_count))
+fn replay_next_inode_id(current: InodeId, deltas: &[WalDelta]) -> InodeId {
+    deltas.iter().fold(current, |next, delta| match delta {
+        WalDelta::CreateInode { inode_id, .. } => InodeId(next.0.max(inode_id.0.saturating_add(1))),
+        WalDelta::BindDirentry { .. }
+        | WalDelta::UnbindDirentry { .. }
+        | WalDelta::AppendFileRevision { .. }
+        | WalDelta::TombstoneSubtree { .. } => next,
+    })
 }

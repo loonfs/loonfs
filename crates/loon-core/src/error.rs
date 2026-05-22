@@ -30,6 +30,7 @@ pub enum CoreErrorKind {
     TombstoneConflict,
     LeaseConflict,
     WouldCycle,
+    UnsupportedRenameMode,
     CommitIdReuseConflict,
     CommitQueueFull,
     CheckpointUnavailable,
@@ -311,6 +312,8 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         CommitValidationError::CreateChildNameCollision { .. }
         | CommitValidationError::ChildNamePreconditionParentNotDirectory { .. }
         | CommitValidationError::ChildNamePreconditionMismatch { .. }
+        | CommitValidationError::BindingPreconditionMissing { .. }
+        | CommitValidationError::BindingPreconditionMismatch { .. }
         | CommitValidationError::CreateParentNotDirectory { .. }
         | CommitValidationError::ReplaceFileInodeNotFile { .. }
         | CommitValidationError::RestoreRevisionInodeNotFile { .. }
@@ -332,12 +335,14 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::DeleteFileInodeMissing { .. }
         | CommitValidationError::RenameInodeMissing { .. }
         | CommitValidationError::RenameSourceBindingMissing { .. }
+        | CommitValidationError::SourceBindingMissing { .. }
         | CommitValidationError::RenameTargetParentMissing { .. }
         | CommitValidationError::DeleteSubtreeRootMissing { .. }
         | CommitValidationError::DirectoryEmptyPreconditionInodeMissing { .. } => {
             CoreErrorKind::PathNotFound
         }
         CommitValidationError::RenameWouldCycleDirectory { .. } => CoreErrorKind::WouldCycle,
+        CommitValidationError::UnsupportedRenameMode { .. } => CoreErrorKind::UnsupportedRenameMode,
         CommitValidationError::StaleWriterFenceToken { .. }
         | CommitValidationError::LeaseHolderMismatch { .. }
         | CommitValidationError::LeaseExpired { .. } => CoreErrorKind::LeaseConflict,

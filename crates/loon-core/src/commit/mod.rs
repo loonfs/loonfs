@@ -1,7 +1,8 @@
 use crate::metadata::MetadataState;
 use loon_api::{
-    v0::CommitAnnotations, ChangeSeq, CommitId, ContentRef, FenceToken, HeadState,
-    HeadStateEnvelope, InodeId, InodeKind, LeaseState, NamespaceId, RevisionNo,
+    v0::{CommitAnnotations, RenameMode},
+    ChangeSeq, CommitId, ContentRef, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
+    LeaseState, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +25,7 @@ pub(crate) use self::ordered::resolve_restore_content_refs;
 pub(crate) use self::prepared::CommitFingerprintSource;
 pub use self::prepared::{
     materialize_commit, CommitExecutionContext, CommitMaterializationError, CommitPrepareError,
-    MaterializedCommit, MaterializedCommitOp, PreparedCommit,
+    MaterializedCommit, MaterializedCommitDelta, PreparedCommit,
 };
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 
@@ -70,6 +71,7 @@ pub enum CommitOp {
         inode_id: InodeId,
         new_parent_inode: InodeId,
         new_display_name: String,
+        mode: RenameMode,
     },
     DeleteSubtree {
         root_inode: InodeId,
@@ -94,9 +96,26 @@ pub enum Precondition {
         name_key: String,
         child_inode: InodeId,
     },
+    BindingIs {
+        parent_inode: InodeId,
+        name_key: String,
+        child_inode: InodeId,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
+    },
     DirectoryEmpty {
         inode_id: InodeId,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedBinding {
+    pub parent_inode: InodeId,
+    pub name_key: String,
+    pub display_name: String,
+    pub child_inode: InodeId,
+    pub bind_seq: ChangeSeq,
+    pub bind_delta_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +126,7 @@ pub struct CommitPlan {
     pub assigned_seq: ChangeSeq,
     pub allocated_inode_ids: Vec<InodeId>,
     pub resolved_restore_content_refs: Vec<Option<ContentRef>>,
+    pub resolved_source_bindings: Vec<Option<ResolvedBinding>>,
     pub resulting_next_inode_id: InodeId,
     pub metadata_preconditions: Vec<Precondition>,
     pub checked_invariants: Vec<String>,
@@ -155,6 +175,16 @@ pub enum CommitValidationError {
         name_key: String,
         expected_child_inode: InodeId,
         actual_child_inode: InodeId,
+    },
+    BindingPreconditionMissing {
+        parent_inode: InodeId,
+        name_key: String,
+    },
+    BindingPreconditionMismatch {
+        parent_inode: InodeId,
+        name_key: String,
+        expected_child_inode: InodeId,
+        actual_child_inode: Option<InodeId>,
     },
     DirectoryEmptyPreconditionInodeMissing {
         inode_id: InodeId,
@@ -239,6 +269,9 @@ pub enum CommitValidationError {
     RenameSourceBindingMissing {
         inode_id: InodeId,
     },
+    SourceBindingMissing {
+        inode_id: InodeId,
+    },
     RenameTargetParentMissing {
         parent_inode: InodeId,
     },
@@ -264,6 +297,9 @@ pub enum CommitValidationError {
         parent_inode: InodeId,
         root_inode: InodeId,
         tombstone_seq: ChangeSeq,
+    },
+    UnsupportedRenameMode {
+        mode: RenameMode,
     },
     DeleteSubtreeRootMissing {
         root_inode: InodeId,

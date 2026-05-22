@@ -1,4 +1,4 @@
-use crate::{ChangeSeq, CommitId, ContentRef, NamespaceId};
+use crate::{v0::RenameMode, ChangeSeq, CommitId, ContentRef, NamespaceId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +43,9 @@ pub enum FilesystemPutBehavior {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum FilesystemOperation {
+    CreateDir {
+        path: String,
+    },
     PutFile {
         path: String,
         content_ref: ContentRef,
@@ -54,6 +57,8 @@ pub enum FilesystemOperation {
     MovePath {
         from_path: String,
         to_path: String,
+        #[serde(default = "crate::v0::default_rename_mode")]
+        mode: RenameMode,
     },
     CopyPath {
         from_path: String,

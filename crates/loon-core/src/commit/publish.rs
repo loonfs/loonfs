@@ -149,6 +149,7 @@ mod tests {
             assigned_seq,
             allocated_inode_ids: Vec::new(),
             resolved_restore_content_refs: Vec::new(),
+            resolved_source_bindings: Vec::new(),
             resulting_next_inode_id: InodeId(10),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
@@ -176,7 +177,7 @@ mod tests {
                     writer_fence_token: FenceToken(1),
                     message: None,
                     annotations: None,
-                    ops: Vec::new(),
+                    deltas: Vec::new(),
                     preconditions: Vec::new(),
                     results: Vec::new(),
                 }

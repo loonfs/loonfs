@@ -26,7 +26,8 @@ pub enum CheckpointSegmentKind {
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointTableFamily {
     Inodes,
-    Direntries,
+    DirentryBinds,
+    DirentryUnbinds,
     Revisions,
     Tombstones,
     CommitReceipts,
@@ -68,28 +69,34 @@ pub enum CheckpointRow {
         inode_kind: InodeKind,
         created_seq: ChangeSeq,
     },
-    Direntry {
+    DirentryBind {
         parent_inode_id: InodeId,
         name_key: String,
         display_name: String,
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
-        #[serde(default)]
-        bind_op_index: u32,
+        bind_delta_index: u32,
+    },
+    DirentryUnbind {
+        parent_inode_id: InodeId,
+        name_key: String,
+        child_inode_id: InodeId,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
+        unbind_seq: ChangeSeq,
+        unbind_delta_index: u32,
     },
     Revision {
         inode_id: InodeId,
         revision_no: RevisionNo,
         committed_seq: ChangeSeq,
-        #[serde(default)]
-        revision_op_index: u32,
+        revision_delta_index: u32,
         content_ref: ContentRef,
     },
     Tombstone {
         root_inode_id: InodeId,
         tombstone_seq: ChangeSeq,
-        #[serde(default)]
-        tombstone_op_index: u32,
+        tombstone_delta_index: u32,
     },
     CommitReceipt {
         commit_id: CommitId,
@@ -103,53 +110,56 @@ impl CheckpointRow {
     pub fn row_key(&self) -> String {
         match self {
             Self::Inode { inode_id, .. } => format!("inode-{:020}", inode_id.0),
-            Self::Direntry {
+            Self::DirentryBind {
                 parent_inode_id,
                 name_key,
                 bind_seq,
-                bind_op_index,
+                bind_delta_index,
                 ..
             } => {
-                if *bind_op_index == 0 {
-                    format!(
-                        "direntry-{:020}-{name_key}-{:020}",
-                        parent_inode_id.0, bind_seq.0
-                    )
-                } else {
-                    format!(
-                        "direntry-{:020}-{name_key}-{:020}-{:010}",
-                        parent_inode_id.0, bind_seq.0, bind_op_index
-                    )
-                }
+                format!(
+                    "direntry-{:020}-{name_key}-{:020}-{:010}",
+                    parent_inode_id.0, bind_seq.0, bind_delta_index
+                )
+            }
+            Self::DirentryUnbind {
+                parent_inode_id,
+                name_key,
+                bind_seq,
+                bind_delta_index,
+                unbind_seq,
+                unbind_delta_index,
+                ..
+            } => {
+                format!(
+                    "direntry-unbind-{:020}-{name_key}-{:020}-{:010}-{:020}-{:010}",
+                    parent_inode_id.0,
+                    bind_seq.0,
+                    bind_delta_index,
+                    unbind_seq.0,
+                    unbind_delta_index
+                )
             }
             Self::Revision {
                 inode_id,
                 revision_no,
-                revision_op_index,
+                revision_delta_index,
                 ..
             } => {
-                if *revision_op_index == 0 {
-                    format!("revision-{:020}-{:020}", inode_id.0, revision_no.0)
-                } else {
-                    format!(
-                        "revision-{:020}-{:020}-{:010}",
-                        inode_id.0, revision_no.0, revision_op_index
-                    )
-                }
+                format!(
+                    "revision-{:020}-{:020}-{:010}",
+                    inode_id.0, revision_no.0, revision_delta_index
+                )
             }
             Self::Tombstone {
                 root_inode_id,
                 tombstone_seq,
-                tombstone_op_index,
+                tombstone_delta_index,
             } => {
-                if *tombstone_op_index == 0 {
-                    format!("tombstone-{:020}-{:020}", root_inode_id.0, tombstone_seq.0)
-                } else {
-                    format!(
-                        "tombstone-{:020}-{:020}-{:010}",
-                        root_inode_id.0, tombstone_seq.0, tombstone_op_index
-                    )
-                }
+                format!(
+                    "tombstone-{:020}-{:020}-{:010}",
+                    root_inode_id.0, tombstone_seq.0, tombstone_delta_index
+                )
             }
             Self::CommitReceipt {
                 committed_seq,

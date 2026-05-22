@@ -26,14 +26,18 @@ pub fn wal_payload_from_materialized_commit(
         writer_fence_token: prepared.request.writer_fence_token,
         message: prepared.request.message.clone(),
         annotations: prepared.request.annotations.clone(),
-        ops: commit.ops.iter().map(|op| op.wal_op.clone()).collect(),
+        deltas: commit
+            .deltas
+            .iter()
+            .map(|delta| delta.wal_delta.clone())
+            .collect(),
         preconditions: prepared
             .request
             .preconditions
             .iter()
             .map(WalPrecondition::from)
             .collect(),
-        results: commit.ops.iter().map(|op| op.result.clone()).collect(),
+        results: commit.results.clone(),
     })
 }
 
@@ -67,6 +71,19 @@ impl From<&Precondition> for WalPrecondition {
                 parent_inode: *parent_inode,
                 name_key: name_key.clone(),
                 child_inode: *child_inode,
+            },
+            Precondition::BindingIs {
+                parent_inode,
+                name_key,
+                child_inode,
+                bind_seq,
+                bind_delta_index,
+            } => Self::BindingIs {
+                parent_inode: *parent_inode,
+                name_key: name_key.clone(),
+                child_inode: *child_inode,
+                bind_seq: *bind_seq,
+                bind_delta_index: *bind_delta_index,
             },
             Precondition::DirectoryEmpty { inode_id } => Self::DirectoryEmpty {
                 inode_id: *inode_id,
@@ -104,6 +121,7 @@ mod tests {
             assigned_seq: ChangeSeq(1),
             allocated_inode_ids: vec![InodeId(2)],
             resolved_restore_content_refs: vec![None],
+            resolved_source_bindings: vec![None],
             resulting_next_inode_id: InodeId(3),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
@@ -116,7 +134,7 @@ mod tests {
 
         assert_eq!(payload.namespace_id, namespace_id);
         assert_eq!(payload.seq, ChangeSeq(1));
-        assert_eq!(payload.ops.len(), 1);
+        assert_eq!(payload.deltas.len(), 2);
         assert_eq!(payload.results.len(), 1);
     }
 }

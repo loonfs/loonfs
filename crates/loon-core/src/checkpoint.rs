@@ -5,8 +5,8 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::loading::read_head_object;
 use crate::metadata::{
-    CommitReceiptRecord, DirentryRecord, InodeRecord, MetadataState, RevisionRecord,
-    SubtreeTombstoneRecord,
+    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
+    RevisionRecord, SubtreeTombstoneRecord,
 };
 use loon_api::{
     checkpoint_page_checksum_sha256, checkpoint_segment_payload_checksum_sha256,
@@ -30,9 +30,10 @@ const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
 // retention floor advances. This hook stays in place so future retention gates
 // can add progress requirements without restructuring the flow.
 const REQUIRED_RETENTION_PROGRESS_CLASSES: &[DerivedWorkClass] = &[];
-const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 5] = [
+const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 6] = [
     CheckpointTableFamily::Inodes,
-    CheckpointTableFamily::Direntries,
+    CheckpointTableFamily::DirentryBinds,
+    CheckpointTableFamily::DirentryUnbinds,
     CheckpointTableFamily::Revisions,
     CheckpointTableFamily::Tombstones,
     CheckpointTableFamily::CommitReceipts,
@@ -933,22 +934,42 @@ fn append_rows_to_metadata(
                 created_seq: *created_seq,
             }),
             (
-                CheckpointTableFamily::Direntries,
-                CheckpointRow::Direntry {
+                CheckpointTableFamily::DirentryBinds,
+                CheckpointRow::DirentryBind {
                     parent_inode_id,
                     name_key,
                     display_name,
                     child_inode_id,
                     bind_seq,
-                    bind_op_index,
+                    bind_delta_index,
                 },
-            ) => metadata_state.direntries.push(DirentryRecord {
+            ) => metadata_state.direntry_binds.push(DirentryBindRecord {
                 parent_inode_id: *parent_inode_id,
                 name_key: name_key.clone(),
                 display_name: display_name.clone(),
                 child_inode_id: *child_inode_id,
                 bind_seq: *bind_seq,
-                bind_op_index: *bind_op_index,
+                bind_delta_index: *bind_delta_index,
+            }),
+            (
+                CheckpointTableFamily::DirentryUnbinds,
+                CheckpointRow::DirentryUnbind {
+                    parent_inode_id,
+                    name_key,
+                    child_inode_id,
+                    bind_seq,
+                    bind_delta_index,
+                    unbind_seq,
+                    unbind_delta_index,
+                },
+            ) => metadata_state.direntry_unbinds.push(DirentryUnbindRecord {
+                parent_inode_id: *parent_inode_id,
+                name_key: name_key.clone(),
+                child_inode_id: *child_inode_id,
+                bind_seq: *bind_seq,
+                bind_delta_index: *bind_delta_index,
+                unbind_seq: *unbind_seq,
+                unbind_delta_index: *unbind_delta_index,
             }),
             (
                 CheckpointTableFamily::Revisions,
@@ -956,14 +977,14 @@ fn append_rows_to_metadata(
                     inode_id,
                     revision_no,
                     committed_seq,
-                    revision_op_index,
+                    revision_delta_index,
                     content_ref,
                 },
             ) => metadata_state.revisions.push(RevisionRecord {
                 inode_id: *inode_id,
                 revision_no: *revision_no,
                 committed_seq: *committed_seq,
-                revision_op_index: *revision_op_index,
+                revision_delta_index: *revision_delta_index,
                 content_ref: content_ref.clone(),
             }),
             (
@@ -971,14 +992,14 @@ fn append_rows_to_metadata(
                 CheckpointRow::Tombstone {
                     root_inode_id,
                     tombstone_seq,
-                    tombstone_op_index,
+                    tombstone_delta_index,
                 },
             ) => metadata_state
                 .subtree_tombstones
                 .push(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
                     tombstone_seq: *tombstone_seq,
-                    tombstone_op_index: *tombstone_op_index,
+                    tombstone_delta_index: *tombstone_delta_index,
                 }),
             (
                 CheckpointTableFamily::CommitReceipts,
@@ -1026,16 +1047,29 @@ fn checkpoint_rows_for_family(
                 created_seq: inode.created_seq,
             })
             .collect::<Vec<_>>(),
-        CheckpointTableFamily::Direntries => metadata_state
-            .direntries
+        CheckpointTableFamily::DirentryBinds => metadata_state
+            .direntry_binds
             .iter()
-            .map(|direntry| CheckpointRow::Direntry {
+            .map(|direntry| CheckpointRow::DirentryBind {
                 parent_inode_id: direntry.parent_inode_id,
                 name_key: direntry.name_key.clone(),
                 display_name: direntry.display_name.clone(),
                 child_inode_id: direntry.child_inode_id,
                 bind_seq: direntry.bind_seq,
-                bind_op_index: direntry.bind_op_index,
+                bind_delta_index: direntry.bind_delta_index,
+            })
+            .collect::<Vec<_>>(),
+        CheckpointTableFamily::DirentryUnbinds => metadata_state
+            .direntry_unbinds
+            .iter()
+            .map(|unbind| CheckpointRow::DirentryUnbind {
+                parent_inode_id: unbind.parent_inode_id,
+                name_key: unbind.name_key.clone(),
+                child_inode_id: unbind.child_inode_id,
+                bind_seq: unbind.bind_seq,
+                bind_delta_index: unbind.bind_delta_index,
+                unbind_seq: unbind.unbind_seq,
+                unbind_delta_index: unbind.unbind_delta_index,
             })
             .collect::<Vec<_>>(),
         CheckpointTableFamily::Revisions => metadata_state
@@ -1045,7 +1079,7 @@ fn checkpoint_rows_for_family(
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
                 committed_seq: revision.committed_seq,
-                revision_op_index: revision.revision_op_index,
+                revision_delta_index: revision.revision_delta_index,
                 content_ref: revision.content_ref.clone(),
             })
             .collect::<Vec<_>>(),
@@ -1055,7 +1089,7 @@ fn checkpoint_rows_for_family(
             .map(|tombstone| CheckpointRow::Tombstone {
                 root_inode_id: tombstone.root_inode_id,
                 tombstone_seq: tombstone.tombstone_seq,
-                tombstone_op_index: tombstone.tombstone_op_index,
+                tombstone_delta_index: tombstone.tombstone_delta_index,
             })
             .collect::<Vec<_>>(),
         CheckpointTableFamily::CommitReceipts => metadata_state
@@ -1078,7 +1112,8 @@ fn checkpoint_rows_for_family(
 fn checkpoint_table_family(family: CheckpointTableFamily) -> ObjectStoreCheckpointTableFamily {
     match family {
         CheckpointTableFamily::Inodes => ObjectStoreCheckpointTableFamily::Inodes,
-        CheckpointTableFamily::Direntries => ObjectStoreCheckpointTableFamily::Direntries,
+        CheckpointTableFamily::DirentryBinds => ObjectStoreCheckpointTableFamily::DirentryBinds,
+        CheckpointTableFamily::DirentryUnbinds => ObjectStoreCheckpointTableFamily::DirentryUnbinds,
         CheckpointTableFamily::Revisions => ObjectStoreCheckpointTableFamily::Revisions,
         CheckpointTableFamily::Tombstones => ObjectStoreCheckpointTableFamily::Tombstones,
         CheckpointTableFamily::CommitReceipts => ObjectStoreCheckpointTableFamily::CommitReceipts,
@@ -1088,7 +1123,8 @@ fn checkpoint_table_family(family: CheckpointTableFamily) -> ObjectStoreCheckpoi
 fn checkpoint_row_kind(row: &CheckpointRow) -> &'static str {
     match row {
         CheckpointRow::Inode { .. } => "inode",
-        CheckpointRow::Direntry { .. } => "direntry",
+        CheckpointRow::DirentryBind { .. } => "direntry_bind",
+        CheckpointRow::DirentryUnbind { .. } => "direntry_unbind",
         CheckpointRow::Revision { .. } => "revision",
         CheckpointRow::Tombstone { .. } => "tombstone",
         CheckpointRow::CommitReceipt { .. } => "commit_receipt",
@@ -1103,8 +1139,9 @@ mod tests {
         publish_checkpoint_hint_seq, write_checkpoint_manifest, CheckpointLoadError,
     };
     use crate::{
-        bootstrap_namespace, load_verified_namespace_basis, put_file_bytes, write_file_bytes,
-        BasisLoadError, CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
+        bootstrap_namespace, load_verified_namespace_basis, move_path, put_file_bytes,
+        write_file_bytes, BasisLoadError, CoreError, CoreErrorKind, MutationContext,
+        PutFileBehavior,
     };
     use loon_api::{ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
@@ -1157,6 +1194,47 @@ mod tests {
 
         assert_eq!(after.head.checkpoint_hint_seq, Some(before.head.seq));
         assert_eq!(before.head.seq, after.head.seq);
+        assert!(metadata_states_equivalent(
+            &before.metadata_state,
+            &after.metadata_state
+        ));
+    }
+
+    #[test]
+    fn checkpoint_round_trip_preserves_direntry_unbind_rows() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::from("demo");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+        move_path(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            "/docs/moved.txt",
+            &context,
+            None,
+        )
+        .expect("move hello");
+
+        let before = load_verified_namespace_basis(&store, &namespace_id).expect("basis before");
+        assert_eq!(before.metadata_state.direntry_unbinds.len(), 1);
+        create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
+        let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
+
+        assert_eq!(
+            after.metadata_state.direntry_unbinds,
+            before.metadata_state.direntry_unbinds
+        );
         assert!(metadata_states_equivalent(
             &before.metadata_state,
             &after.metadata_state

@@ -2,7 +2,9 @@ use crate::commit::SemanticCommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, CoreErrorKind};
 use crate::services::PutFileBehavior;
-use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
+use loon_api::v0::{
+    CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse, RenameMode,
+};
 use loon_api::{CommitId, ContentRef, MutationResult, NamespaceId};
 use loon_objectstore::ObjectStore;
 
@@ -10,6 +12,10 @@ const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathMutationIntent {
+    CreateDir {
+        commit_id: CommitId,
+        absolute_path: String,
+    },
     PutFile {
         commit_id: CommitId,
         absolute_path: String,
@@ -25,6 +31,7 @@ pub enum PathMutationIntent {
         commit_id: CommitId,
         from_path: String,
         to_path: String,
+        mode: RenameMode,
     },
     CopyFilePath {
         commit_id: CommitId,
@@ -36,7 +43,8 @@ pub enum PathMutationIntent {
 impl PathMutationIntent {
     pub fn commit_id(&self) -> &CommitId {
         match self {
-            Self::PutFile { commit_id, .. }
+            Self::CreateDir { commit_id, .. }
+            | Self::PutFile { commit_id, .. }
             | Self::DeletePath { commit_id, .. }
             | Self::MovePath { commit_id, .. }
             | Self::CopyFilePath { commit_id, .. } => commit_id,

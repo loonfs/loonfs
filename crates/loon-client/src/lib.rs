@@ -2,6 +2,7 @@
 
 use http::Uri;
 use loon_api::{
+    v0::RenameMode,
     v0::{
         BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
         CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
@@ -344,6 +345,28 @@ impl Client {
         self.put_file_bytes_with_commit_id(spec, bytes, true, commit_id)
     }
 
+    pub fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
+        self.create_dir_with_commit_id(spec, &generated_commit_id())
+    }
+
+    pub fn create_dir_with_commit_id(
+        &self,
+        spec: &NamespacePath,
+        commit_id: &str,
+    ) -> Result<MutationResult, ClientError> {
+        let commit_id = parse_commit_id(commit_id)?;
+        let response = self.apply_filesystem_operation(
+            &spec.namespace,
+            &FilesystemOperationRequest {
+                commit_id,
+                operation: FilesystemOperation::CreateDir {
+                    path: spec.absolute_path.clone(),
+                },
+            },
+        )?;
+        Ok(response.into())
+    }
+
     pub fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, ClientError> {
         self.delete_path_with_commit_id(spec, &generated_commit_id())
     }
@@ -394,6 +417,7 @@ impl Client {
                 operation: FilesystemOperation::MovePath {
                     from_path: from.absolute_path.clone(),
                     to_path: to.absolute_path.clone(),
+                    mode: RenameMode::NoReplace,
                 },
             },
         )?;

@@ -1,16 +1,16 @@
 use loon_api::{
-    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo, WalOp,
+    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo, WalDelta,
 };
 use loon_core::metadata::{InodeRecord, MetadataState as CoreMetadataState};
 use loon_model::metadata::MetadataState as ModelMetadataState;
 
 type NormalizedInodes = Vec<(u64, &'static str, u64)>;
-type NormalizedDirentries = Vec<(u64, String, u64, u64, u32)>;
+type NormalizedDirentryBinds = Vec<(u64, String, u64, u64, u32)>;
 type NormalizedRevisions = Vec<(u64, u64, u64, u32, String)>;
 type NormalizedTombstones = Vec<(u64, u64, u32)>;
 type NormalizedMetadata = (
     NormalizedInodes,
-    NormalizedDirentries,
+    NormalizedDirentryBinds,
     NormalizedRevisions,
     NormalizedTombstones,
 );
@@ -23,50 +23,124 @@ fn content_ref(seed: &str) -> ContentRef {
     }
 }
 
+fn create_dir(
+    delta_index: u32,
+    inode_id: InodeId,
+    parent_inode: InodeId,
+    display_name: &str,
+) -> Vec<WalDelta> {
+    vec![
+        WalDelta::CreateInode {
+            delta_index,
+            inode_id,
+            inode_kind: InodeKind::Dir,
+        },
+        WalDelta::BindDirentry {
+            delta_index: delta_index.saturating_add(1),
+            parent_inode,
+            display_name: display_name.to_owned(),
+            child_inode: inode_id,
+        },
+    ]
+}
+
+fn create_file(
+    delta_index: u32,
+    inode_id: InodeId,
+    parent_inode: InodeId,
+    display_name: &str,
+    content_ref: ContentRef,
+) -> Vec<WalDelta> {
+    vec![
+        WalDelta::CreateInode {
+            delta_index,
+            inode_id,
+            inode_kind: InodeKind::File,
+        },
+        WalDelta::BindDirentry {
+            delta_index: delta_index.saturating_add(1),
+            parent_inode,
+            display_name: display_name.to_owned(),
+            child_inode: inode_id,
+        },
+        WalDelta::AppendFileRevision {
+            delta_index: delta_index.saturating_add(2),
+            inode_id,
+            revision_no: RevisionNo(1),
+            content_ref,
+        },
+    ]
+}
+
+fn append_revision(
+    delta_index: u32,
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+    content_ref: ContentRef,
+) -> Vec<WalDelta> {
+    vec![WalDelta::AppendFileRevision {
+        delta_index,
+        inode_id,
+        revision_no,
+        content_ref,
+    }]
+}
+
+fn bind(
+    delta_index: u32,
+    inode_id: InodeId,
+    parent_inode: InodeId,
+    display_name: &str,
+) -> Vec<WalDelta> {
+    vec![WalDelta::BindDirentry {
+        delta_index,
+        parent_inode,
+        display_name: display_name.to_owned(),
+        child_inode: inode_id,
+    }]
+}
+
+fn tombstone(delta_index: u32, root_inode: InodeId) -> Vec<WalDelta> {
+    vec![WalDelta::TombstoneSubtree {
+        delta_index,
+        root_inode,
+    }]
+}
+
 #[test]
 fn metadata_apply_matches_model_for_basic_commit_sequence() {
     let core_state = core_bootstrap_state();
     let model_state = model_bootstrap_state();
 
-    let create_dir = vec![WalOp::CreateDir {
-        op_index: 0,
-        inode_id: InodeId(2),
-        parent_inode: InodeId(1),
-        display_name: "docs".to_owned(),
-    }];
-    let create_file = vec![WalOp::CreateFile {
-        op_index: 0,
-        inode_id: InodeId(3),
-        parent_inode: InodeId(2),
-        display_name: "readme.txt".to_owned(),
-        content_ref: content_ref("content-1"),
-    }];
-    let replace_file = vec![WalOp::ReplaceFile {
-        op_index: 0,
-        inode_id: InodeId(3),
-        base_revision_no: RevisionNo(1),
-        content_ref: content_ref("content-2"),
-    }];
+    let create_dir = create_dir(0, InodeId(2), InodeId(1), "docs");
+    let create_file = create_file(
+        0,
+        InodeId(3),
+        InodeId(2),
+        "readme.txt",
+        content_ref("content-1"),
+    );
+    let replace_file = append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2"));
 
     let core_state = core_state
-        .apply_committed_wal_ops(ChangeSeq(1), &create_dir)
+        .apply_committed_wal_deltas(ChangeSeq(1), &create_dir)
         .unwrap()
         .metadata_state
-        .apply_committed_wal_ops(ChangeSeq(2), &create_file)
+        .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
         .unwrap()
         .metadata_state
-        .apply_committed_wal_ops(ChangeSeq(3), &replace_file)
+        .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
         .unwrap()
         .metadata_state;
 
     let model_state = model_state
-        .apply_committed_wal_ops(ChangeSeq(1), &create_dir)
+        .apply_committed_wal_deltas(ChangeSeq(1), &create_dir)
         .unwrap()
         .metadata_state
-        .apply_committed_wal_ops(ChangeSeq(2), &create_file)
+        .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
         .unwrap()
         .metadata_state
-        .apply_committed_wal_ops(ChangeSeq(3), &replace_file)
+        .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
         .unwrap()
         .metadata_state;
 
@@ -76,128 +150,70 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
 #[test]
 fn metadata_apply_matches_model_for_rename() {
     assert_states_match(&[
-        vec![WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![WalOp::Rename {
-            op_index: 0,
-            inode_id: InodeId(3),
-            new_parent_inode: InodeId(1),
-            new_display_name: "README.txt".to_owned(),
-        }],
+        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            content_ref("content-1"),
+        ),
+        bind(0, InodeId(3), InodeId(1), "README.txt"),
     ]);
 }
 
 #[test]
 fn metadata_apply_matches_model_for_restore_revision() {
     assert_states_match(&[
-        vec![WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![WalOp::ReplaceFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-2"),
-        }],
-        vec![WalOp::RestoreRevision {
-            op_index: 0,
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(2),
-            content_ref: content_ref("content-1"),
-        }],
+        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            content_ref("content-1"),
+        ),
+        append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
+        append_revision(0, InodeId(3), RevisionNo(3), content_ref("content-1")),
     ]);
 }
 
 #[test]
 fn metadata_apply_matches_model_for_restore_revision_of_current_head() {
     assert_states_match(&[
-        vec![WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![WalOp::RestoreRevision {
-            op_index: 0,
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-1"),
-        }],
+        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            content_ref("content-1"),
+        ),
+        append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-1")),
     ]);
 }
 
 #[test]
 fn metadata_apply_matches_model_for_delete_file() {
     assert_states_match(&[
-        vec![WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![WalOp::DeleteFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-        }],
+        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            content_ref("content-1"),
+        ),
+        tombstone(0, InodeId(3)),
     ]);
 }
 
 #[test]
 fn metadata_apply_matches_model_for_delete_subtree() {
     assert_states_match(&[
-        vec![WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "nested".to_owned(),
-        }],
-        vec![WalOp::DeleteSubtree {
-            op_index: 0,
-            root_inode: InodeId(2),
-        }],
+        create_dir(0, InodeId(2), InodeId(1), "docs"),
+        create_dir(0, InodeId(3), InodeId(2), "nested"),
+        tombstone(0, InodeId(2)),
     ]);
 }
 
@@ -208,7 +224,8 @@ fn core_bootstrap_state() -> CoreMetadataState {
             inode_kind: InodeKind::Dir,
             created_seq: ChangeSeq(0),
         }],
-        direntries: Vec::new(),
+        direntry_binds: Vec::new(),
+        direntry_unbinds: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
         commit_receipts: Vec::new(),
@@ -219,18 +236,18 @@ fn model_bootstrap_state() -> ModelMetadataState {
     loon_model::bootstrap_basis_metadata_state()
 }
 
-fn assert_states_match(sequences: &[Vec<WalOp>]) {
+fn assert_states_match(sequences: &[Vec<WalDelta>]) {
     let mut core_state = core_bootstrap_state();
     let mut model_state = model_bootstrap_state();
 
-    for (index, ops) in sequences.iter().enumerate() {
+    for (index, deltas) in sequences.iter().enumerate() {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
         core_state = core_state
-            .apply_committed_wal_ops(seq, ops)
+            .apply_committed_wal_deltas(seq, deltas)
             .expect("core apply")
             .metadata_state;
         model_state = model_state
-            .apply_committed_wal_ops(seq, ops)
+            .apply_committed_wal_deltas(seq, deltas)
             .expect("model apply")
             .metadata_state;
     }
@@ -252,7 +269,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
             })
             .collect(),
         state
-            .direntries
+            .direntry_binds
             .iter()
             .map(|direntry| {
                 (
@@ -260,7 +277,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     direntry.display_name.clone(),
                     direntry.child_inode_id.0,
                     direntry.bind_seq.0,
-                    direntry.bind_op_index,
+                    direntry.bind_delta_index,
                 )
             })
             .collect(),
@@ -272,7 +289,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     revision.inode_id.0,
                     revision.revision_no.0,
                     revision.committed_seq.0,
-                    revision.revision_op_index,
+                    revision.revision_delta_index,
                     revision.content_ref.digest.clone(),
                 )
             })
@@ -284,7 +301,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                 (
                     tombstone.root_inode_id.0,
                     tombstone.tombstone_seq.0,
-                    tombstone.tombstone_op_index,
+                    tombstone.tombstone_delta_index,
                 )
             })
             .collect(),
@@ -305,7 +322,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
             })
             .collect(),
         state
-            .direntries
+            .direntry_binds
             .iter()
             .map(|direntry| {
                 (
@@ -313,7 +330,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     direntry.display_name.clone(),
                     direntry.child_inode_id.0,
                     direntry.bind_seq.0,
-                    direntry.bind_op_index,
+                    direntry.bind_delta_index,
                 )
             })
             .collect(),
@@ -325,7 +342,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     revision.inode_id.0,
                     revision.revision_no.0,
                     revision.committed_seq.0,
-                    revision.revision_op_index,
+                    revision.revision_delta_index,
                     revision.content_ref.digest.clone(),
                 )
             })
@@ -337,7 +354,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 (
                     tombstone.root_inode_id.0,
                     tombstone.tombstone_seq.0,
-                    tombstone.tombstone_op_index,
+                    tombstone.tombstone_delta_index,
                 )
             })
             .collect(),

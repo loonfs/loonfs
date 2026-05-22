@@ -3,7 +3,8 @@ use crate::ObjectStoreError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointTableFamily {
     Inodes,
-    Direntries,
+    DirentryBinds,
+    DirentryUnbinds,
     Revisions,
     Tombstones,
     CommitReceipts,
@@ -13,7 +14,8 @@ impl CheckpointTableFamily {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inodes => "inodes",
-            Self::Direntries => "direntries",
+            Self::DirentryBinds => "direntry-binds",
+            Self::DirentryUnbinds => "direntry-unbinds",
             Self::Revisions => "revisions",
             Self::Tombstones => "tombstones",
             Self::CommitReceipts => "commit-receipts",
@@ -151,8 +153,8 @@ mod tests {
             "namespaces/ns-1/checkpoints/00000000000000000400/manifest.json"
         );
         assert_eq!(
-            checkpoint_table("ns-1", 400, CheckpointTableFamily::Direntries, 7),
-            "namespaces/ns-1/checkpoints/00000000000000000400/tables/direntries-00007.sst.zst"
+            checkpoint_table("ns-1", 400, CheckpointTableFamily::DirentryBinds, 7),
+            "namespaces/ns-1/checkpoints/00000000000000000400/tables/direntry-binds-00007.sst.zst"
         );
         assert_eq!(
             checkpoint_table("ns-1", 400, CheckpointTableFamily::CommitReceipts, 0),

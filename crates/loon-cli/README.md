@@ -85,6 +85,9 @@ Filesystem operations
   loon put [--profile <name>] [--namespace <name>] <local-path> [remote-path] [--force]
     Upload a local file
 
+  loon mkdir [--profile <name>] [--namespace <name>] <path>
+    Create a directory
+
   loon rm [--profile <name>] [--namespace <name>] <path>
     Remove a path
 

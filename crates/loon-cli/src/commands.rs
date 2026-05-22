@@ -158,6 +158,7 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
         Command::Cat(args) => run_filesystem_cat(kind, args),
         Command::Get(args) => run_filesystem_get(kind, args, runtime),
         Command::Put(args) => run_filesystem_put(kind, args),
+        Command::Mkdir(args) => run_filesystem_mkdir(kind, args),
         Command::Rm(args) => run_filesystem_rm(kind, args),
         Command::Mv(args) => run_filesystem_mv(kind, args),
         Command::Cp(args) => run_filesystem_cp(kind, args),
@@ -875,6 +876,43 @@ fn run_filesystem_rm(
         .target
         .backend()
         .delete_path(&spec)
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::FileMutation {
+            target: render_target(&context.namespace, &spec.absolute_path),
+            committed_seq: result.committed_seq.0,
+        },
+    })
+}
+
+fn run_filesystem_mkdir(
+    kind: CommandKind,
+    args: FilesystemPathArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let result = context
+        .target
+        .backend()
+        .create_dir(&spec)
         .map_err(|error| {
             fail(
                 kind,
