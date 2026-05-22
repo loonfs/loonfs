@@ -4,7 +4,7 @@ assertion_line: 297
 expression: human_success(&output)
 ---
 name = "default"
-mode = "local"
+mode = "embedded"
 default_namespace = "demo"
 
 [store]

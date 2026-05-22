@@ -4,6 +4,7 @@ members = [
   "crates/loon-api",
   "crates/loon-objectstore",
   "crates/loon-core",
+  "crates/loonfs",
   "crates/loon-model",
   "crates/loon-server",
   "crates/loon-client",

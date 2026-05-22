@@ -2,13 +2,12 @@ use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use loon_api::{AuthoritativePathEntry, CommitId, MutationResult, NamespaceId, NamespaceSummary};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loon_core::{
-    bootstrap_namespace, copy_file_path, delete_path_non_recursive, fork_namespace,
-    list_namespaces, list_path, move_path, put_file_bytes, read_file_bytes, resolve_path,
-    BootstrapNamespaceError, CoreError, CoreErrorKind, MutationContext, PutFileBehavior,
+use loonfs::{
+    BootstrapNamespaceError, CopyOptions, CoreError, CoreErrorKind, CreateNamespaceOptions,
+    DeleteOptions, Fs, FsConfig, MoveOptions, PutFileBehavior, PutFileOptions, RuntimeError,
+    SharedObjectStore,
 };
-use loon_objectstore::ConfiguredObjectStore;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 
@@ -133,35 +132,18 @@ fn map_client_error(error: ClientError) -> CliError {
     }
 }
 
-// --- Direct backend (calls loon-core directly) ---
+// --- Embedded backend (embedded/direct mode uses the shared loonfs runtime) ---
 
-pub struct DirectBackend {
-    store: ConfiguredObjectStore,
-    writer_id: String,
-    writer_version: String,
-    lease_duration_ms: u64,
+pub struct EmbeddedBackend {
+    fs: Fs,
 }
 
-impl DirectBackend {
-    fn mutation_context(&self) -> MutationContext {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        MutationContext {
-            writer_id: self.writer_id.clone(),
-            writer_version: self.writer_version.clone(),
-            now_ms,
-            lease_duration_ms: self.lease_duration_ms,
-        }
-    }
-}
-
-impl Backend for DirectBackend {
+impl Backend for EmbeddedBackend {
     fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, CliError> {
         let ns_id = parse_namespace_id(namespace_id)?;
-        bootstrap_namespace(&self.store, &ns_id, &self.mutation_context(), false)
-            .map_err(map_bootstrap_error)
+        self.fs
+            .create_namespace(&ns_id, CreateNamespaceOptions::default())
+            .map_err(map_runtime_error)
     }
 
     fn fork_namespace(
@@ -171,35 +153,35 @@ impl Backend for DirectBackend {
     ) -> Result<NamespaceSummary, CliError> {
         let source_namespace_id = parse_namespace_id(source)?;
         let new_namespace_id = parse_namespace_id(new_namespace_id)?;
-        fork_namespace(
-            &self.store,
-            &source_namespace_id,
-            &new_namespace_id,
-            &self.mutation_context(),
-        )
-        .map_err(map_core_error)
+        self.fs
+            .fork_namespace(&source_namespace_id, &new_namespace_id)
+            .map_err(map_runtime_error)
     }
 
     fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CliError> {
-        list_namespaces(&self.store).map_err(map_core_error)
+        self.fs.list_namespaces().map_err(map_runtime_error)
     }
 
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        list_path(&self.store, &ns_id, &spec.absolute_path)
-            .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
+        self.fs
+            .list_path(&ns_id, &spec.absolute_path)
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        resolve_path(&self.store, &ns_id, &spec.absolute_path)
-            .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
+        self.fs
+            .stat_path(&ns_id, &spec.absolute_path)
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
-        let result = read_file_bytes(&self.store, &ns_id, &spec.absolute_path)
-            .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))?;
+        let result = self
+            .fs
+            .read_file_bytes(&ns_id, &spec.absolute_path)
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
         Ok(result.bytes)
     }
 
@@ -216,29 +198,32 @@ impl Backend for DirectBackend {
             PutFileBehavior::CreateOnly
         };
         let commit_id = generated_commit_id();
-        put_file_bytes(
-            &self.store,
-            &ns_id,
-            &spec.absolute_path,
-            bytes,
-            behavior,
-            &self.mutation_context(),
-            Some(&commit_id),
-        )
-        .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
+        self.fs
+            .put_file_bytes(
+                &ns_id,
+                &spec.absolute_path,
+                bytes,
+                PutFileOptions {
+                    behavior,
+                    commit_id: Some(commit_id),
+                },
+            )
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&spec.namespace)?;
         let commit_id = generated_commit_id();
-        delete_path_non_recursive(
-            &self.store,
-            &ns_id,
-            &spec.absolute_path,
-            &self.mutation_context(),
-            Some(&commit_id),
-        )
-        .map_err(|error| map_namespace_scoped_core_error(&spec.namespace, error))
+        self.fs
+            .delete_path(
+                &ns_id,
+                &spec.absolute_path,
+                DeleteOptions {
+                    recursive: false,
+                    commit_id: Some(commit_id),
+                },
+            )
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
     fn move_path(
@@ -248,15 +233,16 @@ impl Backend for DirectBackend {
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&from.namespace)?;
         let commit_id = generated_commit_id();
-        move_path(
-            &self.store,
-            &ns_id,
-            &from.absolute_path,
-            &to.absolute_path,
-            &self.mutation_context(),
-            Some(&commit_id),
-        )
-        .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
+        self.fs
+            .move_path(
+                &ns_id,
+                &from.absolute_path,
+                &to.absolute_path,
+                MoveOptions {
+                    commit_id: Some(commit_id),
+                },
+            )
+            .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
     }
 
     fn copy_path(
@@ -266,15 +252,16 @@ impl Backend for DirectBackend {
     ) -> Result<MutationResult, CliError> {
         let ns_id = parse_namespace_id(&from.namespace)?;
         let commit_id = generated_commit_id();
-        copy_file_path(
-            &self.store,
-            &ns_id,
-            &from.absolute_path,
-            &to.absolute_path,
-            &self.mutation_context(),
-            Some(&commit_id),
-        )
-        .map_err(|error| map_namespace_scoped_core_error(&from.namespace, error))
+        self.fs
+            .copy_path(
+                &ns_id,
+                &from.absolute_path,
+                &to.absolute_path,
+                CopyOptions {
+                    commit_id: Some(commit_id),
+                },
+            )
+            .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
     }
 }
 
@@ -282,8 +269,24 @@ fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
     NamespaceId::parse(namespace).map_err(|error| CliError::invalid_input(error.to_string()))
 }
 
-fn generated_commit_id() -> String {
-    CommitId::generate().to_string()
+fn generated_commit_id() -> CommitId {
+    CommitId::generate()
+}
+
+fn map_runtime_error(error: RuntimeError) -> CliError {
+    match error {
+        RuntimeError::Core(error) => map_core_error(error),
+        RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
+        RuntimeError::Config(message) => CliError::invalid_config(message),
+    }
+}
+
+fn map_namespace_scoped_runtime_error(namespace: &str, error: RuntimeError) -> CliError {
+    match error {
+        RuntimeError::Core(error) => map_namespace_scoped_core_error(namespace, error),
+        RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
+        RuntimeError::Config(message) => CliError::invalid_config(message),
+    }
 }
 
 fn map_core_error(error: CoreError) -> CliError {
@@ -366,12 +369,12 @@ fn default_writer_id() -> String {
 // --- Target resolution ---
 
 pub enum ResolvedTarget {
-    Local(Box<LocalTarget>),
+    Embedded(Box<EmbeddedTarget>),
     Remote(RemoteTarget),
 }
 
-pub struct LocalTarget {
-    backend: DirectBackend,
+pub struct EmbeddedTarget {
+    backend: EmbeddedBackend,
 }
 
 pub struct RemoteTarget {
@@ -381,13 +384,13 @@ pub struct RemoteTarget {
 impl ResolvedTarget {
     pub fn resolve(profile_name: &str, profile: &ProfileConfig) -> Result<Self, CliError> {
         match profile {
-            ProfileConfig::Local {
+            ProfileConfig::Embedded {
                 store,
                 writer_id,
                 writer_version,
                 lease_duration_ms,
                 ..
-            } => Ok(Self::Local(Box::new(LocalTarget::new(
+            } => Ok(Self::Embedded(Box::new(EmbeddedTarget::new(
                 store,
                 writer_id.as_deref(),
                 writer_version.as_deref(),
@@ -407,20 +410,20 @@ impl ResolvedTarget {
 
     pub fn mode_str(&self) -> &'static str {
         match self {
-            ResolvedTarget::Local(_) => "local",
+            ResolvedTarget::Embedded(_) => "embedded",
             ResolvedTarget::Remote(_) => "remote",
         }
     }
 
     pub fn backend(&self) -> &dyn Backend {
         match self {
-            ResolvedTarget::Local(target) => &target.backend,
+            ResolvedTarget::Embedded(target) => &target.backend,
             ResolvedTarget::Remote(target) => &target.backend,
         }
     }
 }
 
-impl LocalTarget {
+impl EmbeddedTarget {
     fn new(
         store_config: &StoreConfig,
         writer_id: Option<&str>,
@@ -428,16 +431,21 @@ impl LocalTarget {
         lease_duration_ms: Option<u64>,
     ) -> Result<Self, CliError> {
         let store = store_config.object_store()?;
-        let backend = DirectBackend {
+        let store: SharedObjectStore = Arc::new(store);
+        let fs = Fs::open(
             store,
-            writer_id: writer_id
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(default_writer_id),
-            writer_version: writer_version
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION"))),
-            lease_duration_ms: lease_duration_ms.unwrap_or(DEFAULT_LEASE_DURATION_MS),
-        };
+            FsConfig {
+                writer_id: writer_id
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(default_writer_id),
+                writer_version: writer_version
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION"))),
+                lease_duration_ms: lease_duration_ms.unwrap_or(DEFAULT_LEASE_DURATION_MS),
+            },
+        )
+        .map_err(map_runtime_error)?;
+        let backend = EmbeddedBackend { fs };
         Ok(Self { backend })
     }
 }
@@ -460,11 +468,12 @@ impl RemoteTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_core_error, Backend, LocalTarget, DEFAULT_LEASE_DURATION_MS};
+    use super::{map_core_error, Backend, EmbeddedTarget, DEFAULT_LEASE_DURATION_MS};
     use crate::config::StoreConfig;
     use loon_api::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
     use loon_client::NamespacePath;
-    use loon_core::{commit::CommitValidationError, list_changes_after, CoreError};
+    use loon_core::commit::CommitValidationError;
+    use loonfs::CoreError;
     use tempfile::tempdir;
 
     #[test]
@@ -480,21 +489,24 @@ mod tests {
     }
 
     #[test]
-    fn local_target_uses_five_second_default_lease_when_unset() {
+    fn embedded_target_uses_five_second_default_lease_when_unset() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
 
-        let target = LocalTarget::new(&store, None, None, None).expect("build local target");
+        let target = EmbeddedTarget::new(&store, None, None, None).expect("build embedded target");
 
-        assert_eq!(target.backend.lease_duration_ms, DEFAULT_LEASE_DURATION_MS);
-        assert_eq!(target.backend.lease_duration_ms, 5_000);
+        assert_eq!(
+            target.backend.fs.config().lease_duration_ms,
+            DEFAULT_LEASE_DURATION_MS
+        );
+        assert_eq!(target.backend.fs.config().lease_duration_ms, 5_000);
     }
 
     #[test]
-    fn local_target_preserves_explicit_lease_duration() {
+    fn embedded_target_preserves_explicit_lease_duration() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
@@ -502,19 +514,19 @@ mod tests {
         };
 
         let target =
-            LocalTarget::new(&store, None, None, Some(12_345)).expect("build local target");
+            EmbeddedTarget::new(&store, None, None, Some(12_345)).expect("build embedded target");
 
-        assert_eq!(target.backend.lease_duration_ms, 12_345);
+        assert_eq!(target.backend.fs.config().lease_duration_ms, 12_345);
     }
 
     #[test]
-    fn direct_backend_generates_non_empty_commit_id_for_local_put() {
+    fn embedded_backend_generates_non_empty_commit_id_for_embedded_put() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        let target = LocalTarget::new(&store, None, None, None).expect("build local target");
+        let target = EmbeddedTarget::new(&store, None, None, None).expect("build embedded target");
         target
             .backend
             .create_namespace("demo")
@@ -532,12 +544,11 @@ mod tests {
             )
             .expect("put file");
 
-        let changes = list_changes_after(
-            &target.backend.store,
-            &NamespaceId::from("demo"),
-            ChangeSeq(0),
-        )
-        .expect("list changes");
+        let changes = target
+            .backend
+            .fs
+            .list_changes_after(&NamespaceId::from("demo"), ChangeSeq(0))
+            .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
         assert!(!changes.changes[0].commit_id.as_str().trim().is_empty());
     }

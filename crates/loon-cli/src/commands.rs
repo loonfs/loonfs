@@ -972,32 +972,32 @@ fn build_profile_from_create_spec(
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
     let mode = match spec.mode.as_deref() {
-        Some("local") => "local".to_owned(),
+        Some("embedded") => "embedded".to_owned(),
         Some("remote") => "remote".to_owned(),
         Some(other) => {
             return Err(CliError::invalid_input(format!(
-                "unknown mode: `{other}` (expected local or remote)"
+                "unknown mode: `{other}` (expected embedded or remote)"
             )))
         }
-        None if runtime.interactive => prompt::prompt_choice("mode", &["local", "remote"])?,
+        None if runtime.interactive => prompt::prompt_choice("mode", &["embedded", "remote"])?,
         None => {
             return Err(CliError::non_interactive_input_required("mode"));
         }
     };
 
     match mode.as_str() {
-        "local" => build_local_profile(spec, runtime),
+        "embedded" => build_embedded_profile(spec, runtime),
         "remote" => build_remote_profile(spec, runtime),
         _ => unreachable!(),
     }
 }
 
-fn build_local_profile(
+fn build_embedded_profile(
     spec: CreateProfileSpec,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
-    reject_create_flag("server-url", spec.server_url.is_some(), "local")?;
-    reject_create_flag("auth-token", spec.auth_token.is_some(), "local")?;
+    reject_create_flag("server-url", spec.server_url.is_some(), "embedded")?;
+    reject_create_flag("auth-token", spec.auth_token.is_some(), "embedded")?;
 
     let store_kind = match spec.store_kind.as_deref() {
         Some("local-fs") => "local-fs",
@@ -1011,7 +1011,7 @@ fn build_local_profile(
         None if runtime.interactive => {
             return prompt::prompt_choice("store kind", &["aws-s3", "cloudflare-r2", "local-fs"])
                 .and_then(|choice| {
-                    build_local_profile(
+                    build_embedded_profile(
                         CreateProfileSpec {
                             store_kind: Some(choice),
                             ..spec
@@ -1101,7 +1101,7 @@ fn build_local_profile(
         _ => unreachable!(),
     };
 
-    Ok(ProfileConfig::Local {
+    Ok(ProfileConfig::Embedded {
         store,
         default_namespace: None,
         writer_id: None,
@@ -1177,9 +1177,9 @@ fn apply_update_flags(
     args: &ProfileUpdateArgs,
 ) -> Result<ProfileConfig, CliError> {
     match &existing {
-        ProfileConfig::Local { store, .. } => {
-            reject_flag("server-url", &args.server_url, "local")?;
-            reject_flag("auth-token", &args.auth_token, "local")?;
+        ProfileConfig::Embedded { store, .. } => {
+            reject_flag("server-url", &args.server_url, "embedded")?;
+            reject_flag("auth-token", &args.auth_token, "embedded")?;
             match store {
                 StoreConfig::LocalFs { .. } => {
                     reject_flag("bucket", &args.bucket, "local-fs")?;
@@ -1215,7 +1215,7 @@ fn apply_update_flags(
     }
 
     match existing {
-        ProfileConfig::Local {
+        ProfileConfig::Embedded {
             store,
             default_namespace,
             writer_id,
@@ -1262,7 +1262,7 @@ fn apply_update_flags(
                     key_prefix: args.key_prefix.clone().or(key_prefix),
                 },
             };
-            Ok(ProfileConfig::Local {
+            Ok(ProfileConfig::Embedded {
                 store,
                 default_namespace,
                 writer_id,
@@ -1293,7 +1293,7 @@ fn reject_flag(flag: &str, value: &Option<String>, profile_kind: &str) -> Result
 
 fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, CliError> {
     match existing {
-        ProfileConfig::Local {
+        ProfileConfig::Embedded {
             store,
             default_namespace,
             writer_id,
@@ -1353,7 +1353,7 @@ fn apply_update_interactive(existing: ProfileConfig) -> Result<ProfileConfig, Cl
                     key_prefix: prompt::prompt_optional("key prefix", key_prefix.as_deref())?,
                 },
             };
-            Ok(ProfileConfig::Local {
+            Ok(ProfileConfig::Embedded {
                 store,
                 default_namespace,
                 writer_id,

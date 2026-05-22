@@ -1,22 +1,14 @@
-use crate::config::ServerConfig;
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::{CommitId, NamespaceId};
-use loon_core::{
-    commit::{
-        semantic_commit_fingerprint_for_v0_request, CommitHeadPublishError,
-        SemanticCommitFingerprint,
-    },
-    publish_namespace_mutations_batch, CoreError, MutationContext, NamespaceMutationCandidate,
-    PathMutationIntent,
+use loon_core::commit::{
+    semantic_commit_fingerprint_for_v0_request, CommitHeadPublishError, SemanticCommitFingerprint,
 };
-use loon_objectstore::ObjectStore;
+use loonfs::{CoreError, Fs, NamespaceMutationCandidate, PathMutationIntent, RuntimeError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, Notify};
 use tokio::time::{Duration, Instant};
 
-type SharedStore = Arc<dyn ObjectStore + Send + Sync>;
 type CommitResult = Result<ApiCommitResponse, CoreError>;
 
 const MAX_BATCH_CANDIDATES: usize = 1024;
@@ -27,16 +19,14 @@ const HEAD_CAS_RETRY_LIMIT: usize = 8;
 #[derive(Clone)]
 pub(crate) struct PublisherRegistry {
     inner: Arc<Mutex<HashMap<NamespaceId, NamespacePublisher>>>,
-    store: SharedStore,
-    config: Arc<ServerConfig>,
+    fs: Arc<Fs>,
 }
 
 impl PublisherRegistry {
-    pub(crate) fn new(store: SharedStore, config: Arc<ServerConfig>) -> Self {
+    pub(crate) fn new(fs: Arc<Fs>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
-            store,
-            config,
+            fs,
         }
     }
 
@@ -70,13 +60,7 @@ impl PublisherRegistry {
                 .expect("publisher registry mutex poisoned");
             publishers
                 .entry(namespace_id.clone())
-                .or_insert_with(|| {
-                    NamespacePublisher::new(
-                        namespace_id.clone(),
-                        self.store.clone(),
-                        self.config.clone(),
-                    )
-                })
+                .or_insert_with(|| NamespacePublisher::new(namespace_id.clone(), self.fs.clone()))
                 .clone()
         };
         publisher.submit(candidate).await
@@ -86,8 +70,7 @@ impl PublisherRegistry {
 #[derive(Clone)]
 struct NamespacePublisher {
     namespace_id: NamespaceId,
-    store: SharedStore,
-    config: Arc<ServerConfig>,
+    fs: Arc<Fs>,
     state: Arc<Mutex<NamespacePublisherState>>,
 }
 
@@ -115,11 +98,10 @@ struct InFlightRequest {
 }
 
 impl NamespacePublisher {
-    fn new(namespace_id: NamespaceId, store: SharedStore, config: Arc<ServerConfig>) -> Self {
+    fn new(namespace_id: NamespaceId, fs: Arc<Fs>) -> Self {
         Self {
             namespace_id,
-            store,
-            config,
+            fs,
             state: Arc::new(Mutex::new(NamespacePublisherState {
                 batch: None,
                 in_flight: HashMap::new(),
@@ -266,15 +248,12 @@ impl NamespacePublisher {
                 .map(|candidate| candidate.candidate.clone())
                 .collect::<Vec<_>>();
             let namespace_id = self.namespace_id.clone();
-            let store = self.store.clone();
-            let context = mutation_context(&self.config);
+            let fs = self.fs.clone();
             results = tokio::task::spawn_blocking(move || {
-                publish_namespace_mutations_batch(
-                    store.as_ref(),
-                    &namespace_id,
-                    batch_candidates,
-                    &context,
-                )
+                fs.publish_namespace_mutations_batch(&namespace_id, batch_candidates)
+                    .into_iter()
+                    .map(|result| result.map_err(runtime_error_to_core))
+                    .collect()
             })
             .await
             .unwrap_or_else(|err| vec![Err(CoreError::Store(err.to_string())); candidates.len()]);
@@ -378,31 +357,25 @@ fn candidate_semantic_commit_fingerprint(
     }
 }
 
-fn mutation_context(config: &ServerConfig) -> MutationContext {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    MutationContext {
-        writer_id: config.writer_id.clone(),
-        writer_version: config.writer_version.clone(),
-        now_ms,
-        lease_duration_ms: config.lease_duration_ms,
+fn runtime_error_to_core(error: RuntimeError) -> CoreError {
+    match error {
+        RuntimeError::Core(error) => error,
+        RuntimeError::Bootstrap(error) => CoreError::Store(error.to_string()),
+        RuntimeError::Config(message) => CoreError::Store(message),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::StoreConfig;
+    use crate::config::{ServerConfig, StoreConfig};
     use loon_api::v0::{CommitOp, CommitRequest};
     use loon_api::{ChangeSeq, InodeId};
-    use loon_core::{
-        bootstrap_namespace, store_bytes_as_content, PathMutationIntent, PutFileBehavior,
-    };
+    use loon_core::{store_bytes_as_content, PathMutationIntent, PutFileBehavior};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use loonfs::{CreateNamespaceOptions, Fs, FsConfig, SharedObjectStore as SharedStore};
     use std::path::Path;
     use std::sync::Condvar;
     use tempfile::tempdir;
@@ -528,6 +501,25 @@ mod tests {
         })
     }
 
+    fn test_fs(store: SharedStore, config: &ServerConfig) -> Arc<Fs> {
+        Arc::new(
+            Fs::open(
+                store,
+                FsConfig {
+                    writer_id: config.writer_id.clone(),
+                    writer_version: config.writer_version.clone(),
+                    lease_duration_ms: config.lease_duration_ms,
+                },
+            )
+            .expect("open runtime"),
+        )
+    }
+
+    fn create_namespace(fs: &Fs, namespace_id: &NamespaceId) {
+        fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .expect("bootstrap");
+    }
+
     fn create_dir_request(
         commit_id: impl Into<String>,
         display_name: impl Into<String>,
@@ -582,14 +574,9 @@ mod tests {
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
-        bootstrap_namespace(
-            shared.as_ref(),
-            &namespace_id,
-            &mutation_context(&config),
-            false,
-        )
-        .expect("bootstrap");
-        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+        let fs = test_fs(shared.clone(), &config);
+        create_namespace(&fs, &namespace_id);
+        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -640,14 +627,9 @@ mod tests {
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
-        bootstrap_namespace(
-            shared.as_ref(),
-            &namespace_id,
-            &mutation_context(&config),
-            false,
-        )
-        .expect("bootstrap");
-        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+        let fs = test_fs(shared.clone(), &config);
+        create_namespace(&fs, &namespace_id);
+        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -686,14 +668,9 @@ mod tests {
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
-        bootstrap_namespace(
-            shared.as_ref(),
-            &namespace_id,
-            &mutation_context(&config),
-            false,
-        )
-        .expect("bootstrap");
-        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+        let fs = test_fs(shared.clone(), &config);
+        create_namespace(&fs, &namespace_id);
+        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
         store.arm_next_head_cas();
         let active = admit_commit(
@@ -758,14 +735,9 @@ mod tests {
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
-        bootstrap_namespace(
-            shared.as_ref(),
-            &namespace_id,
-            &mutation_context(&config),
-            false,
-        )
-        .expect("bootstrap");
-        let publisher = NamespacePublisher::new(namespace_id.clone(), shared.clone(), config);
+        let fs = test_fs(shared.clone(), &config);
+        create_namespace(&fs, &namespace_id);
+        let publisher = NamespacePublisher::new(namespace_id.clone(), fs);
 
         store.arm_next_head_cas();
         let mut receivers = Vec::with_capacity(MAX_BATCH_CANDIDATES);
@@ -811,14 +783,9 @@ mod tests {
             },
         });
         let namespace_id = NamespaceId::from("demo");
-        bootstrap_namespace(
-            store.as_ref(),
-            &namespace_id,
-            &mutation_context(&config),
-            false,
-        )
-        .expect("bootstrap");
-        let registry = PublisherRegistry::new(store.clone(), config);
+        let fs = test_fs(store.clone(), &config);
+        create_namespace(&fs, &namespace_id);
+        let registry = PublisherRegistry::new(fs);
 
         let request_a = CommitRequest {
             commit_id: CommitId::from("req-a"),
@@ -868,16 +835,11 @@ mod tests {
             },
         });
         let namespace_id = NamespaceId::from("demo");
-        bootstrap_namespace(
-            store.as_ref(),
-            &namespace_id,
-            &mutation_context(&config),
-            false,
-        )
-        .expect("bootstrap");
+        let fs = test_fs(store.clone(), &config);
+        create_namespace(&fs, &namespace_id);
         let content =
             store_bytes_as_content(store.as_ref(), &namespace_id, b"hello").expect("stage content");
-        let registry = PublisherRegistry::new(store.clone(), config);
+        let registry = PublisherRegistry::new(fs);
 
         let explicit = CommitRequest {
             commit_id: CommitId::from("explicit-commit"),

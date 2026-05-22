@@ -1,6 +1,6 @@
 ![LoonFS Logo](assets/loonfs-wordmark-black.svg)
 
-LoonFS is an agent-native, durable file-system backed by object storage. It is multiplayer by default. It can be used across agents, sessions, and teams even when running in local mode.
+LoonFS is an agent-native, durable file-system backed by object storage. It is multiplayer by default. It can be used across agents, sessions, and teams in embedded/direct mode without a LoonFS server.
 
 The Loon protocol enables version history, branching, and replays out of the box.
 
@@ -26,7 +26,7 @@ cp ./target/debug/loon ~/.local/bin/loon    # copy it to somewhere in your $PATH
 
 You will need access to an object storage bucket in the form of keys in order to set up Loon. Once installed, you can get started by running the following commands. 
 ```bash
-loon init                   # creates your first Loon profile and sets it as the default. We recommend using 'local' mode to start, with an object storage store.
+loon init                   # creates your first Loon profile and sets it as the default. We recommend using embedded mode to start, with an object storage store.
 
 loon namespace create {namespace_id}
 loon use {namespace_id}   # sets the newly created namespace as the default.
@@ -47,9 +47,11 @@ loon get {REMOTE_FILE_PATH} {LOCAL_FILE_PATH}
 loon rm {REMOTE_FILE_PATH}
 ```
 
-The LoonFS cli has two main modes: `local` and `remote`:
-- `local` interfaces with the store (object storage) directly.
-- `remote` makes request to a remote LoonFS Server which is then in charge of interfacing with the store. There is no current canonical LoonFS server, as such you have to run your own in order to leverage that option.
+The LoonFS CLI has two main topology modes: `embedded` and `remote`:
+- `embedded`/direct mode talks to object storage directly from the current process; no LoonFS server is required.
+- `remote` mode talks to a LoonFS server, which hosts the runtime and talks to object storage.
+
+`local-fs` is an object-store provider for development, tests, or hardened local deployments. It is not the same thing as embedded mode; embedded mode can use `local-fs`, S3, or Cloudflare R2.
 
 **Both modes are multi-player by default.**
 

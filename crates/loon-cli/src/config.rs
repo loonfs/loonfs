@@ -24,7 +24,7 @@ pub struct CliConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum ProfileConfig {
-    Local {
+    Embedded {
         store: StoreConfig,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_namespace: Option<String>,
@@ -130,21 +130,21 @@ impl Default for CliConfig {
 impl ProfileConfig {
     pub fn mode_str(&self) -> &'static str {
         match self {
-            ProfileConfig::Local { .. } => "local",
+            ProfileConfig::Embedded { .. } => "embedded",
             ProfileConfig::Remote { .. } => "remote",
         }
     }
 
     pub fn store_kind_str(&self) -> Option<&'static str> {
         match self {
-            ProfileConfig::Local { store, .. } => Some(store.kind_str()),
+            ProfileConfig::Embedded { store, .. } => Some(store.kind_str()),
             ProfileConfig::Remote { .. } => None,
         }
     }
 
     pub(crate) fn validate(&self, name: &str) -> Result<(), CliError> {
         match self {
-            ProfileConfig::Local {
+            ProfileConfig::Embedded {
                 store,
                 default_namespace,
                 ..
@@ -180,13 +180,13 @@ impl ProfileConfig {
 
     pub fn redacted(&self) -> Self {
         match self {
-            ProfileConfig::Local {
+            ProfileConfig::Embedded {
                 store,
                 default_namespace,
                 writer_id,
                 writer_version,
                 lease_duration_ms,
-            } => ProfileConfig::Local {
+            } => ProfileConfig::Embedded {
                 store: store.redacted(),
                 default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
