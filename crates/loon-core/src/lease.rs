@@ -237,3 +237,187 @@ fn map_cas_error(err: ObjectStoreError) -> CasOutcome {
 fn map_head_takeover_error(err: HeadFenceTakeoverError) -> LeaseAcquireError {
     LeaseAcquireError::HeadFenceTakeover(err.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::CoreErrorKind;
+    use crate::loading::{read_head_object, read_lease_object};
+    use crate::protocol::commit_operations;
+    use crate::services::bootstrap_namespace;
+    use loon_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
+    use loon_api::{ChangeSeq, CommitId, InodeId};
+    use loon_objectstore::fs::LocalFsStore;
+    use loon_objectstore::keys::namespace_lease;
+    use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
+    use tempfile::tempdir;
+
+    #[test]
+    fn same_holder_renewal_extends_expiry_without_advancing_fence() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = namespace_id();
+        let initial = context("writer-a", 1_000);
+        bootstrap_namespace(&store, &namespace_id, &initial, false).expect("bootstrap");
+        let before = read_lease_object(&store, &namespace_id).expect("read lease before");
+
+        let renewed_context = context("writer-a", 1_500);
+        acquire_or_renew_namespace_lease(&store, &namespace_id, &renewed_context)
+            .expect("renew lease");
+
+        let head = read_head_object(&store, &namespace_id)
+            .expect("read head")
+            .envelope
+            .state;
+        let renewed = read_lease_object(&store, &namespace_id)
+            .expect("read renewed lease")
+            .envelope
+            .state;
+        assert_eq!(head.active_fence_token, FenceToken(0));
+        assert_eq!(renewed.fence_token, FenceToken(0));
+        assert_eq!(renewed.holder_id, "writer-a");
+        assert!(renewed.lease_expires_at_ms > before.envelope.state.lease_expires_at_ms);
+    }
+
+    #[test]
+    fn expired_lease_takeover_rewrites_existing_lease_and_advances_fence() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = DeleteRejectingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let namespace_id = namespace_id();
+        let initial = context("writer-a", 1_000);
+        bootstrap_namespace(&store, &namespace_id, &initial, false).expect("bootstrap");
+        let lease_key = namespace_lease(namespace_id.as_str());
+        assert!(store.head(&lease_key).expect("lease head before").is_some());
+
+        let takeover_context = context("writer-b", 3_001);
+        acquire_or_renew_namespace_lease(&store, &namespace_id, &takeover_context)
+            .expect("take over expired lease");
+
+        let head = read_head_object(&store, &namespace_id)
+            .expect("read head")
+            .envelope
+            .state;
+        let lease = read_lease_object(&store, &namespace_id)
+            .expect("read lease")
+            .envelope
+            .state;
+        assert!(store.head(&lease_key).expect("lease head after").is_some());
+        assert_eq!(head.active_fence_token, FenceToken(1));
+        assert_eq!(lease.fence_token, FenceToken(1));
+        assert_eq!(lease.holder_id, "writer-b");
+        assert_eq!(
+            lease.lease_expires_at_ms,
+            takeover_context
+                .now_ms
+                .saturating_add(takeover_context.lease_duration_ms)
+        );
+    }
+
+    #[test]
+    fn previous_writer_cannot_publish_while_newer_lease_is_valid() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = namespace_id();
+        let writer_a = context("writer-a", 1_000);
+        bootstrap_namespace(&store, &namespace_id, &writer_a, false).expect("bootstrap");
+
+        let writer_b = context("writer-b", 3_001);
+        commit_operations(
+            &store,
+            &namespace_id,
+            create_dir_request("writer-b-create", "from-b"),
+            &writer_b,
+        )
+        .expect("writer b commit after takeover");
+
+        let writer_a_retry = context("writer-a", 3_002);
+        let error = commit_operations(
+            &store,
+            &namespace_id,
+            create_dir_request("writer-a-stale", "from-a"),
+            &writer_a_retry,
+        )
+        .expect_err("previous writer should be fenced out");
+        assert_eq!(error.kind(), CoreErrorKind::LeaseConflict);
+
+        let head = read_head_object(&store, &namespace_id)
+            .expect("read head")
+            .envelope
+            .state;
+        let lease = read_lease_object(&store, &namespace_id)
+            .expect("read lease")
+            .envelope
+            .state;
+        assert_eq!(head.seq, ChangeSeq(1));
+        assert_eq!(head.active_fence_token, FenceToken(1));
+        assert_eq!(lease.fence_token, FenceToken(1));
+        assert_eq!(lease.holder_id, "writer-b");
+    }
+
+    fn namespace_id() -> NamespaceId {
+        NamespaceId::from("demo")
+    }
+
+    fn context(writer_id: &str, now_ms: u64) -> MutationContext {
+        MutationContext {
+            writer_id: writer_id.to_owned(),
+            writer_version: format!("{writer_id}/0.1.0"),
+            now_ms,
+            lease_duration_ms: 1_000,
+        }
+    }
+
+    fn create_dir_request(commit_id: &str, display_name: &str) -> ApiCommitRequest {
+        ApiCommitRequest {
+            commit_id: CommitId::from(commit_id),
+            preconditions: Vec::new(),
+            ops: vec![ApiCommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: display_name.to_owned(),
+            }],
+            message: None,
+            annotations: None,
+        }
+    }
+
+    struct DeleteRejectingStore {
+        inner: LocalFsStore,
+    }
+
+    impl DeleteRejectingStore {
+        fn new(inner: LocalFsStore) -> Self {
+            Self { inner }
+        }
+    }
+
+    impl ObjectStore for DeleteRejectingStore {
+        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key)
+        }
+
+        fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+            self.inner.get(key, range)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            self.inner.put(key, bytes, mode)
+        }
+
+        fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
+            panic!("lease acquisition must not delete live namespace objects")
+        }
+
+        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+            self.inner.list_prefix(prefix)
+        }
+    }
+}

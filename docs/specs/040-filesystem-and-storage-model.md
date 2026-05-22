@@ -4,6 +4,8 @@
 
 A namespace is the unit of visible metadata history.
 
+The `namespace_id` is a durable storage identity, not a reusable display name. It must not be reused after namespace destruction. Future aliases or user-facing names may be reused only if they map to a new `namespace_id`.
+
 Each namespace has:
 
 - a descriptor that records its namespace id and content-store id

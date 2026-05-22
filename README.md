@@ -51,7 +51,7 @@ The LoonFS CLI has two main topology modes: `embedded` and `remote`:
 - `embedded`/direct mode talks to object storage directly from the current process; no LoonFS server is required.
 - `remote` mode talks to a LoonFS server, which hosts the runtime and talks to object storage.
 
-`local-fs` is an object-store provider for development, tests, or hardened local deployments. It is not the same thing as embedded mode; embedded mode can use `local-fs`, S3, or Cloudflare R2.
+Embedded mode is production-capable when backed by an object store that satisfies the LoonFS object-store contract. `local-fs` is an object-store provider, not a mode; treat it as dev/test. Embedded mode can use `local-fs`, S3, or Cloudflare R2.
 
 **Both modes are multi-player by default.**
 

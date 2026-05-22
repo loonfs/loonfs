@@ -420,8 +420,10 @@ impl fmt::Display for InodeId {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_upload_id, validate_wal_segment_id, CommitId, ContentStoreId, NamespaceId,
+        generate_upload_id, generate_wal_segment_id, validate_upload_id, validate_wal_segment_id,
+        CommitId, ContentStoreId, NamespaceId,
     };
+    use std::collections::BTreeSet;
 
     #[test]
     fn namespace_id_parse_accepts_allowed_grammar() {
@@ -495,5 +497,41 @@ mod tests {
         assert!(validate_wal_segment_id("seg_00000000000000000000000000000001").is_ok());
         assert!(validate_upload_id(["upl", "123"].join("-")).is_err());
         assert!(validate_wal_segment_id(["seg", "123"].join("-")).is_err());
+    }
+
+    #[test]
+    fn generated_runtime_ids_use_lower_hex_uuid_bodies() {
+        let upload_id = generate_upload_id();
+        let wal_segment_id = generate_wal_segment_id();
+
+        assert_generated_id_shape(&upload_id, "upl");
+        assert_generated_id_shape(&wal_segment_id, "seg");
+        assert!(validate_upload_id(&upload_id).is_ok());
+        assert!(validate_wal_segment_id(&wal_segment_id).is_ok());
+    }
+
+    #[test]
+    fn generated_wal_segment_ids_are_not_reused_across_samples() {
+        let mut ids = BTreeSet::new();
+        for _ in 0..128 {
+            let id = generate_wal_segment_id();
+            assert!(
+                ids.insert(id.clone()),
+                "generated duplicate WAL segment id {id}"
+            );
+        }
+    }
+
+    fn assert_generated_id_shape(value: &str, prefix: &str) {
+        let expected_prefix = format!("{prefix}_");
+        let body = value
+            .strip_prefix(&expected_prefix)
+            .expect("generated id prefix");
+        assert_eq!(body.len(), 32);
+        assert!(
+            body.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "generated id body must be lowercase hex: {value}"
+        );
     }
 }

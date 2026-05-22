@@ -144,6 +144,9 @@ pub fn prepare_wal_segment(
         .last()
         .map(|record| record.seq)
         .ok_or(WalBuildError::EmptySegment)?;
+    // WAL segment IDs are collision-resistant namespace-incarnation IDs. They
+    // are intentionally not derived from the seq range, so losing writers can
+    // leave harmless orphan segments without creating reusable object names.
     let segment_id = generate_wal_segment_id();
     let payload = WalSegmentPayload {
         namespace_id,
@@ -435,5 +438,72 @@ mod tests {
         let payload = wal_payload_from_materialized_commit(&record).expect("build commit payload");
 
         assert_eq!(payload, segment.envelope.payload.records[0]);
+    }
+
+    #[test]
+    fn prepared_wal_segments_use_unique_segment_ids_and_object_keys() {
+        let namespace_id = NamespaceId::from("demo");
+        let record = materialized_create_dir(
+            &namespace_id,
+            "c_wal_unique",
+            "docs",
+            ChangeSeq(0),
+            ChangeSeq(1),
+        );
+
+        let first = prepare_wal_segment(
+            namespace_id.clone(),
+            None,
+            std::slice::from_ref(&record),
+            "test-writer",
+        )
+        .expect("prepare first wal segment");
+        let second = prepare_wal_segment(
+            namespace_id,
+            None,
+            std::slice::from_ref(&record),
+            "test-writer",
+        )
+        .expect("prepare second wal segment");
+
+        assert_ne!(first.segment_id, second.segment_id);
+        assert_ne!(first.object_key, second.object_key);
+        validate_wal_segment_id(&first.segment_id).expect("first segment id shape");
+        validate_wal_segment_id(&second.segment_id).expect("second segment id shape");
+    }
+
+    fn materialized_create_dir(
+        namespace_id: &NamespaceId,
+        commit_id: &str,
+        display_name: &str,
+        apply_after_seq: ChangeSeq,
+        assigned_seq: ChangeSeq,
+    ) -> MaterializedCommit {
+        let request = CommitRequest {
+            namespace_id: namespace_id.clone(),
+            commit_id: CommitId::from(commit_id),
+            writer_id: "writer-a".to_owned(),
+            writer_fence_token: FenceToken(1),
+            ops: vec![CommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: display_name.to_owned(),
+            }],
+            preconditions: Vec::new(),
+            message: None,
+            annotations: None,
+        };
+        let plan = CommitPlan {
+            namespace_id: namespace_id.clone(),
+            commit_id: CommitId::from(commit_id),
+            apply_after_seq,
+            assigned_seq,
+            allocated_inode_ids: vec![InodeId(2)],
+            resolved_restore_content_refs: vec![None],
+            resulting_next_inode_id: InodeId(3),
+            metadata_preconditions: Vec::new(),
+            checked_invariants: Vec::new(),
+        };
+        let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
+        materialize_commit(prepared).expect("materialize commit")
     }
 }
