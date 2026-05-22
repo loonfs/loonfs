@@ -261,6 +261,10 @@ async fn filesystem_operation(
         operation,
     } = request;
     let intent = match operation {
+        FilesystemOperation::CreateDir { path } => PathMutationIntent::CreateDir {
+            commit_id,
+            absolute_path: path,
+        },
         FilesystemOperation::PutFile {
             path,
             content_ref,
@@ -276,10 +280,15 @@ async fn filesystem_operation(
             absolute_path: path,
             recursive: false,
         },
-        FilesystemOperation::MovePath { from_path, to_path } => PathMutationIntent::MovePath {
+        FilesystemOperation::MovePath {
+            from_path,
+            to_path,
+            mode,
+        } => PathMutationIntent::MovePath {
             commit_id,
             from_path,
             to_path,
+            mode,
         },
         FilesystemOperation::CopyPath { from_path, to_path } => PathMutationIntent::CopyFilePath {
             commit_id,
@@ -537,6 +546,9 @@ impl ApiResponseError {
             CoreErrorKind::TombstoneConflict => (StatusCode::CONFLICT, "tombstone_conflict"),
             CoreErrorKind::LeaseConflict => (StatusCode::CONFLICT, "lease_conflict"),
             CoreErrorKind::WouldCycle => (StatusCode::CONFLICT, "would_cycle"),
+            CoreErrorKind::UnsupportedRenameMode => {
+                (StatusCode::BAD_REQUEST, "unsupported_rename_mode")
+            }
             CoreErrorKind::CommitIdReuseConflict => {
                 (StatusCode::CONFLICT, "commit_id_reuse_conflict")
             }

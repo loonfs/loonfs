@@ -43,7 +43,7 @@ An inode does not record:
 
 Those facts live in other metadata families:
 
-- direntries say where an inode is currently bound in the tree;
+- direntries and direntry unbinds say where an inode is currently bound in the tree;
 - revisions say which immutable file version is current for a file inode; and
 - paths are derived views produced by walking visible directory bindings from the root.
 
@@ -70,6 +70,20 @@ Illustrative direntry row that binds that inode into the tree:
   "display_name": "Report.txt",
   "child_inode_id": 42,
   "bind_seq": 17
+}
+```
+
+Illustrative direntry unbind row that removes one exact prior binding:
+
+```json
+{
+  "parent_inode_id": 9,
+  "name_key": "report.txt",
+  "child_inode_id": 42,
+  "bind_seq": 17,
+  "bind_delta_index": 1,
+  "unbind_seq": 22,
+  "unbind_delta_index": 0
 }
 ```
 
@@ -106,7 +120,7 @@ The core inode kinds are:
 | --- | --- |
 | **DIR** | A directory that can own child bindings. |
 | **FILE** | A file whose history is an ordered set of revisions. |
-| **MOUNT** | A presentation point for another namespace or subtree. |
+| **MOUNT** | Reserved for a future presentation point for another namespace or subtree. |
 
 The spec does not require a larger type taxonomy in the core model. New resource types should normally be represented through file content or resource properties rather than by introducing new inode kinds.
 
@@ -181,7 +195,7 @@ No durable parent/child relationship is part of v0 namespace state. After fork, 
 
 ## 7. Mounts
 
-A mount presents another namespace, or a subtree of another namespace, inside the current tree.
+A mount will present another namespace, or a subtree of another namespace, inside the current tree. Mount creation, mount metadata, and mount traversal are reserved future work in v0; no standard mutation operation creates a mount today.
 
 A mount carries:
 
@@ -190,7 +204,7 @@ A mount carries:
 
 This allows a composed visible tree without inventing one global namespace history underneath.
 
-Two rules apply:
+When mounts are implemented, two rules will apply:
 
 1. path resolution may cross a mount;
 2. mount loops are invalid and must be rejected.
@@ -221,4 +235,4 @@ The head summarizes the current visible boundary and replay hints, including at 
 
 A checkpoint is authoritative only when it has been verified against its durable objects and namespace summary. If verification fails, readers must not treat that checkpoint as authoritative.
 
-The WAL preserves ordered history even when multiple logical commits are stored in one segment. Checkpoints keep replay bounded. Together they provide recovery from durable artifacts alone without requiring unbounded WAL replay as history grows.
+The WAL preserves ordered history even when multiple logical commits are stored in one segment. Each logical commit records semantic results plus normalized metadata deltas such as inode creation, direntry bind/unbind, file revision append, and subtree tombstone rows. Checkpoints keep replay bounded. Together they provide recovery from durable artifacts alone without requiring unbounded WAL replay as history grows.

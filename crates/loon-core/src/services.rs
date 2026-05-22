@@ -21,7 +21,7 @@ use loon_api::{
     name_key_for_display_name, payload_checksum_sha256,
     v0::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
-        CommitRequest as ApiCommitRequest,
+        CommitRequest as ApiCommitRequest, RenameMode,
     },
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef,
     ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
@@ -516,6 +516,10 @@ pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PathFingerprintInput {
+    CreateDir {
+        namespace_id: NamespaceId,
+        absolute_path: String,
+    },
     PutFile {
         namespace_id: NamespaceId,
         absolute_path: String,
@@ -531,6 +535,7 @@ enum PathFingerprintInput {
         namespace_id: NamespaceId,
         from_path: String,
         to_path: String,
+        mode: RenameMode,
     },
     CopyFilePath {
         namespace_id: NamespaceId,
@@ -565,6 +570,10 @@ pub(crate) fn semantic_commit_fingerprint_for_path_intent(
     intent: &PathMutationIntent,
 ) -> Result<SemanticCommitFingerprint, CoreError> {
     let identity = match intent {
+        PathMutationIntent::CreateDir { absolute_path, .. } => PathFingerprintInput::CreateDir {
+            namespace_id: namespace_id.clone(),
+            absolute_path: absolute_path.clone(),
+        },
         PathMutationIntent::PutFile {
             absolute_path,
             behavior,
@@ -586,11 +595,15 @@ pub(crate) fn semantic_commit_fingerprint_for_path_intent(
             recursive: *recursive,
         },
         PathMutationIntent::MovePath {
-            from_path, to_path, ..
+            from_path,
+            to_path,
+            mode,
+            ..
         } => PathFingerprintInput::MovePath {
             namespace_id: namespace_id.clone(),
             from_path: from_path.clone(),
             to_path: to_path.clone(),
+            mode: *mode,
         },
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
@@ -641,6 +654,26 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
         PutFileBehavior::ReplaceExisting,
         context,
         commit_id,
+    )
+}
+
+pub fn create_dir_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<MutationResult, CoreError> {
+    let commit_id = normalized_commit_id(commit_id)?;
+    let intent = PathMutationIntent::CreateDir {
+        commit_id,
+        absolute_path: absolute_path.to_owned(),
+    };
+    DirectObjectStorePublisher::new(store).submit_path_intent(
+        namespace_id,
+        intent,
+        context,
+        PublishOptions::default(),
     )
 }
 
@@ -700,6 +733,9 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
         content_store_id,
     };
     let commit_request = match intent {
+        PathMutationIntent::CreateDir { absolute_path, .. } => {
+            plan_create_dir(absolute_path, &commit_id, &view)?
+        }
         PathMutationIntent::PutFile {
             absolute_path,
             content_ref,
@@ -719,8 +755,11 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
             ..
         } => plan_delete_path(absolute_path, *recursive, &commit_id, &view)?,
         PathMutationIntent::MovePath {
-            from_path, to_path, ..
-        } => plan_move_path(from_path, to_path, &commit_id, &view)?,
+            from_path,
+            to_path,
+            mode,
+            ..
+        } => plan_move_path(from_path, to_path, *mode, &commit_id, &view)?,
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
         } => plan_copy_file_path(store, from_path, to_path, &commit_id, &view)?,
@@ -745,10 +784,19 @@ fn child_name_is_precondition(
     let parent_inode = resolved
         .parent_inode_id
         .ok_or(CoreError::RootMutationForbidden)?;
-    Ok(ApiCommitPrecondition::ChildNameIs {
+    let binding = view
+        .metadata_state
+        .current_parent_binding_for_child(resolved.inode_id, view.head.seq)
+        .ok_or_else(|| CoreError::MissingPath(resolved.absolute_path.clone()))?;
+    if binding.parent_inode_id != parent_inode {
+        return Err(CoreError::MissingPath(resolved.absolute_path.clone()));
+    }
+    Ok(ApiCommitPrecondition::BindingIs {
         parent_inode,
-        name_key: name_key_for_display_name(view.head.name_policy, &resolved.display_name),
-        child_inode: resolved.inode_id,
+        name_key: binding.name_key,
+        child_inode: binding.child_inode_id,
+        bind_seq: binding.bind_seq,
+        bind_delta_index: binding.bind_delta_index,
     })
 }
 
@@ -761,6 +809,35 @@ fn child_name_absent_precondition(
         parent_inode,
         name_key: name_key_for_display_name(view.head.name_policy, display_name),
     }
+}
+
+fn plan_create_dir(
+    absolute_path: &str,
+    commit_id: &CommitId,
+    view: &PathPlanningView<'_>,
+) -> Result<ApiCommitRequest, CoreError> {
+    validate_path_for_mutation(absolute_path)?;
+    reject_tombstoned_path_ancestor(view.metadata_state, absolute_path, view.head.seq)?;
+    if lookup_path(view.metadata_state, absolute_path, view.head.seq).is_ok() {
+        return Err(CoreError::DestinationExists(absolute_path.to_owned()));
+    }
+    let parent_inode = resolve_parent_directory(view.metadata_state, absolute_path, view.head.seq)?;
+    let display_name = final_component(absolute_path)?;
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![ApiCommitOp::CreateDir {
+            parent_inode,
+            display_name: display_name.clone(),
+        }],
+        preconditions: vec![
+            child_name_absent_precondition(view, parent_inode, &display_name),
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: parent_inode,
+            },
+        ],
+        message: None,
+        annotations: None,
+    })
 }
 
 fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
@@ -909,6 +986,7 @@ pub fn move_path<S: ObjectStore + ?Sized>(
         commit_id,
         from_path: from_path.to_owned(),
         to_path: to_path.to_owned(),
+        mode: RenameMode::NoReplace,
     };
     DirectObjectStorePublisher::new(store).submit_path_intent(
         namespace_id,
@@ -993,9 +1071,15 @@ fn plan_delete_path(
 fn plan_move_path(
     from_path: &str,
     to_path: &str,
+    mode: RenameMode,
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
+    if mode != RenameMode::NoReplace {
+        return Err(CoreError::CommitValidation(
+            crate::commit::CommitValidationError::UnsupportedRenameMode { mode },
+        ));
+    }
     validate_path_for_mutation(from_path)?;
     validate_path_for_mutation(to_path)?;
     reject_tombstoned_path_ancestor(view.metadata_state, from_path, view.head.seq)?;
@@ -1014,6 +1098,7 @@ fn plan_move_path(
             inode_id: source.inode_id,
             new_parent_inode: target_parent,
             new_display_name: target_name.clone(),
+            mode,
         }],
         preconditions: vec![
             child_name_is_precondition(view, &source)?,
@@ -1123,14 +1208,22 @@ fn ensure_parent_directories(
         });
         let allocated = *next_inode_id;
         *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
+        let delta_index = op_index.saturating_mul(2);
         let applied = working.apply_committed_wal_ops(
             committed_seq,
-            &[loon_api::WalOp::CreateDir {
-                op_index: *op_index,
-                inode_id: allocated,
-                parent_inode: current_inode,
-                display_name: component.clone(),
-            }],
+            &[
+                loon_api::WalOp::CreateInode {
+                    delta_index,
+                    inode_id: allocated,
+                    inode_kind: InodeKind::Dir,
+                },
+                loon_api::WalOp::BindDirentry {
+                    delta_index: delta_index.saturating_add(1),
+                    parent_inode: current_inode,
+                    display_name: component.clone(),
+                    child_inode: allocated,
+                },
+            ],
         )?;
         *working = applied.metadata_state;
         *op_index = op_index.saturating_add(1);
@@ -1276,19 +1369,6 @@ fn tombstoned_path_ancestor(
         else {
             return Ok(None);
         };
-        let Some(latest_binding) =
-            metadata_state.current_parent_binding_for_child(bound_child.child_inode_id, seq)
-        else {
-            return Ok(None);
-        };
-        if latest_binding.parent_inode_id != bound_child.parent_inode_id
-            || latest_binding.name_key != bound_child.name_key
-            || latest_binding.bind_seq != bound_child.bind_seq
-            || latest_binding.bind_op_index != bound_child.bind_op_index
-        {
-            return Ok(None);
-        }
-
         if let Some(tombstone) =
             metadata_state.covering_subtree_tombstone(bound_child.child_inode_id, seq)
         {
@@ -1297,6 +1377,18 @@ fn tombstoned_path_ancestor(
                 tombstone.root_inode_id,
                 tombstone.tombstone_seq,
             )));
+        }
+        let Some(latest_binding) =
+            metadata_state.current_parent_binding_for_child(bound_child.child_inode_id, seq)
+        else {
+            return Ok(None);
+        };
+        if latest_binding.parent_inode_id != bound_child.parent_inode_id
+            || latest_binding.name_key != bound_child.name_key
+            || latest_binding.bind_seq != bound_child.bind_seq
+            || latest_binding.bind_delta_index != bound_child.bind_delta_index
+        {
+            return Ok(None);
         }
 
         if metadata_state

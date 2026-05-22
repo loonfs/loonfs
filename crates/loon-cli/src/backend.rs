@@ -3,9 +3,9 @@ use crate::error::CliError;
 use loon_api::{AuthoritativePathEntry, CommitId, MutationResult, NamespaceId, NamespaceSummary};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs::{
-    BootstrapNamespaceError, CopyOptions, CoreError, CoreErrorKind, CreateNamespaceOptions,
-    DeleteOptions, Fs, FsConfig, MoveOptions, PutFileBehavior, PutFileOptions, RuntimeError,
-    SharedObjectStore,
+    BootstrapNamespaceError, CopyOptions, CoreError, CoreErrorKind, CreateDirOptions,
+    CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, MoveOptions, PutFileBehavior,
+    PutFileOptions, RuntimeError, SharedObjectStore,
 };
 use std::sync::Arc;
 
@@ -28,6 +28,7 @@ pub trait Backend {
         bytes: &[u8],
         force: bool,
     ) -> Result<MutationResult, CliError>;
+    fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, CliError>;
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError>;
     fn move_path(
         &self,
@@ -93,6 +94,10 @@ impl Backend for RemoteBackend {
 
     fn delete_path(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
         self.client.delete_path(spec).map_err(map_client_error)
+    }
+
+    fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
+        self.client.create_dir(spec).map_err(map_client_error)
     }
 
     fn move_path(
@@ -226,6 +231,20 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
+    fn create_dir(&self, spec: &NamespacePath) -> Result<MutationResult, CliError> {
+        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let commit_id = generated_commit_id();
+        self.fs
+            .create_dir(
+                &ns_id,
+                &spec.absolute_path,
+                CreateDirOptions {
+                    commit_id: Some(commit_id),
+                },
+            )
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
+    }
+
     fn move_path(
         &self,
         from: &NamespacePath,
@@ -316,6 +335,7 @@ fn map_core_error(error: CoreError) -> CliError {
         CoreErrorKind::TombstoneConflict => "tombstone_conflict",
         CoreErrorKind::LeaseConflict => "lease_conflict",
         CoreErrorKind::WouldCycle => "would_cycle",
+        CoreErrorKind::UnsupportedRenameMode => "unsupported_rename_mode",
         CoreErrorKind::CommitIdReuseConflict => "commit_id_reuse_conflict",
         CoreErrorKind::CommitQueueFull => "commit_queue_full",
         CoreErrorKind::CheckpointUnavailable => "checkpoint_unavailable",

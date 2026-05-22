@@ -1,6 +1,8 @@
 use crate::digest::sha256_hex;
 use crate::v0::{CommitAnnotations, CommitOpResult};
-use crate::{ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, NamespaceId, RevisionNo};
+use crate::{
+    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
+};
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -15,51 +17,33 @@ pub enum WalEnvelopeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WalOp {
-    CreateDir {
-        #[serde(default)]
-        op_index: u32,
+    CreateInode {
+        delta_index: u32,
         inode_id: InodeId,
+        inode_kind: InodeKind,
+    },
+    BindDirentry {
+        delta_index: u32,
         parent_inode: InodeId,
         display_name: String,
+        child_inode: InodeId,
     },
-    CreateFile {
-        #[serde(default)]
-        op_index: u32,
-        inode_id: InodeId,
+    UnbindDirentry {
+        delta_index: u32,
         parent_inode: InodeId,
-        display_name: String,
+        name_key: String,
+        child_inode: InodeId,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
+    },
+    AppendFileRevision {
+        delta_index: u32,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
         content_ref: ContentRef,
     },
-    ReplaceFile {
-        #[serde(default)]
-        op_index: u32,
-        inode_id: InodeId,
-        base_revision_no: RevisionNo,
-        content_ref: ContentRef,
-    },
-    RestoreRevision {
-        #[serde(default)]
-        op_index: u32,
-        inode_id: InodeId,
-        source_revision_no: RevisionNo,
-        base_revision_no: RevisionNo,
-        content_ref: ContentRef,
-    },
-    DeleteFile {
-        #[serde(default)]
-        op_index: u32,
-        inode_id: InodeId,
-    },
-    Rename {
-        #[serde(default)]
-        op_index: u32,
-        inode_id: InodeId,
-        new_parent_inode: InodeId,
-        new_display_name: String,
-    },
-    DeleteSubtree {
-        #[serde(default)]
-        op_index: u32,
+    TombstoneSubtree {
+        delta_index: u32,
         root_inode: InodeId,
     },
 }
@@ -81,6 +65,13 @@ pub enum WalPrecondition {
         parent_inode: InodeId,
         name_key: String,
         child_inode: InodeId,
+    },
+    BindingIs {
+        parent_inode: InodeId,
+        name_key: String,
+        child_inode: InodeId,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
     },
     DirectoryEmpty {
         inode_id: InodeId,

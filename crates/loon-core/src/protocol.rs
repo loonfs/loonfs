@@ -435,7 +435,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
             commit_id: record.prepared.request.commit_id,
             committed_seq: wal.envelope.payload.records[accepted_index].seq,
-            results: record.ops.into_iter().map(|op| op.result).collect(),
+            results: record.results,
         }));
     }
     finish_batch_outcomes_with_aliases(outcomes, &aliases)

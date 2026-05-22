@@ -37,9 +37,11 @@ pub fn replay_wal_tail_with_metadata(
 }
 
 fn replay_next_inode_id(current: InodeId, ops: &[WalOp]) -> InodeId {
-    let create_count = ops
-        .iter()
-        .filter(|op| matches!(op, WalOp::CreateDir { .. } | WalOp::CreateFile { .. }))
-        .count() as u64;
-    InodeId(current.0.saturating_add(create_count))
+    ops.iter().fold(current, |next, op| match op {
+        WalOp::CreateInode { inode_id, .. } => InodeId(next.0.max(inode_id.0.saturating_add(1))),
+        WalOp::BindDirentry { .. }
+        | WalOp::UnbindDirentry { .. }
+        | WalOp::AppendFileRevision { .. }
+        | WalOp::TombstoneSubtree { .. } => next,
+    })
 }

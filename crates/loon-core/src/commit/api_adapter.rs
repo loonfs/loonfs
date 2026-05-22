@@ -70,10 +70,12 @@ pub(super) fn commit_op_from_v0(op: api_v0::CommitOp) -> CommitOp {
             inode_id,
             new_parent_inode,
             new_display_name,
+            mode,
         } => CommitOp::Rename {
             inode_id,
             new_parent_inode,
             new_display_name,
+            mode,
         },
         api_v0::CommitOp::DeleteSubtree { root_inode } => CommitOp::DeleteSubtree { root_inode },
     }
@@ -108,6 +110,19 @@ pub(super) fn commit_precondition_from_v0(
             parent_inode,
             name_key,
             child_inode,
+        },
+        api_v0::CommitPrecondition::BindingIs {
+            parent_inode,
+            name_key,
+            child_inode,
+            bind_seq,
+            bind_delta_index,
+        } => Precondition::BindingIs {
+            parent_inode,
+            name_key,
+            child_inode,
+            bind_seq,
+            bind_delta_index,
         },
         api_v0::CommitPrecondition::DirectoryEmpty { inode_id } => {
             Precondition::DirectoryEmpty { inode_id }
@@ -176,6 +191,7 @@ mod tests {
                     inode_id: InodeId(2),
                     new_parent_inode: InodeId(1),
                     new_display_name: "b.txt".to_owned(),
+                    mode: loon_api::v0::RenameMode::NoReplace,
                 },
                 ApiCommitOp::DeleteSubtree {
                     root_inode: InodeId(3),

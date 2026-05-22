@@ -4,6 +4,7 @@ use crate::ObjectStoreError;
 pub enum CheckpointTableFamily {
     Inodes,
     Direntries,
+    DirentryUnbinds,
     Revisions,
     Tombstones,
     CommitReceipts,
@@ -14,6 +15,7 @@ impl CheckpointTableFamily {
         match self {
             Self::Inodes => "inodes",
             Self::Direntries => "direntries",
+            Self::DirentryUnbinds => "direntry-unbinds",
             Self::Revisions => "revisions",
             Self::Tombstones => "tombstones",
             Self::CommitReceipts => "commit-receipts",

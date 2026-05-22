@@ -14,11 +14,12 @@ use loon_core::commit::{
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
     bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
-    copy_file_path, delete_path, delete_path_non_recursive, fork_namespace, list_changes_after,
-    list_namespaces, load_verified_namespace_basis, move_path, publish_namespace_mutations_batch,
-    put_file_bytes, read_file_bytes, resolve_path, store_bytes_as_content, upload_content,
-    write_file_bytes, CoreError, CoreErrorKind, DirectObjectStorePublisher, MutationContext,
-    NamespaceMutationCandidate, PathMutationIntent, PublishOptions, PutFileBehavior,
+    copy_file_path, create_dir_path, delete_path, delete_path_non_recursive, fork_namespace,
+    list_changes_after, list_namespaces, load_verified_namespace_basis, move_path,
+    publish_namespace_mutations_batch, put_file_bytes, read_file_bytes, resolve_path,
+    store_bytes_as_content, upload_content, write_file_bytes, CoreError, CoreErrorKind,
+    DirectObjectStorePublisher, MutationContext, NamespaceMutationCandidate, PathMutationIntent,
+    PublishOptions, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -31,28 +32,88 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tempfile::tempdir;
 
+fn wal_create_dir(
+    delta_index: u32,
+    inode_id: InodeId,
+    parent_inode: InodeId,
+    display_name: String,
+) -> Vec<loon_api::WalOp> {
+    vec![
+        loon_api::WalOp::CreateInode {
+            delta_index,
+            inode_id,
+            inode_kind: InodeKind::Dir,
+        },
+        loon_api::WalOp::BindDirentry {
+            delta_index: delta_index.saturating_add(1),
+            parent_inode,
+            display_name,
+            child_inode: inode_id,
+        },
+    ]
+}
+
+fn wal_create_file(
+    delta_index: u32,
+    inode_id: InodeId,
+    parent_inode: InodeId,
+    display_name: String,
+    content_ref: ContentRef,
+) -> Vec<loon_api::WalOp> {
+    vec![
+        loon_api::WalOp::CreateInode {
+            delta_index,
+            inode_id,
+            inode_kind: InodeKind::File,
+        },
+        loon_api::WalOp::BindDirentry {
+            delta_index: delta_index.saturating_add(1),
+            parent_inode,
+            display_name,
+            child_inode: inode_id,
+        },
+        loon_api::WalOp::AppendFileRevision {
+            delta_index: delta_index.saturating_add(2),
+            inode_id,
+            revision_no: RevisionNo(1),
+            content_ref,
+        },
+    ]
+}
+
+fn wal_append_revision(
+    delta_index: u32,
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+    content_ref: ContentRef,
+) -> Vec<loon_api::WalOp> {
+    vec![loon_api::WalOp::AppendFileRevision {
+        delta_index,
+        inode_id,
+        revision_no,
+        content_ref,
+    }]
+}
+
+fn wal_tombstone(delta_index: u32, root_inode: InodeId) -> Vec<loon_api::WalOp> {
+    vec![loon_api::WalOp::TombstoneSubtree {
+        delta_index,
+        root_inode,
+    }]
+}
+
 #[test]
 fn stale_revision_precondition_is_rejected() {
     let metadata_state = metadata_state_after(&[
-        vec![loon_api::WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![loon_api::WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![loon_api::WalOp::ReplaceFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-2"),
-        }],
+        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt".to_owned(),
+            content_ref("content-1"),
+        ),
+        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
     let request = CommitRequest {
@@ -84,23 +145,15 @@ fn stale_revision_precondition_is_rejected() {
 #[test]
 fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let metadata_state = metadata_state_after(&[
-        vec![loon_api::WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![loon_api::WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![loon_api::WalOp::DeleteSubtree {
-            op_index: 0,
-            root_inode: InodeId(2),
-        }],
+        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt".to_owned(),
+            content_ref("content-1"),
+        ),
+        wal_tombstone(0, InodeId(2)),
     ]);
     let context = validation_context(metadata_state.clone(), ChangeSeq(3), InodeId(4));
 
@@ -159,12 +212,8 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
 
 #[test]
 fn restore_revision_validation_rejects_missing_inode() {
-    let metadata_state = metadata_state_after(&[vec![loon_api::WalOp::CreateDir {
-        op_index: 0,
-        inode_id: InodeId(2),
-        parent_inode: InodeId(1),
-        display_name: "docs".to_owned(),
-    }]]);
+    let metadata_state =
+        metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
@@ -192,12 +241,8 @@ fn restore_revision_validation_rejects_missing_inode() {
 
 #[test]
 fn restore_revision_validation_rejects_non_file_target() {
-    let metadata_state = metadata_state_after(&[vec![loon_api::WalOp::CreateDir {
-        op_index: 0,
-        inode_id: InodeId(2),
-        parent_inode: InodeId(1),
-        display_name: "docs".to_owned(),
-    }]]);
+    let metadata_state =
+        metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
@@ -227,25 +272,15 @@ fn restore_revision_validation_rejects_non_file_target() {
 #[test]
 fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let metadata_state = metadata_state_after(&[
-        vec![loon_api::WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![loon_api::WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![loon_api::WalOp::ReplaceFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-2"),
-        }],
+        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt".to_owned(),
+            content_ref("content-1"),
+        ),
+        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
 
@@ -306,19 +341,14 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
 #[test]
 fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
-        vec![loon_api::WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![loon_api::WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
+        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt".to_owned(),
+            content_ref("content-1"),
+        ),
     ]);
     let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
 
@@ -356,25 +386,15 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
 #[test]
 fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
-        vec![loon_api::WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![loon_api::WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![loon_api::WalOp::ReplaceFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-2"),
-        }],
+        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt".to_owned(),
+            content_ref("content-1"),
+        ),
+        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
 
@@ -415,23 +435,15 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
 #[test]
 fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     let metadata_state = metadata_state_after(&[
-        vec![loon_api::WalOp::CreateDir {
-            op_index: 0,
-            inode_id: InodeId(2),
-            parent_inode: InodeId(1),
-            display_name: "docs".to_owned(),
-        }],
-        vec![loon_api::WalOp::CreateFile {
-            op_index: 0,
-            inode_id: InodeId(3),
-            parent_inode: InodeId(2),
-            display_name: "readme.txt".to_owned(),
-            content_ref: content_ref("content-1"),
-        }],
-        vec![loon_api::WalOp::DeleteSubtree {
-            op_index: 0,
-            root_inode: InodeId(2),
-        }],
+        wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
+        wal_create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt".to_owned(),
+            content_ref("content-1"),
+        ),
+        wal_tombstone(0, InodeId(2)),
     ]);
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
 
@@ -483,13 +495,14 @@ fn restore_revision_overflow_is_rejected() {
             display_name: "overflow.txt".to_owned(),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(1),
-            bind_op_index: 0,
+            bind_delta_index: 0,
         }],
+        direntry_unbinds: Vec::new(),
         revisions: vec![loon_core::metadata::RevisionRecord {
             inode_id: InodeId(2),
             revision_no: RevisionNo(u64::MAX),
             committed_seq: ChangeSeq(1),
-            revision_op_index: 0,
+            revision_delta_index: 0,
             content_ref: content_ref("content-max"),
         }],
         subtree_tombstones: Vec::new(),
@@ -837,6 +850,7 @@ fn child_name_is_precondition_observes_earlier_batch_candidate() {
                     inode_id: file_inode,
                     new_parent_inode: docs_inode,
                     new_display_name: "moved.txt".to_owned(),
+                    mode: loon_api::v0::RenameMode::NoReplace,
                 }],
                 message: None,
                 annotations: None,
@@ -1177,6 +1191,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
                 commit_id: CommitId::from("move-path"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
+                mode: loon_api::v0::RenameMode::NoReplace,
             },
             &context,
             PublishOptions::default(),
@@ -1290,6 +1305,7 @@ fn path_intents_in_one_batch_see_tentative_state() {
                 commit_id: CommitId::from("move-batched-path"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
+                mode: loon_api::v0::RenameMode::NoReplace,
             }),
         ],
         &context,
@@ -2079,6 +2095,142 @@ fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
 }
 
 #[test]
+fn create_dir_path_creates_directory_without_auto_parents() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+
+    let created = create_dir_path(
+        &store,
+        &namespace_id(),
+        "/docs",
+        &context,
+        Some("mkdir-docs"),
+    )
+    .expect("create dir");
+    assert_eq!(created.committed_seq, ChangeSeq(1));
+    let docs = resolve_path(&store, &namespace_id(), "/docs").expect("resolve docs");
+    assert_eq!(docs.inode_kind, InodeKind::Dir);
+
+    let missing_parent = create_dir_path(
+        &store,
+        &namespace_id(),
+        "/missing/nested",
+        &context,
+        Some("mkdir-missing-parent"),
+    )
+    .expect_err("mkdir does not auto-create parents");
+    assert_eq!(missing_parent.kind(), CoreErrorKind::PathNotFound);
+}
+
+#[test]
+fn path_move_writes_unbind_and_stale_binding_is_fails() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/a.txt",
+        b"hello",
+        &context,
+        Some("seed-a"),
+    )
+    .expect("seed file");
+    let basis_before_move =
+        load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
+    let file = basis_before_move
+        .metadata_state
+        .resolve_visible_path("/docs/a.txt", basis_before_move.head.seq)
+        .expect("resolve file");
+    let old_binding = basis_before_move
+        .metadata_state
+        .current_parent_binding_for_child(file.inode_id, basis_before_move.head.seq)
+        .expect("old binding");
+
+    move_path(
+        &store,
+        &namespace_id(),
+        "/docs/a.txt",
+        "/docs/b.txt",
+        &context,
+        Some("move-a-to-b"),
+    )
+    .expect("move file");
+    let moved_basis = load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
+    assert_eq!(moved_basis.metadata_state.direntry_unbinds.len(), 1);
+    assert!(resolve_path(&store, &namespace_id(), "/docs/a.txt").is_err());
+    resolve_path(&store, &namespace_id(), "/docs/b.txt").expect("new path visible");
+
+    let stale_binding = commit_operations(
+        &store,
+        &namespace_id(),
+        ApiCommitRequest {
+            commit_id: CommitId::from("delete-with-stale-binding"),
+            preconditions: vec![CommitPrecondition::BindingIs {
+                parent_inode: old_binding.parent_inode_id,
+                name_key: old_binding.name_key,
+                child_inode: old_binding.child_inode_id,
+                bind_seq: old_binding.bind_seq,
+                bind_delta_index: old_binding.bind_delta_index,
+            }],
+            ops: vec![ApiCommitOp::DeleteFile {
+                inode_id: file.inode_id,
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("stale binding should fail");
+    assert_eq!(stale_binding.kind(), CoreErrorKind::PathConflict);
+}
+
+#[test]
+fn unsupported_rename_mode_is_named_bad_request_failure() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id(),
+        "/docs/a.txt",
+        b"hello",
+        &context,
+        Some("seed-rename-mode"),
+    )
+    .expect("seed file");
+    let basis = load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
+    let file = basis
+        .metadata_state
+        .resolve_visible_path("/docs/a.txt", basis.head.seq)
+        .expect("resolve file");
+
+    let error = commit_operations(
+        &store,
+        &namespace_id(),
+        ApiCommitRequest {
+            commit_id: CommitId::from("unsupported-rename-mode"),
+            preconditions: Vec::new(),
+            ops: vec![ApiCommitOp::Rename {
+                inode_id: file.inode_id,
+                new_parent_inode: InodeId(1),
+                new_display_name: "b.txt".to_owned(),
+                mode: loon_api::v0::RenameMode::ReplaceExisting,
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("unsupported rename mode");
+    assert_eq!(error.kind(), CoreErrorKind::UnsupportedRenameMode);
+}
+
+#[test]
 fn put_file_create_only_rejects_existing_target_without_force() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -2396,6 +2548,7 @@ fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {
             created_seq: ChangeSeq(0),
         }],
         direntries: Vec::new(),
+        direntry_unbinds: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
         commit_receipts: Vec::new(),

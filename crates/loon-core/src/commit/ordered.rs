@@ -2,7 +2,7 @@ use super::frame::validate_commit_request_frame;
 use super::prepared::materialize_commit_op;
 use super::{
     push_unique_invariant, CommitMaterializationError, CommitOp, CommitPlan, CommitRequest,
-    CommitValidationContext, CommitValidationError, Precondition,
+    CommitValidationContext, CommitValidationError, Precondition, ResolvedBinding,
 };
 use crate::invariants::INVARIANTS;
 use crate::metadata::MetadataState;
@@ -15,6 +15,11 @@ struct CommitShape {
     assigned_seq: ChangeSeq,
     allocated_inode_ids: Vec<InodeId>,
     resulting_next_inode_id: InodeId,
+}
+
+struct ResolvedMetadataPreconditions {
+    resolved_restore_content_refs: Vec<Option<ContentRef>>,
+    resolved_source_bindings: Vec<Option<ResolvedBinding>>,
 }
 
 pub(crate) fn resolve_restore_content_refs(
@@ -85,7 +90,7 @@ pub fn build_commit_plan(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let shape = compute_commit_shape(request, context)?;
-    let resolved_restore_content_refs = validate_metadata_preconditions(
+    let resolved_metadata = validate_metadata_preconditions(
         request,
         &context.metadata_state,
         shape.assigned_seq,
@@ -136,7 +141,8 @@ pub fn build_commit_plan(
         apply_after_seq: context.head.seq,
         assigned_seq: shape.assigned_seq,
         allocated_inode_ids: shape.allocated_inode_ids,
-        resolved_restore_content_refs,
+        resolved_restore_content_refs: resolved_metadata.resolved_restore_content_refs,
+        resolved_source_bindings: resolved_metadata.resolved_source_bindings,
         resulting_next_inode_id: shape.resulting_next_inode_id,
         metadata_preconditions: request.preconditions.clone(),
         checked_invariants,
@@ -195,10 +201,12 @@ fn validate_metadata_preconditions(
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
     checked_invariants: &mut Vec<String>,
-) -> Result<Vec<Option<ContentRef>>, CommitValidationError> {
+) -> Result<ResolvedMetadataPreconditions, CommitValidationError> {
     let mut ephemeral_metadata_state = metadata_state.clone();
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
     let mut resolved_restore_content_refs = Vec::with_capacity(request.ops.len());
+    let mut resolved_source_bindings = Vec::with_capacity(request.ops.len());
+    let mut next_delta_index = 0u32;
 
     validate_explicit_preconditions(
         &request.preconditions,
@@ -244,6 +252,30 @@ fn validate_metadata_preconditions(
             }
             _ => None,
         };
+        let resolved_source_binding = match op {
+            CommitOp::DeleteFile { inode_id } => Some(resolve_current_binding_for_mutation(
+                &ephemeral_metadata_state,
+                *inode_id,
+                committed_seq,
+            )?),
+            CommitOp::Rename { inode_id, mode, .. } => {
+                if *mode != loon_api::v0::RenameMode::NoReplace {
+                    return Err(CommitValidationError::UnsupportedRenameMode { mode: *mode });
+                }
+                Some(resolve_current_binding_for_mutation(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    committed_seq,
+                )?)
+            }
+            CommitOp::DeleteSubtree { root_inode } => Some(resolve_current_binding_for_mutation(
+                &ephemeral_metadata_state,
+                *root_inode,
+                committed_seq,
+            )?),
+            _ => None,
+        };
+
         match op {
             CommitOp::CreateDir {
                 parent_inode,
@@ -307,6 +339,7 @@ fn validate_metadata_preconditions(
                 inode_id,
                 new_parent_inode,
                 new_display_name,
+                ..
             } => {
                 validate_rename_source(&ephemeral_metadata_state, *inode_id, committed_seq)?;
                 validate_rename_target_name_absent(
@@ -349,24 +382,33 @@ fn validate_metadata_preconditions(
             }
         }
         resolved_restore_content_refs.push(resolved_restore_content_ref.clone());
+        resolved_source_bindings.push(resolved_source_binding.clone());
 
+        let (deltas, _result) = materialize_commit_op(
+            op,
+            op_index,
+            resolved_restore_content_ref.as_ref(),
+            resolved_source_binding.as_ref(),
+            &mut allocated_inode_ids,
+            &mut next_delta_index,
+        )
+        .map_err(|err| materialization_error_to_validation_error(err, op))?;
         let applied_metadata = ephemeral_metadata_state
             .apply_committed_wal_ops(
                 committed_seq,
-                &[materialize_commit_op(
-                    op,
-                    op_index,
-                    resolved_restore_content_ref.as_ref(),
-                    &mut allocated_inode_ids,
-                )
-                .map_err(|err| materialization_error_to_validation_error(err, op))?
-                .wal_op],
+                &deltas
+                    .iter()
+                    .map(|delta| delta.wal_op.clone())
+                    .collect::<Vec<_>>(),
             )
             .expect("validated commit ops should always apply into ephemeral metadata state");
         ephemeral_metadata_state = applied_metadata.metadata_state;
     }
 
-    Ok(resolved_restore_content_refs)
+    Ok(ResolvedMetadataPreconditions {
+        resolved_restore_content_refs,
+        resolved_source_bindings,
+    })
 }
 
 fn materialization_error_to_validation_error(
@@ -408,7 +450,26 @@ fn materialization_error_to_validation_error(
             base_revision_no: *base_revision_no,
         },
         (CommitMaterializationError::OpIndexOverflow, _) => CommitValidationError::OpIndexOverflow,
+        (CommitMaterializationError::DeltaIndexOverflow, _) => {
+            CommitValidationError::OpIndexOverflow
+        }
+        (CommitMaterializationError::MissingResolvedSourceBinding { op_index }, _) => {
+            CommitValidationError::SourceBindingMissing {
+                inode_id: request_op_inode(op).unwrap_or(InodeId(u64::from(op_index))),
+            }
+        }
         _ => CommitValidationError::NextInodeOverflow,
+    }
+}
+
+fn request_op_inode(op: &CommitOp) -> Option<InodeId> {
+    match op {
+        CommitOp::ReplaceFile { inode_id, .. }
+        | CommitOp::RestoreRevision { inode_id, .. }
+        | CommitOp::DeleteFile { inode_id }
+        | CommitOp::Rename { inode_id, .. } => Some(*inode_id),
+        CommitOp::DeleteSubtree { root_inode } => Some(*root_inode),
+        CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. } => None,
     }
 }
 
@@ -456,6 +517,23 @@ fn validate_explicit_preconditions(
                     *parent_inode,
                     name_key,
                     *child_inode,
+                    base_seq,
+                )?;
+            }
+            Precondition::BindingIs {
+                parent_inode,
+                name_key,
+                child_inode,
+                bind_seq,
+                bind_delta_index,
+            } => {
+                validate_binding_is_precondition(
+                    metadata_state,
+                    *parent_inode,
+                    name_key,
+                    *child_inode,
+                    *bind_seq,
+                    *bind_delta_index,
                     base_seq,
                 )?;
             }
@@ -528,6 +606,66 @@ fn validate_child_name_is_precondition(
             name_key: name_key.to_owned(),
             expected_child_inode: child_inode,
             actual_child_inode: existing.child_inode_id,
+        });
+    }
+
+    Ok(())
+}
+
+fn resolve_current_binding_for_mutation(
+    metadata_state: &MetadataState,
+    inode_id: InodeId,
+    base_seq: ChangeSeq,
+) -> Result<ResolvedBinding, CommitValidationError> {
+    let binding = metadata_state
+        .current_parent_binding_for_child(inode_id, base_seq)
+        .ok_or(CommitValidationError::SourceBindingMissing { inode_id })?;
+    Ok(ResolvedBinding {
+        parent_inode: binding.parent_inode_id,
+        name_key: binding.name_key,
+        display_name: binding.display_name,
+        child_inode: binding.child_inode_id,
+        bind_seq: binding.bind_seq,
+        bind_delta_index: binding.bind_delta_index,
+    })
+}
+
+fn validate_binding_is_precondition(
+    metadata_state: &MetadataState,
+    parent_inode: InodeId,
+    name_key: &str,
+    child_inode: InodeId,
+    bind_seq: ChangeSeq,
+    bind_delta_index: u32,
+    base_seq: ChangeSeq,
+) -> Result<(), CommitValidationError> {
+    let parent = metadata_state
+        .inode_at_seq(parent_inode, base_seq)
+        .ok_or(CommitValidationError::ChildNamePreconditionParentMissing { parent_inode })?;
+    if parent.inode_kind != InodeKind::Dir {
+        return Err(
+            CommitValidationError::ChildNamePreconditionParentNotDirectory {
+                parent_inode,
+                actual_kind: parent.inode_kind,
+            },
+        );
+    }
+
+    let Some(existing) = metadata_state.visible_child(parent_inode, name_key, base_seq) else {
+        return Err(CommitValidationError::BindingPreconditionMissing {
+            parent_inode,
+            name_key: name_key.to_owned(),
+        });
+    };
+    if existing.child_inode_id != child_inode
+        || existing.bind_seq != bind_seq
+        || existing.bind_delta_index != bind_delta_index
+    {
+        return Err(CommitValidationError::BindingPreconditionMismatch {
+            parent_inode,
+            name_key: name_key.to_owned(),
+            expected_child_inode: child_inode,
+            actual_child_inode: Some(existing.child_inode_id),
         });
     }
 

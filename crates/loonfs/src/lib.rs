@@ -136,6 +136,11 @@ impl Default for PutFileOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CreateDirOptions {
+    pub commit_id: Option<CommitId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteOptions {
     pub recursive: bool,
     pub commit_id: Option<CommitId>,
@@ -377,6 +382,21 @@ impl Fs {
             absolute_path,
             content_ref,
             options.behavior,
+            &self.mutation_context(),
+            options.commit_id.as_ref().map(CommitId::as_str),
+        )?)
+    }
+
+    pub fn create_dir(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: CreateDirOptions,
+    ) -> Result<MutationResult> {
+        Ok(loon_core::create_dir_path(
+            self.store(),
+            namespace_id,
+            absolute_path,
             &self.mutation_context(),
             options.commit_id.as_ref().map(CommitId::as_str),
         )?)

@@ -91,6 +91,14 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
 
+    let mkdir = harness.run(&["--json", "mkdir", "/docs"]);
+    assert_success(&mkdir);
+    assert_eq!(json_data(&mkdir)["target"], "demo:/docs");
+
+    let docs = harness.run(&["--json", "stat", "/docs"]);
+    assert_success(&docs);
+    assert_eq!(json_data(&docs)["inode_kind"], "dir");
+
     let put = harness.run(&[
         "--json",
         "put",

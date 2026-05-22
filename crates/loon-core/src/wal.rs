@@ -366,14 +366,13 @@ fn decode_and_validate_replayed_wal(
 fn replay_next_inode_id(current_next_inode_id: InodeId, ops: &[WalOp]) -> InodeId {
     ops.iter()
         .fold(current_next_inode_id, |next_inode_id, op| match op {
-            WalOp::CreateDir { inode_id, .. } | WalOp::CreateFile { inode_id, .. } => {
+            WalOp::CreateInode { inode_id, .. } => {
                 InodeId(next_inode_id.0.max(inode_id.0.saturating_add(1)))
             }
-            WalOp::ReplaceFile { .. }
-            | WalOp::RestoreRevision { .. }
-            | WalOp::DeleteFile { .. }
-            | WalOp::Rename { .. }
-            | WalOp::DeleteSubtree { .. } => next_inode_id,
+            WalOp::BindDirentry { .. }
+            | WalOp::UnbindDirentry { .. }
+            | WalOp::AppendFileRevision { .. }
+            | WalOp::TombstoneSubtree { .. } => next_inode_id,
         })
 }
 
@@ -421,6 +420,7 @@ mod tests {
             assigned_seq: ChangeSeq(1),
             allocated_inode_ids: vec![InodeId(2)],
             resolved_restore_content_refs: vec![None],
+            resolved_source_bindings: vec![None],
             resulting_next_inode_id: InodeId(3),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
@@ -499,6 +499,7 @@ mod tests {
             assigned_seq,
             allocated_inode_ids: vec![InodeId(2)],
             resolved_restore_content_refs: vec![None],
+            resolved_source_bindings: vec![None],
             resulting_next_inode_id: InodeId(3),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),

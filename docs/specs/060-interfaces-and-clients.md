@@ -141,26 +141,12 @@ Representative request:
 ```json
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "message": "move report and publish new bytes",
-  "annotations": {
-    "source": "cli"
-  },
-  "ops": [
-    {
-      "op": "put",
-      "path": "/docs/report.txt",
-      "content_ref": {
-        "kind": "whole_file_v0",
-        "digest": "sha256:7ab...",
-        "size_bytes": 20591
-      }
-    },
-    {
-      "op": "mv",
-      "source_path": "/docs/report.txt",
-      "destination_path": "/reports/report.txt"
-    }
-  ]
+  "operation": {
+    "op": "move_path",
+    "from_path": "/docs/report.txt",
+    "to_path": "/reports/report.txt",
+    "mode": "no_replace"
+  }
 }
 ```
 
@@ -171,19 +157,19 @@ Representative response:
 ```json
 {
   "namespace_id": "demo",
-  "committed_seq": 419,
-  "results": [
-    {
-      "op_index": 0,
-      "inode_id": 42,
-      "revision_no": 8
-    },
-    {
-      "op_index": 1,
-      "inode_id": 42,
-      "absolute_path": "/reports/report.txt"
-    }
-  ]
+  "committed_seq": 419
+}
+```
+
+The same endpoint also accepts path directory creation:
+
+```json
+{
+  "commit_id": "c_8b7d4ef098ec4c1fbde15edbe02f9a64",
+  "operation": {
+    "op": "create_dir",
+    "path": "/docs"
+  }
 }
 ```
 
@@ -361,7 +347,7 @@ This client uses the path-oriented surface.
 
 Typical behavior:
 
-- `ls`, `stat`, `get`, `put`, `mv`, and `cp` use user-visible paths;
+- `ls`, `stat`, `get`, `put`, `mkdir`, `mv`, and `cp` use user-visible paths;
 - the server remains authoritative for path resolution, canonical inode identity, and commit validation;
 - small commands are often sessionless;
 - large or recursive commands may be realized as sequences of ordinary logical commits.

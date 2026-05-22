@@ -13,6 +13,8 @@ pub struct MetadataState {
     #[serde(default)]
     pub direntries: Vec<DirentryRecord>,
     #[serde(default)]
+    pub direntry_unbinds: Vec<DirentryUnbindRecord>,
+    #[serde(default)]
     pub revisions: Vec<RevisionRecord>,
     #[serde(default)]
     pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
@@ -34,8 +36,18 @@ pub struct DirentryRecord {
     pub display_name: String,
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
-    #[serde(default)]
-    pub bind_op_index: u32,
+    pub bind_delta_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirentryUnbindRecord {
+    pub parent_inode_id: InodeId,
+    pub name_key: String,
+    pub child_inode_id: InodeId,
+    pub bind_seq: ChangeSeq,
+    pub bind_delta_index: u32,
+    pub unbind_seq: ChangeSeq,
+    pub unbind_delta_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,8 +55,7 @@ pub struct RevisionRecord {
     pub inode_id: InodeId,
     pub revision_no: RevisionNo,
     pub committed_seq: ChangeSeq,
-    #[serde(default)]
-    pub revision_op_index: u32,
+    pub revision_delta_index: u32,
     pub content_ref: ContentRef,
 }
 
@@ -52,8 +63,7 @@ pub struct RevisionRecord {
 pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
-    #[serde(default)]
-    pub tombstone_op_index: u32,
+    pub tombstone_delta_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,164 +126,91 @@ impl MetadataState {
 
         for op in ops {
             match op {
-                WalOp::CreateDir {
-                    op_index,
+                WalOp::CreateInode {
+                    delta_index: _,
                     inode_id,
-                    parent_inode,
-                    display_name,
+                    inode_kind,
                 } => {
                     metadata_state.inodes.push(InodeRecord {
                         inode_id: *inode_id,
-                        inode_kind: InodeKind::Dir,
+                        inode_kind: inode_kind.clone(),
                         created_seq: committed_seq,
                     });
+                    push_unique_invariant(&mut checked_invariants, "create_inode_writes_inode_row");
+                }
+                WalOp::BindDirentry {
+                    delta_index,
+                    parent_inode,
+                    display_name,
+                    child_inode,
+                } => {
                     metadata_state.direntries.push(DirentryRecord {
                         parent_inode_id: *parent_inode,
                         name_key: name_key_for_display_name(NamePolicy::default(), display_name),
                         display_name: display_name.clone(),
-                        child_inode_id: *inode_id,
+                        child_inode_id: *child_inode,
                         bind_seq: committed_seq,
-                        bind_op_index: *op_index,
+                        bind_delta_index: *delta_index,
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "create_dir_writes_inode_and_direntry_rows",
+                        "bind_direntry_writes_direntry_row",
                     );
                 }
-                WalOp::CreateFile {
-                    op_index,
-                    inode_id,
+                WalOp::UnbindDirentry {
+                    delta_index,
                     parent_inode,
-                    display_name,
-                    content_ref,
+                    name_key,
+                    child_inode,
+                    bind_seq,
+                    bind_delta_index,
                 } => {
-                    metadata_state.inodes.push(InodeRecord {
-                        inode_id: *inode_id,
-                        inode_kind: InodeKind::File,
-                        created_seq: committed_seq,
-                    });
-                    metadata_state.direntries.push(DirentryRecord {
+                    metadata_state.direntry_unbinds.push(DirentryUnbindRecord {
                         parent_inode_id: *parent_inode,
-                        name_key: name_key_for_display_name(NamePolicy::default(), display_name),
-                        display_name: display_name.clone(),
-                        child_inode_id: *inode_id,
-                        bind_seq: committed_seq,
-                        bind_op_index: *op_index,
-                    });
-                    metadata_state.revisions.push(RevisionRecord {
-                        inode_id: *inode_id,
-                        revision_no: RevisionNo(1),
-                        committed_seq,
-                        revision_op_index: *op_index,
-                        content_ref: content_ref.clone(),
+                        name_key: name_key.clone(),
+                        child_inode_id: *child_inode,
+                        bind_seq: *bind_seq,
+                        bind_delta_index: *bind_delta_index,
+                        unbind_seq: committed_seq,
+                        unbind_delta_index: *delta_index,
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "create_file_writes_inode_direntry_and_initial_revision",
+                        "unbind_direntry_writes_unbind_row",
                     );
                 }
-                WalOp::ReplaceFile {
-                    op_index,
+                WalOp::AppendFileRevision {
+                    delta_index,
                     inode_id,
-                    base_revision_no,
+                    revision_no,
                     content_ref,
                 } => {
-                    let next_revision = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
-                        MetadataApplyError::RevisionOverflow {
-                            inode_id: *inode_id,
-                            base_revision_no: *base_revision_no,
-                        },
-                    )?;
                     metadata_state.revisions.push(RevisionRecord {
                         inode_id: *inode_id,
-                        revision_no: next_revision,
+                        revision_no: *revision_no,
                         committed_seq,
-                        revision_op_index: *op_index,
+                        revision_delta_index: *delta_index,
                         content_ref: content_ref.clone(),
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "replace_file_appends_new_revision_head",
+                        "append_file_revision_writes_revision_row",
                     );
                 }
-                WalOp::RestoreRevision {
-                    op_index,
-                    inode_id,
-                    base_revision_no,
-                    content_ref,
-                    ..
+                WalOp::TombstoneSubtree {
+                    delta_index,
+                    root_inode,
                 } => {
-                    let next_revision = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
-                        MetadataApplyError::RevisionOverflow {
-                            inode_id: *inode_id,
-                            base_revision_no: *base_revision_no,
-                        },
-                    )?;
-                    metadata_state.revisions.push(RevisionRecord {
-                        inode_id: *inode_id,
-                        revision_no: next_revision,
-                        committed_seq,
-                        revision_op_index: *op_index,
-                        content_ref: content_ref.clone(),
-                    });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        "restore_creates_new_revision_head",
-                    );
-                }
-                WalOp::DeleteFile { op_index, inode_id } => {
-                    metadata_state
-                        .subtree_tombstones
-                        .push(SubtreeTombstoneRecord {
-                            root_inode_id: *inode_id,
-                            tombstone_seq: committed_seq,
-                            tombstone_op_index: *op_index,
-                        });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        "delete_file_writes_tombstone_row",
-                    );
-                }
-                WalOp::Rename {
-                    op_index,
-                    inode_id,
-                    new_parent_inode,
-                    new_display_name,
-                } => {
-                    metadata_state.direntries.push(DirentryRecord {
-                        parent_inode_id: *new_parent_inode,
-                        name_key: name_key_for_display_name(
-                            NamePolicy::default(),
-                            new_display_name,
-                        ),
-                        display_name: new_display_name.clone(),
-                        child_inode_id: *inode_id,
-                        bind_seq: committed_seq,
-                        bind_op_index: *op_index,
-                    });
-                    push_unique_invariant(
-                        &mut checked_invariants,
-                        "rename_appends_new_direntry_binding",
-                    );
-                }
-                WalOp::DeleteSubtree { .. } => {
-                    let WalOp::DeleteSubtree {
-                        op_index,
-                        root_inode,
-                    } = op
-                    else {
-                        unreachable!();
-                    };
                     metadata_state
                         .subtree_tombstones
                         .push(SubtreeTombstoneRecord {
                             root_inode_id: *root_inode,
                             tombstone_seq: committed_seq,
-                            tombstone_op_index: *op_index,
+                            tombstone_delta_index: *delta_index,
                         });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "delete_subtree_writes_tombstone_row",
+                        "tombstone_subtree_writes_tombstone_row",
                     );
                 }
             }
@@ -327,7 +264,7 @@ impl MetadataState {
                 (
                     revision.revision_no,
                     revision.committed_seq,
-                    revision.revision_op_index,
+                    revision.revision_delta_index,
                 )
             })
             .cloned()
@@ -346,7 +283,7 @@ impl MetadataState {
                     && revision.revision_no == revision_no
                     && revision.committed_seq <= base_seq
             })
-            .max_by_key(|revision| (revision.committed_seq, revision.revision_op_index))
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index))
             .cloned()
     }
 
@@ -364,7 +301,7 @@ impl MetadataState {
                     && direntry.name_key == canonical_name_key
                     && direntry.bind_seq <= base_seq
             })
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_op_index))
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
             .cloned()
     }
 
@@ -373,7 +310,11 @@ impl MetadataState {
         child_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<DirentryRecord> {
-        self.latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)
+        let direntry = self.latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)?;
+        if self.is_direntry_unbound_at_seq(&direntry, base_seq) {
+            return None;
+        }
+        Some(direntry)
     }
 
     pub fn active_subtree_tombstone(
@@ -386,7 +327,7 @@ impl MetadataState {
             .filter(|tombstone| {
                 tombstone.root_inode_id == root_inode_id && tombstone.tombstone_seq <= base_seq
             })
-            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_op_index))
+            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
             .cloned()
     }
 
@@ -408,7 +349,7 @@ impl MetadataState {
             }
 
             current = self
-                .latest_parent_binding_for_child_at_seq(candidate_inode_id, base_seq)
+                .current_parent_binding_for_child(candidate_inode_id, base_seq)
                 .map(|direntry| direntry.parent_inode_id);
         }
 
@@ -475,7 +416,7 @@ impl MetadataState {
                     .map(|active| {
                         active.child_inode_id == direntry.child_inode_id
                             && active.bind_seq == direntry.bind_seq
-                            && active.bind_op_index == direntry.bind_op_index
+                            && active.bind_delta_index == direntry.bind_delta_index
                     })
                     .unwrap_or(false)
             })
@@ -566,12 +507,16 @@ impl MetadataState {
         base_seq: ChangeSeq,
     ) -> Option<DirentryRecord> {
         let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
+        if self.is_direntry_unbound_at_seq(&direntry, base_seq) {
+            return None;
+        }
         let latest_binding =
             self.latest_parent_binding_for_child_at_seq(direntry.child_inode_id, base_seq)?;
         if latest_binding.parent_inode_id != direntry.parent_inode_id
             || latest_binding.name_key != direntry.name_key
             || latest_binding.bind_seq != direntry.bind_seq
-            || latest_binding.bind_op_index != direntry.bind_op_index
+            || latest_binding.bind_delta_index != direntry.bind_delta_index
+            || self.is_direntry_unbound_at_seq(&latest_binding, base_seq)
         {
             return None;
         }
@@ -589,8 +534,23 @@ impl MetadataState {
             .filter(|direntry| {
                 direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
             })
-            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_op_index))
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
             .cloned()
+    }
+
+    pub fn is_direntry_unbound_at_seq(
+        &self,
+        direntry: &DirentryRecord,
+        base_seq: ChangeSeq,
+    ) -> bool {
+        self.direntry_unbinds.iter().any(|unbind| {
+            unbind.unbind_seq <= base_seq
+                && unbind.parent_inode_id == direntry.parent_inode_id
+                && unbind.name_key == direntry.name_key
+                && unbind.child_inode_id == direntry.child_inode_id
+                && unbind.bind_seq == direntry.bind_seq
+                && unbind.bind_delta_index == direntry.bind_delta_index
+        })
     }
 
     pub fn would_create_directory_cycle(
@@ -610,7 +570,7 @@ impl MetadataState {
                 return true;
             }
             current = self
-                .latest_parent_binding_for_child_at_seq(candidate_inode_id, base_seq)
+                .current_parent_binding_for_child(candidate_inode_id, base_seq)
                 .map(|direntry| direntry.parent_inode_id);
         }
 

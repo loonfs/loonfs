@@ -4,7 +4,7 @@ use loon_api::{
         CompleteUploadRequest,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, ControlObjectKind,
-    CreateCheckpointResponse, InodeId, LeaseStateEnvelope, RevisionNo,
+    CreateCheckpointResponse, InodeId, InodeKind, LeaseStateEnvelope, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_objectstore::keys::{checkpoint_manifest, namespace_lease};
@@ -33,6 +33,17 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
             .client
             .create_namespace("demo")
             .expect("create namespace");
+        let directory = NamespacePath::parse("demo:/notes").expect("parse directory path");
+        harness
+            .client
+            .create_dir(&directory)
+            .expect("create directory");
+        let directory_entry = harness
+            .client
+            .stat_path(&directory)
+            .expect("stat directory");
+        assert_eq!(directory_entry.inode_kind, InodeKind::Dir);
+
         let target = NamespacePath::parse("demo:/notes/hello.txt").expect("parse namespace path");
         harness
             .client

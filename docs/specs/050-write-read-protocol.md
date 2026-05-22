@@ -83,8 +83,8 @@ The reader builds an in-memory metadata state from two kinds of durable object:
 
 1. Read the namespace descriptor and content-store descriptor to learn the namespace's immutable content-store relationship.
 2. Read the namespace **head** object to learn the current `seq`, `checkpoint_hint_seq`, and visible WAL tip.
-3. If `checkpoint_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint materializes metadata state through that `seq` across four append-only tables: inodes, direntries, revisions, and subtree tombstones.
-4. Use the visible WAL tip named by the head to identify the visible segment chain after the checkpoint `seq` (or from genesis, if no checkpoint exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends rows to the same four tables.
+3. If `checkpoint_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint materializes metadata state through that `seq` across append-only tables: inodes, direntry binds, direntry unbinds, revisions, subtree tombstones, and committed commit receipts.
+4. Use the visible WAL tip named by the head to identify the visible segment chain after the checkpoint `seq` (or from genesis, if no checkpoint exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends normalized rows to the same metadata tables.
 
 The result is a complete metadata state pinned to one `seq`.
 
@@ -93,7 +93,7 @@ The result is a complete metadata state pinned to one `seq`.
 Given a metadata state at seq N:
 
 - An **inode** is visible if `created_seq <= N` and no active subtree tombstone covers the inode or any of its ancestors.
-- A **directory binding** is active if it is the latest `(parent_inode_id, name_key)` pair with `bind_seq <= N`.
+- A **directory binding** is active if it is the latest `(parent_inode_id, name_key)` pair with `bind_seq <= N`, is also the latest parent binding for the child inode, and has not been removed by a matching direntry unbind.
 - A **file revision** is the latest revision for an inode with `committed_seq <= N`.
 
 ### 2.3 Path resolution
@@ -102,7 +102,7 @@ To resolve an absolute path at seq N:
 
 1. Start at the root inode (inode id 1).
 2. For each path component, find the active directory binding whose normalized `name_key` matches the component under the namespace's `NamePolicy`.
-3. Follow the binding to its `child_inode_id`. If the child is a mount, cross into the target namespace and continue resolution there.
+3. Follow the binding to its `child_inode_id`. Mount traversal is reserved future work; v0 path resolution does not cross mounts.
 4. If any component has no matching visible binding, the path does not exist.
 
 ### 2.4 File content retrieval
@@ -163,11 +163,14 @@ The first standard lower-level mutation set includes:
 - `create_dir(parent_inode_id, display_name)`
 - `create_file(parent_inode_id, display_name, content_ref)`
 - `replace_file(inode_id, base_revision_no, content_ref)`
-- `rename(inode_id, new_parent_inode_id, new_display_name)`
+- `rename(inode_id, new_parent_inode_id, new_display_name, mode = no_replace)`
+- `delete_file(inode_id)`
 - `delete_subtree(root_inode_id)`
 - `restore_revision(inode_id, source_revision_no, base_revision_no)`
 
 The path-oriented filesystem surface may compile higher-level operations into these lower-level mutations.
+
+These are semantic commit operations. Durable WAL payloads store normalized metadata deltas derived from the semantic operations: `create_inode`, `bind_direntry`, `unbind_direntry`, `append_file_revision`, and `tombstone_subtree`. Raw bind/unbind/create-inode deltas are not standard client-facing commit operations.
 
 ## 6. Preconditions
 
@@ -184,6 +187,8 @@ The core kinds of precondition are:
 | **Directory-contents based** | "Delete this directory non-recursively only if it is still empty." |
 
 The exact wire shape of preconditions may vary by transport binding, but the semantics must match these checks.
+
+The exact binding precondition is `binding_is(parent_inode_id, name_key, child_inode_id, bind_seq, bind_delta_index)`. It pins a source path to one specific prior binding, so a rename-away, delete, or same-name rebind cannot accidentally satisfy a stale move or delete.
 
 ## 7. Change feed and replay
 

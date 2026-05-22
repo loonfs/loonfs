@@ -7,6 +7,18 @@ pub type CommitAnnotations = BTreeMap<String, Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RenameMode {
+    NoReplace,
+    ReplaceExisting,
+    Exchange,
+}
+
+pub fn default_rename_mode() -> RenameMode {
+    RenameMode::NoReplace
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UploadMode {
     ServiceProxied,
 }
@@ -86,6 +98,8 @@ pub enum CommitOp {
         inode_id: InodeId,
         new_parent_inode: InodeId,
         new_display_name: String,
+        #[serde(default = "default_rename_mode")]
+        mode: RenameMode,
     },
     DeleteSubtree {
         root_inode: InodeId,
@@ -110,6 +124,13 @@ pub enum CommitPrecondition {
         parent_inode: InodeId,
         name_key: String,
         child_inode: InodeId,
+    },
+    BindingIs {
+        parent_inode: InodeId,
+        name_key: String,
+        child_inode: InodeId,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
     },
     DirectoryEmpty {
         inode_id: InodeId,
