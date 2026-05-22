@@ -2,8 +2,8 @@ use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
 use crate::metadata::{MetadataApplyError, MetadataState};
 use loon_api::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, generate_wal_segment_id,
-    validate_wal_segment_id, ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitPayload, WalOp,
-    WalSegmentEnvelope, WalSegmentPayload, WalSegmentPointer,
+    validate_wal_segment_id, ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitPayload,
+    WalDelta, WalSegmentEnvelope, WalSegmentPayload, WalSegmentPointer,
 };
 use loon_objectstore::keys::wal_segment;
 use serde::{Deserialize, Serialize};
@@ -190,7 +190,7 @@ pub fn replay_wal_segment(
     for record in &envelope.payload.records {
         resulting_head.seq = record.seq;
         resulting_head.next_inode_id =
-            replay_next_inode_id(resulting_head.next_inode_id, &record.ops);
+            replay_next_inode_id(resulting_head.next_inode_id, &record.deltas);
     }
     resulting_head.visible_wal_tip = Some(envelope.pointer(wal_object.object_key.clone()));
 
@@ -363,16 +363,17 @@ fn decode_and_validate_replayed_wal(
     Ok(envelope)
 }
 
-fn replay_next_inode_id(current_next_inode_id: InodeId, ops: &[WalOp]) -> InodeId {
-    ops.iter()
-        .fold(current_next_inode_id, |next_inode_id, op| match op {
-            WalOp::CreateInode { inode_id, .. } => {
+fn replay_next_inode_id(current_next_inode_id: InodeId, deltas: &[WalDelta]) -> InodeId {
+    deltas
+        .iter()
+        .fold(current_next_inode_id, |next_inode_id, delta| match delta {
+            WalDelta::CreateInode { inode_id, .. } => {
                 InodeId(next_inode_id.0.max(inode_id.0.saturating_add(1)))
             }
-            WalOp::BindDirentry { .. }
-            | WalOp::UnbindDirentry { .. }
-            | WalOp::AppendFileRevision { .. }
-            | WalOp::TombstoneSubtree { .. } => next_inode_id,
+            WalDelta::BindDirentry { .. }
+            | WalDelta::UnbindDirentry { .. }
+            | WalDelta::AppendFileRevision { .. }
+            | WalDelta::TombstoneSubtree { .. } => next_inode_id,
         })
 }
 

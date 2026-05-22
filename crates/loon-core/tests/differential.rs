@@ -1,16 +1,16 @@
 use loon_api::{
-    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo, WalOp,
+    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo, WalDelta,
 };
 use loon_core::metadata::{InodeRecord, MetadataState as CoreMetadataState};
 use loon_model::metadata::MetadataState as ModelMetadataState;
 
 type NormalizedInodes = Vec<(u64, &'static str, u64)>;
-type NormalizedDirentries = Vec<(u64, String, u64, u64, u32)>;
+type NormalizedDirentryBinds = Vec<(u64, String, u64, u64, u32)>;
 type NormalizedRevisions = Vec<(u64, u64, u64, u32, String)>;
 type NormalizedTombstones = Vec<(u64, u64, u32)>;
 type NormalizedMetadata = (
     NormalizedInodes,
-    NormalizedDirentries,
+    NormalizedDirentryBinds,
     NormalizedRevisions,
     NormalizedTombstones,
 );
@@ -28,14 +28,14 @@ fn create_dir(
     inode_id: InodeId,
     parent_inode: InodeId,
     display_name: &str,
-) -> Vec<WalOp> {
+) -> Vec<WalDelta> {
     vec![
-        WalOp::CreateInode {
+        WalDelta::CreateInode {
             delta_index,
             inode_id,
             inode_kind: InodeKind::Dir,
         },
-        WalOp::BindDirentry {
+        WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
             display_name: display_name.to_owned(),
@@ -50,20 +50,20 @@ fn create_file(
     parent_inode: InodeId,
     display_name: &str,
     content_ref: ContentRef,
-) -> Vec<WalOp> {
+) -> Vec<WalDelta> {
     vec![
-        WalOp::CreateInode {
+        WalDelta::CreateInode {
             delta_index,
             inode_id,
             inode_kind: InodeKind::File,
         },
-        WalOp::BindDirentry {
+        WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
             display_name: display_name.to_owned(),
             child_inode: inode_id,
         },
-        WalOp::AppendFileRevision {
+        WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
             inode_id,
             revision_no: RevisionNo(1),
@@ -77,8 +77,8 @@ fn append_revision(
     inode_id: InodeId,
     revision_no: RevisionNo,
     content_ref: ContentRef,
-) -> Vec<WalOp> {
-    vec![WalOp::AppendFileRevision {
+) -> Vec<WalDelta> {
+    vec![WalDelta::AppendFileRevision {
         delta_index,
         inode_id,
         revision_no,
@@ -91,8 +91,8 @@ fn bind(
     inode_id: InodeId,
     parent_inode: InodeId,
     display_name: &str,
-) -> Vec<WalOp> {
-    vec![WalOp::BindDirentry {
+) -> Vec<WalDelta> {
+    vec![WalDelta::BindDirentry {
         delta_index,
         parent_inode,
         display_name: display_name.to_owned(),
@@ -100,8 +100,8 @@ fn bind(
     }]
 }
 
-fn tombstone(delta_index: u32, root_inode: InodeId) -> Vec<WalOp> {
-    vec![WalOp::TombstoneSubtree {
+fn tombstone(delta_index: u32, root_inode: InodeId) -> Vec<WalDelta> {
+    vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode,
     }]
@@ -123,24 +123,24 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
     let replace_file = append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2"));
 
     let core_state = core_state
-        .apply_committed_wal_ops(ChangeSeq(1), &create_dir)
+        .apply_committed_wal_deltas(ChangeSeq(1), &create_dir)
         .unwrap()
         .metadata_state
-        .apply_committed_wal_ops(ChangeSeq(2), &create_file)
+        .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
         .unwrap()
         .metadata_state
-        .apply_committed_wal_ops(ChangeSeq(3), &replace_file)
+        .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
         .unwrap()
         .metadata_state;
 
     let model_state = model_state
-        .apply_committed_wal_ops(ChangeSeq(1), &create_dir)
+        .apply_committed_wal_deltas(ChangeSeq(1), &create_dir)
         .unwrap()
         .metadata_state
-        .apply_committed_wal_ops(ChangeSeq(2), &create_file)
+        .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
         .unwrap()
         .metadata_state
-        .apply_committed_wal_ops(ChangeSeq(3), &replace_file)
+        .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
         .unwrap()
         .metadata_state;
 
@@ -224,7 +224,7 @@ fn core_bootstrap_state() -> CoreMetadataState {
             inode_kind: InodeKind::Dir,
             created_seq: ChangeSeq(0),
         }],
-        direntries: Vec::new(),
+        direntry_binds: Vec::new(),
         direntry_unbinds: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
@@ -236,18 +236,18 @@ fn model_bootstrap_state() -> ModelMetadataState {
     loon_model::bootstrap_basis_metadata_state()
 }
 
-fn assert_states_match(sequences: &[Vec<WalOp>]) {
+fn assert_states_match(sequences: &[Vec<WalDelta>]) {
     let mut core_state = core_bootstrap_state();
     let mut model_state = model_bootstrap_state();
 
-    for (index, ops) in sequences.iter().enumerate() {
+    for (index, deltas) in sequences.iter().enumerate() {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
         core_state = core_state
-            .apply_committed_wal_ops(seq, ops)
+            .apply_committed_wal_deltas(seq, deltas)
             .expect("core apply")
             .metadata_state;
         model_state = model_state
-            .apply_committed_wal_ops(seq, ops)
+            .apply_committed_wal_deltas(seq, deltas)
             .expect("model apply")
             .metadata_state;
     }
@@ -269,7 +269,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
             })
             .collect(),
         state
-            .direntries
+            .direntry_binds
             .iter()
             .map(|direntry| {
                 (
@@ -322,7 +322,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
             })
             .collect(),
         state
-            .direntries
+            .direntry_binds
             .iter()
             .map(|direntry| {
                 (

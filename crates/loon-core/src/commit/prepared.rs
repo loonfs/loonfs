@@ -3,7 +3,8 @@ use super::{
     ResolvedBinding, SemanticCommitFingerprint,
 };
 use loon_api::{
-    v0::CommitOpResult, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo, WalOp,
+    v0::CommitOpResult, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
+    WalDelta,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -32,7 +33,7 @@ pub struct PreparedCommit {
 pub struct MaterializedCommitDelta {
     pub semantic_op_index: u32,
     pub delta_index: u32,
-    pub wal_op: WalOp,
+    pub wal_delta: WalDelta,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,7 +192,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::CreateInode {
+                WalDelta::CreateInode {
                     delta_index: 0,
                     inode_id,
                     inode_kind: InodeKind::Dir,
@@ -201,7 +202,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::BindDirentry {
+                WalDelta::BindDirentry {
                     delta_index: 0,
                     parent_inode: *parent_inode,
                     display_name: display_name.clone(),
@@ -222,7 +223,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::CreateInode {
+                WalDelta::CreateInode {
                     delta_index: 0,
                     inode_id,
                     inode_kind: InodeKind::File,
@@ -232,7 +233,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::BindDirentry {
+                WalDelta::BindDirentry {
                     delta_index: 0,
                     parent_inode: *parent_inode,
                     display_name: display_name.clone(),
@@ -243,7 +244,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::AppendFileRevision {
+                WalDelta::AppendFileRevision {
                     delta_index: 0,
                     inode_id,
                     revision_no: RevisionNo(1),
@@ -272,7 +273,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::AppendFileRevision {
+                WalDelta::AppendFileRevision {
                     delta_index: 0,
                     inode_id: *inode_id,
                     revision_no,
@@ -304,7 +305,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::AppendFileRevision {
+                WalDelta::AppendFileRevision {
                     delta_index: 0,
                     inode_id: *inode_id,
                     revision_no,
@@ -327,7 +328,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::TombstoneSubtree {
+                WalDelta::TombstoneSubtree {
                     delta_index: 0,
                     root_inode: *inode_id,
                 },
@@ -350,7 +351,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::BindDirentry {
+                WalDelta::BindDirentry {
                     delta_index: 0,
                     parent_inode: *new_parent_inode,
                     display_name: new_display_name.clone(),
@@ -370,7 +371,7 @@ pub(super) fn materialize_commit_op(
                 &mut deltas,
                 op_index,
                 next_delta_index,
-                WalOp::TombstoneSubtree {
+                WalDelta::TombstoneSubtree {
                     delta_index: 0,
                     root_inode: *root_inode,
                 },
@@ -395,7 +396,7 @@ fn push_unbind_delta(
         deltas,
         semantic_op_index,
         next_delta_index,
-        WalOp::UnbindDirentry {
+        WalDelta::UnbindDirentry {
             delta_index: 0,
             parent_inode: binding.parent_inode,
             name_key: binding.name_key.clone(),
@@ -410,36 +411,36 @@ fn push_delta(
     deltas: &mut Vec<MaterializedCommitDelta>,
     semantic_op_index: u32,
     next_delta_index: &mut u32,
-    mut wal_op: WalOp,
+    mut wal_delta: WalDelta,
 ) -> Result<(), CommitMaterializationError> {
     let delta_index = *next_delta_index;
     *next_delta_index = next_delta_index
         .checked_add(1)
         .ok_or(CommitMaterializationError::DeltaIndexOverflow)?;
-    set_wal_delta_index(&mut wal_op, delta_index);
+    set_wal_delta_index(&mut wal_delta, delta_index);
     deltas.push(MaterializedCommitDelta {
         semantic_op_index,
         delta_index,
-        wal_op,
+        wal_delta,
     });
     Ok(())
 }
 
-fn set_wal_delta_index(wal_op: &mut WalOp, delta_index: u32) {
-    match wal_op {
-        WalOp::CreateInode {
+fn set_wal_delta_index(wal_delta: &mut WalDelta, delta_index: u32) {
+    match wal_delta {
+        WalDelta::CreateInode {
             delta_index: slot, ..
         }
-        | WalOp::BindDirentry {
+        | WalDelta::BindDirentry {
             delta_index: slot, ..
         }
-        | WalOp::UnbindDirentry {
+        | WalDelta::UnbindDirentry {
             delta_index: slot, ..
         }
-        | WalOp::AppendFileRevision {
+        | WalDelta::AppendFileRevision {
             delta_index: slot, ..
         }
-        | WalOp::TombstoneSubtree {
+        | WalDelta::TombstoneSubtree {
             delta_index: slot, ..
         } => *slot = delta_index,
     }
@@ -533,12 +534,12 @@ mod tests {
 
         assert_eq!(materialized.deltas.len(), 2);
         assert!(matches!(
-            materialized.deltas[0].wal_op,
-            WalOp::CreateInode { .. }
+            materialized.deltas[0].wal_delta,
+            WalDelta::CreateInode { .. }
         ));
         assert!(matches!(
-            materialized.deltas[1].wal_op,
-            WalOp::BindDirentry { .. }
+            materialized.deltas[1].wal_delta,
+            WalDelta::BindDirentry { .. }
         ));
         assert!(matches!(
             materialized.results[0],

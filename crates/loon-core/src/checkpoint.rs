@@ -5,7 +5,7 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::loading::read_head_object;
 use crate::metadata::{
-    CommitReceiptRecord, DirentryRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
+    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
     RevisionRecord, SubtreeTombstoneRecord,
 };
 use loon_api::{
@@ -32,7 +32,7 @@ const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
 const REQUIRED_RETENTION_PROGRESS_CLASSES: &[DerivedWorkClass] = &[];
 const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 6] = [
     CheckpointTableFamily::Inodes,
-    CheckpointTableFamily::Direntries,
+    CheckpointTableFamily::DirentryBinds,
     CheckpointTableFamily::DirentryUnbinds,
     CheckpointTableFamily::Revisions,
     CheckpointTableFamily::Tombstones,
@@ -934,8 +934,8 @@ fn append_rows_to_metadata(
                 created_seq: *created_seq,
             }),
             (
-                CheckpointTableFamily::Direntries,
-                CheckpointRow::Direntry {
+                CheckpointTableFamily::DirentryBinds,
+                CheckpointRow::DirentryBind {
                     parent_inode_id,
                     name_key,
                     display_name,
@@ -943,7 +943,7 @@ fn append_rows_to_metadata(
                     bind_seq,
                     bind_delta_index,
                 },
-            ) => metadata_state.direntries.push(DirentryRecord {
+            ) => metadata_state.direntry_binds.push(DirentryBindRecord {
                 parent_inode_id: *parent_inode_id,
                 name_key: name_key.clone(),
                 display_name: display_name.clone(),
@@ -1047,10 +1047,10 @@ fn checkpoint_rows_for_family(
                 created_seq: inode.created_seq,
             })
             .collect::<Vec<_>>(),
-        CheckpointTableFamily::Direntries => metadata_state
-            .direntries
+        CheckpointTableFamily::DirentryBinds => metadata_state
+            .direntry_binds
             .iter()
-            .map(|direntry| CheckpointRow::Direntry {
+            .map(|direntry| CheckpointRow::DirentryBind {
                 parent_inode_id: direntry.parent_inode_id,
                 name_key: direntry.name_key.clone(),
                 display_name: direntry.display_name.clone(),
@@ -1112,7 +1112,7 @@ fn checkpoint_rows_for_family(
 fn checkpoint_table_family(family: CheckpointTableFamily) -> ObjectStoreCheckpointTableFamily {
     match family {
         CheckpointTableFamily::Inodes => ObjectStoreCheckpointTableFamily::Inodes,
-        CheckpointTableFamily::Direntries => ObjectStoreCheckpointTableFamily::Direntries,
+        CheckpointTableFamily::DirentryBinds => ObjectStoreCheckpointTableFamily::DirentryBinds,
         CheckpointTableFamily::DirentryUnbinds => ObjectStoreCheckpointTableFamily::DirentryUnbinds,
         CheckpointTableFamily::Revisions => ObjectStoreCheckpointTableFamily::Revisions,
         CheckpointTableFamily::Tombstones => ObjectStoreCheckpointTableFamily::Tombstones,
@@ -1123,7 +1123,7 @@ fn checkpoint_table_family(family: CheckpointTableFamily) -> ObjectStoreCheckpoi
 fn checkpoint_row_kind(row: &CheckpointRow) -> &'static str {
     match row {
         CheckpointRow::Inode { .. } => "inode",
-        CheckpointRow::Direntry { .. } => "direntry",
+        CheckpointRow::DirentryBind { .. } => "direntry_bind",
         CheckpointRow::DirentryUnbind { .. } => "direntry_unbind",
         CheckpointRow::Revision { .. } => "revision",
         CheckpointRow::Tombstone { .. } => "tombstone",

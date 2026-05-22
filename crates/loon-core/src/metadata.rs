@@ -1,6 +1,6 @@
 use loon_api::{
     name_key_for_display_name, v0::CommitOpResult, ChangeSeq, CommitId, ContentRef, InodeId,
-    InodeKind, NamePolicy, RevisionNo, WalCommitPayload, WalOp,
+    InodeKind, NamePolicy, RevisionNo, WalCommitPayload, WalDelta,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -11,7 +11,7 @@ pub struct MetadataState {
     #[serde(default)]
     pub inodes: Vec<InodeRecord>,
     #[serde(default)]
-    pub direntries: Vec<DirentryRecord>,
+    pub direntry_binds: Vec<DirentryBindRecord>,
     #[serde(default)]
     pub direntry_unbinds: Vec<DirentryUnbindRecord>,
     #[serde(default)]
@@ -30,7 +30,7 @@ pub struct InodeRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DirentryRecord {
+pub struct DirentryBindRecord {
     pub parent_inode_id: InodeId,
     pub name_key: String,
     pub display_name: String,
@@ -116,17 +116,17 @@ pub enum MetadataApplyError {
 }
 
 impl MetadataState {
-    pub fn apply_committed_wal_ops(
+    pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
-        ops: &[WalOp],
+        deltas: &[WalDelta],
     ) -> Result<AppliedMetadataState, MetadataApplyError> {
         let mut metadata_state = self.clone();
         let mut checked_invariants = Vec::new();
 
-        for op in ops {
-            match op {
-                WalOp::CreateInode {
+        for delta in deltas {
+            match delta {
+                WalDelta::CreateInode {
                     delta_index: _,
                     inode_id,
                     inode_kind,
@@ -138,13 +138,13 @@ impl MetadataState {
                     });
                     push_unique_invariant(&mut checked_invariants, "create_inode_writes_inode_row");
                 }
-                WalOp::BindDirentry {
+                WalDelta::BindDirentry {
                     delta_index,
                     parent_inode,
                     display_name,
                     child_inode,
                 } => {
-                    metadata_state.direntries.push(DirentryRecord {
+                    metadata_state.direntry_binds.push(DirentryBindRecord {
                         parent_inode_id: *parent_inode,
                         name_key: name_key_for_display_name(NamePolicy::default(), display_name),
                         display_name: display_name.clone(),
@@ -154,10 +154,10 @@ impl MetadataState {
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "bind_direntry_writes_direntry_row",
+                        "bind_direntry_writes_direntry_bind_row",
                     );
                 }
-                WalOp::UnbindDirentry {
+                WalDelta::UnbindDirentry {
                     delta_index,
                     parent_inode,
                     name_key,
@@ -179,7 +179,7 @@ impl MetadataState {
                         "unbind_direntry_writes_unbind_row",
                     );
                 }
-                WalOp::AppendFileRevision {
+                WalDelta::AppendFileRevision {
                     delta_index,
                     inode_id,
                     revision_no,
@@ -197,7 +197,7 @@ impl MetadataState {
                         "append_file_revision_writes_revision_row",
                     );
                 }
-                WalOp::TombstoneSubtree {
+                WalDelta::TombstoneSubtree {
                     delta_index,
                     root_inode,
                 } => {
@@ -226,7 +226,7 @@ impl MetadataState {
         &self,
         record: &WalCommitPayload,
     ) -> Result<AppliedMetadataState, MetadataApplyError> {
-        let mut applied = self.apply_committed_wal_ops(record.seq, &record.ops)?;
+        let mut applied = self.apply_committed_wal_deltas(record.seq, &record.deltas)?;
         applied
             .metadata_state
             .commit_receipts
@@ -292,9 +292,9 @@ impl MetadataState {
         parent_inode_id: InodeId,
         name_key: &str,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryRecord> {
+    ) -> Option<DirentryBindRecord> {
         let canonical_name_key = name_key_for_display_name(NamePolicy::default(), name_key);
-        self.direntries
+        self.direntry_binds
             .iter()
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
@@ -309,7 +309,7 @@ impl MetadataState {
         &self,
         child_inode_id: InodeId,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryRecord> {
+    ) -> Option<DirentryBindRecord> {
         let direntry = self.latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)?;
         if self.is_direntry_unbound_at_seq(&direntry, base_seq) {
             return None;
@@ -382,7 +382,7 @@ impl MetadataState {
         parent_inode_id: InodeId,
         name_key: &str,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryRecord> {
+    ) -> Option<DirentryBindRecord> {
         let parent = self.visible_inode(parent_inode_id, base_seq)?;
         if parent.inode_kind != InodeKind::Dir {
             return None;
@@ -397,7 +397,7 @@ impl MetadataState {
         &self,
         parent_inode_id: InodeId,
         base_seq: ChangeSeq,
-    ) -> Vec<DirentryRecord> {
+    ) -> Vec<DirentryBindRecord> {
         let Some(parent) = self.visible_inode(parent_inode_id, base_seq) else {
             return Vec::new();
         };
@@ -406,7 +406,7 @@ impl MetadataState {
         }
 
         let mut children = self
-            .direntries
+            .direntry_binds
             .iter()
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id && direntry.bind_seq <= base_seq
@@ -505,7 +505,7 @@ impl MetadataState {
         parent_inode_id: InodeId,
         name_key: &str,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryRecord> {
+    ) -> Option<DirentryBindRecord> {
         let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
         if self.is_direntry_unbound_at_seq(&direntry, base_seq) {
             return None;
@@ -528,8 +528,8 @@ impl MetadataState {
         &self,
         child_inode_id: InodeId,
         base_seq: ChangeSeq,
-    ) -> Option<DirentryRecord> {
-        self.direntries
+    ) -> Option<DirentryBindRecord> {
+        self.direntry_binds
             .iter()
             .filter(|direntry| {
                 direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
@@ -540,7 +540,7 @@ impl MetadataState {
 
     pub fn is_direntry_unbound_at_seq(
         &self,
-        direntry: &DirentryRecord,
+        direntry: &DirentryBindRecord,
         base_seq: ChangeSeq,
     ) -> bool {
         self.direntry_unbinds.iter().any(|unbind| {

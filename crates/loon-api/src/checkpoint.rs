@@ -26,7 +26,7 @@ pub enum CheckpointSegmentKind {
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointTableFamily {
     Inodes,
-    Direntries,
+    DirentryBinds,
     DirentryUnbinds,
     Revisions,
     Tombstones,
@@ -69,7 +69,7 @@ pub enum CheckpointRow {
         inode_kind: InodeKind,
         created_seq: ChangeSeq,
     },
-    Direntry {
+    DirentryBind {
         parent_inode_id: InodeId,
         name_key: String,
         display_name: String,
@@ -110,7 +110,7 @@ impl CheckpointRow {
     pub fn row_key(&self) -> String {
         match self {
             Self::Inode { inode_id, .. } => format!("inode-{:020}", inode_id.0),
-            Self::Direntry {
+            Self::DirentryBind {
                 parent_inode_id,
                 name_key,
                 bind_seq,

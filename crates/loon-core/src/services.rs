@@ -1209,15 +1209,15 @@ fn ensure_parent_directories(
         let allocated = *next_inode_id;
         *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
         let delta_index = op_index.saturating_mul(2);
-        let applied = working.apply_committed_wal_ops(
+        let applied = working.apply_committed_wal_deltas(
             committed_seq,
             &[
-                loon_api::WalOp::CreateInode {
+                loon_api::WalDelta::CreateInode {
                     delta_index,
                     inode_id: allocated,
                     inode_kind: InodeKind::Dir,
                 },
-                loon_api::WalOp::BindDirentry {
+                loon_api::WalDelta::BindDirentry {
                     delta_index: delta_index.saturating_add(1),
                     parent_inode: current_inode,
                     display_name: component.clone(),

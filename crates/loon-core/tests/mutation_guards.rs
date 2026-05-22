@@ -37,14 +37,14 @@ fn wal_create_dir(
     inode_id: InodeId,
     parent_inode: InodeId,
     display_name: String,
-) -> Vec<loon_api::WalOp> {
+) -> Vec<loon_api::WalDelta> {
     vec![
-        loon_api::WalOp::CreateInode {
+        loon_api::WalDelta::CreateInode {
             delta_index,
             inode_id,
             inode_kind: InodeKind::Dir,
         },
-        loon_api::WalOp::BindDirentry {
+        loon_api::WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
             display_name,
@@ -59,20 +59,20 @@ fn wal_create_file(
     parent_inode: InodeId,
     display_name: String,
     content_ref: ContentRef,
-) -> Vec<loon_api::WalOp> {
+) -> Vec<loon_api::WalDelta> {
     vec![
-        loon_api::WalOp::CreateInode {
+        loon_api::WalDelta::CreateInode {
             delta_index,
             inode_id,
             inode_kind: InodeKind::File,
         },
-        loon_api::WalOp::BindDirentry {
+        loon_api::WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
             display_name,
             child_inode: inode_id,
         },
-        loon_api::WalOp::AppendFileRevision {
+        loon_api::WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
             inode_id,
             revision_no: RevisionNo(1),
@@ -86,8 +86,8 @@ fn wal_append_revision(
     inode_id: InodeId,
     revision_no: RevisionNo,
     content_ref: ContentRef,
-) -> Vec<loon_api::WalOp> {
-    vec![loon_api::WalOp::AppendFileRevision {
+) -> Vec<loon_api::WalDelta> {
+    vec![loon_api::WalDelta::AppendFileRevision {
         delta_index,
         inode_id,
         revision_no,
@@ -95,8 +95,8 @@ fn wal_append_revision(
     }]
 }
 
-fn wal_tombstone(delta_index: u32, root_inode: InodeId) -> Vec<loon_api::WalOp> {
-    vec![loon_api::WalOp::TombstoneSubtree {
+fn wal_tombstone(delta_index: u32, root_inode: InodeId) -> Vec<loon_api::WalDelta> {
+    vec![loon_api::WalDelta::TombstoneSubtree {
         delta_index,
         root_inode,
     }]
@@ -489,7 +489,7 @@ fn restore_revision_overflow_is_rejected() {
                 created_seq: ChangeSeq(1),
             },
         ],
-        direntries: vec![loon_core::metadata::DirentryRecord {
+        direntry_binds: vec![loon_core::metadata::DirentryBindRecord {
             parent_inode_id: InodeId(1),
             name_key: "overflow.txt".to_owned(),
             display_name: "overflow.txt".to_owned(),
@@ -2540,24 +2540,24 @@ impl ObjectStore for InjectCreateFailureStore {
     }
 }
 
-fn metadata_state_after(sequences: &[Vec<loon_api::WalOp>]) -> MetadataState {
+fn metadata_state_after(sequences: &[Vec<loon_api::WalDelta>]) -> MetadataState {
     let mut state = MetadataState {
         inodes: vec![InodeRecord {
             inode_id: InodeId(1),
             inode_kind: InodeKind::Dir,
             created_seq: ChangeSeq(0),
         }],
-        direntries: Vec::new(),
+        direntry_binds: Vec::new(),
         direntry_unbinds: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),
         commit_receipts: Vec::new(),
     };
 
-    for (index, ops) in sequences.iter().enumerate() {
+    for (index, deltas) in sequences.iter().enumerate() {
         state = state
-            .apply_committed_wal_ops(ChangeSeq(u64::try_from(index + 1).expect("seq")), ops)
-            .expect("apply ops")
+            .apply_committed_wal_deltas(ChangeSeq(u64::try_from(index + 1).expect("seq")), deltas)
+            .expect("apply deltas")
             .metadata_state;
     }
 

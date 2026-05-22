@@ -177,7 +177,7 @@ mod tests {
                     writer_fence_token: FenceToken(1),
                     message: None,
                     annotations: None,
-                    ops: Vec::new(),
+                    deltas: Vec::new(),
                     preconditions: Vec::new(),
                     results: Vec::new(),
                 }

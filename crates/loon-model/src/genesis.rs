@@ -8,7 +8,7 @@ pub fn bootstrap_basis_metadata_state() -> MetadataState {
             inode_kind: InodeKind::Dir,
             created_seq: ChangeSeq(0),
         }],
-        direntries: Vec::new(),
+        direntry_binds: Vec::new(),
         direntry_unbinds: Vec::new(),
         revisions: Vec::new(),
         subtree_tombstones: Vec::new(),

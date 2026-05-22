@@ -26,10 +26,10 @@ pub fn wal_payload_from_materialized_commit(
         writer_fence_token: prepared.request.writer_fence_token,
         message: prepared.request.message.clone(),
         annotations: prepared.request.annotations.clone(),
-        ops: commit
+        deltas: commit
             .deltas
             .iter()
-            .map(|delta| delta.wal_op.clone())
+            .map(|delta| delta.wal_delta.clone())
             .collect(),
         preconditions: prepared
             .request
@@ -134,7 +134,7 @@ mod tests {
 
         assert_eq!(payload.namespace_id, namespace_id);
         assert_eq!(payload.seq, ChangeSeq(1));
-        assert_eq!(payload.ops.len(), 2);
+        assert_eq!(payload.deltas.len(), 2);
         assert_eq!(payload.results.len(), 1);
     }
 }

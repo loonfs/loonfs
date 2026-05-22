@@ -43,7 +43,7 @@ An inode does not record:
 
 Those facts live in other metadata families:
 
-- direntries and direntry unbinds say where an inode is currently bound in the tree;
+- direntry bind records and direntry unbind records say where an inode is currently bound in the tree;
 - revisions say which immutable file version is current for a file inode; and
 - paths are derived views produced by walking visible directory bindings from the root.
 
@@ -61,7 +61,7 @@ Illustrative inode row:
 }
 ```
 
-Illustrative direntry row that binds that inode into the tree:
+Illustrative direntry bind row that binds that inode into the tree:
 
 ```json
 {

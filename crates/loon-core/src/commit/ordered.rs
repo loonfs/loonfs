@@ -394,11 +394,11 @@ fn validate_metadata_preconditions(
         )
         .map_err(|err| materialization_error_to_validation_error(err, op))?;
         let applied_metadata = ephemeral_metadata_state
-            .apply_committed_wal_ops(
+            .apply_committed_wal_deltas(
                 committed_seq,
                 &deltas
                     .iter()
-                    .map(|delta| delta.wal_op.clone())
+                    .map(|delta| delta.wal_delta.clone())
                     .collect::<Vec<_>>(),
             )
             .expect("validated commit ops should always apply into ephemeral metadata state");

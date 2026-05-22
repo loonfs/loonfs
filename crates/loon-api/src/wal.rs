@@ -16,7 +16,7 @@ pub enum WalEnvelopeKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WalOp {
+pub enum WalDelta {
     CreateInode {
         delta_index: u32,
         inode_id: InodeId,
@@ -91,7 +91,7 @@ pub struct WalCommitPayload {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<CommitAnnotations>,
-    pub ops: Vec<WalOp>,
+    pub deltas: Vec<WalDelta>,
     pub preconditions: Vec<WalPrecondition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub results: Vec<CommitOpResult>,
