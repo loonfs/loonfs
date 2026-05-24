@@ -400,12 +400,20 @@ pub fn resolve_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id)?;
+    resolve_path_from_basis(store, &basis, absolute_path)
+}
+
+pub fn resolve_path_from_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    basis: &crate::VerifiedNamespaceBasis,
+    absolute_path: &str,
+) -> Result<AuthoritativePathEntry, CoreError> {
     let resolved = basis
         .metadata_state
         .resolve_visible_path(absolute_path, basis.head.seq)?;
     build_authoritative_path_entry(
         store,
-        namespace_id,
+        &basis.head.namespace_id,
         &basis.content_store_id,
         basis.head.seq,
         &basis.metadata_state,
@@ -419,13 +427,21 @@ pub fn list_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id)?;
+    list_path_from_basis(store, &basis, absolute_path)
+}
+
+pub fn list_path_from_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    basis: &crate::VerifiedNamespaceBasis,
+    absolute_path: &str,
+) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
     let resolved = basis
         .metadata_state
         .resolve_visible_path(absolute_path, basis.head.seq)?;
     if resolved.inode_kind == InodeKind::File {
         return Ok(vec![build_authoritative_path_entry(
             store,
-            namespace_id,
+            &basis.head.namespace_id,
             &basis.content_store_id,
             basis.head.seq,
             &basis.metadata_state,
@@ -450,7 +466,7 @@ pub fn list_path<S: ObjectStore + ?Sized>(
                 .expect("visible child listing should resolve inode");
             build_authoritative_path_entry(
                 store,
-                namespace_id,
+                &basis.head.namespace_id,
                 &basis.content_store_id,
                 basis.head.seq,
                 &basis.metadata_state,
@@ -474,7 +490,16 @@ pub fn read_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
-    let entry = resolve_path(store, namespace_id, absolute_path)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    read_file_bytes_from_basis(store, &basis, absolute_path)
+}
+
+pub fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    basis: &crate::VerifiedNamespaceBasis,
+    absolute_path: &str,
+) -> Result<AuthoritativeFileBytes, CoreError> {
+    let entry = resolve_path_from_basis(store, basis, absolute_path)?;
     if entry.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: entry.absolute_path,
@@ -485,8 +510,7 @@ pub fn read_file_bytes<S: ObjectStore + ?Sized>(
         .content_ref
         .clone()
         .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
-    let read = read_durable_content_bytes(store, &content_store_id, &content_ref)?;
+    let read = read_durable_content_bytes(store, &basis.content_store_id, &content_ref)?;
     Ok(AuthoritativeFileBytes {
         entry,
         bytes: read.bytes,

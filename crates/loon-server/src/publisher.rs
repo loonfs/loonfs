@@ -375,7 +375,9 @@ mod tests {
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
-    use loonfs::{CreateNamespaceOptions, Fs, FsConfig, SharedObjectStore as SharedStore};
+    use loonfs::{
+        CreateNamespaceOptions, Fs, FsConfig, RuntimeCacheConfig, SharedObjectStore as SharedStore,
+    };
     use std::path::Path;
     use std::sync::Condvar;
     use tempfile::tempdir;
@@ -509,6 +511,7 @@ mod tests {
                     writer_id: config.writer_id.clone(),
                     writer_version: config.writer_version.clone(),
                     lease_duration_ms: config.lease_duration_ms,
+                    runtime_cache: RuntimeCacheConfig::default(),
                 },
             )
             .expect("open runtime"),

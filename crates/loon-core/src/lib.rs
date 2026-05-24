@@ -18,8 +18,8 @@ pub mod services;
 pub mod wal;
 
 pub use basis::{
-    load_namespace_head_summary, load_verified_namespace_basis, BasisLoadError,
-    NamespaceHeadSummary, VerifiedNamespaceBasis,
+    load_namespace_head_identity, load_namespace_head_summary, load_verified_namespace_basis,
+    BasisLoadError, NamespaceHeadIdentity, NamespaceHeadSummary, VerifiedNamespaceBasis,
 };
 pub use checkpoint::{
     advance_retention_floor, create_checkpoint, CheckpointLoadError, CheckpointLoadErrorKind,
@@ -37,7 +37,8 @@ pub use publisher::{
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, create_dir_path, delete_path, delete_path_non_recursive,
-    fork_namespace, list_namespaces, list_path, move_path, put_file_bytes, put_file_content_ref,
-    read_file_bytes, resolve_path, store_bytes_as_content, write_file_bytes,
-    BootstrapNamespaceError, PutFileBehavior, StoredContent,
+    fork_namespace, list_namespaces, list_path, list_path_from_basis, move_path, put_file_bytes,
+    put_file_content_ref, read_file_bytes, read_file_bytes_from_basis, resolve_path,
+    resolve_path_from_basis, store_bytes_as_content, write_file_bytes, BootstrapNamespaceError,
+    PutFileBehavior, StoredContent,
 };

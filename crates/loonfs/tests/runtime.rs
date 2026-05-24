@@ -3,12 +3,12 @@ use loon_objectstore::keys::{namespace_descriptor, namespace_head};
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
-    CoreErrorKind, CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId,
+    CoreErrorKind, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId,
     MaintenanceTickOptions, MaintenanceTickOutcome, MoveOptions, NamespaceId, PutFileBehavior,
-    PutFileOptions, RuntimeError, SharedObjectStore,
+    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
 };
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -59,6 +59,7 @@ fn open_validates_runtime_config() {
                 writer_id: "   ".to_owned(),
                 writer_version: "runtime-test/0.1.0".to_owned(),
                 lease_duration_ms: 5_000,
+                runtime_cache: RuntimeCacheConfig::default(),
             },
         ),
         "writer_id",
@@ -70,6 +71,7 @@ fn open_validates_runtime_config() {
                 writer_id: "runtime-test".to_owned(),
                 writer_version: "   ".to_owned(),
                 lease_duration_ms: 5_000,
+                runtime_cache: RuntimeCacheConfig::default(),
             },
         ),
         "writer_version",
@@ -81,6 +83,7 @@ fn open_validates_runtime_config() {
                 writer_id: "runtime-test".to_owned(),
                 writer_version: "runtime-test/0.1.0".to_owned(),
                 lease_duration_ms: 0,
+                runtime_cache: RuntimeCacheConfig::default(),
             },
         ),
         "lease_duration_ms",
@@ -153,6 +156,104 @@ fn filesystem_operations_match_core_semantics() {
             .bytes,
         b"updated"
     );
+}
+
+#[test]
+fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("basis-cache-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .expect("create docs");
+
+    raw_store.reset_wal_get_count();
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("first stat should load basis");
+    assert_eq!(raw_store.wal_get_count(), 1);
+
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("second stat should reuse cached basis");
+    assert_eq!(raw_store.wal_get_count(), 1);
+
+    fs.create_dir(&namespace_id, "/other", CreateDirOptions::default())
+        .expect("create other");
+    raw_store.reset_wal_get_count();
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("stat after mutation should reload basis");
+    assert!(raw_store.wal_get_count() > 0);
+}
+
+#[test]
+fn runtime_cache_can_be_disabled() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("basis-cache-disabled-test")
+        .runtime_cache(RuntimeCacheConfig::disabled())
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .expect("create docs");
+
+    raw_store.reset_wal_get_count();
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("first stat should load basis");
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("second stat should load basis again");
+    assert_eq!(raw_store.wal_get_count(), 2);
+}
+
+#[test]
+fn stale_head_write_error_invalidates_runtime_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("basis-cache-stale-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .expect("create docs");
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("prime basis cache");
+
+    raw_store.fail_head_cas();
+    assert_core_error_kind(
+        fs.create_dir(&namespace_id, "/stale", CreateDirOptions::default()),
+        CoreErrorKind::StaleHead,
+    );
+
+    raw_store.allow_head_cas();
+    raw_store.reset_wal_get_count();
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("read after stale head should reload basis");
+    assert!(raw_store.wal_get_count() > 0);
 }
 
 #[test]
@@ -581,7 +682,9 @@ fn separate_runtime_instances_share_object_store_state() {
 struct HeadCasFailureStore {
     inner: LocalFsStore,
     head_key: String,
+    wal_prefix: String,
     fail_head_cas: AtomicBool,
+    wal_get_count: AtomicUsize,
 }
 
 impl HeadCasFailureStore {
@@ -589,12 +692,26 @@ impl HeadCasFailureStore {
         Self {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             head_key: namespace_head(namespace),
+            wal_prefix: format!("namespaces/{namespace}/wal/"),
             fail_head_cas: AtomicBool::new(false),
+            wal_get_count: AtomicUsize::new(0),
         }
     }
 
     fn fail_head_cas(&self) {
         self.fail_head_cas.store(true, Ordering::SeqCst);
+    }
+
+    fn allow_head_cas(&self) {
+        self.fail_head_cas.store(false, Ordering::SeqCst);
+    }
+
+    fn reset_wal_get_count(&self) {
+        self.wal_get_count.store(0, Ordering::SeqCst);
+    }
+
+    fn wal_get_count(&self) -> usize {
+        self.wal_get_count.load(Ordering::SeqCst)
     }
 }
 
@@ -608,6 +725,9 @@ impl ObjectStore for HeadCasFailureStore {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        if key.starts_with(&self.wal_prefix) {
+            self.wal_get_count.fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.get(key, range)
     }
 
