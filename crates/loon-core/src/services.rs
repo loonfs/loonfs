@@ -602,7 +602,7 @@ pub(crate) fn semantic_commit_fingerprint_for_path_intent(
     let identity = match intent {
         PathMutationIntent::CreateDir { absolute_path, .. } => PathFingerprintInput::CreateDir {
             namespace_id: namespace_id.clone(),
-            absolute_path: absolute_path.clone(),
+            absolute_path: normalized_path_for_fingerprint(absolute_path)?,
         },
         PathMutationIntent::PutFile {
             absolute_path,
@@ -611,7 +611,7 @@ pub(crate) fn semantic_commit_fingerprint_for_path_intent(
             ..
         } => PathFingerprintInput::PutFile {
             namespace_id: namespace_id.clone(),
-            absolute_path: absolute_path.clone(),
+            absolute_path: normalized_path_for_fingerprint(absolute_path)?,
             behavior: *behavior,
             content_ref: content_ref.clone(),
         },
@@ -621,7 +621,7 @@ pub(crate) fn semantic_commit_fingerprint_for_path_intent(
             ..
         } => PathFingerprintInput::DeletePath {
             namespace_id: namespace_id.clone(),
-            absolute_path: absolute_path.clone(),
+            absolute_path: normalized_path_for_fingerprint(absolute_path)?,
             recursive: *recursive,
         },
         PathMutationIntent::MovePath {
@@ -631,19 +631,25 @@ pub(crate) fn semantic_commit_fingerprint_for_path_intent(
             ..
         } => PathFingerprintInput::MovePath {
             namespace_id: namespace_id.clone(),
-            from_path: from_path.clone(),
-            to_path: to_path.clone(),
+            from_path: normalized_path_for_fingerprint(from_path)?,
+            to_path: normalized_path_for_fingerprint(to_path)?,
             mode: *mode,
         },
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
         } => PathFingerprintInput::CopyFilePath {
             namespace_id: namespace_id.clone(),
-            from_path: from_path.clone(),
-            to_path: to_path.clone(),
+            from_path: normalized_path_for_fingerprint(from_path)?,
+            to_path: normalized_path_for_fingerprint(to_path)?,
         },
     };
     path_semantic_commit_fingerprint(&identity)
+}
+
+fn normalized_path_for_fingerprint(absolute_path: &str) -> Result<String, CoreError> {
+    Ok(parse_absolute_path_for_core(absolute_path)?
+        .as_str()
+        .to_owned())
 }
 
 pub fn put_file_bytes<S: ObjectStore + ?Sized>(

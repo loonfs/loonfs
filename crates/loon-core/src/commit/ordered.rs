@@ -7,7 +7,8 @@ use super::{
 use crate::invariants::INVARIANTS;
 use crate::metadata::MetadataState;
 use loon_api::{
-    name_key_for_display_name, ChangeSeq, ContentRef, InodeId, InodeKind, NamePolicy, RevisionNo,
+    name_key_for_display_name, ChangeSeq, ContentRef, DisplayName, InodeId, InodeKind, NamePolicy,
+    RevisionNo,
 };
 use std::collections::BTreeMap;
 
@@ -658,6 +659,7 @@ fn validate_child_name_absent(
     base_seq: ChangeSeq,
     name_policy: NamePolicy,
 ) -> Result<(), CommitValidationError> {
+    validate_display_name(display_name)?;
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
         .ok_or(CommitValidationError::CreateParentMissing { parent_inode })?;
@@ -912,6 +914,7 @@ fn validate_rename_target_name_absent(
     base_seq: ChangeSeq,
     name_policy: NamePolicy,
 ) -> Result<(), CommitValidationError> {
+    validate_display_name(display_name)?;
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
         .ok_or(CommitValidationError::RenameTargetParentMissing { parent_inode })?;
@@ -932,6 +935,14 @@ fn validate_rename_target_name_absent(
     }
 
     Ok(())
+}
+
+fn validate_display_name(display_name: &str) -> Result<(), CommitValidationError> {
+    DisplayName::parse(display_name).map(|_| ()).map_err(|_| {
+        CommitValidationError::InvalidDisplayName {
+            display_name: display_name.to_owned(),
+        }
+    })
 }
 
 fn validate_rename_does_not_cycle(
