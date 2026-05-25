@@ -16,6 +16,10 @@ use crate::namespace::catalog::{
 };
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{prepare_wal_segment, StoredWalObject};
+use crate::{
+    load_content_store_descriptor_control, load_namespace_descriptor_control,
+    load_namespace_head_control, load_namespace_lease_control,
+};
 use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitDelta, CommitRequest as ApiCommitRequest,
     CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
@@ -59,7 +63,7 @@ pub fn begin_upload<S: ObjectStore + ?Sized>(
     create_upload_session(store, namespace_id, context)
 }
 
-pub fn create_upload_session<S: ObjectStore + ?Sized>(
+fn create_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -96,7 +100,21 @@ fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
 ) -> Result<(), CoreError> {
     match namespace_initialization_state(store, namespace_id) {
-        Ok(NamespaceInitializationState::Complete) => Ok(()),
+        Ok(NamespaceInitializationState::Complete) => {
+            let descriptor =
+                load_namespace_descriptor_control(store, namespace_id).map_err(|error| {
+                    CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(error))
+                })?;
+            load_content_store_descriptor_control(store, &descriptor.state.content_store_id)
+                .map_err(|error| {
+                    CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(error))
+                })?;
+            load_namespace_head_control(store, namespace_id)
+                .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+            load_namespace_lease_control(store, namespace_id)
+                .map_err(|error| CoreError::Basis(BasisLoadError::LoadLease(error)))?;
+            Ok(())
+        }
         Ok(NamespaceInitializationState::Absent) => {
             Err(CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(
                 crate::loading::ControlObjectLoadError::MissingObject {

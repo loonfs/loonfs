@@ -34,8 +34,8 @@ pub use loading::{
     LoadedLeaseControl, LoadedNamespaceDescriptorControl,
 };
 pub use protocol::{
-    begin_upload, commit_operations, commit_operations_batch, complete_upload,
-    create_upload_session, list_changes_after, upload_content,
+    begin_upload, commit_operations, commit_operations_batch, complete_upload, list_changes_after,
+    upload_content,
 };
 pub use publisher::{
     publish_namespace_mutations_batch, DirectObjectStorePublisher, FlushPolicy,

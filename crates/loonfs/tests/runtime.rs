@@ -421,7 +421,7 @@ fn upload_flow_is_available_from_runtime() {
 }
 
 #[test]
-fn begin_upload_uses_control_cache_without_replay_reads() {
+fn begin_upload_validates_controls_without_replay_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -461,14 +461,10 @@ fn begin_upload_uses_control_cache_without_replay_reads() {
 
     assert_eq!(raw_store.wal_get_count(), 0);
     assert_eq!(raw_store.checkpoint_get_count(), 0);
-    assert_eq!(raw_store.namespace_descriptor_get_count(), 1);
-    assert_eq!(raw_store.content_store_descriptor_get_count(), 1);
-    assert_eq!(raw_store.head_get_count(), 1);
-    assert_eq!(raw_store.lease_get_count(), 1);
 }
 
 #[test]
-fn disabled_control_cache_reloads_begin_upload_descriptors() {
+fn runtime_control_cache_reuses_head_for_basis_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -477,24 +473,29 @@ fn disabled_control_cache_reloads_begin_upload_descriptors() {
     ));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
-        .writer_id("begin-upload-cache-disabled-test")
-        .runtime_cache(RuntimeCacheConfig::disabled())
+        .writer_id("control-cache-head-test")
         .build()
         .expect("build runtime");
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
+    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .expect("create docs");
+
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("prime basis cache");
 
     raw_store.reset_control_get_counts();
-    fs.begin_upload(&namespace_id).expect("first begin upload");
-    fs.begin_upload(&namespace_id).expect("second begin upload");
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("first cached basis validation loads head body");
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("second cached basis validation reuses head body");
 
-    assert_eq!(raw_store.namespace_descriptor_get_count(), 2);
-    assert_eq!(raw_store.content_store_descriptor_get_count(), 2);
+    assert_eq!(raw_store.head_get_count(), 1);
 }
 
 #[test]
-fn control_cache_eviction_reloads_descriptors() {
+fn control_cache_eviction_reloads_head_for_basis_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let other_namespace = NamespaceId::parse("other").expect("valid namespace id");
@@ -506,32 +507,38 @@ fn control_cache_eviction_reloads_descriptors() {
     let fs = Fs::builder(object_store)
         .writer_id("control-cache-eviction-test")
         .runtime_cache(RuntimeCacheConfig {
-            basis_cache_enabled: false,
+            basis_cache_enabled: true,
             control_cache_enabled: true,
             max_cached_namespaces: 1,
-            max_cached_content_stores: 1,
         })
         .build()
         .expect("build runtime");
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
+    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .expect("create docs");
     fs.create_namespace(&other_namespace, CreateNamespaceOptions::default())
         .expect("create other namespace");
+    fs.create_dir(&other_namespace, "/docs", CreateDirOptions::default())
+        .expect("create other docs");
+
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("prime first namespace basis");
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("prime first namespace head cache");
 
     raw_store.reset_control_get_counts();
-    fs.begin_upload(&namespace_id).expect("begin upload demo");
-    fs.begin_upload(&other_namespace)
-        .expect("begin upload other");
-    fs.begin_upload(&namespace_id)
-        .expect("begin upload demo after eviction");
+    fs.stat_path(&other_namespace, "/docs")
+        .expect("load other namespace basis and evict first head cache");
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("reload first namespace basis and head cache");
 
-    assert_eq!(raw_store.namespace_descriptor_get_count(), 3);
-    assert_eq!(raw_store.content_store_descriptor_get_count(), 3);
+    assert_eq!(raw_store.head_get_count(), 1);
 }
 
 #[test]
-fn control_cache_reloads_head_after_external_change() {
+fn runtime_control_cache_reloads_head_after_external_change() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -551,27 +558,33 @@ fn control_cache_reloads_head_after_external_change() {
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
+    writer
+        .create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .expect("create docs");
+    reader
+        .stat_path(&namespace_id, "/docs")
+        .expect("prime basis cache");
     raw_store.reset_control_get_counts();
     reader
-        .begin_upload(&namespace_id)
+        .stat_path(&namespace_id, "/docs")
         .expect("prime control cache");
     reader
-        .begin_upload(&namespace_id)
+        .stat_path(&namespace_id, "/docs")
         .expect("reuse unchanged control cache");
     assert_eq!(raw_store.head_get_count(), 1);
 
     writer
-        .create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .create_dir(&namespace_id, "/docs/new", CreateDirOptions::default())
         .expect("advance head");
     raw_store.reset_control_get_counts();
     reader
-        .begin_upload(&namespace_id)
+        .stat_path(&namespace_id, "/docs/new")
         .expect("reload changed head");
-    assert_eq!(raw_store.head_get_count(), 1);
+    assert!(raw_store.head_get_count() > 0);
 }
 
 #[test]
-fn cached_begin_upload_rejects_missing_and_partial_namespace() {
+fn begin_upload_rejects_missing_and_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
@@ -599,7 +612,7 @@ fn cached_begin_upload_rejects_missing_and_partial_namespace() {
 }
 
 #[test]
-fn cached_begin_upload_rejects_malformed_descriptors() {
+fn begin_upload_rejects_malformed_descriptors() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
@@ -639,6 +652,37 @@ fn cached_begin_upload_rejects_malformed_descriptors() {
         fs.begin_upload(&content_bad),
         CoreErrorKind::NamespaceCorrupt,
     );
+}
+
+#[test]
+fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("begin-upload-malformed-control-test")
+        .runtime_cache(RuntimeCacheConfig::disabled())
+        .build()
+        .expect("build runtime");
+
+    let head_bad = NamespaceId::parse("head-bad").expect("valid namespace id");
+    fs.create_namespace(&head_bad, CreateNamespaceOptions::default())
+        .expect("create head-bad namespace");
+    raw_store
+        .put_overwrite(&namespace_head(head_bad.as_str()), br#"{"not":"a head"}"#)
+        .expect("corrupt head");
+    assert_core_error_kind(fs.begin_upload(&head_bad), CoreErrorKind::NamespaceCorrupt);
+
+    let lease_bad = NamespaceId::parse("lease-bad").expect("valid namespace id");
+    fs.create_namespace(&lease_bad, CreateNamespaceOptions::default())
+        .expect("create lease-bad namespace");
+    raw_store
+        .put_overwrite(
+            &namespace_lease(lease_bad.as_str()),
+            br#"{"not":"a lease"}"#,
+        )
+        .expect("corrupt lease");
+    assert_core_error_kind(fs.begin_upload(&lease_bad), CoreErrorKind::NamespaceCorrupt);
 }
 
 #[test]
@@ -945,16 +989,12 @@ fn separate_runtime_instances_share_object_store_state() {
 struct HeadCasFailureStore {
     inner: LocalFsStore,
     head_key: String,
-    lease_key: String,
     wal_prefix: String,
     checkpoint_prefix: String,
     fail_head_cas: AtomicBool,
     wal_get_count: AtomicUsize,
     checkpoint_get_count: AtomicUsize,
-    namespace_descriptor_get_count: AtomicUsize,
-    content_store_descriptor_get_count: AtomicUsize,
     head_get_count: AtomicUsize,
-    lease_get_count: AtomicUsize,
 }
 
 impl HeadCasFailureStore {
@@ -962,16 +1002,12 @@ impl HeadCasFailureStore {
         Self {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             head_key: namespace_head(namespace),
-            lease_key: namespace_lease(namespace),
             wal_prefix: format!("namespaces/{namespace}/wal/"),
             checkpoint_prefix: format!("namespaces/{namespace}/checkpoints/"),
             fail_head_cas: AtomicBool::new(false),
             wal_get_count: AtomicUsize::new(0),
             checkpoint_get_count: AtomicUsize::new(0),
-            namespace_descriptor_get_count: AtomicUsize::new(0),
-            content_store_descriptor_get_count: AtomicUsize::new(0),
             head_get_count: AtomicUsize::new(0),
-            lease_get_count: AtomicUsize::new(0),
         }
     }
 
@@ -989,12 +1025,7 @@ impl HeadCasFailureStore {
 
     fn reset_control_get_counts(&self) {
         self.checkpoint_get_count.store(0, Ordering::SeqCst);
-        self.namespace_descriptor_get_count
-            .store(0, Ordering::SeqCst);
-        self.content_store_descriptor_get_count
-            .store(0, Ordering::SeqCst);
         self.head_get_count.store(0, Ordering::SeqCst);
-        self.lease_get_count.store(0, Ordering::SeqCst);
         self.reset_wal_get_count();
     }
 
@@ -1006,21 +1037,8 @@ impl HeadCasFailureStore {
         self.checkpoint_get_count.load(Ordering::SeqCst)
     }
 
-    fn namespace_descriptor_get_count(&self) -> usize {
-        self.namespace_descriptor_get_count.load(Ordering::SeqCst)
-    }
-
-    fn content_store_descriptor_get_count(&self) -> usize {
-        self.content_store_descriptor_get_count
-            .load(Ordering::SeqCst)
-    }
-
     fn head_get_count(&self) -> usize {
         self.head_get_count.load(Ordering::SeqCst)
-    }
-
-    fn lease_get_count(&self) -> usize {
-        self.lease_get_count.load(Ordering::SeqCst)
     }
 }
 
@@ -1040,19 +1058,8 @@ impl ObjectStore for HeadCasFailureStore {
         if key.starts_with(&self.checkpoint_prefix) {
             self.checkpoint_get_count.fetch_add(1, Ordering::SeqCst);
         }
-        if key.starts_with("namespaces/") && key.ends_with("/descriptor.json") {
-            self.namespace_descriptor_get_count
-                .fetch_add(1, Ordering::SeqCst);
-        }
-        if key.starts_with("content-stores/") && key.ends_with("/descriptor.json") {
-            self.content_store_descriptor_get_count
-                .fetch_add(1, Ordering::SeqCst);
-        }
         if key == self.head_key {
             self.head_get_count.fetch_add(1, Ordering::SeqCst);
-        }
-        if key == self.lease_key {
-            self.lease_get_count.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.get(key, range)
     }

@@ -9,23 +9,21 @@ pub use loon_api::v0::{
     CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
     UploadContentResponse,
 };
+use loon_api::HeadState;
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
     ContentRef, CreateCheckpointResponse, FilesystemOperationResponse, InodeId, MutationResult,
     NamespaceId, NamespaceSummary,
 };
-use loon_api::{
-    ContentStoreDescriptorState, ContentStoreId, HeadState, LeaseState, NamespaceDescriptorState,
-};
-use loon_core::{
-    BasisLoadError, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
-    LoadedLeaseControl, MutationContext, VerifiedNamespaceBasis,
-};
 pub use loon_core::{
     BootstrapNamespaceError, CoreError, CoreErrorKind, NamespaceMutationCandidate,
     PathMutationIntent, PutFileBehavior,
 };
-use loon_objectstore::keys::{namespace_head, namespace_lease};
+use loon_core::{
+    ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MutationContext,
+    VerifiedNamespaceBasis,
+};
+use loon_objectstore::keys::namespace_head;
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
@@ -69,7 +67,6 @@ pub struct RuntimeCacheConfig {
     pub basis_cache_enabled: bool,
     pub control_cache_enabled: bool,
     pub max_cached_namespaces: usize,
-    pub max_cached_content_stores: usize,
 }
 
 impl RuntimeCacheConfig {
@@ -78,7 +75,6 @@ impl RuntimeCacheConfig {
             basis_cache_enabled: false,
             control_cache_enabled: false,
             max_cached_namespaces: 0,
-            max_cached_content_stores: 0,
         }
     }
 }
@@ -89,7 +85,6 @@ impl Default for RuntimeCacheConfig {
             basis_cache_enabled: true,
             control_cache_enabled: true,
             max_cached_namespaces: 64,
-            max_cached_content_stores: 64,
         }
     }
 }
@@ -157,46 +152,20 @@ impl BasisCache {
 struct RuntimeControlCache {
     namespaces: HashMap<NamespaceId, NamespaceControlCacheEntry>,
     namespace_order: VecDeque<NamespaceId>,
-    content_stores: HashMap<ContentStoreId, Arc<ContentStoreDescriptorState>>,
-    content_store_order: VecDeque<ContentStoreId>,
 }
 
 #[derive(Debug, Default)]
 struct NamespaceControlCacheEntry {
-    descriptor: Option<Arc<NamespaceDescriptorState>>,
     head: Option<CachedControl<HeadState>>,
-    lease: Option<CachedControl<LeaseState>>,
 }
 
 #[derive(Debug, Clone)]
 struct CachedControl<T> {
     identity: ControlObjectIdentity,
-    state: Arc<T>,
+    _marker: std::marker::PhantomData<T>,
 }
 
 impl RuntimeControlCache {
-    fn namespace_descriptor(
-        &mut self,
-        namespace_id: &NamespaceId,
-    ) -> Option<Arc<NamespaceDescriptorState>> {
-        let descriptor = self.namespaces.get(namespace_id)?.descriptor.clone()?;
-        self.touch_namespace(namespace_id);
-        Some(descriptor)
-    }
-
-    fn insert_namespace_descriptor(
-        &mut self,
-        descriptor: Arc<NamespaceDescriptorState>,
-        max_cached_namespaces: usize,
-    ) {
-        if max_cached_namespaces == 0 {
-            return;
-        }
-        let namespace_id = descriptor.namespace_id.clone();
-        self.namespace_entry(&namespace_id, max_cached_namespaces)
-            .descriptor = Some(descriptor);
-    }
-
     fn namespace_head(&mut self, namespace_id: &NamespaceId) -> Option<CachedControl<HeadState>> {
         let head = self.namespaces.get(namespace_id)?.head.clone()?;
         self.touch_namespace(namespace_id);
@@ -216,60 +185,6 @@ impl RuntimeControlCache {
             .head = Some(head);
     }
 
-    fn namespace_lease(&mut self, namespace_id: &NamespaceId) -> Option<CachedControl<LeaseState>> {
-        let lease = self.namespaces.get(namespace_id)?.lease.clone()?;
-        self.touch_namespace(namespace_id);
-        Some(lease)
-    }
-
-    fn insert_namespace_lease(
-        &mut self,
-        namespace_id: &NamespaceId,
-        lease: CachedControl<LeaseState>,
-        max_cached_namespaces: usize,
-    ) {
-        if max_cached_namespaces == 0 {
-            return;
-        }
-        self.namespace_entry(namespace_id, max_cached_namespaces)
-            .lease = Some(lease);
-    }
-
-    fn content_store_descriptor(
-        &mut self,
-        content_store_id: &ContentStoreId,
-    ) -> Option<Arc<ContentStoreDescriptorState>> {
-        let descriptor = self.content_stores.get(content_store_id).cloned()?;
-        self.touch_content_store(content_store_id);
-        Some(descriptor)
-    }
-
-    fn insert_content_store_descriptor(
-        &mut self,
-        descriptor: Arc<ContentStoreDescriptorState>,
-        max_cached_content_stores: usize,
-    ) {
-        if max_cached_content_stores == 0 {
-            return;
-        }
-        let content_store_id = descriptor.content_store_id.clone();
-        self.content_stores
-            .insert(content_store_id.clone(), descriptor);
-        self.touch_content_store(&content_store_id);
-        while self.content_stores.len() > max_cached_content_stores {
-            let Some(evicted) = self.content_store_order.pop_front() else {
-                break;
-            };
-            self.content_stores.remove(&evicted);
-        }
-    }
-
-    fn invalidate_content_store(&mut self, content_store_id: &ContentStoreId) {
-        self.content_stores.remove(content_store_id);
-        self.content_store_order
-            .retain(|candidate| candidate != content_store_id);
-    }
-
     fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
         self.namespaces.remove(namespace_id);
         self.namespace_order
@@ -279,12 +194,6 @@ impl RuntimeControlCache {
     fn invalidate_namespace_head(&mut self, namespace_id: &NamespaceId) {
         if let Some(entry) = self.namespaces.get_mut(namespace_id) {
             entry.head = None;
-        }
-    }
-
-    fn invalidate_namespace_lease(&mut self, namespace_id: &NamespaceId) {
-        if let Some(entry) = self.namespaces.get_mut(namespace_id) {
-            entry.lease = None;
         }
     }
 
@@ -310,12 +219,6 @@ impl RuntimeControlCache {
         self.namespace_order
             .retain(|candidate| candidate != namespace_id);
         self.namespace_order.push_back(namespace_id.clone());
-    }
-
-    fn touch_content_store(&mut self, content_store_id: &ContentStoreId) {
-        self.content_store_order
-            .retain(|candidate| candidate != content_store_id);
-        self.content_store_order.push_back(content_store_id.clone());
     }
 }
 
@@ -744,20 +647,11 @@ impl Fs {
     }
 
     pub fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
-        if self.control_cache_enabled() {
-            self.ensure_upload_namespace_available_cached(namespace_id)?;
-            Ok(loon_core::create_upload_session(
-                self.store(),
-                namespace_id,
-                &self.mutation_context(),
-            )?)
-        } else {
-            Ok(loon_core::begin_upload(
-                self.store(),
-                namespace_id,
-                &self.mutation_context(),
-            )?)
-        }
+        Ok(loon_core::begin_upload(
+            self.store(),
+            namespace_id,
+            &self.mutation_context(),
+        )?)
     }
 
     pub fn upload_content(
@@ -876,149 +770,6 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    fn ensure_upload_namespace_available_cached(&self, namespace_id: &NamespaceId) -> Result<()> {
-        let descriptor = match self.load_namespace_descriptor_cached(namespace_id) {
-            Ok(descriptor) => descriptor,
-            Err(error) => {
-                return Err(self.namespace_descriptor_error_for_upload(namespace_id, error))
-            }
-        };
-        let head = self
-            .load_namespace_head_cached(namespace_id)
-            .map_err(|error| head_error_for_upload(namespace_id, error))?;
-        let lease = self
-            .load_namespace_lease_cached(namespace_id)
-            .map_err(|error| lease_error_for_upload(namespace_id, error))?;
-        debug_assert_eq!(head.state.namespace_id, *namespace_id);
-        debug_assert_eq!(lease.state.namespace_id, *namespace_id);
-        self.load_content_store_descriptor_cached(&descriptor.content_store_id)
-            .map_err(content_store_descriptor_error)?;
-        Ok(())
-    }
-
-    fn namespace_descriptor_error_for_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        error: ControlObjectLoadError,
-    ) -> RuntimeError {
-        match error {
-            ControlObjectLoadError::MissingObject { .. }
-            | ControlObjectLoadError::MissingObjectAfterHead { .. } => {
-                match self.namespace_head_or_lease_exists(namespace_id) {
-                    Ok(true) => RuntimeError::Core(CoreError::NamespacePartiallyInitialized {
-                        namespace_id: namespace_id.clone(),
-                    }),
-                    Ok(false) => namespace_descriptor_error(error),
-                    Err(error) => error,
-                }
-            }
-            error => namespace_descriptor_error(error),
-        }
-    }
-
-    fn namespace_head_or_lease_exists(&self, namespace_id: &NamespaceId) -> Result<bool> {
-        let head_exists = self
-            .store()
-            .head(&namespace_head(namespace_id.as_str()))
-            .map_err(|error| RuntimeError::Core(CoreError::Store(error.to_string())))?
-            .is_some();
-        let lease_exists = self
-            .store()
-            .head(&namespace_lease(namespace_id.as_str()))
-            .map_err(|error| RuntimeError::Core(CoreError::Store(error.to_string())))?
-            .is_some();
-        Ok(head_exists || lease_exists)
-    }
-
-    fn load_namespace_descriptor_cached(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> std::result::Result<Arc<NamespaceDescriptorState>, ControlObjectLoadError> {
-        let cache_config = &self.inner.config.runtime_cache;
-        if !self.control_cache_enabled() {
-            return loon_core::load_namespace_descriptor_control(self.store(), namespace_id)
-                .map(|loaded| Arc::new(loaded.state));
-        }
-
-        let cached = self
-            .inner
-            .control_cache
-            .lock()
-            .expect("control cache lock poisoned")
-            .namespace_descriptor(namespace_id);
-        if let Some(descriptor) = cached {
-            return Ok(descriptor);
-        }
-
-        let loaded = match loon_core::load_namespace_descriptor_control(self.store(), namespace_id)
-        {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                self.invalidate_namespace_cache(namespace_id);
-                return Err(error);
-            }
-        };
-        let descriptor = Arc::new(loaded.state);
-        self.inner
-            .control_cache
-            .lock()
-            .expect("control cache lock poisoned")
-            .insert_namespace_descriptor(
-                Arc::clone(&descriptor),
-                cache_config.max_cached_namespaces,
-            );
-        Ok(descriptor)
-    }
-
-    fn load_content_store_descriptor_cached(
-        &self,
-        content_store_id: &ContentStoreId,
-    ) -> std::result::Result<Arc<ContentStoreDescriptorState>, ControlObjectLoadError> {
-        let cache_config = &self.inner.config.runtime_cache;
-        if !cache_config.control_cache_enabled || cache_config.max_cached_content_stores == 0 {
-            return loon_core::load_content_store_descriptor_control(
-                self.store(),
-                content_store_id,
-            )
-            .map(|loaded| Arc::new(loaded.state));
-        }
-
-        let cached = self
-            .inner
-            .control_cache
-            .lock()
-            .expect("control cache lock poisoned")
-            .content_store_descriptor(content_store_id);
-        if let Some(descriptor) = cached {
-            return Ok(descriptor);
-        }
-
-        let loaded = match loon_core::load_content_store_descriptor_control(
-            self.store(),
-            content_store_id,
-        ) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                self.inner
-                    .control_cache
-                    .lock()
-                    .expect("control cache lock poisoned")
-                    .invalidate_content_store(content_store_id);
-                return Err(error);
-            }
-        };
-        let descriptor = Arc::new(loaded.state);
-        self.inner
-            .control_cache
-            .lock()
-            .expect("control cache lock poisoned")
-            .insert_content_store_descriptor(
-                Arc::clone(&descriptor),
-                cache_config.max_cached_content_stores,
-            );
-        Ok(descriptor)
-    }
-
     fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
@@ -1080,69 +831,6 @@ impl Fs {
                 cache_config.max_cached_namespaces,
             );
         Ok(head)
-    }
-
-    fn load_namespace_lease_cached(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> std::result::Result<CachedControl<LeaseState>, ControlObjectLoadError> {
-        let cache_config = &self.inner.config.runtime_cache;
-        if !self.control_cache_enabled() {
-            return loon_core::load_namespace_lease_control(self.store(), namespace_id)
-                .map(cached_lease);
-        }
-
-        let cached = self
-            .inner
-            .control_cache
-            .lock()
-            .expect("control cache lock poisoned")
-            .namespace_lease(namespace_id);
-        if let Some(lease) = cached {
-            match self.cached_control_identity_matches(
-                &namespace_lease(namespace_id.as_str()),
-                &lease.identity,
-            ) {
-                Ok(true) => return Ok(lease),
-                Ok(false) => self
-                    .inner
-                    .control_cache
-                    .lock()
-                    .expect("control cache lock poisoned")
-                    .invalidate_namespace_lease(namespace_id),
-                Err(error) => {
-                    self.inner
-                        .control_cache
-                        .lock()
-                        .expect("control cache lock poisoned")
-                        .invalidate_namespace_lease(namespace_id);
-                    return Err(error);
-                }
-            }
-        }
-
-        let loaded = match loon_core::load_namespace_lease_control(self.store(), namespace_id) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                self.inner
-                    .control_cache
-                    .lock()
-                    .expect("control cache lock poisoned")
-                    .invalidate_namespace_lease(namespace_id);
-                return Err(error);
-            }
-        };
-        let lease = cached_lease(loaded);
-        self.inner
-            .control_cache
-            .lock()
-            .expect("control cache lock poisoned")
-            .insert_namespace_lease(
-                namespace_id,
-                lease.clone(),
-                cache_config.max_cached_namespaces,
-            );
-        Ok(lease)
     }
 
     fn cached_control_identity_matches(
@@ -1277,56 +965,7 @@ impl Fs {
 fn cached_head(loaded: LoadedHeadControl) -> CachedControl<HeadState> {
     CachedControl {
         identity: loaded.identity,
-        state: Arc::new(loaded.state),
-    }
-}
-
-fn cached_lease(loaded: LoadedLeaseControl) -> CachedControl<LeaseState> {
-    CachedControl {
-        identity: loaded.identity,
-        state: Arc::new(loaded.state),
-    }
-}
-
-fn namespace_descriptor_error(error: ControlObjectLoadError) -> RuntimeError {
-    RuntimeError::Core(CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(
-        error,
-    )))
-}
-
-fn content_store_descriptor_error(error: ControlObjectLoadError) -> RuntimeError {
-    RuntimeError::Core(CoreError::Basis(
-        BasisLoadError::LoadContentStoreDescriptor(error),
-    ))
-}
-
-fn head_error_for_upload(
-    namespace_id: &NamespaceId,
-    error: ControlObjectLoadError,
-) -> RuntimeError {
-    match error {
-        ControlObjectLoadError::MissingObject { .. }
-        | ControlObjectLoadError::MissingObjectAfterHead { .. } => {
-            RuntimeError::Core(CoreError::NamespacePartiallyInitialized {
-                namespace_id: namespace_id.clone(),
-            })
-        }
-        error => RuntimeError::Core(CoreError::Basis(BasisLoadError::LoadHead(error))),
-    }
-}
-
-fn lease_error_for_upload(
-    namespace_id: &NamespaceId,
-    error: ControlObjectLoadError,
-) -> RuntimeError {
-    match error {
-        ControlObjectLoadError::MissingObject { .. }
-        | ControlObjectLoadError::MissingObjectAfterHead { .. } => {
-            RuntimeError::Core(CoreError::NamespacePartiallyInitialized {
-                namespace_id: namespace_id.clone(),
-            })
-        }
-        error => RuntimeError::Core(CoreError::Basis(BasisLoadError::LoadLease(error))),
+        _marker: std::marker::PhantomData,
     }
 }
 
