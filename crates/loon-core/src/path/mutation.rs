@@ -1,17 +1,11 @@
 use super::helpers::validate_path_for_mutation;
+use super::intent::{PathMutationIntent, PutFileBehavior};
+use crate::content::store_bytes_as_content;
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::publisher::{DirectObjectStorePublisher, PathMutationIntent, PublishOptions};
-use crate::services::store_bytes_as_content;
+use crate::publisher::{DirectObjectStorePublisher, PublishOptions};
 use loon_api::{v0::RenameMode, CommitId, ContentRef, MutationResult, NamespaceId};
 use loon_objectstore::ObjectStore;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PutFileBehavior {
-    CreateOnly,
-    ReplaceExisting,
-}
 
 fn generated_commit_id() -> CommitId {
     CommitId::generate()

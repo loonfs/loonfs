@@ -1,14 +1,13 @@
 use super::helpers::{
     final_component, lookup_path, parse_absolute_path_for_core, parse_mutation_path,
 };
-use super::mutation::PutFileBehavior;
+use super::intent::{PathMutationIntent, PutFileBehavior};
 use super::tombstone::reject_tombstoned_path_ancestor;
-use crate::basis::load_verified_namespace_basis;
+use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::commit::SemanticCommitFingerprint;
 use crate::content::validate_durable_content_reference;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
-use crate::publisher::{PathMutationIntent, PlannedPathMutation};
 use loon_api::{
     payload_checksum_sha256,
     v0::{
@@ -20,6 +19,65 @@ use loon_api::{
 };
 use loon_objectstore::ObjectStore;
 use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedPathMutation {
+    pub commit_id: CommitId,
+    pub semantic_commit_fingerprint: SemanticCommitFingerprint,
+    pub commit_request: ApiCommitRequest,
+}
+
+pub(crate) struct PathPlanner<'a, S: ObjectStore + ?Sized> {
+    store: &'a S,
+}
+
+impl<'a, S: ObjectStore + ?Sized> PathPlanner<'a, S> {
+    pub(crate) fn new(store: &'a S) -> Self {
+        Self { store }
+    }
+
+    pub(crate) fn plan_against_basis(
+        &self,
+        namespace_id: &NamespaceId,
+        intent: &PathMutationIntent,
+    ) -> Result<PlannedPathMutation, CoreError> {
+        let basis = load_verified_namespace_basis(self.store, namespace_id)?;
+        self.plan_against_verified_basis(namespace_id, intent, &basis)
+    }
+
+    pub(crate) fn plan_against_verified_basis(
+        &self,
+        namespace_id: &NamespaceId,
+        intent: &PathMutationIntent,
+        basis: &VerifiedNamespaceBasis,
+    ) -> Result<PlannedPathMutation, CoreError> {
+        self.plan_against_state(
+            namespace_id,
+            intent,
+            &basis.head,
+            &basis.metadata_state,
+            &basis.content_store_id,
+        )
+    }
+
+    pub(crate) fn plan_against_state(
+        &self,
+        namespace_id: &NamespaceId,
+        intent: &PathMutationIntent,
+        head: &HeadState,
+        metadata_state: &MetadataState,
+        content_store_id: &ContentStoreId,
+    ) -> Result<PlannedPathMutation, CoreError> {
+        plan_path_mutation_against_state(
+            self.store,
+            namespace_id,
+            intent,
+            head,
+            metadata_state,
+            content_store_id,
+        )
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -115,22 +173,6 @@ fn normalized_path_for_fingerprint(absolute_path: &str) -> Result<String, CoreEr
     Ok(parse_absolute_path_for_core(absolute_path)?
         .as_str()
         .to_owned())
-}
-
-pub(crate) fn plan_path_mutation<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    intent: &PathMutationIntent,
-) -> Result<PlannedPathMutation, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
-    plan_path_mutation_against_state(
-        store,
-        namespace_id,
-        intent,
-        &basis.head,
-        &basis.metadata_state,
-        &basis.content_store_id,
-    )
 }
 
 pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
@@ -669,4 +711,265 @@ fn resolve_parent_directory(
         });
     }
     Ok(resolved.inode_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::MutationContext;
+    use crate::error::CoreErrorKind;
+    use crate::services::{
+        bootstrap_namespace, delete_path, put_file_bytes, store_bytes_as_content,
+    };
+    use loon_api::v0::{CommitOp, CommitPrecondition};
+    use loon_api::RevisionNo;
+    use loon_objectstore::fs::LocalFsStore;
+    use tempfile::tempdir;
+
+    fn test_context() -> MutationContext {
+        MutationContext {
+            writer_id: "writer".to_owned(),
+            writer_version: "test".to_owned(),
+            now_ms: 1,
+            lease_duration_ms: 60_000,
+        }
+    }
+
+    fn setup_namespace() -> (
+        tempfile::TempDir,
+        LocalFsStore,
+        NamespaceId,
+        MutationContext,
+    ) {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::from("demo");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        (temp_dir, store, namespace_id, context)
+    }
+
+    fn plan_against_current_state(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        intent: &PathMutationIntent,
+    ) -> PlannedPathMutation {
+        let basis = load_verified_namespace_basis(store, namespace_id).expect("basis");
+        PathPlanner::new(store)
+            .plan_against_state(
+                namespace_id,
+                intent,
+                &basis.head,
+                &basis.metadata_state,
+                &basis.content_store_id,
+            )
+            .expect("plan")
+    }
+
+    #[test]
+    fn create_dir_plan_contains_semantic_op_and_target_absence_precondition() {
+        let (_temp_dir, store, namespace_id, _context) = setup_namespace();
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &PathMutationIntent::CreateDir {
+                commit_id: CommitId::from("mkdir-docs"),
+                absolute_path: "/docs".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            planned.commit_request.ops,
+            vec![CommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: "docs".to_owned(),
+            }]
+        );
+        assert!(planned
+            .commit_request
+            .preconditions
+            .iter()
+            .any(|precondition| matches!(
+                precondition,
+                CommitPrecondition::ChildNameAbsent {
+                    parent_inode: InodeId(1),
+                    name_key,
+                } if name_key == "docs"
+            )));
+    }
+
+    #[test]
+    fn put_file_plan_auto_creates_missing_parent_directories() {
+        let (_temp_dir, store, namespace_id, _context) = setup_namespace();
+        let staged = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage");
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &PathMutationIntent::PutFile {
+                commit_id: CommitId::from("put-nested"),
+                absolute_path: "/docs/nested/a.txt".to_owned(),
+                content_ref: staged.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            },
+        );
+
+        assert_eq!(planned.commit_request.ops.len(), 3);
+        assert!(matches!(
+            &planned.commit_request.ops[0],
+            CommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name,
+            } if display_name == "docs"
+        ));
+        assert!(matches!(
+            &planned.commit_request.ops[1],
+            CommitOp::CreateDir { display_name, .. } if display_name == "nested"
+        ));
+        assert!(matches!(
+            &planned.commit_request.ops[2],
+            CommitOp::CreateFile {
+                display_name,
+                content_ref,
+                ..
+            } if display_name == "a.txt" && content_ref == &staged.content_ref
+        ));
+    }
+
+    #[test]
+    fn move_path_plan_contains_binding_and_target_absence_preconditions() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace();
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/a.txt",
+            b"hello",
+            PutFileBehavior::CreateOnly,
+            &context,
+            Some("seed-file"),
+        )
+        .expect("seed file");
+
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &PathMutationIntent::MovePath {
+                commit_id: CommitId::from("move-file"),
+                from_path: "/docs/a.txt".to_owned(),
+                to_path: "/docs/b.txt".to_owned(),
+                mode: RenameMode::NoReplace,
+            },
+        );
+
+        assert!(matches!(
+            planned.commit_request.ops.as_slice(),
+            [CommitOp::Rename {
+                new_display_name,
+                mode: RenameMode::NoReplace,
+                ..
+            }] if new_display_name == "b.txt"
+        ));
+        assert!(planned
+            .commit_request
+            .preconditions
+            .iter()
+            .any(|precondition| matches!(precondition, CommitPrecondition::BindingIs { .. })));
+        assert!(planned
+            .commit_request
+            .preconditions
+            .iter()
+            .any(|precondition| matches!(
+                precondition,
+                CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key == "b.txt"
+            )));
+    }
+
+    #[test]
+    fn copy_file_plan_validates_source_revision_and_target_absence() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace();
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/a.txt",
+            b"hello",
+            PutFileBehavior::CreateOnly,
+            &context,
+            Some("seed-copy-source"),
+        )
+        .expect("seed file");
+
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &PathMutationIntent::CopyFilePath {
+                commit_id: CommitId::from("copy-file"),
+                from_path: "/docs/a.txt".to_owned(),
+                to_path: "/docs/copy.txt".to_owned(),
+            },
+        );
+
+        assert!(matches!(
+            planned.commit_request.ops.as_slice(),
+            [CommitOp::CreateFile { display_name, .. }] if display_name == "copy.txt"
+        ));
+        assert!(planned
+            .commit_request
+            .preconditions
+            .iter()
+            .any(|precondition| matches!(
+                precondition,
+                CommitPrecondition::InodeRevisionIs {
+                    revision_no: RevisionNo(1),
+                    ..
+                }
+            )));
+        assert!(planned
+            .commit_request
+            .preconditions
+            .iter()
+            .any(|precondition| matches!(
+                precondition,
+                CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key == "copy.txt"
+            )));
+    }
+
+    #[test]
+    fn tombstoned_ancestor_blocks_descendant_planning() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace();
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/dead/file.txt",
+            b"hello",
+            PutFileBehavior::CreateOnly,
+            &context,
+            Some("seed-dead-tree"),
+        )
+        .expect("seed file");
+        delete_path(
+            &store,
+            &namespace_id,
+            "/dead",
+            &context,
+            Some("delete-dead-tree"),
+        )
+        .expect("delete tree");
+        let staged = store_bytes_as_content(&store, &namespace_id, b"new").expect("stage");
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let error = PathPlanner::new(&store)
+            .plan_against_state(
+                &namespace_id,
+                &PathMutationIntent::PutFile {
+                    commit_id: CommitId::from("put-under-dead"),
+                    absolute_path: "/dead/new.txt".to_owned(),
+                    content_ref: staged.content_ref,
+                    behavior: PutFileBehavior::CreateOnly,
+                },
+                &basis.head,
+                &basis.metadata_state,
+                &basis.content_store_id,
+            )
+            .expect_err("tombstoned ancestor");
+
+        assert_eq!(error.kind(), CoreErrorKind::TombstoneConflict);
+    }
 }
