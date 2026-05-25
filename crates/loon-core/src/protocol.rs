@@ -56,6 +56,14 @@ pub fn begin_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<BeginUploadResponse, CoreError> {
     ensure_upload_namespace_available(store, namespace_id)?;
+    create_upload_session(store, namespace_id, context)
+}
+
+pub fn create_upload_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<BeginUploadResponse, CoreError> {
     let upload_id = generate_upload_id();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
