@@ -668,10 +668,11 @@ fn validate_child_name_absent(
         });
     }
 
-    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
+    let name_key = name_key_for_display_name(name_policy, display_name);
+    if let Some(existing) = metadata_state.visible_child(parent_inode, &name_key, base_seq) {
         return Err(CommitValidationError::CreateChildNameCollision {
             parent_inode,
-            name_key: name_key_for_display_name(name_policy, display_name),
+            name_key,
             child_inode: existing.child_inode_id,
         });
     }
@@ -921,10 +922,11 @@ fn validate_rename_target_name_absent(
         });
     }
 
-    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
+    let name_key = name_key_for_display_name(name_policy, display_name);
+    if let Some(existing) = metadata_state.visible_child(parent_inode, &name_key, base_seq) {
         return Err(CommitValidationError::RenameTargetNameCollision {
             parent_inode,
-            name_key: name_key_for_display_name(name_policy, display_name),
+            name_key,
             child_inode: existing.child_inode_id,
         });
     }

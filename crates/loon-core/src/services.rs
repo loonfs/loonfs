@@ -18,16 +18,16 @@ use crate::publisher::{
     DirectObjectStorePublisher, PathMutationIntent, PlannedPathMutation, PublishOptions,
 };
 use loon_api::{
-    name_key_for_display_name, payload_checksum_sha256,
+    payload_checksum_sha256,
     v0::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
         CommitRequest as ApiCommitRequest, RenameMode,
     },
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef,
+    AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef,
     ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
-    FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState, LeaseStateEnvelope,
-    MutationResult, NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId,
-    NamespaceIdValidationError, NamespaceSummary,
+    DisplayName, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind, LeaseState,
+    LeaseStateEnvelope, MutationResult, NameKey, NamespaceDescriptorEnvelope,
+    NamespaceDescriptorState, NamespaceId, NamespaceIdValidationError, NamespaceSummary, PathError,
 };
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
@@ -408,9 +408,12 @@ pub fn resolve_path_from_basis<S: ObjectStore + ?Sized>(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
-    let resolved = basis
-        .metadata_state
-        .resolve_visible_path(absolute_path, basis.head.seq)?;
+    let absolute_path = parse_absolute_path_for_core(absolute_path)?;
+    let resolved = basis.metadata_state.resolve_visible_path(
+        &absolute_path,
+        basis.head.name_policy,
+        basis.head.seq,
+    )?;
     build_authoritative_path_entry(
         store,
         &basis.head.namespace_id,
@@ -435,9 +438,12 @@ pub fn list_path_from_basis<S: ObjectStore + ?Sized>(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
-    let resolved = basis
-        .metadata_state
-        .resolve_visible_path(absolute_path, basis.head.seq)?;
+    let absolute_path = parse_absolute_path_for_core(absolute_path)?;
+    let resolved = basis.metadata_state.resolve_visible_path(
+        &absolute_path,
+        basis.head.name_policy,
+        basis.head.seq,
+    )?;
     if resolved.inode_kind == InodeKind::File {
         return Ok(vec![build_authoritative_path_entry(
             store,
@@ -464,6 +470,9 @@ pub fn list_path_from_basis<S: ObjectStore + ?Sized>(
                 .metadata_state
                 .visible_inode(direntry.child_inode_id, basis.head.seq)
                 .expect("visible child listing should resolve inode");
+            let child_path = AbsolutePath::parse(&resolved.absolute_path)
+                .map_err(map_path_error_to_core)?
+                .join(&DisplayName::parse(&direntry.display_name).map_err(map_path_error_to_core)?);
             build_authoritative_path_entry(
                 store,
                 &basis.head.namespace_id,
@@ -471,10 +480,7 @@ pub fn list_path_from_basis<S: ObjectStore + ?Sized>(
                 basis.head.seq,
                 &basis.metadata_state,
                 &ResolvedVisiblePath {
-                    absolute_path: join_absolute_path(
-                        &resolved.absolute_path,
-                        &direntry.display_name,
-                    ),
+                    absolute_path: child_path.as_str().to_owned(),
                     inode_id: direntry.child_inode_id,
                     inode_kind: child.inode_kind,
                     parent_inode_id: Some(direntry.parent_inode_id),
@@ -829,9 +835,12 @@ fn child_name_absent_precondition(
     parent_inode: InodeId,
     display_name: &str,
 ) -> ApiCommitPrecondition {
+    let display_name =
+        DisplayName::parse(display_name).expect("path planner should provide valid display name");
+    let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
     ApiCommitPrecondition::ChildNameAbsent {
         parent_inode,
-        name_key: name_key_for_display_name(view.head.name_policy, display_name),
+        name_key: name_key.as_str().to_owned(),
     }
 }
 
@@ -840,13 +849,32 @@ fn plan_create_dir(
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    validate_path_for_mutation(absolute_path)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, absolute_path, view.head.seq)?;
-    if lookup_path(view.metadata_state, absolute_path, view.head.seq).is_ok() {
-        return Err(CoreError::DestinationExists(absolute_path.to_owned()));
+    let absolute_path = parse_mutation_path(absolute_path)?;
+    reject_tombstoned_path_ancestor(
+        view.metadata_state,
+        &absolute_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    if lookup_path(
+        view.metadata_state,
+        &absolute_path,
+        view.head.name_policy,
+        view.head.seq,
+    )
+    .is_ok()
+    {
+        return Err(CoreError::DestinationExists(
+            absolute_path.as_str().to_owned(),
+        ));
     }
-    let parent_inode = resolve_parent_directory(view.metadata_state, absolute_path, view.head.seq)?;
-    let display_name = final_component(absolute_path)?;
+    let parent_inode = resolve_parent_directory(
+        view.metadata_state,
+        &absolute_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    let display_name = final_component(&absolute_path)?;
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::CreateDir {
@@ -872,18 +900,28 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    validate_path_for_mutation(absolute_path)?;
+    let absolute_path = parse_mutation_path(absolute_path)?;
     let _validated =
         validate_durable_content_reference(store, view.content_store_id, &content_ref)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, absolute_path, view.head.seq)?;
-    let target = lookup_path(view.metadata_state, absolute_path, view.head.seq);
+    reject_tombstoned_path_ancestor(
+        view.metadata_state,
+        &absolute_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    let target = lookup_path(
+        view.metadata_state,
+        &absolute_path,
+        view.head.name_policy,
+        view.head.seq,
+    );
 
     let mut ops = Vec::new();
     let mut working = view.metadata_state.clone();
     let mut next_inode_id = view.head.next_inode_id;
     let mut op_index = 0u32;
     let final_parent_inode = ensure_parent_directories(
-        absolute_path,
+        &absolute_path,
         view.head.seq,
         view.head.name_policy,
         &mut working,
@@ -891,24 +929,26 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
         &mut next_inode_id,
         &mut op_index,
     )?;
-    let final_name = final_component(absolute_path)?;
+    let final_name = final_component(&absolute_path)?;
     let mut preconditions = Vec::new();
 
     match target {
         Ok(existing) => {
             if behavior == PutFileBehavior::CreateOnly {
-                return Err(CoreError::DestinationExists(absolute_path.to_owned()));
+                return Err(CoreError::DestinationExists(
+                    absolute_path.as_str().to_owned(),
+                ));
             }
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
-                    path: absolute_path.to_owned(),
+                    path: absolute_path.as_str().to_owned(),
                     kind: existing.inode_kind,
                 });
             }
             let revision = view
                 .metadata_state
                 .latest_revision_head_at_seq(existing.inode_id, view.head.seq)
-                .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
+                .ok_or_else(|| CoreError::MissingPath(absolute_path.as_str().to_owned()))?;
             preconditions.push(binding_is_precondition(view, &existing)?);
             ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
@@ -1049,10 +1089,12 @@ fn plan_delete_path(
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    validate_path_for_mutation(absolute_path)?;
-    let resolved = view
-        .metadata_state
-        .resolve_visible_path(absolute_path, view.head.seq)?;
+    let absolute_path = parse_mutation_path(absolute_path)?;
+    let resolved = view.metadata_state.resolve_visible_path(
+        &absolute_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
     let op = match resolved.inode_kind {
         InodeKind::File => ApiCommitOp::DeleteFile {
             inode_id: resolved.inode_id,
@@ -1065,7 +1107,9 @@ fn plan_delete_path(
                 .metadata_state
                 .visible_children(resolved.inode_id, view.head.seq);
             if !children.is_empty() {
-                return Err(CoreError::DirectoryNotEmpty(absolute_path.to_owned()));
+                return Err(CoreError::DirectoryNotEmpty(
+                    absolute_path.as_str().to_owned(),
+                ));
             }
             ApiCommitOp::DeleteSubtree {
                 root_inode: resolved.inode_id,
@@ -1099,17 +1143,41 @@ fn plan_move_path(
             crate::commit::CommitValidationError::UnsupportedRenameMode { mode },
         ));
     }
-    validate_path_for_mutation(from_path)?;
-    validate_path_for_mutation(to_path)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, from_path, view.head.seq)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, to_path, view.head.seq)?;
-    let source = view
-        .metadata_state
-        .resolve_visible_path(from_path, view.head.seq)?;
-    let target_parent = resolve_parent_directory(view.metadata_state, to_path, view.head.seq)?;
-    let target_name = final_component(to_path)?;
-    if lookup_path(view.metadata_state, to_path, view.head.seq).is_ok() {
-        return Err(CoreError::DestinationExists(to_path.to_owned()));
+    let from_path = parse_mutation_path(from_path)?;
+    let to_path = parse_mutation_path(to_path)?;
+    reject_tombstoned_path_ancestor(
+        view.metadata_state,
+        &from_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    reject_tombstoned_path_ancestor(
+        view.metadata_state,
+        &to_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    let source = view.metadata_state.resolve_visible_path(
+        &from_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    let target_parent = resolve_parent_directory(
+        view.metadata_state,
+        &to_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    let target_name = final_component(&to_path)?;
+    if lookup_path(
+        view.metadata_state,
+        &to_path,
+        view.head.name_policy,
+        view.head.seq,
+    )
+    .is_ok()
+    {
+        return Err(CoreError::DestinationExists(to_path.as_str().to_owned()));
     }
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
@@ -1141,34 +1209,58 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
 ) -> Result<ApiCommitRequest, CoreError> {
-    validate_path_for_mutation(from_path)?;
-    validate_path_for_mutation(to_path)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, from_path, view.head.seq)?;
-    reject_tombstoned_path_ancestor(view.metadata_state, to_path, view.head.seq)?;
+    let from_path = parse_mutation_path(from_path)?;
+    let to_path = parse_mutation_path(to_path)?;
+    reject_tombstoned_path_ancestor(
+        view.metadata_state,
+        &from_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    reject_tombstoned_path_ancestor(
+        view.metadata_state,
+        &to_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
 
-    let source = view
-        .metadata_state
-        .resolve_visible_path(from_path, view.head.seq)?;
+    let source = view.metadata_state.resolve_visible_path(
+        &from_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
     if source.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
-            path: from_path.to_owned(),
+            path: from_path.as_str().to_owned(),
             kind: source.inode_kind,
         });
     }
 
-    if lookup_path(view.metadata_state, to_path, view.head.seq).is_ok() {
-        return Err(CoreError::DestinationExists(to_path.to_owned()));
+    if lookup_path(
+        view.metadata_state,
+        &to_path,
+        view.head.name_policy,
+        view.head.seq,
+    )
+    .is_ok()
+    {
+        return Err(CoreError::DestinationExists(to_path.as_str().to_owned()));
     }
 
     let revision = view
         .metadata_state
         .latest_revision_head_at_seq(source.inode_id, view.head.seq)
-        .ok_or_else(|| CoreError::MissingPath(from_path.to_owned()))?;
+        .ok_or_else(|| CoreError::MissingPath(from_path.as_str().to_owned()))?;
     let _validated =
         validate_durable_content_reference(store, view.content_store_id, &revision.content_ref)?;
 
-    let target_parent = resolve_parent_directory(view.metadata_state, to_path, view.head.seq)?;
-    let target_name = final_component(to_path)?;
+    let target_parent = resolve_parent_directory(
+        view.metadata_state,
+        &to_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    let target_name = final_component(&to_path)?;
     Ok(ApiCommitRequest {
         commit_id: commit_id.to_owned(),
         ops: vec![ApiCommitOp::CreateFile {
@@ -1196,7 +1288,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
 }
 
 fn ensure_parent_directories(
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
     committed_seq: ChangeSeq,
     name_policy: loon_api::NamePolicy,
     working: &mut MetadataState,
@@ -1204,19 +1296,24 @@ fn ensure_parent_directories(
     next_inode_id: &mut InodeId,
     op_index: &mut u32,
 ) -> Result<InodeId, CoreError> {
-    let components = path_components(absolute_path)?;
+    let components = absolute_path.components();
     if components.len() <= 1 {
         return Ok(InodeId(1));
     }
 
     let mut current_inode = InodeId(1);
     for component in &components[..components.len() - 1] {
-        if let Some(child) = working.visible_child(current_inode, component, committed_seq) {
+        let display_name = component.to_display_name();
+        let name_key = NameKey::for_display_name(name_policy, &display_name);
+        if let Some(child) = working.visible_child(current_inode, name_key.as_str(), committed_seq)
+        {
             let inode = working
                 .visible_inode(child.child_inode_id, committed_seq)
-                .ok_or_else(|| CoreError::MissingPath(component.clone()))?;
+                .ok_or_else(|| CoreError::MissingPath(component.as_str().to_owned()))?;
             if inode.inode_kind != InodeKind::Dir {
-                return Err(CoreError::NonDirectoryPathComponent(component.clone()));
+                return Err(CoreError::NonDirectoryPathComponent(
+                    component.as_str().to_owned(),
+                ));
             }
             current_inode = child.child_inode_id;
             continue;
@@ -1224,7 +1321,7 @@ fn ensure_parent_directories(
 
         ops.push(ApiCommitOp::CreateDir {
             parent_inode: current_inode,
-            display_name: component.clone(),
+            display_name: display_name.as_str().to_owned(),
         });
         let allocated = *next_inode_id;
         *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
@@ -1240,8 +1337,8 @@ fn ensure_parent_directories(
                 loon_api::WalDelta::BindDirentry {
                     delta_index: delta_index.saturating_add(1),
                     parent_inode: current_inode,
-                    name_key: name_key_for_display_name(name_policy, component),
-                    display_name: component.clone(),
+                    name_key: name_key.as_str().to_owned(),
+                    display_name: display_name.as_str().to_owned(),
                     child_inode: allocated,
                 },
             ],
@@ -1255,18 +1352,20 @@ fn ensure_parent_directories(
 
 fn resolve_parent_directory(
     metadata_state: &MetadataState,
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
+    name_policy: loon_api::NamePolicy,
     seq: ChangeSeq,
 ) -> Result<InodeId, CoreError> {
-    let components = path_components(absolute_path)?;
-    if components.len() <= 1 {
+    let Some(parent_path) = absolute_path.parent() else {
+        return Ok(InodeId(1));
+    };
+    if parent_path.is_root() {
         return Ok(InodeId(1));
     }
-    let parent_path = format!("/{}", components[..components.len() - 1].join("/"));
-    let resolved = metadata_state.resolve_visible_path(&parent_path, seq)?;
+    let resolved = metadata_state.resolve_visible_path(&parent_path, name_policy, seq)?;
     if resolved.inode_kind != InodeKind::Dir {
         return Err(CoreError::ExpectedDirectory {
-            path: parent_path,
+            path: parent_path.as_str().to_owned(),
             kind: resolved.inode_kind,
         });
     }
@@ -1310,62 +1409,48 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
 
 fn lookup_path(
     metadata_state: &MetadataState,
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
+    name_policy: loon_api::NamePolicy,
     seq: ChangeSeq,
 ) -> Result<ResolvedVisiblePath, VisiblePathError> {
-    metadata_state.resolve_visible_path(absolute_path, seq)
+    metadata_state.resolve_visible_path(absolute_path, name_policy, seq)
 }
 
 fn validate_path_for_mutation(absolute_path: &str) -> Result<(), CoreError> {
-    if absolute_path == "/" {
+    parse_mutation_path(absolute_path).map(|_| ())
+}
+
+fn parse_absolute_path_for_core(absolute_path: &str) -> Result<AbsolutePath, CoreError> {
+    AbsolutePath::parse(absolute_path).map_err(map_path_error_to_core)
+}
+
+fn parse_mutation_path(absolute_path: &str) -> Result<AbsolutePath, CoreError> {
+    let path = parse_absolute_path_for_core(absolute_path)?;
+    if path.is_root() {
         return Err(CoreError::RootMutationForbidden);
     }
-    path_components(absolute_path).map(|_| ())
+    Ok(path)
 }
 
-fn path_components(absolute_path: &str) -> Result<Vec<String>, CoreError> {
-    if !absolute_path.starts_with('/') {
-        return Err(CoreError::InvalidPath(absolute_path.to_owned()));
-    }
-    let mut out = Vec::new();
-    for component in absolute_path.split('/') {
-        if component.is_empty() {
-            continue;
-        }
-        if component == "." || component == ".." {
-            return Err(CoreError::InvalidPath(absolute_path.to_owned()));
-        }
-        out.push(component.to_owned());
-    }
-    if out.is_empty() {
-        return Err(CoreError::InvalidPath(absolute_path.to_owned()));
-    }
-    Ok(out)
+fn map_path_error_to_core(error: PathError) -> CoreError {
+    CoreError::InvalidPath(error.invalid_path_input().to_owned())
 }
 
-fn final_component(absolute_path: &str) -> Result<String, CoreError> {
-    let components = path_components(absolute_path)?;
-    components
-        .last()
-        .cloned()
-        .ok_or_else(|| CoreError::InvalidPath(absolute_path.to_owned()))
-}
-
-fn join_absolute_path(base: &str, component: &str) -> String {
-    if base == "/" {
-        format!("/{component}")
-    } else {
-        format!("{base}/{component}")
-    }
+fn final_component(absolute_path: &AbsolutePath) -> Result<String, CoreError> {
+    absolute_path
+        .final_component()
+        .map(|component| component.as_str().to_owned())
+        .ok_or_else(|| CoreError::InvalidPath(absolute_path.as_str().to_owned()))
 }
 
 fn reject_tombstoned_path_ancestor(
     metadata_state: &MetadataState,
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
+    name_policy: loon_api::NamePolicy,
     seq: ChangeSeq,
 ) -> Result<(), CoreError> {
     let Some((path, root_inode, tombstone_seq)) =
-        tombstoned_path_ancestor(metadata_state, absolute_path, seq)?
+        tombstoned_path_ancestor(metadata_state, absolute_path, name_policy, seq)?
     else {
         return Ok(());
     };
@@ -1378,23 +1463,29 @@ fn reject_tombstoned_path_ancestor(
 
 fn tombstoned_path_ancestor(
     metadata_state: &MetadataState,
-    absolute_path: &str,
+    absolute_path: &AbsolutePath,
+    name_policy: loon_api::NamePolicy,
     seq: ChangeSeq,
 ) -> Result<Option<(String, InodeId, ChangeSeq)>, CoreError> {
-    let components = path_components(absolute_path)?;
     let mut current_inode = InodeId(1);
-    let mut current_path = "/".to_owned();
+    let mut current_path = AbsolutePath::root();
 
-    for component in components {
-        let Some(bound_child) = metadata_state.bound_child_at_seq(current_inode, &component, seq)
+    for component in absolute_path.components() {
+        let display_name = component.to_display_name();
+        let name_key = NameKey::for_display_name(name_policy, &display_name);
+        let Some(bound_child) =
+            metadata_state.bound_child_at_seq(current_inode, name_key.as_str(), seq)
         else {
             return Ok(None);
         };
+        let visible_component =
+            DisplayName::parse(&bound_child.display_name).map_err(map_path_error_to_core)?;
+        let visible_path = current_path.join(&visible_component);
         if let Some(tombstone) =
             metadata_state.covering_subtree_tombstone(bound_child.child_inode_id, seq)
         {
             return Ok(Some((
-                join_absolute_path(&current_path, &bound_child.display_name),
+                visible_path.as_str().to_owned(),
                 tombstone.root_inode_id,
                 tombstone.tombstone_seq,
             )));
@@ -1418,7 +1509,7 @@ fn tombstoned_path_ancestor(
         {
             return Ok(None);
         }
-        current_path = join_absolute_path(&current_path, &bound_child.display_name);
+        current_path = visible_path;
         current_inode = bound_child.child_inode_id;
     }
 

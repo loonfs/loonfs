@@ -4,7 +4,7 @@ use loon_api::{
         CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
-    ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope,
     ControlObjectKind, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
     NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId, RevisionNo,
 };
@@ -2251,7 +2251,11 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
         load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
     let file = basis_before_move
         .metadata_state
-        .resolve_visible_path("/docs/a.txt", basis_before_move.head.seq)
+        .resolve_visible_path(
+            &AbsolutePath::parse("/docs/a.txt").expect("path"),
+            basis_before_move.head.name_policy,
+            basis_before_move.head.seq,
+        )
         .expect("resolve file");
     let old_binding = basis_before_move
         .metadata_state
@@ -2314,7 +2318,11 @@ fn unsupported_rename_mode_is_named_bad_request_failure() {
     let basis = load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
     let file = basis
         .metadata_state
-        .resolve_visible_path("/docs/a.txt", basis.head.seq)
+        .resolve_visible_path(
+            &AbsolutePath::parse("/docs/a.txt").expect("path"),
+            basis.head.name_policy,
+            basis.head.seq,
+        )
         .expect("resolve file");
 
     let error = commit_operations(
