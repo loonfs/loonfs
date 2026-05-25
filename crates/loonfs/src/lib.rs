@@ -102,18 +102,18 @@ pub struct FsBuilder {
 
 #[derive(Debug, Default)]
 struct BasisCache {
-    entries: HashMap<NamespaceId, VerifiedNamespaceBasis>,
+    entries: HashMap<NamespaceId, Arc<VerifiedNamespaceBasis>>,
     order: VecDeque<NamespaceId>,
 }
 
 impl BasisCache {
-    fn get(&mut self, namespace_id: &NamespaceId) -> Option<VerifiedNamespaceBasis> {
+    fn get(&mut self, namespace_id: &NamespaceId) -> Option<Arc<VerifiedNamespaceBasis>> {
         let basis = self.entries.get(namespace_id).cloned()?;
         self.touch(namespace_id);
         Some(basis)
     }
 
-    fn insert(&mut self, basis: VerifiedNamespaceBasis, max_cached_namespaces: usize) {
+    fn insert(&mut self, basis: Arc<VerifiedNamespaceBasis>, max_cached_namespaces: usize) {
         if max_cached_namespaces == 0 {
             return;
         }
@@ -408,7 +408,7 @@ impl Fs {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(loon_core::resolve_path_from_basis(
             self.store(),
-            &basis,
+            basis.as_ref(),
             absolute_path,
         )?)
     }
@@ -421,7 +421,7 @@ impl Fs {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(loon_core::list_path_from_basis(
             self.store(),
-            &basis,
+            basis.as_ref(),
             absolute_path,
         )?)
     }
@@ -434,7 +434,7 @@ impl Fs {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(loon_core::read_file_bytes_from_basis(
             self.store(),
-            &basis,
+            basis.as_ref(),
             absolute_path,
         )?)
     }
@@ -686,13 +686,13 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    fn basis_for_read(&self, namespace_id: &NamespaceId) -> Result<VerifiedNamespaceBasis> {
+    fn basis_for_read(&self, namespace_id: &NamespaceId) -> Result<Arc<VerifiedNamespaceBasis>> {
         let cache_config = &self.inner.config.runtime_cache;
         if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
-            return Ok(
+            return Ok(Arc::new(
                 loon_core::load_verified_namespace_basis(self.store(), namespace_id)
                     .map_err(CoreError::from)?,
-            );
+            ));
         }
 
         let cached = self
@@ -703,10 +703,7 @@ impl Fs {
             .get(namespace_id);
         if let Some(basis) = cached {
             match loon_core::load_namespace_head_identity(self.store(), namespace_id) {
-                Ok(identity)
-                    if identity.namespace_id == *namespace_id
-                        && identity.head_etag == basis.head_etag =>
-                {
+                Ok(identity) if identity.head_etag == basis.head_etag => {
                     return Ok(basis);
                 }
                 Ok(_) | Err(_) => {
@@ -717,11 +714,12 @@ impl Fs {
 
         let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
             .map_err(CoreError::from)?;
-        self.cache_basis(basis.clone());
+        let basis = Arc::new(basis);
+        self.cache_basis(Arc::clone(&basis));
         Ok(basis)
     }
 
-    fn cache_basis(&self, basis: VerifiedNamespaceBasis) {
+    fn cache_basis(&self, basis: Arc<VerifiedNamespaceBasis>) {
         let cache_config = &self.inner.config.runtime_cache;
         if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
             return;

@@ -41,7 +41,6 @@ pub struct NamespaceHeadSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceHeadIdentity {
-    pub namespace_id: NamespaceId,
     pub head_etag: String,
 }
 
@@ -213,10 +212,7 @@ pub fn load_namespace_head_identity<S: ObjectStore + ?Sized>(
         .ok_or(CoreError::Basis(BasisLoadError::MissingHeadEtag {
             object_key,
         }))?;
-    Ok(NamespaceHeadIdentity {
-        namespace_id: expected_namespace.clone(),
-        head_etag,
-    })
+    Ok(NamespaceHeadIdentity { head_etag })
 }
 
 fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {

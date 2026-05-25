@@ -195,6 +195,48 @@ fn runtime_cache_reuses_verified_basis_for_repeated_reads() {
 }
 
 #[test]
+fn runtime_cache_observes_head_advanced_by_another_runtime() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let reader = Fs::builder(object_store.clone())
+        .writer_id("basis-cache-reader")
+        .build()
+        .expect("build reader runtime");
+    let writer = Fs::builder(object_store)
+        .writer_id("basis-cache-writer")
+        .build()
+        .expect("build writer runtime");
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    writer
+        .create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .expect("create docs");
+
+    reader
+        .stat_path(&namespace_id, "/docs")
+        .expect("prime reader cache");
+
+    writer
+        .create_dir(&namespace_id, "/docs/new", CreateDirOptions::default())
+        .expect("advance head from another runtime");
+
+    raw_store.reset_wal_get_count();
+    let stat = reader
+        .stat_path(&namespace_id, "/docs/new")
+        .expect("reader should observe external head advance");
+    assert_eq!(stat.absolute_path, "/docs/new");
+    assert_eq!(stat.authoritative_head_seq, ChangeSeq(2));
+    assert!(raw_store.wal_get_count() > 0);
+}
+
+#[test]
 fn runtime_cache_can_be_disabled() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
