@@ -1,6 +1,7 @@
 use loon_api::{
-    payload_checksum_sha256, ContentStoreDescriptorEnvelope, ContentStoreId, ControlObjectKind,
-    HeadStateEnvelope, LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceId,
+    payload_checksum_sha256, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
+    ContentStoreId, ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState,
+    LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId,
     CONTROL_OBJECT_FORMAT_VERSION,
 };
 use loon_objectstore::keys::{
@@ -38,6 +39,39 @@ pub(crate) struct LoadedLeaseObject {
     pub(crate) object_key: String,
     pub(crate) metadata: ObjectMetadata,
     pub(crate) envelope: LeaseStateEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+pub struct ControlObjectIdentity {
+    pub etag: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+pub struct LoadedNamespaceDescriptorControl {
+    pub object_key: String,
+    pub identity: ControlObjectIdentity,
+    pub state: NamespaceDescriptorState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+pub struct LoadedContentStoreDescriptorControl {
+    pub object_key: String,
+    pub identity: ControlObjectIdentity,
+    pub state: ContentStoreDescriptorState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+pub struct LoadedHeadControl {
+    pub object_key: String,
+    pub identity: ControlObjectIdentity,
+    pub state: HeadState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize)]
+pub struct LoadedLeaseControl {
+    pub object_key: String,
+    pub identity: ControlObjectIdentity,
+    pub state: LeaseState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, DeriveSerialize, Deserialize, Error)]
@@ -214,6 +248,68 @@ pub(crate) fn read_lease_object<S: ObjectStore + ?Sized>(
         metadata,
         envelope,
     })
+}
+
+pub fn load_namespace_descriptor_control<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<LoadedNamespaceDescriptorControl, ControlObjectLoadError> {
+    let loaded = read_namespace_descriptor_object(store, expected_namespace)?;
+    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
+    Ok(LoadedNamespaceDescriptorControl {
+        object_key: loaded.object_key,
+        identity,
+        state: loaded.envelope.state,
+    })
+}
+
+pub fn load_content_store_descriptor_control<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_content_store: &ContentStoreId,
+) -> Result<LoadedContentStoreDescriptorControl, ControlObjectLoadError> {
+    let loaded = read_content_store_descriptor_object(store, expected_content_store)?;
+    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
+    Ok(LoadedContentStoreDescriptorControl {
+        object_key: loaded.object_key,
+        identity,
+        state: loaded.envelope.state,
+    })
+}
+
+pub fn load_namespace_head_control<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<LoadedHeadControl, ControlObjectLoadError> {
+    let loaded = read_head_object(store, expected_namespace)?;
+    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
+    Ok(LoadedHeadControl {
+        object_key: loaded.object_key,
+        identity,
+        state: loaded.envelope.state,
+    })
+}
+
+pub fn load_namespace_lease_control<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<LoadedLeaseControl, ControlObjectLoadError> {
+    let loaded = read_lease_object(store, expected_namespace)?;
+    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
+    Ok(LoadedLeaseControl {
+        object_key: loaded.object_key,
+        identity,
+        state: loaded.envelope.state,
+    })
+}
+
+fn control_identity(
+    object_key: &str,
+    metadata: &ObjectMetadata,
+) -> Result<ControlObjectIdentity, ControlObjectLoadError> {
+    let etag = metadata.etag.clone().ok_or_else(|| {
+        ControlObjectLoadError::Store(format!("missing control object etag for `{object_key}`"))
+    })?;
+    Ok(ControlObjectIdentity { etag })
 }
 
 fn validate_namespace_id_for_control_key(
