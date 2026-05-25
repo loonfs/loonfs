@@ -12,6 +12,7 @@ mod lease;
 mod loading;
 pub mod metadata;
 pub mod namespace;
+mod path;
 mod protocol;
 pub mod publisher;
 pub mod services;
