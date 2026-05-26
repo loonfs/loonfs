@@ -14,6 +14,7 @@ use crate::namespace::catalog::{
     load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
 };
+use crate::path::planner::{semantic_commit_fingerprint_for_path_intent, PathPlanner};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{prepare_wal_segment, StoredWalObject};
 use crate::{
@@ -572,13 +573,14 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let semantic_fingerprint = match intent.semantic_commit_fingerprint(namespace_id) {
-                Ok(value) => value,
-                Err(error) => {
-                    outcomes[index] = Some(Err(error));
-                    return None;
-                }
-            };
+            let semantic_fingerprint =
+                match semantic_commit_fingerprint_for_path_intent(namespace_id, &intent) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(error));
+                        return None;
+                    }
+                };
             let commit_id = intent.commit_id().clone();
             if !record_primary_request_or_complete_idempotent(
                 namespace_id,
@@ -592,8 +594,7 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             ) {
                 return None;
             }
-            let planned = match crate::services::plan_path_mutation_against_state(
-                store,
+            let planned = match PathPlanner::new(store).plan_against_state(
                 namespace_id,
                 &intent,
                 current_head,

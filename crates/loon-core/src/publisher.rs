@@ -1,53 +1,27 @@
-use crate::commit::SemanticCommitFingerprint;
+use crate::commit::{semantic_commit_fingerprint_for_v0_request, SemanticCommitFingerprint};
 use crate::context::MutationContext;
 use crate::error::{CoreError, CoreErrorKind};
-use crate::services::PutFileBehavior;
-use loon_api::v0::{
-    CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse, RenameMode,
+use crate::path::intent::PathMutationIntent;
+use crate::path::planner::{
+    semantic_commit_fingerprint_for_path_intent, PathPlanner, PlannedPathMutation,
 };
-use loon_api::{CommitId, ContentRef, MutationResult, NamespaceId};
+use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
+use loon_api::{CommitId, MutationResult, NamespaceId};
 use loon_objectstore::ObjectStore;
 
 const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathMutationIntent {
-    CreateDir {
-        commit_id: CommitId,
-        absolute_path: String,
-    },
-    PutFile {
-        commit_id: CommitId,
-        absolute_path: String,
-        content_ref: ContentRef,
-        behavior: PutFileBehavior,
-    },
-    DeletePath {
-        commit_id: CommitId,
-        absolute_path: String,
-        recursive: bool,
-    },
-    MovePath {
-        commit_id: CommitId,
-        from_path: String,
-        to_path: String,
-        mode: RenameMode,
-    },
-    CopyFilePath {
-        commit_id: CommitId,
-        from_path: String,
-        to_path: String,
-    },
+pub enum NamespaceMutationCandidate {
+    Commit(ApiCommitRequest),
+    Path(PathMutationIntent),
 }
 
-impl PathMutationIntent {
+impl NamespaceMutationCandidate {
     pub fn commit_id(&self) -> &CommitId {
         match self {
-            Self::CreateDir { commit_id, .. }
-            | Self::PutFile { commit_id, .. }
-            | Self::DeletePath { commit_id, .. }
-            | Self::MovePath { commit_id, .. }
-            | Self::CopyFilePath { commit_id, .. } => commit_id,
+            Self::Commit(request) => &request.commit_id,
+            Self::Path(intent) => intent.commit_id(),
         }
     }
 
@@ -55,21 +29,14 @@ impl PathMutationIntent {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<SemanticCommitFingerprint, CoreError> {
-        crate::services::semantic_commit_fingerprint_for_path_intent(namespace_id, self)
+        match self {
+            Self::Commit(request) => {
+                semantic_commit_fingerprint_for_v0_request(namespace_id, request)
+                    .map_err(|err| CoreError::Store(err.to_string()))
+            }
+            Self::Path(intent) => semantic_commit_fingerprint_for_path_intent(namespace_id, intent),
+        }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedPathMutation {
-    pub commit_id: CommitId,
-    pub semantic_commit_fingerprint: SemanticCommitFingerprint,
-    pub commit_request: ApiCommitRequest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NamespaceMutationCandidate {
-    Commit(ApiCommitRequest),
-    Path(PathMutationIntent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +74,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
     ) -> Result<PlannedPathMutation, CoreError> {
-        crate::services::plan_path_mutation(self.store, namespace_id, intent)
+        PathPlanner::new(self.store).plan_against_basis(namespace_id, intent)
     }
 
     pub fn submit_path_intent(

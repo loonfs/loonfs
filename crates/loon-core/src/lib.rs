@@ -34,18 +34,20 @@ pub use loading::{
     ControlObjectLoadError, LoadedContentStoreDescriptorControl, LoadedHeadControl,
     LoadedLeaseControl, LoadedNamespaceDescriptorControl,
 };
+pub use path::intent::{PathMutationIntent, PutFileBehavior};
+pub use path::planner::PlannedPathMutation;
 pub use protocol::{
     begin_upload, commit_operations, commit_operations_batch, complete_upload, list_changes_after,
     upload_content,
 };
 pub use publisher::{
     publish_namespace_mutations_batch, DirectObjectStorePublisher, FlushPolicy,
-    NamespaceMutationCandidate, PathMutationIntent, PlannedPathMutation, PublishOptions,
+    NamespaceMutationCandidate, PublishOptions,
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, create_dir_path, delete_path, delete_path_non_recursive,
     fork_namespace, list_namespaces, list_path, list_path_from_basis, move_path, put_file_bytes,
     put_file_content_ref, read_file_bytes, read_file_bytes_from_basis, resolve_path,
     resolve_path_from_basis, store_bytes_as_content, write_file_bytes, BootstrapNamespaceError,
-    PutFileBehavior, StoredContent,
+    StoredContent,
 };

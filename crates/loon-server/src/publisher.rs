@@ -1,8 +1,6 @@
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::{CommitId, NamespaceId};
-use loon_core::commit::{
-    semantic_commit_fingerprint_for_v0_request, CommitHeadPublishError, SemanticCommitFingerprint,
-};
+use loon_core::commit::{CommitHeadPublishError, SemanticCommitFingerprint};
 use loonfs::{CoreError, Fs, NamespaceMutationCandidate, PathMutationIntent, RuntimeError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -112,8 +110,8 @@ impl NamespacePublisher {
     }
 
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
-        let commit_id = candidate_commit_id(&candidate).clone();
-        let fingerprint = candidate_semantic_commit_fingerprint(&self.namespace_id, &candidate)?;
+        let commit_id = candidate.commit_id().clone();
+        let fingerprint = candidate.semantic_commit_fingerprint(&self.namespace_id)?;
         let (sender, receiver) = oneshot::channel();
         self.admit(commit_id, candidate, fingerprint, sender)?;
         receiver
@@ -335,28 +333,6 @@ fn is_head_publish_stale(result: &CommitResult) -> bool {
     )
 }
 
-fn candidate_commit_id(candidate: &NamespaceMutationCandidate) -> &CommitId {
-    match candidate {
-        NamespaceMutationCandidate::Commit(request) => &request.commit_id,
-        NamespaceMutationCandidate::Path(intent) => intent.commit_id(),
-    }
-}
-
-fn candidate_semantic_commit_fingerprint(
-    namespace_id: &NamespaceId,
-    candidate: &NamespaceMutationCandidate,
-) -> Result<SemanticCommitFingerprint, CoreError> {
-    match candidate {
-        NamespaceMutationCandidate::Commit(request) => {
-            semantic_commit_fingerprint_for_v0_request(namespace_id, request)
-                .map_err(|err| CoreError::Store(err.to_string()))
-        }
-        NamespaceMutationCandidate::Path(intent) => {
-            intent.semantic_commit_fingerprint(namespace_id)
-        }
-    }
-}
-
 fn runtime_error_to_core(error: RuntimeError) -> CoreError {
     match error {
         RuntimeError::Core(error) => error,
@@ -554,7 +530,7 @@ mod tests {
     ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
         let commit_id = request.commit_id.clone();
         let candidate = NamespaceMutationCandidate::Commit(request);
-        let fingerprint = candidate_semantic_commit_fingerprint(namespace_id, &candidate)?;
+        let fingerprint = candidate.semantic_commit_fingerprint(namespace_id)?;
         let (sender, receiver) = oneshot::channel();
         publisher.admit(commit_id, candidate, fingerprint, sender)?;
         Ok(receiver)
