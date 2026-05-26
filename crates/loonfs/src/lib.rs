@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,7 +22,8 @@ pub use loon_core::{
 };
 use loon_core::{
     ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MutationContext,
-    VerifiedNamespaceBasis,
+    NamespaceCommitEngine, NamespaceCommitEnginePublishResult, VerifiedNamespaceBasis,
+    WarmBasisEvent,
 };
 use loon_objectstore::keys::namespace_head;
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
@@ -98,7 +100,9 @@ struct FsInner {
     store: SharedObjectStore,
     config: FsConfig,
     basis_cache: Mutex<BasisCache>,
+    commit_engines: Mutex<CommitEngineCache>,
     control_cache: Mutex<RuntimeControlCache>,
+    cache_stats: RuntimeCacheStatsInner,
 }
 
 pub struct FsBuilder {
@@ -149,6 +153,50 @@ impl BasisCache {
 }
 
 #[derive(Debug, Default)]
+struct CommitEngineCache {
+    entries: HashMap<NamespaceId, Arc<Mutex<NamespaceCommitEngine>>>,
+    order: VecDeque<NamespaceId>,
+}
+
+impl CommitEngineCache {
+    fn get_or_insert(
+        &mut self,
+        namespace_id: &NamespaceId,
+        max_cached_namespaces: usize,
+    ) -> Arc<Mutex<NamespaceCommitEngine>> {
+        if let Some(engine) = self.entries.get(namespace_id).cloned() {
+            self.touch(namespace_id);
+            return engine;
+        }
+        let engine = Arc::new(Mutex::new(NamespaceCommitEngine::new(namespace_id.clone())));
+        self.entries.insert(namespace_id.clone(), engine.clone());
+        self.touch(namespace_id);
+        while self.entries.len() > max_cached_namespaces {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+        engine
+    }
+
+    fn invalidate(&mut self, namespace_id: &NamespaceId) {
+        if let Some(engine) = self.entries.remove(namespace_id) {
+            engine
+                .lock()
+                .expect("commit engine lock poisoned")
+                .invalidate();
+        }
+        self.order.retain(|candidate| candidate != namespace_id);
+    }
+
+    fn touch(&mut self, namespace_id: &NamespaceId) {
+        self.order.retain(|candidate| candidate != namespace_id);
+        self.order.push_back(namespace_id.clone());
+    }
+}
+
+#[derive(Debug, Default)]
 struct RuntimeControlCache {
     namespaces: HashMap<NamespaceId, NamespaceControlCacheEntry>,
     namespace_order: VecDeque<NamespaceId>,
@@ -163,6 +211,56 @@ struct NamespaceControlCacheEntry {
 struct CachedControl<T> {
     identity: ControlObjectIdentity,
     _marker: std::marker::PhantomData<T>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeCacheStats {
+    pub publish_warm_basis_hits: usize,
+    pub publish_warm_basis_misses: usize,
+    pub publish_warm_basis_invalidations: usize,
+    pub publish_warm_basis_advances: usize,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeCacheStatsInner {
+    publish_warm_basis_hits: AtomicUsize,
+    publish_warm_basis_misses: AtomicUsize,
+    publish_warm_basis_invalidations: AtomicUsize,
+    publish_warm_basis_advances: AtomicUsize,
+}
+
+impl RuntimeCacheStatsInner {
+    fn snapshot(&self) -> RuntimeCacheStats {
+        RuntimeCacheStats {
+            publish_warm_basis_hits: self.publish_warm_basis_hits.load(Ordering::SeqCst),
+            publish_warm_basis_misses: self.publish_warm_basis_misses.load(Ordering::SeqCst),
+            publish_warm_basis_invalidations: self
+                .publish_warm_basis_invalidations
+                .load(Ordering::SeqCst),
+            publish_warm_basis_advances: self.publish_warm_basis_advances.load(Ordering::SeqCst),
+        }
+    }
+
+    fn record_publish_result(&self, result: &NamespaceCommitEnginePublishResult) {
+        match result.warm_basis_event {
+            WarmBasisEvent::Reused => {
+                self.publish_warm_basis_hits.fetch_add(1, Ordering::SeqCst);
+            }
+            WarmBasisEvent::ColdLoaded | WarmBasisEvent::InvalidatedThenColdLoaded => {
+                self.publish_warm_basis_misses
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            WarmBasisEvent::Disabled => {}
+        }
+        if result.warm_basis_invalidated {
+            self.publish_warm_basis_invalidations
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        if result.warm_basis_advanced {
+            self.publish_warm_basis_advances
+                .fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl RuntimeControlCache {
@@ -362,7 +460,9 @@ impl Fs {
                 store,
                 config,
                 basis_cache: Mutex::new(BasisCache::default()),
+                commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
+                cache_stats: RuntimeCacheStatsInner::default(),
             }),
         })
     }
@@ -689,14 +789,17 @@ impl Fs {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        let result = loon_core::commit_operations(
-            self.store(),
+        self.publish_namespace_mutations_batch(
             namespace_id,
-            request,
-            &self.mutation_context(),
+            vec![NamespaceMutationCandidate::Commit(request)],
         )
-        .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            Err(RuntimeError::Core(CoreError::Store(
+                "empty commit batch".to_owned(),
+            )))
+        })
     }
 
     pub fn commit_operations_batch(
@@ -704,17 +807,13 @@ impl Fs {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<Result<CommitResponse>> {
-        let results: Vec<_> = loon_core::commit_operations_batch(
-            self.store(),
+        self.publish_namespace_mutations_batch(
             namespace_id,
-            requests,
-            &self.mutation_context(),
+            requests
+                .into_iter()
+                .map(NamespaceMutationCandidate::Commit)
+                .collect(),
         )
-        .into_iter()
-        .map(|result| result.map_err(RuntimeError::Core))
-        .collect();
-        self.invalidate_namespace_cache_after_batch(namespace_id, &results);
-        results
     }
 
     pub fn publish_namespace_mutations_batch(
@@ -722,6 +821,25 @@ impl Fs {
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
+        if self.commit_engine_cache_enabled() {
+            let engine = self.commit_engine(namespace_id);
+            let publish = {
+                let mut engine = engine.lock().expect("commit engine lock poisoned");
+                engine.publish_batch(self.store(), candidates, &self.mutation_context())
+            };
+            self.inner.cache_stats.record_publish_result(&publish);
+            if let Some(basis) = publish.post_commit_basis.clone() {
+                self.cache_basis(Arc::new(basis));
+            } else if publish.warm_basis_invalidated {
+                self.invalidate_namespace_cache(namespace_id);
+            }
+            return publish
+                .results
+                .into_iter()
+                .map(|result| result.map_err(RuntimeError::Core))
+                .collect();
+        }
+
         let results: Vec<_> = loon_core::publish_namespace_mutations_batch(
             self.store(),
             namespace_id,
@@ -733,6 +851,10 @@ impl Fs {
         .collect();
         self.invalidate_namespace_cache_after_batch(namespace_id, &results);
         results
+    }
+
+    pub fn runtime_cache_stats(&self) -> RuntimeCacheStats {
+        self.inner.cache_stats.snapshot()
     }
 
     pub fn list_changes_after(
@@ -858,6 +980,20 @@ impl Fs {
         cache_config.control_cache_enabled && cache_config.max_cached_namespaces > 0
     }
 
+    fn commit_engine_cache_enabled(&self) -> bool {
+        let cache_config = &self.inner.config.runtime_cache;
+        cache_config.basis_cache_enabled && cache_config.max_cached_namespaces > 0
+    }
+
+    fn commit_engine(&self, namespace_id: &NamespaceId) -> Arc<Mutex<NamespaceCommitEngine>> {
+        let cache_config = &self.inner.config.runtime_cache;
+        self.inner
+            .commit_engines
+            .lock()
+            .expect("commit engine cache lock poisoned")
+            .get_or_insert(namespace_id, cache_config.max_cached_namespaces)
+    }
+
     fn basis_for_read(&self, namespace_id: &NamespaceId) -> Result<Arc<VerifiedNamespaceBasis>> {
         let cache_config = &self.inner.config.runtime_cache;
         if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
@@ -925,6 +1061,11 @@ impl Fs {
             .lock()
             .expect("control cache lock poisoned")
             .invalidate_namespace(namespace_id);
+        self.inner
+            .commit_engines
+            .lock()
+            .expect("commit engine cache lock poisoned")
+            .invalidate(namespace_id);
     }
 
     fn finish_namespace_mutation<T>(

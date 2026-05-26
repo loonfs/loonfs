@@ -42,7 +42,8 @@ pub use protocol::{
 };
 pub use publisher::{
     publish_namespace_mutations_batch, DirectObjectStorePublisher, FlushPolicy,
-    NamespaceMutationCandidate, PublishOptions,
+    NamespaceCommitEngine, NamespaceCommitEnginePublishResult, NamespaceMutationCandidate,
+    PublishOptions, WarmBasisEvent,
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, create_dir_path, delete_path, delete_path_non_recursive,

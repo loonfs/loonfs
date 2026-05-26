@@ -1,4 +1,4 @@
-use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::basis::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use crate::commit::{
     build_commit_plan, commit_request_from_v0, materialize_commit, prepare_commit_head_publish,
     publish_commit_head, resolve_restore_content_refs, semantic_commit_fingerprint,
@@ -36,6 +36,13 @@ use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::collections::HashMap;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PublishBatchAgainstBasisResult {
+    pub(crate) results: Vec<Result<ApiCommitResponse, CoreError>>,
+    pub(crate) post_commit_basis: Option<VerifiedNamespaceBasis>,
+    pub(crate) basis_advanced: bool,
+}
 
 #[derive(Debug, Clone)]
 struct LoadedUploadSessionObject {
@@ -356,7 +363,43 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
                 .collect()
         }
     };
+    publish_namespace_mutations_batch_against_basis(
+        store,
+        namespace_id,
+        candidates,
+        context,
+        &basis,
+    )
+    .results
+}
 
+pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidates: Vec<NamespaceMutationCandidate>,
+    context: &MutationContext,
+    basis: &VerifiedNamespaceBasis,
+) -> PublishBatchAgainstBasisResult {
+    if candidates.is_empty() {
+        return PublishBatchAgainstBasisResult {
+            results: Vec::new(),
+            post_commit_basis: Some(basis.clone()),
+            basis_advanced: false,
+        };
+    }
+    if basis.head.namespace_id != *namespace_id {
+        return PublishBatchAgainstBasisResult {
+            results: (0..candidates.len())
+                .map(|_| {
+                    Err(CoreError::Store(
+                        "publish basis namespace mismatch".to_owned(),
+                    ))
+                })
+                .collect(),
+            post_commit_basis: None,
+            basis_advanced: false,
+        };
+    }
     let mut outcomes: Vec<Option<Result<ApiCommitResponse, CoreError>>> =
         (0..candidates.len()).map(|_| None).collect();
     let mut current_head = basis.head.clone();
@@ -369,7 +412,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         let Some(candidate_request) = prepare_candidate_request(
             store,
             namespace_id,
-            &basis,
+            basis,
             &current_head,
             &current_metadata_state,
             candidate,
@@ -446,7 +489,11 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     }
 
     if accepted.is_empty() {
-        return finish_batch_outcomes_with_aliases(outcomes, &aliases);
+        return PublishBatchAgainstBasisResult {
+            results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+            post_commit_basis: Some(basis.clone()),
+            basis_advanced: false,
+        };
     }
     let records = accepted
         .iter()
@@ -464,7 +511,11 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::Store(message.clone())));
             }
-            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
+            return PublishBatchAgainstBasisResult {
+                results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+                post_commit_basis: None,
+                basis_advanced: false,
+            };
         }
     };
     match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
@@ -473,7 +524,11 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::WalWrite(err.to_string())));
             }
-            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
+            return PublishBatchAgainstBasisResult {
+                results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+                post_commit_basis: None,
+                basis_advanced: false,
+            };
         }
     }
 
@@ -491,15 +546,35 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             for (index, _) in accepted {
                 outcomes[index] = Some(Err(CoreError::Store(message.clone())));
             }
-            return finish_batch_outcomes_with_aliases(outcomes, &aliases);
+            return PublishBatchAgainstBasisResult {
+                results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+                post_commit_basis: None,
+                basis_advanced: false,
+            };
         }
     };
-    if let Err(error) = publish_commit_head(store, &basis.head_etag, &head_publish) {
-        for (index, _) in accepted {
-            outcomes[index] = Some(Err(error.clone().into()));
+    let head_metadata = match publish_commit_head(store, &basis.head_etag, &head_publish) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            for (index, _) in accepted {
+                outcomes[index] = Some(Err(error.clone().into()));
+            }
+            return PublishBatchAgainstBasisResult {
+                results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+                post_commit_basis: None,
+                basis_advanced: false,
+            };
         }
-        return finish_batch_outcomes_with_aliases(outcomes, &aliases);
-    }
+    };
+
+    let post_commit_basis = head_metadata.etag.map(|head_etag| VerifiedNamespaceBasis {
+        namespace_descriptor: basis.namespace_descriptor.clone(),
+        content_store_id: basis.content_store_id.clone(),
+        head: head_publish.resulting_head.clone(),
+        head_etag,
+        lease: basis.lease.clone(),
+        metadata_state: current_metadata_state,
+    });
 
     for (accepted_index, (outcome_index, record)) in accepted.into_iter().enumerate() {
         outcomes[outcome_index] = Some(Ok(ApiCommitResponse {
@@ -509,7 +584,11 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             results: record.results,
         }));
     }
-    finish_batch_outcomes_with_aliases(outcomes, &aliases)
+    PublishBatchAgainstBasisResult {
+        results: finish_batch_outcomes_with_aliases(outcomes, &aliases),
+        post_commit_basis,
+        basis_advanced: true,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

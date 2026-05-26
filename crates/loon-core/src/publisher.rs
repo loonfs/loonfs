@@ -5,9 +5,14 @@ use crate::path::intent::PathMutationIntent;
 use crate::path::planner::{
     semantic_commit_fingerprint_for_path_intent, PathPlanner, PlannedPathMutation,
 };
+use crate::{
+    load_namespace_head_identity, load_namespace_lease_control, load_verified_namespace_basis,
+    BasisLoadError, VerifiedNamespaceBasis,
+};
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::{CommitId, MutationResult, NamespaceId};
 use loon_objectstore::ObjectStore;
+use std::sync::Arc;
 
 const DEFAULT_STALE_HEAD_RETRY_LIMIT: usize = 8;
 
@@ -57,6 +62,151 @@ impl Default for PublishOptions {
             flush: FlushPolicy::Immediate,
             stale_head_retry_limit: DEFAULT_STALE_HEAD_RETRY_LIMIT,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmBasisEvent {
+    Disabled,
+    ColdLoaded,
+    Reused,
+    InvalidatedThenColdLoaded,
+}
+
+#[derive(Debug, Clone)]
+pub struct NamespaceCommitEnginePublishResult {
+    pub results: Vec<Result<ApiCommitResponse, CoreError>>,
+    pub post_commit_basis: Option<VerifiedNamespaceBasis>,
+    pub warm_basis_event: WarmBasisEvent,
+    pub warm_basis_advanced: bool,
+    pub warm_basis_invalidated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NamespaceCommitEngine {
+    namespace_id: NamespaceId,
+    basis: Option<Arc<VerifiedNamespaceBasis>>,
+}
+
+impl NamespaceCommitEngine {
+    pub fn new(namespace_id: NamespaceId) -> Self {
+        Self {
+            namespace_id,
+            basis: None,
+        }
+    }
+
+    pub fn invalidate(&mut self) {
+        self.basis = None;
+    }
+
+    pub fn publish_batch<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        candidates: Vec<NamespaceMutationCandidate>,
+        context: &MutationContext,
+    ) -> NamespaceCommitEnginePublishResult {
+        if candidates.is_empty() {
+            return NamespaceCommitEnginePublishResult {
+                results: Vec::new(),
+                post_commit_basis: self.basis.as_deref().cloned(),
+                warm_basis_event: WarmBasisEvent::Disabled,
+                warm_basis_advanced: false,
+                warm_basis_invalidated: false,
+            };
+        }
+
+        let candidate_count = candidates.len();
+        if let Err(error) =
+            crate::acquire_or_renew_namespace_lease(store, &self.namespace_id, context)
+        {
+            self.invalidate();
+            return NamespaceCommitEnginePublishResult {
+                results: (0..candidate_count)
+                    .map(|_| Err(CoreError::Lease(error.clone())))
+                    .collect(),
+                post_commit_basis: None,
+                warm_basis_event: WarmBasisEvent::Disabled,
+                warm_basis_advanced: false,
+                warm_basis_invalidated: true,
+            };
+        }
+
+        let (basis, warm_basis_event, invalidated_before_load) = match self.basis_for_publish(store)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                self.invalidate();
+                return NamespaceCommitEnginePublishResult {
+                    results: (0..candidate_count)
+                        .map(|_| Err(CoreError::Basis(error.clone())))
+                        .collect(),
+                    post_commit_basis: None,
+                    warm_basis_event: WarmBasisEvent::Disabled,
+                    warm_basis_advanced: false,
+                    warm_basis_invalidated: true,
+                };
+            }
+        };
+
+        let published = crate::protocol::publish_namespace_mutations_batch_against_basis(
+            store,
+            &self.namespace_id,
+            candidates,
+            context,
+            &basis,
+        );
+        let mut warm_basis_invalidated = invalidated_before_load;
+        if let Some(post_commit_basis) = published.post_commit_basis.clone() {
+            self.basis = Some(Arc::new(post_commit_basis.clone()));
+        } else {
+            self.invalidate();
+            warm_basis_invalidated = true;
+        }
+
+        NamespaceCommitEnginePublishResult {
+            results: published.results,
+            post_commit_basis: published.post_commit_basis,
+            warm_basis_event,
+            warm_basis_advanced: published.basis_advanced && self.basis.is_some(),
+            warm_basis_invalidated,
+        }
+    }
+
+    fn basis_for_publish<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+    ) -> Result<(VerifiedNamespaceBasis, WarmBasisEvent, bool), BasisLoadError> {
+        let mut invalidated = false;
+        if let Some(cached) = self.basis.clone() {
+            match load_namespace_head_identity(store, &self.namespace_id) {
+                Ok(identity) if identity.head_etag == cached.head_etag => {
+                    match load_namespace_lease_control(store, &self.namespace_id) {
+                        Ok(lease) => {
+                            let mut basis = cached.as_ref().clone();
+                            basis.lease = lease.state;
+                            return Ok((basis, WarmBasisEvent::Reused, false));
+                        }
+                        Err(_) => {
+                            self.invalidate();
+                            invalidated = true;
+                        }
+                    }
+                }
+                Ok(_) | Err(_) => {
+                    self.invalidate();
+                    invalidated = true;
+                }
+            }
+        }
+
+        let basis = load_verified_namespace_basis(store, &self.namespace_id)?;
+        let event = if invalidated {
+            WarmBasisEvent::InvalidatedThenColdLoaded
+        } else {
+            WarmBasisEvent::ColdLoaded
+        };
+        Ok((basis, event, invalidated))
     }
 }
 
@@ -143,5 +293,6 @@ pub fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
-    crate::protocol::publish_namespace_mutations_batch(store, namespace_id, candidates, context)
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    engine.publish_batch(store, candidates, context).results
 }
