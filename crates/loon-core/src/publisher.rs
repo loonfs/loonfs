@@ -152,10 +152,48 @@ impl NamespaceCommitEngine {
         let published = crate::protocol::publish_namespace_mutations_batch_against_basis(
             store,
             &self.namespace_id,
-            candidates,
+            candidates.clone(),
             context,
             &basis,
         );
+        if should_retry_reused_warm_rejection(warm_basis_event, &published) {
+            self.invalidate();
+            let cold_basis = match load_verified_namespace_basis(store, &self.namespace_id) {
+                Ok(value) => value,
+                Err(error) => {
+                    return NamespaceCommitEnginePublishResult {
+                        results: (0..candidate_count)
+                            .map(|_| Err(CoreError::Basis(error.clone())))
+                            .collect(),
+                        post_commit_basis: None,
+                        warm_basis_event: WarmBasisEvent::InvalidatedThenColdLoaded,
+                        warm_basis_advanced: false,
+                        warm_basis_invalidated: true,
+                    };
+                }
+            };
+            let retried = crate::protocol::publish_namespace_mutations_batch_against_basis(
+                store,
+                &self.namespace_id,
+                candidates,
+                context,
+                &cold_basis,
+            );
+            return self.finish_publish_result(
+                retried,
+                WarmBasisEvent::InvalidatedThenColdLoaded,
+                true,
+            );
+        }
+        self.finish_publish_result(published, warm_basis_event, invalidated_before_load)
+    }
+
+    fn finish_publish_result(
+        &mut self,
+        published: crate::protocol::PublishBatchAgainstBasisResult,
+        warm_basis_event: WarmBasisEvent,
+        invalidated_before_load: bool,
+    ) -> NamespaceCommitEnginePublishResult {
         let mut warm_basis_invalidated = invalidated_before_load;
         if let Some(post_commit_basis) = published.post_commit_basis.clone() {
             self.basis = Some(Arc::new(post_commit_basis.clone()));
@@ -208,6 +246,16 @@ impl NamespaceCommitEngine {
         };
         Ok((basis, event, invalidated))
     }
+}
+
+fn should_retry_reused_warm_rejection(
+    warm_basis_event: WarmBasisEvent,
+    published: &crate::protocol::PublishBatchAgainstBasisResult,
+) -> bool {
+    warm_basis_event == WarmBasisEvent::Reused
+        && !published.basis_advanced
+        && published.post_commit_basis.is_some()
+        && published.results.iter().any(Result::is_err)
 }
 
 pub struct DirectObjectStorePublisher<'a, S: ObjectStore + ?Sized> {

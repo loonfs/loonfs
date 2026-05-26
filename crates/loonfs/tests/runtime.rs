@@ -54,6 +54,14 @@ fn create_dir_candidate(commit_id: &str, absolute_path: &str) -> NamespaceMutati
     })
 }
 
+fn delete_candidate(commit_id: &str, absolute_path: &str) -> NamespaceMutationCandidate {
+    NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+        absolute_path: absolute_path.to_owned(),
+        recursive: true,
+    })
+}
+
 fn assert_single_publish_ok(results: Vec<loonfs::Result<loonfs::CommitResponse>>) {
     let result = results
         .into_iter()
@@ -364,6 +372,56 @@ fn runtime_publish_cold_loads_after_external_head_advance() {
         "stale warm basis should be discarded and replaced by a cold replay"
     );
 
+    let stats = first.runtime_cache_stats();
+    assert_eq!(stats.publish_warm_basis_hits, 0);
+    assert_eq!(stats.publish_warm_basis_misses, 2);
+    assert_eq!(stats.publish_warm_basis_invalidations, 1);
+    assert_eq!(stats.publish_warm_basis_advances, 2);
+}
+
+#[test]
+fn runtime_publish_retries_warm_rejection_after_external_head_race() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let first = Fs::builder(object_store.clone())
+        .writer_id("shared-race-writer")
+        .build()
+        .expect("build first runtime");
+    let second = Fs::builder(object_store)
+        .writer_id("shared-race-writer")
+        .build()
+        .expect("build second runtime");
+
+    first
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("race-prime", "/docs")],
+    ));
+    second
+        .create_dir(&namespace_id, "/a", CreateDirOptions::default())
+        .expect("external runtime creates /a");
+
+    raw_store.reset_wal_get_count();
+    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![delete_candidate("race-delete-a", "/a")],
+    ));
+    assert!(
+        raw_store.wal_get_count() > 0,
+        "warm rejection should be retried from a cold basis"
+    );
+
+    assert_core_error_kind(
+        first.stat_path(&namespace_id, "/a"),
+        CoreErrorKind::PathNotFound,
+    );
     let stats = first.runtime_cache_stats();
     assert_eq!(stats.publish_warm_basis_hits, 0);
     assert_eq!(stats.publish_warm_basis_misses, 2);
