@@ -14,7 +14,10 @@ use loon_api::{
     decode_wal_segment_envelope_zstd, ChangeSeq, ContentStoreId, HeadState,
     NamespaceDescriptorState, NamespaceId, WalSegmentPointer,
 };
-use loon_objectstore::{keys::namespace_descriptor, ObjectStore};
+use loon_objectstore::{
+    keys::{namespace_descriptor, namespace_head},
+    ObjectStore,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -34,6 +37,11 @@ pub struct NamespaceHeadSummary {
     pub head_seq: ChangeSeq,
     pub checkpoint_hint_seq: Option<ChangeSeq>,
     pub retention_floor_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceHeadIdentity {
+    pub head_etag: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
@@ -177,6 +185,34 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         checkpoint_hint_seq: head.checkpoint_hint_seq,
         retention_floor_seq: head.retention_floor_seq,
     })
+}
+
+pub fn load_namespace_head_identity<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+) -> Result<NamespaceHeadIdentity, CoreError> {
+    NamespaceId::parse(expected_namespace.as_str())?;
+    let object_key = namespace_head(expected_namespace.as_str());
+    let metadata = store
+        .head(&object_key)
+        .map_err(|err| {
+            CoreError::Basis(BasisLoadError::LoadHead(ControlObjectLoadError::Store(
+                err.to_string(),
+            )))
+        })?
+        .ok_or_else(|| {
+            CoreError::Basis(BasisLoadError::LoadHead(
+                ControlObjectLoadError::MissingObject {
+                    object_key: object_key.clone(),
+                },
+            ))
+        })?;
+    let head_etag = metadata
+        .etag
+        .ok_or(CoreError::Basis(BasisLoadError::MissingHeadEtag {
+            object_key,
+        }))?;
+    Ok(NamespaceHeadIdentity { head_etag })
 }
 
 fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {

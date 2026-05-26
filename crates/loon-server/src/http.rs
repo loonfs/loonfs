@@ -19,7 +19,7 @@ use loon_api::{
 };
 use loonfs::{
     BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs, FsConfig,
-    PathMutationIntent, PutFileBehavior, RuntimeError, SharedObjectStore,
+    PathMutationIntent, PutFileBehavior, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -123,6 +123,7 @@ fn build_fs(config: &ServerConfig, store: SharedStore) -> Result<Fs, ServerConfi
             writer_id: config.writer_id.clone(),
             writer_version: config.writer_version.clone(),
             lease_duration_ms: config.lease_duration_ms,
+            runtime_cache: RuntimeCacheConfig::default(),
         },
     )
     .map_err(|error| ServerConfigError::InvalidField {
@@ -616,7 +617,9 @@ mod tests {
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
-    use loonfs::{CreateNamespaceOptions, Fs, FsConfig, PutFileBehavior, PutFileOptions};
+    use loonfs::{
+        CreateNamespaceOptions, Fs, FsConfig, PutFileBehavior, PutFileOptions, RuntimeCacheConfig,
+    };
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -1036,6 +1039,7 @@ mod tests {
                 writer_id: writer_id.to_owned(),
                 writer_version: format!("{writer_id}/0.1.0"),
                 lease_duration_ms: 60_000,
+                runtime_cache: RuntimeCacheConfig::default(),
             },
         )
         .expect("open runtime")
