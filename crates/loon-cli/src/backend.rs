@@ -5,7 +5,7 @@ use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs::{
     BootstrapNamespaceError, CopyOptions, CoreError, CoreErrorKind, CreateDirOptions,
     CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, MoveOptions, PutFileBehavior,
-    PutFileOptions, RuntimeError, SharedObjectStore,
+    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
 };
 use std::sync::Arc;
 
@@ -462,6 +462,7 @@ impl EmbeddedTarget {
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION"))),
                 lease_duration_ms: lease_duration_ms.unwrap_or(DEFAULT_LEASE_DURATION_MS),
+                runtime_cache: RuntimeCacheConfig::default(),
             },
         )
         .map_err(map_runtime_error)?;

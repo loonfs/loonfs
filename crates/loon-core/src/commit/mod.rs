@@ -2,7 +2,7 @@ use crate::metadata::MetadataState;
 use loon_api::{
     v0::{CommitAnnotations, RenameMode},
     ChangeSeq, CommitId, ContentRef, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
-    LeaseState, NamespaceId, RevisionNo,
+    LeaseState, NamePolicy, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -91,11 +91,6 @@ pub enum Precondition {
         parent_inode: InodeId,
         name_key: String,
     },
-    ChildNameIs {
-        parent_inode: InodeId,
-        name_key: String,
-        child_inode: InodeId,
-    },
     BindingIs {
         parent_inode: InodeId,
         name_key: String,
@@ -128,6 +123,7 @@ pub struct CommitPlan {
     pub resolved_restore_content_refs: Vec<Option<ContentRef>>,
     pub resolved_source_bindings: Vec<Option<ResolvedBinding>>,
     pub resulting_next_inode_id: InodeId,
+    pub name_policy: NamePolicy,
     pub metadata_preconditions: Vec<Precondition>,
     pub checked_invariants: Vec<String>,
 }
@@ -159,22 +155,12 @@ pub enum CommitValidationError {
         head: FenceToken,
         lease: FenceToken,
     },
-    ChildNamePreconditionParentMissing {
+    NamePreconditionParentMissing {
         parent_inode: InodeId,
     },
-    ChildNamePreconditionParentNotDirectory {
+    NamePreconditionParentNotDirectory {
         parent_inode: InodeId,
         actual_kind: InodeKind,
-    },
-    ChildNamePreconditionMissing {
-        parent_inode: InodeId,
-        name_key: String,
-    },
-    ChildNamePreconditionMismatch {
-        parent_inode: InodeId,
-        name_key: String,
-        expected_child_inode: InodeId,
-        actual_child_inode: InodeId,
     },
     BindingPreconditionMissing {
         parent_inode: InodeId,

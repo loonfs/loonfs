@@ -310,8 +310,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
             CoreErrorKind::TombstoneConflict
         }
         CommitValidationError::CreateChildNameCollision { .. }
-        | CommitValidationError::ChildNamePreconditionParentNotDirectory { .. }
-        | CommitValidationError::ChildNamePreconditionMismatch { .. }
+        | CommitValidationError::NamePreconditionParentNotDirectory { .. }
         | CommitValidationError::BindingPreconditionMissing { .. }
         | CommitValidationError::BindingPreconditionMismatch { .. }
         | CommitValidationError::CreateParentNotDirectory { .. }
@@ -328,8 +327,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
             CoreErrorKind::DirectoryNotEmpty
         }
         CommitValidationError::CreateParentMissing { .. }
-        | CommitValidationError::ChildNamePreconditionParentMissing { .. }
-        | CommitValidationError::ChildNamePreconditionMissing { .. }
+        | CommitValidationError::NamePreconditionParentMissing { .. }
         | CommitValidationError::ReplaceFileInodeMissing { .. }
         | CommitValidationError::RestoreRevisionInodeMissing { .. }
         | CommitValidationError::DeleteFileInodeMissing { .. }

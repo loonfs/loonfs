@@ -120,7 +120,6 @@ The core inode kinds are:
 | --- | --- |
 | **DIR** | A directory that can own child bindings. |
 | **FILE** | A file whose history is an ordered set of revisions. |
-| **MOUNT** | Reserved for a future presentation point for another namespace or subtree. |
 
 The spec does not require a larger type taxonomy in the core model. New resource types should normally be represented through file content or resource properties rather than by introducing new inode kinds.
 
@@ -195,9 +194,9 @@ No durable parent/child relationship is part of v0 namespace state. After fork, 
 
 ## 7. Mounts
 
-A mount will present another namespace, or a subtree of another namespace, inside the current tree. Mount creation, mount metadata, and mount traversal are reserved future work in v0; no standard mutation operation creates a mount today.
+A mount may later present another namespace, or a subtree of another namespace, inside the current tree; mount creation, mount metadata, mount inode kinds, and mount traversal are reserved future work. The v0 model has no mount inode kind and no standard mutation operation creates a mount.
 
-A mount carries:
+A future mount would carry:
 
 - a target namespace id
 - a target root inode id within that namespace

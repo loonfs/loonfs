@@ -400,12 +400,20 @@ pub fn resolve_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id)?;
+    resolve_path_from_basis(store, &basis, absolute_path)
+}
+
+pub fn resolve_path_from_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    basis: &crate::VerifiedNamespaceBasis,
+    absolute_path: &str,
+) -> Result<AuthoritativePathEntry, CoreError> {
     let resolved = basis
         .metadata_state
         .resolve_visible_path(absolute_path, basis.head.seq)?;
     build_authoritative_path_entry(
         store,
-        namespace_id,
+        &basis.head.namespace_id,
         &basis.content_store_id,
         basis.head.seq,
         &basis.metadata_state,
@@ -419,13 +427,21 @@ pub fn list_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id)?;
+    list_path_from_basis(store, &basis, absolute_path)
+}
+
+pub fn list_path_from_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    basis: &crate::VerifiedNamespaceBasis,
+    absolute_path: &str,
+) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
     let resolved = basis
         .metadata_state
         .resolve_visible_path(absolute_path, basis.head.seq)?;
     if resolved.inode_kind == InodeKind::File {
         return Ok(vec![build_authoritative_path_entry(
             store,
-            namespace_id,
+            &basis.head.namespace_id,
             &basis.content_store_id,
             basis.head.seq,
             &basis.metadata_state,
@@ -450,7 +466,7 @@ pub fn list_path<S: ObjectStore + ?Sized>(
                 .expect("visible child listing should resolve inode");
             build_authoritative_path_entry(
                 store,
-                namespace_id,
+                &basis.head.namespace_id,
                 &basis.content_store_id,
                 basis.head.seq,
                 &basis.metadata_state,
@@ -474,7 +490,16 @@ pub fn read_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
-    let entry = resolve_path(store, namespace_id, absolute_path)?;
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    read_file_bytes_from_basis(store, &basis, absolute_path)
+}
+
+pub fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
+    store: &S,
+    basis: &crate::VerifiedNamespaceBasis,
+    absolute_path: &str,
+) -> Result<AuthoritativeFileBytes, CoreError> {
+    let entry = resolve_path_from_basis(store, basis, absolute_path)?;
     if entry.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: entry.absolute_path,
@@ -485,8 +510,7 @@ pub fn read_file_bytes<S: ObjectStore + ?Sized>(
         .content_ref
         .clone()
         .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
-    let read = read_durable_content_bytes(store, &content_store_id, &content_ref)?;
+    let read = read_durable_content_bytes(store, &basis.content_store_id, &content_ref)?;
     Ok(AuthoritativeFileBytes {
         entry,
         bytes: read.bytes,
@@ -777,7 +801,7 @@ struct PathPlanningView<'a> {
     content_store_id: &'a ContentStoreId,
 }
 
-fn child_name_is_precondition(
+fn binding_is_precondition(
     view: &PathPlanningView<'_>,
     resolved: &ResolvedVisiblePath,
 ) -> Result<ApiCommitPrecondition, CoreError> {
@@ -861,6 +885,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     let final_parent_inode = ensure_parent_directories(
         absolute_path,
         view.head.seq,
+        view.head.name_policy,
         &mut working,
         &mut ops,
         &mut next_inode_id,
@@ -884,7 +909,7 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
                 .metadata_state
                 .latest_revision_head_at_seq(existing.inode_id, view.head.seq)
                 .ok_or_else(|| CoreError::MissingPath(absolute_path.to_owned()))?;
-            preconditions.push(child_name_is_precondition(view, &existing)?);
+            preconditions.push(binding_is_precondition(view, &existing)?);
             ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
                 base_revision_no: revision.revision_no,
@@ -1046,14 +1071,8 @@ fn plan_delete_path(
                 root_inode: resolved.inode_id,
             }
         }
-        kind => {
-            return Err(CoreError::ExpectedFile {
-                path: absolute_path.to_owned(),
-                kind,
-            });
-        }
     };
-    let mut preconditions = vec![child_name_is_precondition(view, &resolved)?];
+    let mut preconditions = vec![binding_is_precondition(view, &resolved)?];
     if !recursive && resolved.inode_kind == InodeKind::Dir {
         preconditions.push(ApiCommitPrecondition::DirectoryEmpty {
             inode_id: resolved.inode_id,
@@ -1101,7 +1120,7 @@ fn plan_move_path(
             mode,
         }],
         preconditions: vec![
-            child_name_is_precondition(view, &source)?,
+            binding_is_precondition(view, &source)?,
             child_name_absent_precondition(view, target_parent, &target_name),
             ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: source.inode_id,
@@ -1158,7 +1177,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
             content_ref: revision.content_ref,
         }],
         preconditions: vec![
-            child_name_is_precondition(view, &source)?,
+            binding_is_precondition(view, &source)?,
             ApiCommitPrecondition::InodeRevisionIs {
                 inode_id: source.inode_id,
                 revision_no: revision.revision_no,
@@ -1179,6 +1198,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
 fn ensure_parent_directories(
     absolute_path: &str,
     committed_seq: ChangeSeq,
+    name_policy: loon_api::NamePolicy,
     working: &mut MetadataState,
     ops: &mut Vec<ApiCommitOp>,
     next_inode_id: &mut InodeId,
@@ -1220,6 +1240,7 @@ fn ensure_parent_directories(
                 loon_api::WalDelta::BindDirentry {
                     delta_index: delta_index.saturating_add(1),
                     parent_inode: current_inode,
+                    name_key: name_key_for_display_name(name_policy, component),
                     display_name: component.clone(),
                     child_inode: allocated,
                 },

@@ -2,8 +2,8 @@ use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
 use crate::metadata::{MetadataApplyError, MetadataState};
 use loon_api::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, generate_wal_segment_id,
-    validate_wal_segment_id, ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitPayload,
-    WalDelta, WalSegmentEnvelope, WalSegmentPayload, WalSegmentPointer,
+    validate_wal_segment_id, ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitDelta,
+    WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload, WalSegmentPointer,
 };
 use loon_objectstore::keys::wal_segment;
 use serde::{Deserialize, Serialize};
@@ -190,7 +190,7 @@ pub fn replay_wal_segment(
     for record in &envelope.payload.records {
         resulting_head.seq = record.seq;
         resulting_head.next_inode_id =
-            replay_next_inode_id(resulting_head.next_inode_id, &record.deltas);
+            replay_next_inode_id_from_commit_deltas(resulting_head.next_inode_id, &record.deltas);
     }
     resulting_head.visible_wal_tip = Some(envelope.pointer(wal_object.object_key.clone()));
 
@@ -377,6 +377,15 @@ fn replay_next_inode_id(current_next_inode_id: InodeId, deltas: &[WalDelta]) -> 
         })
 }
 
+fn replay_next_inode_id_from_commit_deltas(
+    current_next_inode_id: InodeId,
+    deltas: &[WalCommitDelta],
+) -> InodeId {
+    deltas.iter().fold(current_next_inode_id, |next, delta| {
+        replay_next_inode_id(next, std::slice::from_ref(&delta.delta))
+    })
+}
+
 fn extend_invariants(checked_invariants: &mut Vec<String>, new_invariants: &[String]) {
     for invariant in new_invariants {
         push_invariant(checked_invariants, invariant);
@@ -423,6 +432,7 @@ mod tests {
             resolved_restore_content_refs: vec![None],
             resolved_source_bindings: vec![None],
             resulting_next_inode_id: InodeId(3),
+            name_policy: loon_api::NamePolicy::default(),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         };
@@ -502,6 +512,7 @@ mod tests {
             resolved_restore_content_refs: vec![None],
             resolved_source_bindings: vec![None],
             resulting_next_inode_id: InodeId(3),
+            name_policy: loon_api::NamePolicy::default(),
             metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         };

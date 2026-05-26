@@ -45,17 +45,17 @@ A share object includes at least:
 - role
 - optional presentation metadata such as display name or description
 
-A mount presents that accessible subtree somewhere in a visible tree.
+A future mount feature may present that accessible subtree somewhere in a visible tree; this is not part of the v0 namespace mutation model.
 
 Example:
 
 - a project subtree is shared with a user;
-- that subtree is then mounted at `/Shared/ProjectA` inside another namespace.
+- a future presentation layer may mount that subtree at `/Shared/ProjectA` inside another namespace.
 
 This separates access and presentation:
 
 - the share answers "who may access this subtree?";
-- the mount answers "where is that subtree shown in a tree?".
+- a future mount would answer "where is that subtree shown in a tree?".
 
 ## 5. Download and upload capabilities
 

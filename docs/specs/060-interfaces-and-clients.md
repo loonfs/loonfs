@@ -38,7 +38,7 @@ A commit request carries the following logical fields:
 | Field | Meaning |
 | --- | --- |
 | `commit_id` | Client-generated stable idempotency key for this logical commit request. The same value must be reused for safe retries. |
-| `preconditions` | Explicit semantic checks such as `inode_revision_is`, `child_name_is`, `child_name_absent`, `directory_empty`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
+| `preconditions` | Explicit semantic checks such as `inode_revision_is`, `binding_is`, `child_name_absent`, `directory_empty`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
 | `ops` | Ordered list of mutation operations. Operation order is preserved through validation, logical commit creation, and change-feed output. |
 | `message` | Optional human-readable description of the mutation event. |
 | `annotations` | Optional structured metadata attached to the logical commit request. |
@@ -309,7 +309,26 @@ Representative response:
           "op_index": 0,
           "op": "replace_file",
           "inode_id": 42,
-          "revision_no": 8
+          "revision_no": 8,
+          "content_ref": {
+            "kind": "whole_file_v0",
+            "digest": "sha256:7ab...",
+            "size_bytes": 20591
+          }
+        }
+      ],
+      "deltas": [
+        {
+          "semantic_op_index": 0,
+          "delta_index": 0,
+          "delta": "append_file_revision",
+          "inode_id": 42,
+          "revision_no": 8,
+          "content_ref": {
+            "kind": "whole_file_v0",
+            "digest": "sha256:7ab...",
+            "size_bytes": 20591
+          }
         }
       ]
     }

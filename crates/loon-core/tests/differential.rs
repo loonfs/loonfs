@@ -38,6 +38,10 @@ fn create_dir(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
+            name_key: loon_api::name_key_for_display_name(
+                loon_api::NamePolicy::default(),
+                display_name,
+            ),
             display_name: display_name.to_owned(),
             child_inode: inode_id,
         },
@@ -60,6 +64,10 @@ fn create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
+            name_key: loon_api::name_key_for_display_name(
+                loon_api::NamePolicy::default(),
+                display_name,
+            ),
             display_name: display_name.to_owned(),
             child_inode: inode_id,
         },
@@ -95,6 +103,10 @@ fn bind(
     vec![WalDelta::BindDirentry {
         delta_index,
         parent_inode,
+        name_key: loon_api::name_key_for_display_name(
+            loon_api::NamePolicy::default(),
+            display_name,
+        ),
         display_name: display_name.to_owned(),
         child_inode: inode_id,
     }]
@@ -371,7 +383,6 @@ fn normalize_inode(
         match inode_kind {
             InodeKind::Dir => "dir",
             InodeKind::File => "file",
-            InodeKind::Mount => "mount",
         },
         created_seq,
     )

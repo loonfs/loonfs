@@ -25,6 +25,7 @@ pub enum WalDelta {
     BindDirentry {
         delta_index: u32,
         parent_inode: InodeId,
+        name_key: String,
         display_name: String,
         child_inode: InodeId,
     },
@@ -61,11 +62,6 @@ pub enum WalPrecondition {
         parent_inode: InodeId,
         name_key: String,
     },
-    ChildNameIs {
-        parent_inode: InodeId,
-        name_key: String,
-        child_inode: InodeId,
-    },
     BindingIs {
         parent_inode: InodeId,
         name_key: String,
@@ -76,6 +72,12 @@ pub enum WalPrecondition {
     DirectoryEmpty {
         inode_id: InodeId,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalCommitDelta {
+    pub semantic_op_index: u32,
+    pub delta: WalDelta,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +93,7 @@ pub struct WalCommitPayload {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<CommitAnnotations>,
-    pub deltas: Vec<WalDelta>,
+    pub deltas: Vec<WalCommitDelta>,
     pub preconditions: Vec<WalPrecondition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub results: Vec<CommitOpResult>,

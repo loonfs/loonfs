@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use loon_api::v0::{
@@ -8,16 +9,21 @@ pub use loon_api::v0::{
     CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
     UploadContentResponse,
 };
+use loon_api::HeadState;
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
     ContentRef, CreateCheckpointResponse, FilesystemOperationResponse, InodeId, MutationResult,
     NamespaceId, NamespaceSummary,
 };
-use loon_core::MutationContext;
 pub use loon_core::{
     BootstrapNamespaceError, CoreError, CoreErrorKind, NamespaceMutationCandidate,
     PathMutationIntent, PutFileBehavior,
 };
+use loon_core::{
+    ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MutationContext,
+    VerifiedNamespaceBasis,
+};
+use loon_objectstore::keys::namespace_head;
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
@@ -42,6 +48,7 @@ pub struct FsConfig {
     pub writer_id: String,
     pub writer_version: String,
     pub lease_duration_ms: u64,
+    pub runtime_cache: RuntimeCacheConfig,
 }
 
 impl FsConfig {
@@ -50,6 +57,34 @@ impl FsConfig {
             writer_id: writer_id.into(),
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
+            runtime_cache: RuntimeCacheConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCacheConfig {
+    pub basis_cache_enabled: bool,
+    pub control_cache_enabled: bool,
+    pub max_cached_namespaces: usize,
+}
+
+impl RuntimeCacheConfig {
+    pub fn disabled() -> Self {
+        Self {
+            basis_cache_enabled: false,
+            control_cache_enabled: false,
+            max_cached_namespaces: 0,
+        }
+    }
+}
+
+impl Default for RuntimeCacheConfig {
+    fn default() -> Self {
+        Self {
+            basis_cache_enabled: true,
+            control_cache_enabled: true,
+            max_cached_namespaces: 64,
         }
     }
 }
@@ -62,6 +97,8 @@ pub struct Fs {
 struct FsInner {
     store: SharedObjectStore,
     config: FsConfig,
+    basis_cache: Mutex<BasisCache>,
+    control_cache: Mutex<RuntimeControlCache>,
 }
 
 pub struct FsBuilder {
@@ -69,6 +106,120 @@ pub struct FsBuilder {
     writer_id: Option<String>,
     writer_version: String,
     lease_duration_ms: u64,
+    runtime_cache: RuntimeCacheConfig,
+}
+
+#[derive(Debug, Default)]
+struct BasisCache {
+    entries: HashMap<NamespaceId, Arc<VerifiedNamespaceBasis>>,
+    order: VecDeque<NamespaceId>,
+}
+
+impl BasisCache {
+    fn get(&mut self, namespace_id: &NamespaceId) -> Option<Arc<VerifiedNamespaceBasis>> {
+        let basis = self.entries.get(namespace_id).cloned()?;
+        self.touch(namespace_id);
+        Some(basis)
+    }
+
+    fn insert(&mut self, basis: Arc<VerifiedNamespaceBasis>, max_cached_namespaces: usize) {
+        if max_cached_namespaces == 0 {
+            return;
+        }
+        let namespace_id = basis.head.namespace_id.clone();
+        self.entries.insert(namespace_id.clone(), basis);
+        self.touch(&namespace_id);
+        while self.entries.len() > max_cached_namespaces {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+    }
+
+    fn invalidate(&mut self, namespace_id: &NamespaceId) {
+        self.entries.remove(namespace_id);
+        self.order.retain(|candidate| candidate != namespace_id);
+    }
+
+    fn touch(&mut self, namespace_id: &NamespaceId) {
+        self.order.retain(|candidate| candidate != namespace_id);
+        self.order.push_back(namespace_id.clone());
+    }
+}
+
+#[derive(Debug, Default)]
+struct RuntimeControlCache {
+    namespaces: HashMap<NamespaceId, NamespaceControlCacheEntry>,
+    namespace_order: VecDeque<NamespaceId>,
+}
+
+#[derive(Debug, Default)]
+struct NamespaceControlCacheEntry {
+    head: Option<CachedControl<HeadState>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedControl<T> {
+    identity: ControlObjectIdentity,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl RuntimeControlCache {
+    fn namespace_head(&mut self, namespace_id: &NamespaceId) -> Option<CachedControl<HeadState>> {
+        let head = self.namespaces.get(namespace_id)?.head.clone()?;
+        self.touch_namespace(namespace_id);
+        Some(head)
+    }
+
+    fn insert_namespace_head(
+        &mut self,
+        namespace_id: &NamespaceId,
+        head: CachedControl<HeadState>,
+        max_cached_namespaces: usize,
+    ) {
+        if max_cached_namespaces == 0 {
+            return;
+        }
+        self.namespace_entry(namespace_id, max_cached_namespaces)
+            .head = Some(head);
+    }
+
+    fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
+        self.namespaces.remove(namespace_id);
+        self.namespace_order
+            .retain(|candidate| candidate != namespace_id);
+    }
+
+    fn invalidate_namespace_head(&mut self, namespace_id: &NamespaceId) {
+        if let Some(entry) = self.namespaces.get_mut(namespace_id) {
+            entry.head = None;
+        }
+    }
+
+    fn namespace_entry(
+        &mut self,
+        namespace_id: &NamespaceId,
+        max_cached_namespaces: usize,
+    ) -> &mut NamespaceControlCacheEntry {
+        self.namespaces.entry(namespace_id.clone()).or_default();
+        self.touch_namespace(namespace_id);
+        while self.namespaces.len() > max_cached_namespaces {
+            let Some(evicted) = self.namespace_order.pop_front() else {
+                break;
+            };
+            self.namespaces.remove(&evicted);
+        }
+        self.namespaces
+            .get_mut(namespace_id)
+            .expect("namespace cache entry should exist")
+    }
+
+    fn touch_namespace(&mut self, namespace_id: &NamespaceId) {
+        self.namespace_order
+            .retain(|candidate| candidate != namespace_id);
+        self.namespace_order.push_back(namespace_id.clone());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +314,7 @@ impl FsBuilder {
             writer_id: None,
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
+            runtime_cache: RuntimeCacheConfig::default(),
         }
     }
 
@@ -181,6 +333,11 @@ impl FsBuilder {
         self
     }
 
+    pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
+        self.runtime_cache = runtime_cache;
+        self
+    }
+
     pub fn build(self) -> Result<Fs> {
         let writer_id = self
             .writer_id
@@ -191,6 +348,7 @@ impl FsBuilder {
                 writer_id,
                 writer_version: self.writer_version,
                 lease_duration_ms: self.lease_duration_ms,
+                runtime_cache: self.runtime_cache,
             },
         )
     }
@@ -200,7 +358,12 @@ impl Fs {
     pub fn open(store: SharedObjectStore, config: FsConfig) -> Result<Self> {
         validate_config(&config)?;
         Ok(Self {
-            inner: Arc::new(FsInner { store, config }),
+            inner: Arc::new(FsInner {
+                store,
+                config,
+                basis_cache: Mutex::new(BasisCache::default()),
+                control_cache: Mutex::new(RuntimeControlCache::default()),
+            }),
         })
     }
 
@@ -217,12 +380,14 @@ impl Fs {
         namespace_id: &NamespaceId,
         options: CreateNamespaceOptions,
     ) -> Result<NamespaceSummary> {
-        Ok(loon_core::bootstrap_namespace(
+        let result = loon_core::bootstrap_namespace(
             self.store(),
             namespace_id,
             &self.mutation_context(),
             options.allow_existing,
-        )?)
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn fork_namespace(
@@ -230,12 +395,16 @@ impl Fs {
         source: &NamespaceId,
         target: &NamespaceId,
     ) -> Result<NamespaceSummary> {
-        Ok(loon_core::fork_namespace(
-            self.store(),
-            source,
-            target,
-            &self.mutation_context(),
-        )?)
+        let result =
+            loon_core::fork_namespace(self.store(), source, target, &self.mutation_context())
+                .map_err(RuntimeError::from);
+        if should_invalidate_after_result(&result) {
+            self.invalidate_namespace_cache(source);
+        }
+        if result.is_ok() {
+            self.invalidate_namespace_cache(target);
+        }
+        result
     }
 
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
@@ -320,9 +489,10 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry> {
-        Ok(loon_core::resolve_path(
+        let basis = self.basis_for_read(namespace_id)?;
+        Ok(loon_core::resolve_path_from_basis(
             self.store(),
-            namespace_id,
+            basis.as_ref(),
             absolute_path,
         )?)
     }
@@ -332,9 +502,10 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<Vec<AuthoritativePathEntry>> {
-        Ok(loon_core::list_path(
+        let basis = self.basis_for_read(namespace_id)?;
+        Ok(loon_core::list_path_from_basis(
             self.store(),
-            namespace_id,
+            basis.as_ref(),
             absolute_path,
         )?)
     }
@@ -344,9 +515,10 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
-        Ok(loon_core::read_file_bytes(
+        let basis = self.basis_for_read(namespace_id)?;
+        Ok(loon_core::read_file_bytes_from_basis(
             self.store(),
-            namespace_id,
+            basis.as_ref(),
             absolute_path,
         )?)
     }
@@ -358,7 +530,7 @@ impl Fs {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> Result<MutationResult> {
-        Ok(loon_core::put_file_bytes(
+        let result = loon_core::put_file_bytes(
             self.store(),
             namespace_id,
             absolute_path,
@@ -366,7 +538,9 @@ impl Fs {
             options.behavior,
             &self.mutation_context(),
             options.commit_id.as_ref().map(CommitId::as_str),
-        )?)
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn put_file_content_ref(
@@ -376,7 +550,7 @@ impl Fs {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> Result<MutationResult> {
-        Ok(loon_core::put_file_content_ref(
+        let result = loon_core::put_file_content_ref(
             self.store(),
             namespace_id,
             absolute_path,
@@ -384,7 +558,9 @@ impl Fs {
             options.behavior,
             &self.mutation_context(),
             options.commit_id.as_ref().map(CommitId::as_str),
-        )?)
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn create_dir(
@@ -393,13 +569,15 @@ impl Fs {
         absolute_path: &str,
         options: CreateDirOptions,
     ) -> Result<MutationResult> {
-        Ok(loon_core::create_dir_path(
+        let result = loon_core::create_dir_path(
             self.store(),
             namespace_id,
             absolute_path,
             &self.mutation_context(),
             options.commit_id.as_ref().map(CommitId::as_str),
-        )?)
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn delete_path(
@@ -409,23 +587,25 @@ impl Fs {
         options: DeleteOptions,
     ) -> Result<MutationResult> {
         let commit_id = options.commit_id.as_ref().map(CommitId::as_str);
-        if options.recursive {
-            Ok(loon_core::delete_path(
+        let result = if options.recursive {
+            loon_core::delete_path(
                 self.store(),
                 namespace_id,
                 absolute_path,
                 &self.mutation_context(),
                 commit_id,
-            )?)
+            )
         } else {
-            Ok(loon_core::delete_path_non_recursive(
+            loon_core::delete_path_non_recursive(
                 self.store(),
                 namespace_id,
                 absolute_path,
                 &self.mutation_context(),
                 commit_id,
-            )?)
+            )
         }
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn move_path(
@@ -435,14 +615,16 @@ impl Fs {
         to_path: &str,
         options: MoveOptions,
     ) -> Result<MutationResult> {
-        Ok(loon_core::move_path(
+        let result = loon_core::move_path(
             self.store(),
             namespace_id,
             from_path,
             to_path,
             &self.mutation_context(),
             options.commit_id.as_ref().map(CommitId::as_str),
-        )?)
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn copy_path(
@@ -452,14 +634,16 @@ impl Fs {
         to_path: &str,
         options: CopyOptions,
     ) -> Result<MutationResult> {
-        Ok(loon_core::copy_file_path(
+        let result = loon_core::copy_file_path(
             self.store(),
             namespace_id,
             from_path,
             to_path,
             &self.mutation_context(),
             options.commit_id.as_ref().map(CommitId::as_str),
-        )?)
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
@@ -505,12 +689,14 @@ impl Fs {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        Ok(loon_core::commit_operations(
+        let result = loon_core::commit_operations(
             self.store(),
             namespace_id,
             request,
             &self.mutation_context(),
-        )?)
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn commit_operations_batch(
@@ -518,7 +704,7 @@ impl Fs {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<Result<CommitResponse>> {
-        loon_core::commit_operations_batch(
+        let results: Vec<_> = loon_core::commit_operations_batch(
             self.store(),
             namespace_id,
             requests,
@@ -526,7 +712,9 @@ impl Fs {
         )
         .into_iter()
         .map(|result| result.map_err(RuntimeError::Core))
-        .collect()
+        .collect();
+        self.invalidate_namespace_cache_after_batch(namespace_id, &results);
+        results
     }
 
     pub fn publish_namespace_mutations_batch(
@@ -534,7 +722,7 @@ impl Fs {
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
-        loon_core::publish_namespace_mutations_batch(
+        let results: Vec<_> = loon_core::publish_namespace_mutations_batch(
             self.store(),
             namespace_id,
             candidates,
@@ -542,7 +730,9 @@ impl Fs {
         )
         .into_iter()
         .map(|result| result.map_err(RuntimeError::Core))
-        .collect()
+        .collect();
+        self.invalidate_namespace_cache_after_batch(namespace_id, &results);
+        results
     }
 
     pub fn list_changes_after(
@@ -561,22 +751,201 @@ impl Fs {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
-        Ok(loon_core::create_checkpoint(
-            self.store(),
-            namespace_id,
-            &self.mutation_context(),
-        )?)
+        let result =
+            loon_core::create_checkpoint(self.store(), namespace_id, &self.mutation_context())
+                .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
-        Ok(loon_core::advance_retention_floor(
+        let result = loon_core::advance_retention_floor(
             self.store(),
             namespace_id,
             &self.mutation_context(),
-        )?)
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    fn load_namespace_head_cached(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> std::result::Result<CachedControl<HeadState>, ControlObjectLoadError> {
+        let cache_config = &self.inner.config.runtime_cache;
+        if !self.control_cache_enabled() {
+            return loon_core::load_namespace_head_control(self.store(), namespace_id)
+                .map(cached_head);
+        }
+
+        let cached = self
+            .inner
+            .control_cache
+            .lock()
+            .expect("control cache lock poisoned")
+            .namespace_head(namespace_id);
+        if let Some(head) = cached {
+            match self.cached_control_identity_matches(
+                &namespace_head(namespace_id.as_str()),
+                &head.identity,
+            ) {
+                Ok(true) => return Ok(head),
+                Ok(false) => self
+                    .inner
+                    .control_cache
+                    .lock()
+                    .expect("control cache lock poisoned")
+                    .invalidate_namespace_head(namespace_id),
+                Err(error) => {
+                    self.inner
+                        .control_cache
+                        .lock()
+                        .expect("control cache lock poisoned")
+                        .invalidate_namespace_head(namespace_id);
+                    return Err(error);
+                }
+            }
+        }
+
+        let loaded = match loon_core::load_namespace_head_control(self.store(), namespace_id) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                self.inner
+                    .control_cache
+                    .lock()
+                    .expect("control cache lock poisoned")
+                    .invalidate_namespace_head(namespace_id);
+                return Err(error);
+            }
+        };
+        let head = cached_head(loaded);
+        self.inner
+            .control_cache
+            .lock()
+            .expect("control cache lock poisoned")
+            .insert_namespace_head(
+                namespace_id,
+                head.clone(),
+                cache_config.max_cached_namespaces,
+            );
+        Ok(head)
+    }
+
+    fn cached_control_identity_matches(
+        &self,
+        object_key: &str,
+        identity: &ControlObjectIdentity,
+    ) -> std::result::Result<bool, ControlObjectLoadError> {
+        let metadata = self
+            .store()
+            .head(object_key)
+            .map_err(|error| ControlObjectLoadError::Store(error.to_string()))?
+            .ok_or_else(|| ControlObjectLoadError::MissingObject {
+                object_key: object_key.to_owned(),
+            })?;
+        let Some(etag) = metadata.etag else {
+            return Err(ControlObjectLoadError::Store(format!(
+                "missing control object etag for `{object_key}`"
+            )));
+        };
+        Ok(etag == identity.etag)
+    }
+
+    fn control_cache_enabled(&self) -> bool {
+        let cache_config = &self.inner.config.runtime_cache;
+        cache_config.control_cache_enabled && cache_config.max_cached_namespaces > 0
+    }
+
+    fn basis_for_read(&self, namespace_id: &NamespaceId) -> Result<Arc<VerifiedNamespaceBasis>> {
+        let cache_config = &self.inner.config.runtime_cache;
+        if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
+            return Ok(Arc::new(
+                loon_core::load_verified_namespace_basis(self.store(), namespace_id)
+                    .map_err(CoreError::from)?,
+            ));
+        }
+
+        let cached = self
+            .inner
+            .basis_cache
+            .lock()
+            .expect("basis cache lock poisoned")
+            .get(namespace_id);
+        if let Some(basis) = cached {
+            if self.control_cache_enabled() {
+                match self.load_namespace_head_cached(namespace_id) {
+                    Ok(head) if head.identity.etag == basis.head_etag => {
+                        return Ok(basis);
+                    }
+                    Ok(_) | Err(_) => {
+                        self.invalidate_namespace_cache(namespace_id);
+                    }
+                }
+            } else {
+                match loon_core::load_namespace_head_identity(self.store(), namespace_id) {
+                    Ok(identity) if identity.head_etag == basis.head_etag => {
+                        return Ok(basis);
+                    }
+                    Ok(_) | Err(_) => {
+                        self.invalidate_namespace_cache(namespace_id);
+                    }
+                }
+            }
+        }
+
+        let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
+            .map_err(CoreError::from)?;
+        let basis = Arc::new(basis);
+        self.cache_basis(Arc::clone(&basis));
+        Ok(basis)
+    }
+
+    fn cache_basis(&self, basis: Arc<VerifiedNamespaceBasis>) {
+        let cache_config = &self.inner.config.runtime_cache;
+        if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
+            return;
+        }
+        self.inner
+            .basis_cache
+            .lock()
+            .expect("basis cache lock poisoned")
+            .insert(basis, cache_config.max_cached_namespaces);
+    }
+
+    fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
+        self.inner
+            .basis_cache
+            .lock()
+            .expect("basis cache lock poisoned")
+            .invalidate(namespace_id);
+        self.inner
+            .control_cache
+            .lock()
+            .expect("control cache lock poisoned")
+            .invalidate_namespace(namespace_id);
+    }
+
+    fn finish_namespace_mutation<T>(
+        &self,
+        namespace_id: &NamespaceId,
+        result: Result<T>,
+    ) -> Result<T> {
+        if should_invalidate_after_result(&result) {
+            self.invalidate_namespace_cache(namespace_id);
+        }
+        result
+    }
+
+    fn invalidate_namespace_cache_after_batch(
+        &self,
+        namespace_id: &NamespaceId,
+        results: &[Result<CommitResponse>],
+    ) {
+        if results.iter().any(should_invalidate_after_result) {
+            self.invalidate_namespace_cache(namespace_id);
+        }
     }
 
     fn store(&self) -> &(dyn ObjectStore + Send + Sync) {
@@ -590,6 +959,13 @@ impl Fs {
             now_ms: current_time_ms(),
             lease_duration_ms: self.inner.config.lease_duration_ms,
         }
+    }
+}
+
+fn cached_head(loaded: LoadedHeadControl) -> CachedControl<HeadState> {
+    CachedControl {
+        identity: loaded.identity,
+        _marker: std::marker::PhantomData,
     }
 }
 
@@ -614,6 +990,14 @@ fn validate_config(config: &FsConfig) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(RuntimeError::Core(error)) if error.kind() == CoreErrorKind::StaleHead => true,
+        _ => false,
+    }
 }
 
 fn current_time_ms() -> u64 {

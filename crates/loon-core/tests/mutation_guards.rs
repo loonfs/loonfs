@@ -1,8 +1,8 @@
 use loon_api::{
     decode_wal_segment_envelope_zstd, sha256_digest,
     v0::{
-        CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
-        CompleteUploadRequest,
+        CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition,
+        CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
     ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope,
     ControlObjectKind, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
@@ -13,9 +13,9 @@ use loon_core::commit::{
 };
 use loon_core::metadata::{InodeRecord, MetadataState};
 use loon_core::{
-    bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
-    copy_file_path, create_dir_path, delete_path, delete_path_non_recursive, fork_namespace,
-    list_changes_after, list_namespaces, load_verified_namespace_basis, move_path,
+    begin_upload, bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
+    copy_file_path, create_checkpoint, create_dir_path, delete_path, delete_path_non_recursive,
+    fork_namespace, list_changes_after, list_namespaces, load_verified_namespace_basis, move_path,
     publish_namespace_mutations_batch, put_file_bytes, read_file_bytes, resolve_path,
     store_bytes_as_content, upload_content, write_file_bytes, CoreError, CoreErrorKind,
     DirectObjectStorePublisher, MutationContext, NamespaceMutationCandidate, PathMutationIntent,
@@ -47,6 +47,10 @@ fn wal_create_dir(
         loon_api::WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
+            name_key: loon_api::name_key_for_display_name(
+                loon_api::NamePolicy::default(),
+                &display_name,
+            ),
             display_name,
             child_inode: inode_id,
         },
@@ -69,6 +73,10 @@ fn wal_create_file(
         loon_api::WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
+            name_key: loon_api::name_key_for_display_name(
+                loon_api::NamePolicy::default(),
+                &display_name,
+            ),
             display_name,
             child_inode: inode_id,
         },
@@ -664,6 +672,10 @@ fn public_namespace_operations_reject_invalid_namespace_id_before_key_constructi
         .expect_err("invalid namespace_id should be rejected before lookup");
     assert_eq!(read_error.kind(), CoreErrorKind::InvalidNamespaceId);
 
+    let begin_upload_error = begin_upload(&store, &invalid_namespace, &context)
+        .expect_err("invalid namespace_id should be rejected before upload session creation");
+    assert_eq!(begin_upload_error.kind(), CoreErrorKind::InvalidNamespaceId);
+
     let delete_error = delete_path_non_recursive(
         &store,
         &invalid_namespace,
@@ -692,6 +704,63 @@ fn public_namespace_operations_reject_invalid_namespace_id_before_key_constructi
             .expect("list namespace objects"),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn begin_upload_rejects_missing_and_partial_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+
+    let missing_error =
+        begin_upload(&store, &namespace_id, &context).expect_err("missing namespace");
+    assert_eq!(missing_error.kind(), CoreErrorKind::NamespaceNotFound);
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    store
+        .delete(&namespace_descriptor(namespace_id.as_str()))
+        .expect("delete descriptor");
+
+    let partial_error =
+        begin_upload(&store, &namespace_id, &context).expect_err("partial namespace");
+    assert_eq!(partial_error.kind(), CoreErrorKind::NamespacePartial);
+}
+
+#[test]
+fn begin_upload_does_not_read_checkpoint_or_wal_replay_objects() {
+    let temp_dir = tempdir().expect("tempdir");
+    let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+
+    bootstrap_namespace(&setup_store, &namespace_id, &context, false).expect("bootstrap");
+    put_file_bytes(
+        &setup_store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("upload-guard-create"),
+    )
+    .expect("create file");
+    create_checkpoint(&setup_store, &namespace_id, &context).expect("checkpoint");
+    put_file_bytes(
+        &setup_store,
+        &namespace_id,
+        "/docs/hello.txt",
+        b"updated",
+        PutFileBehavior::ReplaceExisting,
+        &context,
+        Some("upload-guard-replace"),
+    )
+    .expect("replace file");
+
+    let guarded_store = ReplayReadGuardStore::new(temp_dir.path(), namespace_id.as_str());
+    let begin = begin_upload(&guarded_store, &namespace_id, &context).expect("begin upload");
+    assert_eq!(begin.namespace_id, namespace_id);
+    assert_eq!(guarded_store.guarded_get_count(), 0);
 }
 
 #[test]
@@ -803,6 +872,20 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(segment.payload.start_seq, ChangeSeq(1));
     assert_eq!(segment.payload.end_seq, ChangeSeq(2));
     assert_eq!(segment.payload.records.len(), 2);
+    assert_eq!(segment.payload.records[0].deltas.len(), 2);
+    assert_eq!(segment.payload.records[0].deltas[0].semantic_op_index, 0);
+    assert_eq!(segment.payload.records[0].deltas[1].semantic_op_index, 0);
+    match &segment.payload.records[0].deltas[1].delta {
+        loon_api::WalDelta::BindDirentry {
+            name_key,
+            display_name,
+            ..
+        } => {
+            assert_eq!(name_key, "alpha");
+            assert_eq!(display_name, "alpha");
+        }
+        delta => panic!("expected bind delta, got {delta:?}"),
+    }
     store
         .put_if_absent(
             "namespaces/demo/wal/00000000000000000999-00000000000000000999-orphan.cbor.zst",
@@ -814,10 +897,31 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(changes.changes.len(), 2);
     assert_eq!(changes.changes[0].commit_id, CommitId::from("req-batch-a"));
     assert_eq!(changes.changes[1].commit_id, CommitId::from("req-batch-b"));
+    assert_eq!(changes.changes[0].ops, first.results);
+    assert_eq!(changes.changes[0].deltas.len(), 2);
+    assert!(matches!(
+        &changes.changes[0].deltas[0],
+        CommitDelta::CreateInode {
+            semantic_op_index: 0,
+            delta_index: 0,
+            inode_kind: InodeKind::Dir,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &changes.changes[0].deltas[1],
+        CommitDelta::BindDirentry {
+            semantic_op_index: 0,
+            delta_index: 1,
+            name_key,
+            display_name,
+            ..
+        } if name_key == "alpha" && display_name == "alpha"
+    ));
 }
 
 #[test]
-fn child_name_is_precondition_observes_earlier_batch_candidate() {
+fn binding_is_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::from("demo");
@@ -838,6 +942,11 @@ fn child_name_is_precondition_observes_earlier_batch_candidate() {
     let file_inode = resolve_path(&store, &namespace_id, "/docs/readme.txt")
         .expect("resolve file")
         .inode_id;
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    let original_binding = basis
+        .metadata_state
+        .current_parent_binding_for_child(file_inode, basis.head.seq)
+        .expect("source binding");
 
     let responses = commit_operations_batch(
         &store,
@@ -856,14 +965,13 @@ fn child_name_is_precondition_observes_earlier_batch_candidate() {
                 annotations: None,
             },
             ApiCommitRequest {
-                commit_id: CommitId::from("delete-with-stale-child-name"),
-                preconditions: vec![CommitPrecondition::ChildNameIs {
+                commit_id: CommitId::from("delete-with-stale-binding"),
+                preconditions: vec![CommitPrecondition::BindingIs {
                     parent_inode: docs_inode,
-                    name_key: loon_api::name_key_for_display_name(
-                        loon_api::NamePolicy::default(),
-                        "readme.txt",
-                    ),
+                    name_key: original_binding.name_key,
                     child_inode: file_inode,
+                    bind_seq: original_binding.bind_seq,
+                    bind_delta_index: original_binding.bind_delta_index,
                 }],
                 ops: vec![ApiCommitOp::DeleteFile {
                     inode_id: file_inode,
@@ -881,8 +989,8 @@ fn child_name_is_precondition_observes_earlier_batch_candidate() {
     );
     let error = responses[1]
         .as_ref()
-        .expect_err("stale child-name precondition");
-    assert_eq!(error.kind(), CoreErrorKind::PathNotFound);
+        .expect_err("stale binding precondition");
+    assert_eq!(error.kind(), CoreErrorKind::PathConflict);
 }
 
 #[test]
@@ -2613,6 +2721,75 @@ fn content_ref(seed: &str) -> ContentRef {
         kind: ContentRefKind::WholeFileV0,
         digest: sha256_digest(seed.as_bytes()),
         size_bytes: seed.len() as u64,
+    }
+}
+
+struct ReplayReadGuardStore {
+    inner: LocalFsStore,
+    guarded_prefixes: Vec<String>,
+    guarded_gets: AtomicUsize,
+}
+
+impl ReplayReadGuardStore {
+    fn new(root: impl AsRef<Path>, namespace: &str) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("store"),
+            guarded_prefixes: vec![
+                format!("namespaces/{namespace}/wal/"),
+                format!("namespaces/{namespace}/checkpoints/"),
+            ],
+            guarded_gets: AtomicUsize::new(0),
+        }
+    }
+
+    fn guarded_get_count(&self) -> usize {
+        self.guarded_gets.load(Ordering::SeqCst)
+    }
+
+    fn reject_replay_read(&self, key: &str) -> Result<(), ObjectStoreError> {
+        if self
+            .guarded_prefixes
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+        {
+            self.guarded_gets.fetch_add(1, Ordering::SeqCst);
+            return Err(ObjectStoreError::Transport(format!(
+                "begin_upload unexpectedly read replay object `{key}`"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl ObjectStore for ReplayReadGuardStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.reject_replay_read(key)?;
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
     }
 }
 

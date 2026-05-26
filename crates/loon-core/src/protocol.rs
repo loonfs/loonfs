@@ -10,20 +10,27 @@ use crate::content::{validate_durable_content_reference, write_immutable_object}
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
-use crate::namespace::catalog::load_namespace_content_store_id;
+use crate::namespace::catalog::{
+    load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
+    NamespaceInitializationState,
+};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{prepare_wal_segment, StoredWalObject};
+use crate::{
+    load_content_store_descriptor_control, load_namespace_descriptor_control,
+    load_namespace_head_control, load_namespace_lease_control,
+};
 use loon_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitRequest as ApiCommitRequest,
+    BeginUploadResponse, ChangesResponse, CommitDelta, CommitRequest as ApiCommitRequest,
     CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::{
     decode_wal_segment_envelope_zstd, generate_upload_id, validate_upload_id, ChangeSeq, CommitId,
     CompletedUpload, ContentRef, ControlObjectKind, HeadState, NamespaceId, UploadSessionEnvelope,
-    UploadSessionState,
+    UploadSessionState, WalCommitDelta, WalDelta,
 };
-use loon_objectstore::keys::{content_blob, upload_session};
+use loon_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::collections::HashMap;
 
@@ -52,7 +59,15 @@ pub fn begin_upload<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<BeginUploadResponse, CoreError> {
-    let _basis = load_verified_namespace_basis(store, namespace_id)?;
+    ensure_upload_namespace_available(store, namespace_id)?;
+    create_upload_session(store, namespace_id, context)
+}
+
+fn create_upload_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<BeginUploadResponse, CoreError> {
     let upload_id = generate_upload_id();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
@@ -78,6 +93,61 @@ pub fn begin_upload<S: ObjectStore + ?Sized>(
         upload_id,
         mode: UploadMode::ServiceProxied,
     })
+}
+
+fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<(), CoreError> {
+    match namespace_initialization_state(store, namespace_id) {
+        Ok(NamespaceInitializationState::Complete) => {
+            let descriptor =
+                load_namespace_descriptor_control(store, namespace_id).map_err(|error| {
+                    CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(error))
+                })?;
+            load_content_store_descriptor_control(store, &descriptor.state.content_store_id)
+                .map_err(|error| {
+                    CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(error))
+                })?;
+            load_namespace_head_control(store, namespace_id)
+                .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+            load_namespace_lease_control(store, namespace_id)
+                .map_err(|error| CoreError::Basis(BasisLoadError::LoadLease(error)))?;
+            Ok(())
+        }
+        Ok(NamespaceInitializationState::Absent) => {
+            Err(CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(
+                crate::loading::ControlObjectLoadError::MissingObject {
+                    object_key: namespace_descriptor(namespace_id.as_str()),
+                },
+            )))
+        }
+        Ok(NamespaceInitializationState::Partial) => {
+            Err(CoreError::NamespacePartiallyInitialized {
+                namespace_id: namespace_id.clone(),
+            })
+        }
+        Err(error) => Err(map_upload_namespace_initialization_error(error)),
+    }
+}
+
+fn map_upload_namespace_initialization_error(error: NamespaceInitializationError) -> CoreError {
+    match error {
+        NamespaceInitializationError::InvalidNamespaceId(error) => {
+            CoreError::InvalidNamespaceId(error)
+        }
+        NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
+            CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(error))
+        }
+        NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
+            CoreError::Basis(BasisLoadError::LoadContentStoreDescriptor(error))
+        }
+        NamespaceInitializationError::InspectNamespaceDescriptor(_)
+        | NamespaceInitializationError::InspectNamespaceHead(_)
+        | NamespaceInitializationError::InspectNamespaceLease(_) => {
+            CoreError::Store(error.to_string())
+        }
+    }
 }
 
 pub fn upload_content<S: ObjectStore + ?Sized>(
@@ -632,6 +702,7 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
                     message: record.message,
                     annotations: record.annotations,
                     ops: record.results,
+                    deltas: record.deltas.iter().map(commit_delta_from_wal).collect(),
                 });
             }
         }
@@ -643,6 +714,72 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
         through_seq: basis.head.seq,
         changes,
     })
+}
+
+fn commit_delta_from_wal(delta: &WalCommitDelta) -> CommitDelta {
+    let semantic_op_index = delta.semantic_op_index;
+    match &delta.delta {
+        WalDelta::CreateInode {
+            delta_index,
+            inode_id,
+            inode_kind,
+        } => CommitDelta::CreateInode {
+            semantic_op_index,
+            delta_index: *delta_index,
+            inode_id: *inode_id,
+            inode_kind: inode_kind.clone(),
+        },
+        WalDelta::BindDirentry {
+            delta_index,
+            parent_inode,
+            name_key,
+            display_name,
+            child_inode,
+        } => CommitDelta::BindDirentry {
+            semantic_op_index,
+            delta_index: *delta_index,
+            parent_inode: *parent_inode,
+            name_key: name_key.clone(),
+            display_name: display_name.clone(),
+            child_inode: *child_inode,
+        },
+        WalDelta::UnbindDirentry {
+            delta_index,
+            parent_inode,
+            name_key,
+            child_inode,
+            bind_seq,
+            bind_delta_index,
+        } => CommitDelta::UnbindDirentry {
+            semantic_op_index,
+            delta_index: *delta_index,
+            parent_inode: *parent_inode,
+            name_key: name_key.clone(),
+            child_inode: *child_inode,
+            bind_seq: *bind_seq,
+            bind_delta_index: *bind_delta_index,
+        },
+        WalDelta::AppendFileRevision {
+            delta_index,
+            inode_id,
+            revision_no,
+            content_ref,
+        } => CommitDelta::AppendFileRevision {
+            semantic_op_index,
+            delta_index: *delta_index,
+            inode_id: *inode_id,
+            revision_no: *revision_no,
+            content_ref: content_ref.clone(),
+        },
+        WalDelta::TombstoneSubtree {
+            delta_index,
+            root_inode,
+        } => CommitDelta::TombstoneSubtree {
+            semantic_op_index,
+            delta_index: *delta_index,
+            root_inode: *root_inode,
+        },
+    }
 }
 
 fn validate_commit_content_references<S: ObjectStore + ?Sized>(
