@@ -925,11 +925,7 @@ fn find_commit_receipt<'a>(
     metadata_state: &'a crate::metadata::MetadataState,
     commit_id: &CommitId,
 ) -> Option<&'a CommitReceiptRecord> {
-    metadata_state
-        .commit_receipts
-        .iter()
-        .filter(|record| record.commit_id == *commit_id)
-        .max_by_key(|record| record.committed_seq)
+    metadata_state.find_commit_receipt(commit_id)
 }
 
 fn commit_response_from_commit_receipt(

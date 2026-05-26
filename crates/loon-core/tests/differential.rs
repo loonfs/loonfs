@@ -1,7 +1,7 @@
 use loon_api::{
     sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo, WalDelta,
 };
-use loon_core::metadata::{InodeRecord, MetadataState as CoreMetadataState};
+use loon_core::metadata::MetadataState as CoreMetadataState;
 use loon_model::metadata::MetadataState as ModelMetadataState;
 
 type NormalizedInodes = Vec<(u64, &'static str, u64)>;
@@ -230,18 +230,17 @@ fn metadata_apply_matches_model_for_delete_subtree() {
 }
 
 fn core_bootstrap_state() -> CoreMetadataState {
-    CoreMetadataState {
-        inodes: vec![InodeRecord {
-            inode_id: InodeId(1),
-            inode_kind: InodeKind::Dir,
-            created_seq: ChangeSeq(0),
-        }],
-        direntry_binds: Vec::new(),
-        direntry_unbinds: Vec::new(),
-        revisions: Vec::new(),
-        subtree_tombstones: Vec::new(),
-        commit_receipts: Vec::new(),
-    }
+    CoreMetadataState::default()
+        .apply_committed_wal_deltas(
+            ChangeSeq(0),
+            &[WalDelta::CreateInode {
+                delta_index: 0,
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+            }],
+        )
+        .expect("bootstrap core root")
+        .metadata_state
 }
 
 fn model_bootstrap_state() -> ModelMetadataState {
@@ -270,7 +269,7 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
 fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
     (
         state
-            .inodes
+            .inodes()
             .iter()
             .map(|inode| {
                 normalize_inode(
@@ -281,7 +280,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
             })
             .collect(),
         state
-            .direntry_binds
+            .direntry_binds()
             .iter()
             .map(|direntry| {
                 (
@@ -294,7 +293,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
             })
             .collect(),
         state
-            .revisions
+            .revisions()
             .iter()
             .map(|revision| {
                 (
@@ -307,7 +306,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
             })
             .collect(),
         state
-            .subtree_tombstones
+            .subtree_tombstones()
             .iter()
             .map(|tombstone| {
                 (
@@ -321,9 +320,15 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
 }
 
 fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
+    let ModelMetadataState {
+        inodes,
+        direntry_binds,
+        revisions,
+        subtree_tombstones,
+        ..
+    } = state;
     (
-        state
-            .inodes
+        inodes
             .iter()
             .map(|inode| {
                 normalize_inode(
@@ -333,8 +338,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 )
             })
             .collect(),
-        state
-            .direntry_binds
+        direntry_binds
             .iter()
             .map(|direntry| {
                 (
@@ -346,8 +350,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 )
             })
             .collect(),
-        state
-            .revisions
+        revisions
             .iter()
             .map(|revision| {
                 (
@@ -359,8 +362,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                 )
             })
             .collect(),
-        state
-            .subtree_tombstones
+        subtree_tombstones
             .iter()
             .map(|tombstone| {
                 (
