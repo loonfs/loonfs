@@ -7,7 +7,8 @@ use super::{
 use crate::invariants::INVARIANTS;
 use crate::metadata::MetadataState;
 use loon_api::{
-    name_key_for_display_name, ChangeSeq, ContentRef, InodeId, InodeKind, NamePolicy, RevisionNo,
+    name_key_for_display_name, ChangeSeq, ContentRef, DisplayName, InodeId, InodeKind, NamePolicy,
+    RevisionNo,
 };
 use std::collections::BTreeMap;
 
@@ -658,6 +659,7 @@ fn validate_child_name_absent(
     base_seq: ChangeSeq,
     name_policy: NamePolicy,
 ) -> Result<(), CommitValidationError> {
+    validate_display_name(display_name)?;
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
         .ok_or(CommitValidationError::CreateParentMissing { parent_inode })?;
@@ -668,10 +670,11 @@ fn validate_child_name_absent(
         });
     }
 
-    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
+    let name_key = name_key_for_display_name(name_policy, display_name);
+    if let Some(existing) = metadata_state.visible_child(parent_inode, &name_key, base_seq) {
         return Err(CommitValidationError::CreateChildNameCollision {
             parent_inode,
-            name_key: name_key_for_display_name(name_policy, display_name),
+            name_key,
             child_inode: existing.child_inode_id,
         });
     }
@@ -911,6 +914,7 @@ fn validate_rename_target_name_absent(
     base_seq: ChangeSeq,
     name_policy: NamePolicy,
 ) -> Result<(), CommitValidationError> {
+    validate_display_name(display_name)?;
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
         .ok_or(CommitValidationError::RenameTargetParentMissing { parent_inode })?;
@@ -921,15 +925,24 @@ fn validate_rename_target_name_absent(
         });
     }
 
-    if let Some(existing) = metadata_state.visible_child(parent_inode, display_name, base_seq) {
+    let name_key = name_key_for_display_name(name_policy, display_name);
+    if let Some(existing) = metadata_state.visible_child(parent_inode, &name_key, base_seq) {
         return Err(CommitValidationError::RenameTargetNameCollision {
             parent_inode,
-            name_key: name_key_for_display_name(name_policy, display_name),
+            name_key,
             child_inode: existing.child_inode_id,
         });
     }
 
     Ok(())
+}
+
+fn validate_display_name(display_name: &str) -> Result<(), CommitValidationError> {
+    DisplayName::parse(display_name).map(|_| ()).map_err(|_| {
+        CommitValidationError::InvalidDisplayName {
+            display_name: display_name.to_owned(),
+        }
+    })
 }
 
 fn validate_rename_does_not_cycle(

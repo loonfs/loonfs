@@ -194,6 +194,9 @@ pub enum CommitValidationError {
         name_key: String,
         child_inode: InodeId,
     },
+    InvalidDisplayName {
+        display_name: String,
+    },
     CreateUnderSubtreeTombstone {
         parent_inode: InodeId,
         root_inode: InodeId,

@@ -341,6 +341,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         }
         CommitValidationError::RenameWouldCycleDirectory { .. } => CoreErrorKind::WouldCycle,
         CommitValidationError::UnsupportedRenameMode { .. } => CoreErrorKind::UnsupportedRenameMode,
+        CommitValidationError::InvalidDisplayName { .. } => CoreErrorKind::InvalidPath,
         CommitValidationError::StaleWriterFenceToken { .. }
         | CommitValidationError::LeaseHolderMismatch { .. }
         | CommitValidationError::LeaseExpired { .. } => CoreErrorKind::LeaseConflict,

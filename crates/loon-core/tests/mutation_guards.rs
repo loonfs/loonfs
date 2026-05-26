@@ -4,7 +4,7 @@ use loon_api::{
         CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
-    ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope,
     ControlObjectKind, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
     NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId, RevisionNo,
 };
@@ -1268,6 +1268,84 @@ fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
 }
 
 #[test]
+fn explicit_commit_rejects_invalid_display_names() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let create_error = commit_operations(
+        &store,
+        &namespace_id,
+        ApiCommitRequest {
+            commit_id: CommitId::from("invalid-create-name"),
+            preconditions: Vec::new(),
+            ops: vec![ApiCommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: "a/b".to_owned(),
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("invalid create display name");
+    assert_eq!(create_error.kind(), CoreErrorKind::InvalidPath);
+    assert!(matches!(
+        create_error,
+        CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
+            display_name
+        }) if display_name == "a/b"
+    ));
+
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/file.txt",
+        b"hello",
+        &context,
+        Some("seed-for-invalid-rename"),
+    )
+    .expect("seed file");
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    let file = basis
+        .metadata_state
+        .resolve_visible_path(
+            &AbsolutePath::parse("/file.txt").expect("path"),
+            basis.head.name_policy,
+            basis.head.seq,
+        )
+        .expect("resolve file");
+
+    let rename_error = commit_operations(
+        &store,
+        &namespace_id,
+        ApiCommitRequest {
+            commit_id: CommitId::from("invalid-rename-name"),
+            preconditions: Vec::new(),
+            ops: vec![ApiCommitOp::Rename {
+                inode_id: file.inode_id,
+                new_parent_inode: InodeId(1),
+                new_display_name: ".".to_owned(),
+                mode: loon_api::v0::RenameMode::NoReplace,
+            }],
+            message: None,
+            annotations: None,
+        },
+        &context,
+    )
+    .expect_err("invalid rename display name");
+    assert_eq!(rename_error.kind(), CoreErrorKind::InvalidPath);
+    assert!(matches!(
+        rename_error,
+        CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
+            display_name
+        }) if display_name == "."
+    ));
+}
+
+#[test]
 fn direct_publisher_path_intents_cover_basic_mutations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1352,7 +1430,7 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
 
     let intent = PathMutationIntent::PutFile {
         commit_id: CommitId::from("same-path-request"),
-        absolute_path: "/same.txt".to_owned(),
+        absolute_path: "/same//path.txt".to_owned(),
         content_ref: content.content_ref.clone(),
         behavior: PutFileBehavior::CreateOnly,
     };
@@ -1365,7 +1443,17 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
         )
         .expect("first publish");
     let retry = publisher
-        .submit_path_intent(&namespace_id, intent, &context, PublishOptions::default())
+        .submit_path_intent(
+            &namespace_id,
+            PathMutationIntent::PutFile {
+                commit_id: CommitId::from("same-path-request"),
+                absolute_path: "/same/path.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            },
+            &context,
+            PublishOptions::default(),
+        )
         .expect("idempotent retry");
     assert_eq!(retry.committed_seq, first.committed_seq);
 
@@ -1374,7 +1462,7 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
             &namespace_id,
             PathMutationIntent::DeletePath {
                 commit_id: CommitId::from("same-path-request"),
-                absolute_path: "/same.txt".to_owned(),
+                absolute_path: "/same/path.txt".to_owned(),
                 recursive: false,
             },
             &context,
@@ -2251,7 +2339,11 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
         load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
     let file = basis_before_move
         .metadata_state
-        .resolve_visible_path("/docs/a.txt", basis_before_move.head.seq)
+        .resolve_visible_path(
+            &AbsolutePath::parse("/docs/a.txt").expect("path"),
+            basis_before_move.head.name_policy,
+            basis_before_move.head.seq,
+        )
         .expect("resolve file");
     let old_binding = basis_before_move
         .metadata_state
@@ -2314,7 +2406,11 @@ fn unsupported_rename_mode_is_named_bad_request_failure() {
     let basis = load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
     let file = basis
         .metadata_state
-        .resolve_visible_path("/docs/a.txt", basis.head.seq)
+        .resolve_visible_path(
+            &AbsolutePath::parse("/docs/a.txt").expect("path"),
+            basis.head.name_policy,
+            basis.head.seq,
+        )
         .expect("resolve file");
 
     let error = commit_operations(

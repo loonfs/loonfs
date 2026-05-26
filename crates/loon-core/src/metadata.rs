@@ -1,6 +1,6 @@
 use loon_api::{
-    name_key_for_display_name, v0::CommitOpResult, ChangeSeq, CommitId, ContentRef, InodeId,
-    InodeKind, NamePolicy, RevisionNo, WalCommitPayload, WalDelta,
+    v0::CommitOpResult, AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
+    NamePolicy, RevisionNo, WalCommitPayload, WalDelta,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -299,12 +299,11 @@ impl MetadataState {
         name_key: &str,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
-        let canonical_name_key = name_key_for_display_name(NamePolicy::default(), name_key);
         self.direntry_binds
             .iter()
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
-                    && direntry.name_key == canonical_name_key
+                    && direntry.name_key == name_key
                     && direntry.bind_seq <= base_seq
             })
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
@@ -442,15 +441,15 @@ impl MetadataState {
 
     pub fn resolve_visible_path(
         &self,
-        absolute_path: &str,
+        absolute_path: &AbsolutePath,
+        name_policy: NamePolicy,
         base_seq: ChangeSeq,
     ) -> Result<ResolvedVisiblePath, VisiblePathError> {
-        let components = parse_absolute_path_components(absolute_path)?;
         let root_inode_id = InodeId(1);
         let root = self
             .visible_inode(root_inode_id, base_seq)
             .ok_or(VisiblePathError::RootMissing)?;
-        if components.is_empty() {
+        if absolute_path.is_root() {
             return Ok(ResolvedVisiblePath {
                 absolute_path: "/".to_owned(),
                 inode_id: root_inode_id,
@@ -465,7 +464,7 @@ impl MetadataState {
         let mut current_parent_inode_id = None;
         let mut current_display_name = String::new();
 
-        for component in components {
+        for component in absolute_path.components() {
             let current_inode = self.visible_inode(current_inode_id, base_seq).ok_or(
                 VisiblePathError::PathNotFound {
                     absolute_path: current_absolute_path.clone(),
@@ -479,9 +478,12 @@ impl MetadataState {
                 });
             }
 
-            let requested_absolute_path = join_absolute_path(&current_absolute_path, &component);
+            let requested_absolute_path =
+                join_display_path(&current_absolute_path, component.as_str());
+            let display_name = component.to_display_name();
+            let name_key = NameKey::for_display_name(name_policy, &display_name);
             let direntry = self
-                .visible_child(current_inode_id, &component, base_seq)
+                .visible_child(current_inode_id, name_key.as_str(), base_seq)
                 .ok_or(VisiblePathError::PathNotFound {
                     absolute_path: requested_absolute_path,
                 })?;
@@ -489,7 +491,7 @@ impl MetadataState {
             current_parent_inode_id = Some(direntry.parent_inode_id);
             current_display_name = direntry.display_name.clone();
             current_absolute_path =
-                join_absolute_path(&current_absolute_path, &direntry.display_name);
+                join_display_path(&current_absolute_path, &direntry.display_name);
         }
 
         let inode = self
@@ -590,29 +592,7 @@ fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
     }
 }
 
-fn parse_absolute_path_components(absolute_path: &str) -> Result<Vec<String>, VisiblePathError> {
-    if !absolute_path.starts_with('/') {
-        return Err(VisiblePathError::InvalidAbsolutePath {
-            absolute_path: absolute_path.to_owned(),
-        });
-    }
-
-    let mut components = Vec::new();
-    for component in absolute_path.split('/') {
-        if component.is_empty() {
-            continue;
-        }
-        if component == "." || component == ".." {
-            return Err(VisiblePathError::InvalidAbsolutePath {
-                absolute_path: absolute_path.to_owned(),
-            });
-        }
-        components.push(component.to_owned());
-    }
-    Ok(components)
-}
-
-fn join_absolute_path(base: &str, component: &str) -> String {
+fn join_display_path(base: &str, component: &str) -> String {
     if base == "/" {
         format!("/{component}")
     } else {
@@ -644,5 +624,78 @@ mod tests {
         assert_eq!(bind.name_key, "persisted-key");
         assert_eq!(bind.display_name, "Report.TXT");
         assert_eq!(bind.bind_delta_index, 7);
+    }
+
+    #[test]
+    fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
+        let metadata_state = MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+            ],
+            direntry_binds: vec![DirentryBindRecord {
+                parent_inode_id: InodeId(1),
+                name_key: "persisted-key".to_owned(),
+                display_name: "Report.TXT".to_owned(),
+                child_inode_id: InodeId(2),
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: 0,
+            }],
+            ..MetadataState::default()
+        };
+
+        assert!(metadata_state
+            .visible_child(InodeId(1), "persisted-key", ChangeSeq(1))
+            .is_some());
+        assert!(metadata_state
+            .visible_child(InodeId(1), "Report.TXT", ChangeSeq(1))
+            .is_none());
+    }
+
+    #[test]
+    fn resolve_visible_path_uses_explicit_name_policy_and_stored_display_name() {
+        let metadata_state = MetadataState {
+            inodes: vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+            ],
+            direntry_binds: vec![DirentryBindRecord {
+                parent_inode_id: InodeId(1),
+                name_key: "report.txt".to_owned(),
+                display_name: "Report.TXT".to_owned(),
+                child_inode_id: InodeId(2),
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: 0,
+            }],
+            ..MetadataState::default()
+        };
+
+        let resolved = metadata_state
+            .resolve_visible_path(
+                &AbsolutePath::parse("/REPORT.txt").expect("path"),
+                NamePolicy::NfcCasefoldV0,
+                ChangeSeq(1),
+            )
+            .expect("resolve path");
+
+        assert_eq!(resolved.inode_id, InodeId(2));
+        assert_eq!(resolved.absolute_path, "/Report.TXT");
+        assert_eq!(resolved.display_name, "Report.TXT");
     }
 }
