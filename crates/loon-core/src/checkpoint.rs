@@ -6,7 +6,7 @@ use crate::error::CoreError;
 use crate::loading::read_head_object;
 use crate::metadata::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
-    RevisionRecord, SubtreeTombstoneRecord,
+    MetadataStateBuilder, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loon_api::{
     checkpoint_page_checksum_sha256, checkpoint_segment_payload_checksum_sha256,
@@ -666,7 +666,7 @@ fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
     tables: &[CheckpointTableManifest],
 ) -> Result<MetadataState, CheckpointLoadError> {
     let ordered_tables = ordered_checkpoint_tables(manifest_object_key, tables)?;
-    let mut metadata_state = MetadataState::default();
+    let mut metadata_state = MetadataStateBuilder::default();
 
     for table in ordered_tables {
         for descriptor in &table.segments {
@@ -715,7 +715,7 @@ fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
         }
     }
 
-    Ok(metadata_state)
+    Ok(metadata_state.finish())
 }
 
 fn ordered_checkpoint_tables<'a>(
@@ -914,7 +914,7 @@ fn validate_checkpoint_page(
 }
 
 fn append_rows_to_metadata(
-    metadata_state: &mut MetadataState,
+    metadata_state: &mut MetadataStateBuilder,
     family: CheckpointTableFamily,
     object_key: &str,
     rows: &[CheckpointRow],
@@ -928,7 +928,7 @@ fn append_rows_to_metadata(
                     inode_kind,
                     created_seq,
                 },
-            ) => metadata_state.inodes.push(InodeRecord {
+            ) => metadata_state.push_inode(InodeRecord {
                 inode_id: *inode_id,
                 inode_kind: inode_kind.clone(),
                 created_seq: *created_seq,
@@ -943,7 +943,7 @@ fn append_rows_to_metadata(
                     bind_seq,
                     bind_delta_index,
                 },
-            ) => metadata_state.direntry_binds.push(DirentryBindRecord {
+            ) => metadata_state.push_direntry_bind(DirentryBindRecord {
                 parent_inode_id: *parent_inode_id,
                 name_key: name_key.clone(),
                 display_name: display_name.clone(),
@@ -962,7 +962,7 @@ fn append_rows_to_metadata(
                     unbind_seq,
                     unbind_delta_index,
                 },
-            ) => metadata_state.direntry_unbinds.push(DirentryUnbindRecord {
+            ) => metadata_state.push_direntry_unbind(DirentryUnbindRecord {
                 parent_inode_id: *parent_inode_id,
                 name_key: name_key.clone(),
                 child_inode_id: *child_inode_id,
@@ -980,7 +980,7 @@ fn append_rows_to_metadata(
                     revision_delta_index,
                     content_ref,
                 },
-            ) => metadata_state.revisions.push(RevisionRecord {
+            ) => metadata_state.push_revision(RevisionRecord {
                 inode_id: *inode_id,
                 revision_no: *revision_no,
                 committed_seq: *committed_seq,
@@ -994,13 +994,11 @@ fn append_rows_to_metadata(
                     tombstone_seq,
                     tombstone_delta_index,
                 },
-            ) => metadata_state
-                .subtree_tombstones
-                .push(SubtreeTombstoneRecord {
-                    root_inode_id: *root_inode_id,
-                    tombstone_seq: *tombstone_seq,
-                    tombstone_delta_index: *tombstone_delta_index,
-                }),
+            ) => metadata_state.push_subtree_tombstone(SubtreeTombstoneRecord {
+                root_inode_id: *root_inode_id,
+                tombstone_seq: *tombstone_seq,
+                tombstone_delta_index: *tombstone_delta_index,
+            }),
             (
                 CheckpointTableFamily::CommitReceipts,
                 CheckpointRow::CommitReceipt {
@@ -1009,7 +1007,7 @@ fn append_rows_to_metadata(
                     committed_seq,
                     results,
                 },
-            ) => metadata_state.commit_receipts.push(CommitReceiptRecord {
+            ) => metadata_state.push_commit_receipt(CommitReceiptRecord {
                 commit_id: commit_id.clone(),
                 semantic_commit_fingerprint_sha256: semantic_commit_fingerprint_sha256.clone(),
                 committed_seq: *committed_seq,
@@ -1039,7 +1037,7 @@ fn checkpoint_rows_for_family(
 ) -> Vec<CheckpointRow> {
     let mut rows = match family {
         CheckpointTableFamily::Inodes => metadata_state
-            .inodes
+            .inodes()
             .iter()
             .map(|inode| CheckpointRow::Inode {
                 inode_id: inode.inode_id,
@@ -1048,7 +1046,7 @@ fn checkpoint_rows_for_family(
             })
             .collect::<Vec<_>>(),
         CheckpointTableFamily::DirentryBinds => metadata_state
-            .direntry_binds
+            .direntry_binds()
             .iter()
             .map(|direntry| CheckpointRow::DirentryBind {
                 parent_inode_id: direntry.parent_inode_id,
@@ -1060,7 +1058,7 @@ fn checkpoint_rows_for_family(
             })
             .collect::<Vec<_>>(),
         CheckpointTableFamily::DirentryUnbinds => metadata_state
-            .direntry_unbinds
+            .direntry_unbinds()
             .iter()
             .map(|unbind| CheckpointRow::DirentryUnbind {
                 parent_inode_id: unbind.parent_inode_id,
@@ -1073,7 +1071,7 @@ fn checkpoint_rows_for_family(
             })
             .collect::<Vec<_>>(),
         CheckpointTableFamily::Revisions => metadata_state
-            .revisions
+            .revisions()
             .iter()
             .map(|revision| CheckpointRow::Revision {
                 inode_id: revision.inode_id,
@@ -1084,7 +1082,7 @@ fn checkpoint_rows_for_family(
             })
             .collect::<Vec<_>>(),
         CheckpointTableFamily::Tombstones => metadata_state
-            .subtree_tombstones
+            .subtree_tombstones()
             .iter()
             .map(|tombstone| CheckpointRow::Tombstone {
                 root_inode_id: tombstone.root_inode_id,
@@ -1093,7 +1091,7 @@ fn checkpoint_rows_for_family(
             })
             .collect::<Vec<_>>(),
         CheckpointTableFamily::CommitReceipts => metadata_state
-            .commit_receipts
+            .commit_receipts()
             .iter()
             .map(|record| CheckpointRow::CommitReceipt {
                 commit_id: record.commit_id.clone(),
@@ -1227,13 +1225,13 @@ mod tests {
         .expect("move hello");
 
         let before = load_verified_namespace_basis(&store, &namespace_id).expect("basis before");
-        assert_eq!(before.metadata_state.direntry_unbinds.len(), 1);
+        assert_eq!(before.metadata_state.direntry_unbinds().len(), 1);
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
 
         assert_eq!(
-            after.metadata_state.direntry_unbinds,
-            before.metadata_state.direntry_unbinds
+            after.metadata_state.direntry_unbinds(),
+            before.metadata_state.direntry_unbinds()
         );
         assert!(metadata_states_equivalent(
             &before.metadata_state,

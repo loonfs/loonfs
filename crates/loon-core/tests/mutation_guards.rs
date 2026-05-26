@@ -11,7 +11,7 @@ use loon_api::{
 use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
 };
-use loon_core::metadata::{InodeRecord, MetadataState};
+use loon_core::metadata::MetadataState;
 use loon_core::{
     begin_upload, bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
     copy_file_path, create_checkpoint, create_dir_path, delete_path, delete_path_non_recursive,
@@ -484,38 +484,33 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
 
 #[test]
 fn restore_revision_overflow_is_rejected() {
-    let metadata_state = MetadataState {
-        inodes: vec![
-            InodeRecord {
+    let mut deltas = wal_create_file(
+        0,
+        InodeId(2),
+        InodeId(1),
+        "overflow.txt".to_owned(),
+        content_ref("content-max"),
+    );
+    deltas[2] = loon_api::WalDelta::AppendFileRevision {
+        delta_index: 2,
+        inode_id: InodeId(2),
+        revision_no: RevisionNo(u64::MAX),
+        content_ref: content_ref("content-max"),
+    };
+    let metadata_state = MetadataState::default()
+        .apply_committed_wal_deltas(
+            ChangeSeq(0),
+            &[loon_api::WalDelta::CreateInode {
+                delta_index: 0,
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Dir,
-                created_seq: ChangeSeq(0),
-            },
-            InodeRecord {
-                inode_id: InodeId(2),
-                inode_kind: InodeKind::File,
-                created_seq: ChangeSeq(1),
-            },
-        ],
-        direntry_binds: vec![loon_core::metadata::DirentryBindRecord {
-            parent_inode_id: InodeId(1),
-            name_key: "overflow.txt".to_owned(),
-            display_name: "overflow.txt".to_owned(),
-            child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(1),
-            bind_delta_index: 0,
-        }],
-        direntry_unbinds: Vec::new(),
-        revisions: vec![loon_core::metadata::RevisionRecord {
-            inode_id: InodeId(2),
-            revision_no: RevisionNo(u64::MAX),
-            committed_seq: ChangeSeq(1),
-            revision_delta_index: 0,
-            content_ref: content_ref("content-max"),
-        }],
-        subtree_tombstones: Vec::new(),
-        commit_receipts: Vec::new(),
-    };
+            }],
+        )
+        .expect("bootstrap root")
+        .metadata_state
+        .apply_committed_wal_deltas(ChangeSeq(1), &deltas)
+        .expect("create max revision")
+        .metadata_state;
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
@@ -2360,7 +2355,7 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
     )
     .expect("move file");
     let moved_basis = load_verified_namespace_basis(&store, &namespace_id()).expect("load basis");
-    assert_eq!(moved_basis.metadata_state.direntry_unbinds.len(), 1);
+    assert_eq!(moved_basis.metadata_state.direntry_unbinds().len(), 1);
     assert!(resolve_path(&store, &namespace_id(), "/docs/a.txt").is_err());
     resolve_path(&store, &namespace_id(), "/docs/b.txt").expect("new path visible");
 
@@ -2745,18 +2740,17 @@ impl ObjectStore for InjectCreateFailureStore {
 }
 
 fn metadata_state_after(sequences: &[Vec<loon_api::WalDelta>]) -> MetadataState {
-    let mut state = MetadataState {
-        inodes: vec![InodeRecord {
-            inode_id: InodeId(1),
-            inode_kind: InodeKind::Dir,
-            created_seq: ChangeSeq(0),
-        }],
-        direntry_binds: Vec::new(),
-        direntry_unbinds: Vec::new(),
-        revisions: Vec::new(),
-        subtree_tombstones: Vec::new(),
-        commit_receipts: Vec::new(),
-    };
+    let mut state = MetadataState::default()
+        .apply_committed_wal_deltas(
+            ChangeSeq(0),
+            &[loon_api::WalDelta::CreateInode {
+                delta_index: 0,
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+            }],
+        )
+        .expect("bootstrap root")
+        .metadata_state;
 
     for (index, deltas) in sequences.iter().enumerate() {
         state = state

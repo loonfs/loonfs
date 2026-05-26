@@ -9,17 +9,17 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MetadataState {
     #[serde(default)]
-    pub inodes: Vec<InodeRecord>,
+    inodes: Vec<InodeRecord>,
     #[serde(default)]
-    pub direntry_binds: Vec<DirentryBindRecord>,
+    direntry_binds: Vec<DirentryBindRecord>,
     #[serde(default)]
-    pub direntry_unbinds: Vec<DirentryUnbindRecord>,
+    direntry_unbinds: Vec<DirentryUnbindRecord>,
     #[serde(default)]
-    pub revisions: Vec<RevisionRecord>,
+    revisions: Vec<RevisionRecord>,
     #[serde(default)]
-    pub subtree_tombstones: Vec<SubtreeTombstoneRecord>,
+    subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
-    pub commit_receipts: Vec<CommitReceiptRecord>,
+    commit_receipts: Vec<CommitReceiptRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +116,55 @@ pub enum MetadataApplyError {
 }
 
 impl MetadataState {
+    pub(crate) fn from_rows(
+        inodes: Vec<InodeRecord>,
+        direntry_binds: Vec<DirentryBindRecord>,
+        direntry_unbinds: Vec<DirentryUnbindRecord>,
+        revisions: Vec<RevisionRecord>,
+        subtree_tombstones: Vec<SubtreeTombstoneRecord>,
+        commit_receipts: Vec<CommitReceiptRecord>,
+    ) -> Self {
+        Self {
+            inodes,
+            direntry_binds,
+            direntry_unbinds,
+            revisions,
+            subtree_tombstones,
+            commit_receipts,
+        }
+    }
+
+    pub fn inodes(&self) -> &[InodeRecord] {
+        &self.inodes
+    }
+
+    pub fn direntry_binds(&self) -> &[DirentryBindRecord] {
+        &self.direntry_binds
+    }
+
+    pub fn direntry_unbinds(&self) -> &[DirentryUnbindRecord] {
+        &self.direntry_unbinds
+    }
+
+    pub fn revisions(&self) -> &[RevisionRecord] {
+        &self.revisions
+    }
+
+    pub fn subtree_tombstones(&self) -> &[SubtreeTombstoneRecord] {
+        &self.subtree_tombstones
+    }
+
+    pub fn commit_receipts(&self) -> &[CommitReceiptRecord] {
+        &self.commit_receipts
+    }
+
+    pub fn find_commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
+        self.commit_receipts
+            .iter()
+            .filter(|record| record.commit_id == *commit_id)
+            .max_by_key(|record| record.committed_seq)
+    }
+
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
@@ -586,6 +635,41 @@ impl MetadataState {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct MetadataStateBuilder {
+    state: MetadataState,
+}
+
+impl MetadataStateBuilder {
+    pub(crate) fn push_inode(&mut self, record: InodeRecord) {
+        self.state.inodes.push(record);
+    }
+
+    pub(crate) fn push_direntry_bind(&mut self, record: DirentryBindRecord) {
+        self.state.direntry_binds.push(record);
+    }
+
+    pub(crate) fn push_direntry_unbind(&mut self, record: DirentryUnbindRecord) {
+        self.state.direntry_unbinds.push(record);
+    }
+
+    pub(crate) fn push_revision(&mut self, record: RevisionRecord) {
+        self.state.revisions.push(record);
+    }
+
+    pub(crate) fn push_subtree_tombstone(&mut self, record: SubtreeTombstoneRecord) {
+        self.state.subtree_tombstones.push(record);
+    }
+
+    pub(crate) fn push_commit_receipt(&mut self, record: CommitReceiptRecord) {
+        self.state.commit_receipts.push(record);
+    }
+
+    pub(crate) fn finish(self) -> MetadataState {
+        self.state
+    }
+}
+
 fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
     if !invariants.iter().any(|existing| existing == name) {
         invariants.push(name.to_owned());
@@ -619,8 +703,8 @@ mod tests {
             )
             .expect("apply bind delta");
 
-        assert_eq!(applied.metadata_state.direntry_binds.len(), 1);
-        let bind = &applied.metadata_state.direntry_binds[0];
+        assert_eq!(applied.metadata_state.direntry_binds().len(), 1);
+        let bind = &applied.metadata_state.direntry_binds()[0];
         assert_eq!(bind.name_key, "persisted-key");
         assert_eq!(bind.display_name, "Report.TXT");
         assert_eq!(bind.bind_delta_index, 7);
@@ -628,8 +712,8 @@ mod tests {
 
     #[test]
     fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
-        let metadata_state = MetadataState {
-            inodes: vec![
+        let metadata_state = MetadataState::from_rows(
+            vec![
                 InodeRecord {
                     inode_id: InodeId(1),
                     inode_kind: InodeKind::Dir,
@@ -641,7 +725,7 @@ mod tests {
                     created_seq: ChangeSeq(1),
                 },
             ],
-            direntry_binds: vec![DirentryBindRecord {
+            vec![DirentryBindRecord {
                 parent_inode_id: InodeId(1),
                 name_key: "persisted-key".to_owned(),
                 display_name: "Report.TXT".to_owned(),
@@ -649,8 +733,11 @@ mod tests {
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
             }],
-            ..MetadataState::default()
-        };
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
 
         assert!(metadata_state
             .visible_child(InodeId(1), "persisted-key", ChangeSeq(1))
@@ -662,8 +749,8 @@ mod tests {
 
     #[test]
     fn resolve_visible_path_uses_explicit_name_policy_and_stored_display_name() {
-        let metadata_state = MetadataState {
-            inodes: vec![
+        let metadata_state = MetadataState::from_rows(
+            vec![
                 InodeRecord {
                     inode_id: InodeId(1),
                     inode_kind: InodeKind::Dir,
@@ -675,7 +762,7 @@ mod tests {
                     created_seq: ChangeSeq(1),
                 },
             ],
-            direntry_binds: vec![DirentryBindRecord {
+            vec![DirentryBindRecord {
                 parent_inode_id: InodeId(1),
                 name_key: "report.txt".to_owned(),
                 display_name: "Report.TXT".to_owned(),
@@ -683,8 +770,11 @@ mod tests {
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
             }],
-            ..MetadataState::default()
-        };
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
 
         let resolved = metadata_state
             .resolve_visible_path(
@@ -697,5 +787,99 @@ mod tests {
         assert_eq!(resolved.inode_id, InodeId(2));
         assert_eq!(resolved.absolute_path, "/Report.TXT");
         assert_eq!(resolved.display_name, "Report.TXT");
+    }
+
+    #[test]
+    fn metadata_state_serialized_shape_preserves_row_field_names() {
+        let metadata_state = MetadataState::from_rows(
+            vec![InodeRecord {
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(0),
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let encoded = serde_json::to_value(&metadata_state).expect("encode metadata state");
+        assert_eq!(
+            encoded,
+            serde_json::json!({
+                "inodes": [{
+                    "inode_id": 1,
+                    "inode_kind": "dir",
+                    "created_seq": 0
+                }],
+                "direntry_binds": [],
+                "direntry_unbinds": [],
+                "revisions": [],
+                "subtree_tombstones": [],
+                "commit_receipts": []
+            })
+        );
+    }
+
+    #[test]
+    fn metadata_state_accessors_expose_rows_read_only() {
+        let metadata_state = MetadataState::from_rows(
+            vec![InodeRecord {
+                inode_id: InodeId(1),
+                inode_kind: InodeKind::Dir,
+                created_seq: ChangeSeq(0),
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(metadata_state.inodes().len(), 1);
+        assert!(metadata_state.direntry_binds().is_empty());
+        assert!(metadata_state.direntry_unbinds().is_empty());
+        assert!(metadata_state.revisions().is_empty());
+        assert!(metadata_state.subtree_tombstones().is_empty());
+        assert!(metadata_state.commit_receipts().is_empty());
+    }
+
+    #[test]
+    fn find_commit_receipt_returns_latest_matching_receipt() {
+        let commit_id = CommitId::from("same-commit");
+        let metadata_state = MetadataState::from_rows(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                CommitReceiptRecord {
+                    commit_id: commit_id.clone(),
+                    semantic_commit_fingerprint_sha256: "old".to_owned(),
+                    committed_seq: ChangeSeq(1),
+                    results: Vec::new(),
+                },
+                CommitReceiptRecord {
+                    commit_id: CommitId::from("other-commit"),
+                    semantic_commit_fingerprint_sha256: "other".to_owned(),
+                    committed_seq: ChangeSeq(3),
+                    results: Vec::new(),
+                },
+                CommitReceiptRecord {
+                    commit_id: commit_id.clone(),
+                    semantic_commit_fingerprint_sha256: "new".to_owned(),
+                    committed_seq: ChangeSeq(2),
+                    results: Vec::new(),
+                },
+            ],
+        );
+
+        let receipt = metadata_state
+            .find_commit_receipt(&commit_id)
+            .expect("receipt");
+        assert_eq!(receipt.committed_seq, ChangeSeq(2));
+        assert_eq!(receipt.semantic_commit_fingerprint_sha256, "new");
     }
 }
