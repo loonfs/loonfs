@@ -4,8 +4,9 @@ use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError,
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
     CoreErrorKind, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MoveOptions, NamespaceId, PutFileBehavior,
-    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MoveOptions, NamespaceId,
+    NamespaceMutationCandidate, PathMutationIntent, PutFileBehavior, PutFileOptions,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -44,6 +45,30 @@ fn assert_core_error_kind<T>(result: loonfs::Result<T>, expected: CoreErrorKind)
         Err(error) => panic!("expected core error {expected:?}, got {error:?}"),
         Ok(_) => panic!("expected core error {expected:?}"),
     }
+}
+
+fn create_dir_candidate(commit_id: &str, absolute_path: &str) -> NamespaceMutationCandidate {
+    NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
+        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+        absolute_path: absolute_path.to_owned(),
+    })
+}
+
+fn delete_candidate(commit_id: &str, absolute_path: &str) -> NamespaceMutationCandidate {
+    NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+        absolute_path: absolute_path.to_owned(),
+        recursive: true,
+    })
+}
+
+fn assert_single_publish_ok(results: Vec<loonfs::Result<loonfs::CommitResponse>>) {
+    let result = results
+        .into_iter()
+        .next()
+        .expect("one publish result")
+        .expect("publish succeeds");
+    assert!(result.committed_seq.0 > 0);
 }
 
 #[test]
@@ -262,6 +287,231 @@ fn runtime_cache_can_be_disabled() {
     fs.stat_path(&namespace_id, "/docs")
         .expect("second stat should load basis again");
     assert_eq!(raw_store.wal_get_count(), 2);
+}
+
+#[test]
+fn runtime_publish_reuses_warm_basis_for_adjacent_batches() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("publish-warm-basis-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("warm-create-docs", "/docs")],
+    ));
+
+    raw_store.reset_wal_get_count();
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("warm-create-child", "/docs/child")],
+    ));
+    assert_eq!(
+        raw_store.wal_get_count(),
+        0,
+        "second adjacent publish should plan from the warm basis without replaying WAL"
+    );
+
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.publish_warm_basis_misses, 1);
+    assert_eq!(stats.publish_warm_basis_hits, 1);
+    assert_eq!(stats.publish_warm_basis_advances, 2);
+    assert_eq!(stats.publish_warm_basis_invalidations, 0);
+
+    let stat = fs
+        .stat_path(&namespace_id, "/docs/child")
+        .expect("warm-published child is visible");
+    assert_eq!(stat.authoritative_head_seq, ChangeSeq(2));
+}
+
+#[test]
+fn runtime_publish_cold_loads_after_external_head_advance() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let first = Fs::builder(object_store.clone())
+        .writer_id("shared-publish-writer")
+        .build()
+        .expect("build first runtime");
+    let second = Fs::builder(object_store)
+        .writer_id("shared-publish-writer")
+        .build()
+        .expect("build second runtime");
+
+    first
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("external-first", "/docs")],
+    ));
+    second
+        .create_dir(&namespace_id, "/other", CreateDirOptions::default())
+        .expect("external runtime advances head");
+
+    raw_store.reset_wal_get_count();
+    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("external-after", "/docs/child")],
+    ));
+    assert!(
+        raw_store.wal_get_count() > 0,
+        "stale warm basis should be discarded and replaced by a cold replay"
+    );
+
+    let stats = first.runtime_cache_stats();
+    assert_eq!(stats.publish_warm_basis_hits, 0);
+    assert_eq!(stats.publish_warm_basis_misses, 2);
+    assert_eq!(stats.publish_warm_basis_invalidations, 1);
+    assert_eq!(stats.publish_warm_basis_advances, 2);
+}
+
+#[test]
+fn runtime_publish_retries_warm_rejection_after_external_head_race() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let first = Fs::builder(object_store.clone())
+        .writer_id("shared-race-writer")
+        .build()
+        .expect("build first runtime");
+    let second = Fs::builder(object_store)
+        .writer_id("shared-race-writer")
+        .build()
+        .expect("build second runtime");
+
+    first
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("race-prime", "/docs")],
+    ));
+    second
+        .create_dir(&namespace_id, "/a", CreateDirOptions::default())
+        .expect("external runtime creates /a");
+
+    raw_store.reset_wal_get_count();
+    assert_single_publish_ok(first.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![delete_candidate("race-delete-a", "/a")],
+    ));
+    assert!(
+        raw_store.wal_get_count() > 0,
+        "warm rejection should be retried from a cold basis"
+    );
+
+    assert_core_error_kind(
+        first.stat_path(&namespace_id, "/a"),
+        CoreErrorKind::PathNotFound,
+    );
+    let stats = first.runtime_cache_stats();
+    assert_eq!(stats.publish_warm_basis_hits, 0);
+    assert_eq!(stats.publish_warm_basis_misses, 2);
+    assert_eq!(stats.publish_warm_basis_invalidations, 1);
+    assert_eq!(stats.publish_warm_basis_advances, 2);
+}
+
+#[test]
+fn runtime_publish_cache_disabled_replays_for_adjacent_batches() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("publish-warm-disabled-test")
+        .runtime_cache(RuntimeCacheConfig::disabled())
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("disabled-first", "/docs")],
+    ));
+
+    raw_store.reset_wal_get_count();
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("disabled-second", "/docs/child")],
+    ));
+    assert!(
+        raw_store.wal_get_count() > 0,
+        "cache-disabled publish path should still cold-load from WAL"
+    );
+    assert_eq!(fs.runtime_cache_stats(), Default::default());
+}
+
+#[test]
+fn runtime_publish_stale_head_invalidates_warm_basis() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(HeadCasFailureStore::new(
+        temp_dir.path(),
+        namespace_id.as_str(),
+    ));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("publish-warm-stale-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("stale-prime", "/docs")],
+    ));
+
+    raw_store.fail_head_cas();
+    let stale = fs
+        .publish_namespace_mutations_batch(
+            &namespace_id,
+            vec![create_dir_candidate("stale-loses-cas", "/stale")],
+        )
+        .into_iter()
+        .next()
+        .expect("one result")
+        .expect_err("head CAS failure should be stale");
+    assert_core_error_kind::<()>(Err(stale), CoreErrorKind::StaleHead);
+
+    raw_store.allow_head_cas();
+    raw_store.reset_wal_get_count();
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("stale-after", "/after")],
+    ));
+    assert!(
+        raw_store.wal_get_count() > 0,
+        "publish after stale-head invalidation should cold-load visible WAL"
+    );
+
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.publish_warm_basis_hits, 1);
+    assert_eq!(stats.publish_warm_basis_misses, 2);
+    assert_eq!(stats.publish_warm_basis_invalidations, 1);
+    assert_eq!(stats.publish_warm_basis_advances, 2);
 }
 
 #[test]
