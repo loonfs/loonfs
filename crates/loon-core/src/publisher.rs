@@ -76,10 +76,33 @@ pub enum WarmBasisEvent {
 #[derive(Debug, Clone)]
 pub struct NamespaceCommitEnginePublishResult {
     pub results: Vec<Result<ApiCommitResponse, CoreError>>,
-    pub post_commit_basis: Option<VerifiedNamespaceBasis>,
     pub warm_basis_event: WarmBasisEvent,
-    pub warm_basis_advanced: bool,
-    pub warm_basis_invalidated: bool,
+    pub warm_basis_update: WarmBasisUpdate,
+}
+
+#[derive(Debug, Clone)]
+pub enum WarmBasisUpdate {
+    NoChange,
+    Retained(VerifiedNamespaceBasis),
+    Advanced(VerifiedNamespaceBasis),
+    Invalidated,
+}
+
+impl WarmBasisUpdate {
+    pub fn basis(&self) -> Option<&VerifiedNamespaceBasis> {
+        match self {
+            Self::Retained(basis) | Self::Advanced(basis) => Some(basis),
+            Self::NoChange | Self::Invalidated => None,
+        }
+    }
+
+    pub fn is_advanced(&self) -> bool {
+        matches!(self, Self::Advanced(_))
+    }
+
+    pub fn is_invalidated(&self) -> bool {
+        matches!(self, Self::Invalidated)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -109,10 +132,13 @@ impl NamespaceCommitEngine {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
-                post_commit_basis: self.basis.as_deref().cloned(),
                 warm_basis_event: WarmBasisEvent::Disabled,
-                warm_basis_advanced: false,
-                warm_basis_invalidated: false,
+                warm_basis_update: self
+                    .basis
+                    .as_deref()
+                    .cloned()
+                    .map(WarmBasisUpdate::Retained)
+                    .unwrap_or(WarmBasisUpdate::NoChange),
             };
         }
 
@@ -122,29 +148,20 @@ impl NamespaceCommitEngine {
         {
             self.invalidate();
             return NamespaceCommitEnginePublishResult {
-                results: (0..candidate_count)
-                    .map(|_| Err(CoreError::Lease(error.clone())))
-                    .collect(),
-                post_commit_basis: None,
+                results: repeated_error(candidate_count, CoreError::Lease(error)),
                 warm_basis_event: WarmBasisEvent::Disabled,
-                warm_basis_advanced: false,
-                warm_basis_invalidated: true,
+                warm_basis_update: WarmBasisUpdate::Invalidated,
             };
         }
 
-        let (basis, warm_basis_event, invalidated_before_load) = match self.basis_for_publish(store)
-        {
+        let (basis, warm_basis_event) = match self.basis_for_publish(store) {
             Ok(value) => value,
             Err(error) => {
                 self.invalidate();
                 return NamespaceCommitEnginePublishResult {
-                    results: (0..candidate_count)
-                        .map(|_| Err(CoreError::Basis(error.clone())))
-                        .collect(),
-                    post_commit_basis: None,
+                    results: repeated_error(candidate_count, CoreError::Basis(error)),
                     warm_basis_event: WarmBasisEvent::Disabled,
-                    warm_basis_advanced: false,
-                    warm_basis_invalidated: true,
+                    warm_basis_update: WarmBasisUpdate::Invalidated,
                 };
             }
         };
@@ -152,7 +169,7 @@ impl NamespaceCommitEngine {
         let published = crate::protocol::publish_namespace_mutations_batch_against_basis(
             store,
             &self.namespace_id,
-            candidates.clone(),
+            &candidates,
             context,
             &basis,
         );
@@ -162,59 +179,55 @@ impl NamespaceCommitEngine {
                 Ok(value) => value,
                 Err(error) => {
                     return NamespaceCommitEnginePublishResult {
-                        results: (0..candidate_count)
-                            .map(|_| Err(CoreError::Basis(error.clone())))
-                            .collect(),
-                        post_commit_basis: None,
+                        results: repeated_error(candidate_count, CoreError::Basis(error)),
                         warm_basis_event: WarmBasisEvent::InvalidatedThenColdLoaded,
-                        warm_basis_advanced: false,
-                        warm_basis_invalidated: true,
+                        warm_basis_update: WarmBasisUpdate::Invalidated,
                     };
                 }
             };
             let retried = crate::protocol::publish_namespace_mutations_batch_against_basis(
                 store,
                 &self.namespace_id,
-                candidates,
+                &candidates,
                 context,
                 &cold_basis,
             );
-            return self.finish_publish_result(
-                retried,
-                WarmBasisEvent::InvalidatedThenColdLoaded,
-                true,
-            );
+            return self.finish_publish_result(retried, WarmBasisEvent::InvalidatedThenColdLoaded);
         }
-        self.finish_publish_result(published, warm_basis_event, invalidated_before_load)
+        self.finish_publish_result(published, warm_basis_event)
     }
 
     fn finish_publish_result(
         &mut self,
         published: crate::protocol::PublishBatchAgainstBasisResult,
         warm_basis_event: WarmBasisEvent,
-        invalidated_before_load: bool,
     ) -> NamespaceCommitEnginePublishResult {
-        let mut warm_basis_invalidated = invalidated_before_load;
-        if let Some(post_commit_basis) = published.post_commit_basis.clone() {
-            self.basis = Some(Arc::new(post_commit_basis.clone()));
-        } else {
-            self.invalidate();
-            warm_basis_invalidated = true;
-        }
+        let warm_basis_update = match published.basis_promotion {
+            crate::protocol::BasisPromotion::Unchanged(basis) => {
+                self.basis = Some(Arc::new(basis.clone()));
+                WarmBasisUpdate::Retained(basis)
+            }
+            crate::protocol::BasisPromotion::Advanced(basis) => {
+                self.basis = Some(Arc::new(basis.clone()));
+                WarmBasisUpdate::Advanced(basis)
+            }
+            crate::protocol::BasisPromotion::NotCacheable => {
+                self.invalidate();
+                WarmBasisUpdate::Invalidated
+            }
+        };
 
         NamespaceCommitEnginePublishResult {
             results: published.results,
-            post_commit_basis: published.post_commit_basis,
             warm_basis_event,
-            warm_basis_advanced: published.basis_advanced && self.basis.is_some(),
-            warm_basis_invalidated,
+            warm_basis_update,
         }
     }
 
     fn basis_for_publish<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-    ) -> Result<(VerifiedNamespaceBasis, WarmBasisEvent, bool), BasisLoadError> {
+    ) -> Result<(VerifiedNamespaceBasis, WarmBasisEvent), BasisLoadError> {
         let mut invalidated = false;
         if let Some(cached) = self.basis.clone() {
             match load_namespace_head_identity(store, &self.namespace_id) {
@@ -223,7 +236,7 @@ impl NamespaceCommitEngine {
                         Ok(lease) => {
                             let mut basis = cached.as_ref().clone();
                             basis.lease = lease.state;
-                            return Ok((basis, WarmBasisEvent::Reused, false));
+                            return Ok((basis, WarmBasisEvent::Reused));
                         }
                         Err(_) => {
                             self.invalidate();
@@ -244,7 +257,7 @@ impl NamespaceCommitEngine {
         } else {
             WarmBasisEvent::ColdLoaded
         };
-        Ok((basis, event, invalidated))
+        Ok((basis, event))
     }
 }
 
@@ -253,9 +266,15 @@ fn should_retry_reused_warm_rejection(
     published: &crate::protocol::PublishBatchAgainstBasisResult,
 ) -> bool {
     warm_basis_event == WarmBasisEvent::Reused
-        && !published.basis_advanced
-        && published.post_commit_basis.is_some()
+        && matches!(
+            published.basis_promotion,
+            crate::protocol::BasisPromotion::Unchanged(_)
+        )
         && published.results.iter().any(Result::is_err)
+}
+
+fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitResponse, CoreError>> {
+    (0..count).map(|_| Err(error.clone())).collect()
 }
 
 pub struct DirectObjectStorePublisher<'a, S: ObjectStore + ?Sized> {

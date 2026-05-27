@@ -252,11 +252,13 @@ impl RuntimeCacheStatsInner {
             }
             WarmBasisEvent::Disabled => {}
         }
-        if result.warm_basis_invalidated {
+        if result.warm_basis_event == WarmBasisEvent::InvalidatedThenColdLoaded
+            || result.warm_basis_update.is_invalidated()
+        {
             self.publish_warm_basis_invalidations
                 .fetch_add(1, Ordering::SeqCst);
         }
-        if result.warm_basis_advanced {
+        if result.warm_basis_update.is_advanced() {
             self.publish_warm_basis_advances
                 .fetch_add(1, Ordering::SeqCst);
         }
@@ -828,9 +830,9 @@ impl Fs {
                 engine.publish_batch(self.store(), candidates, &self.mutation_context())
             };
             self.inner.cache_stats.record_publish_result(&publish);
-            if let Some(basis) = publish.post_commit_basis.clone() {
-                self.cache_basis(Arc::new(basis));
-            } else if publish.warm_basis_invalidated {
+            if let Some(basis) = publish.warm_basis_update.basis() {
+                self.cache_basis(Arc::new(basis.clone()));
+            } else if publish.warm_basis_update.is_invalidated() {
                 self.invalidate_namespace_cache(namespace_id);
             }
             return publish
