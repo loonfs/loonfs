@@ -16,14 +16,14 @@ pub use loon_api::{
     ContentRef, CreateCheckpointResponse, FilesystemOperationResponse, InodeId, MutationResult,
     NamespaceId, NamespaceSummary,
 };
+use loon_core::publisher::{NamespaceCommitEnginePublishResult, WarmBasisEvent};
 pub use loon_core::{
     BootstrapNamespaceError, CoreError, CoreErrorKind, NamespaceMutationCandidate,
     PathMutationIntent, PutFileBehavior,
 };
 use loon_core::{
     ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MutationContext,
-    NamespaceCommitEngine, NamespaceCommitEnginePublishResult, VerifiedNamespaceBasis,
-    WarmBasisEvent,
+    NamespaceCommitEngine, VerifiedNamespaceBasis,
 };
 use loon_objectstore::keys::namespace_head;
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
