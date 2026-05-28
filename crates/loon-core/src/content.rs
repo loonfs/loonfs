@@ -67,20 +67,46 @@ pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<ValidatedDurableContent, DurableContentValidationError> {
+    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+    let bytes = load_required_object(store, &object_key)?;
+    validate_loaded_content_bytes(object_key, content_ref, &bytes)
+}
+
+pub fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    content_ref: &ContentRef,
+) -> Result<ReadDurableContent, DurableContentValidationError> {
+    let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+    let bytes = load_required_object(store, &object_key)?;
+    let validated = validate_loaded_content_bytes(object_key, content_ref, &bytes)?;
+
+    Ok(ReadDurableContent { validated, bytes })
+}
+
+fn content_object_key_for_ref(
+    content_store_id: &ContentStoreId,
+    content_ref: &ContentRef,
+) -> Result<String, DurableContentValidationError> {
     if content_ref.kind != ContentRefKind::WholeFileV0 {
         return Err(DurableContentValidationError::UnsupportedContentRefKind {
             kind: content_ref.kind,
         });
     }
 
-    let object_key =
-        content_blob(content_store_id.as_str(), &content_ref.digest).map_err(|err| {
-            DurableContentValidationError::InvalidDigest {
-                digest: content_ref.digest.clone(),
-                message: err.to_string(),
-            }
-        })?;
-    let bytes = load_required_object(store, &object_key)?;
+    content_blob(content_store_id.as_str(), &content_ref.digest).map_err(|err| {
+        DurableContentValidationError::InvalidDigest {
+            digest: content_ref.digest.clone(),
+            message: err.to_string(),
+        }
+    })
+}
+
+fn validate_loaded_content_bytes(
+    object_key: String,
+    content_ref: &ContentRef,
+    bytes: &[u8],
+) -> Result<ValidatedDurableContent, DurableContentValidationError> {
     let actual_size = bytes.len() as u64;
     if actual_size != content_ref.size_bytes {
         return Err(DurableContentValidationError::ContentLengthMismatch {
@@ -90,7 +116,7 @@ pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
         });
     }
 
-    let actual_digest = sha256_digest(&bytes);
+    let actual_digest = sha256_digest(bytes);
     if actual_digest != content_ref.digest {
         return Err(DurableContentValidationError::ContentDigestMismatch {
             object_key,
@@ -111,17 +137,6 @@ pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
             "whole_file_content_digest_matches_ref".to_owned(),
         ],
     })
-}
-
-pub fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
-    content_ref: &ContentRef,
-) -> Result<ReadDurableContent, DurableContentValidationError> {
-    let validated = validate_durable_content_reference(store, content_store_id, content_ref)?;
-    let bytes = load_required_object(store, &validated.object_key)?;
-
-    Ok(ReadDurableContent { validated, bytes })
 }
 
 pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(

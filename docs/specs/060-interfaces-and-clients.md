@@ -180,10 +180,10 @@ The upload transport standardizes staged content publication, not one specific b
 The semantic rule is:
 
 - `PUT /content` stores the immutable whole-file object and records the staged `content_ref`;
-- `complete` succeeds only after the expected `content_ref` is durable and matches the staged upload; and
+- `complete` finalizes the upload session only when the expected `content_ref` exactly matches the service-computed staged ref; and
 - the returned `content_ref` is then safe to reference from a commit.
 
-Repeating `PUT /content` with the same bytes for the same upload id is idempotent. Repeating it with different bytes is a conflict. Completing an upload fails if no content was staged, if the expected `content_ref` differs from the staged one, or if the durable content validation rules from the write protocol fail.
+Repeating `PUT /content` with the same bytes for the same upload id is idempotent. Repeating it with different bytes is a conflict. Completing an upload fails if no content was staged or if the expected `content_ref` differs from the staged one. Generic metadata publication still applies the durable content validation rules from the write protocol before arbitrary `content_ref`s become visible.
 
 Representative begin-upload response:
 

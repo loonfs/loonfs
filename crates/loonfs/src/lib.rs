@@ -593,7 +593,6 @@ impl Fs {
     ) -> Result<AuthoritativePathEntry> {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(loon_core::resolve_path_from_basis(
-            self.store(),
             basis.as_ref(),
             absolute_path,
         )?)
@@ -606,7 +605,6 @@ impl Fs {
     ) -> Result<Vec<AuthoritativePathEntry>> {
         let basis = self.basis_for_read(namespace_id)?;
         Ok(loon_core::list_path_from_basis(
-            self.store(),
             basis.as_ref(),
             absolute_path,
         )?)
