@@ -30,7 +30,7 @@ pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
-pub const DEFAULT_MAX_UNCHECKPOINTED_COMMITS: u64 = 1_000;
+pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
 
 pub type SharedObjectStore = Arc<dyn ObjectStore + Send + Sync>;
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -327,19 +327,19 @@ pub struct NamespaceStatus {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
     pub checkpoint_hint_seq: Option<ChangeSeq>,
-    pub uncheckpointed_commits: u64,
+    pub wal_tail_segments: u64,
     pub retention_floor_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MaintenanceTickOptions {
-    pub max_uncheckpointed_commits: u64,
+    pub max_wal_tail_segments: u64,
 }
 
 impl Default for MaintenanceTickOptions {
     fn default() -> Self {
         Self {
-            max_uncheckpointed_commits: DEFAULT_MAX_UNCHECKPOINTED_COMMITS,
+            max_wal_tail_segments: DEFAULT_MAX_WAL_TAIL_SEGMENTS,
         }
     }
 }
@@ -515,15 +515,11 @@ impl Fs {
 
     pub fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
         let summary = loon_core::load_namespace_head_summary(self.store(), namespace_id)?;
-        let checkpoint_seq = summary
-            .checkpoint_hint_seq
-            .map(|seq| seq.0)
-            .unwrap_or_default();
         Ok(NamespaceStatus {
             namespace_id: summary.namespace_id,
             head_seq: summary.head_seq,
             checkpoint_hint_seq: summary.checkpoint_hint_seq,
-            uncheckpointed_commits: summary.head_seq.0.saturating_sub(checkpoint_seq),
+            wal_tail_segments: summary.wal_tail_segments,
             retention_floor_seq: summary.retention_floor_seq,
         })
     }
@@ -533,15 +529,15 @@ impl Fs {
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
     ) -> Result<MaintenanceTickResult> {
-        if options.max_uncheckpointed_commits == 0 {
+        if options.max_wal_tail_segments == 0 {
             return Err(RuntimeError::Config(
-                "max_uncheckpointed_commits must be greater than zero".to_owned(),
+                "max_wal_tail_segments must be greater than zero".to_owned(),
             ));
         }
 
         let status_before = self.namespace_status(namespace_id)?;
         let observed_head_seq = status_before.head_seq;
-        if status_before.uncheckpointed_commits < options.max_uncheckpointed_commits {
+        if status_before.wal_tail_segments < options.max_wal_tail_segments {
             return Ok(MaintenanceTickResult {
                 namespace_id: namespace_id.clone(),
                 status_before,
