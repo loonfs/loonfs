@@ -31,8 +31,9 @@ The required durable object families and standard key patterns are:
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq}-{end_seq}-{segment_id}.cbor.zst` |
-| **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced checkpoint data. | `namespaces/{namespace_id}/checkpoints/{checkpoint_seq}/manifest.json` |
-| **Checkpoint segments** | Immutable | Store verified checkpoint data. | `namespaces/{namespace_id}/checkpoints/{checkpoint_seq}/tables/{family}-{segment_index}.sst.zst` |
+| **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced materialization tables. | `namespaces/{namespace_id}/checkpoints/{checkpoint_seq}/manifest.json` |
+| **Checkpoint base tables** | Immutable | Store a full verified metadata materialization through a base sequence. | `namespaces/{namespace_id}/checkpoints/{checkpoint_seq}/tables/{family}-{segment_index}.sst.zst` |
+| **Checkpoint delta-run tables** | Immutable | Store WAL-derived metadata rows after a base materialization. | `namespaces/{namespace_id}/checkpoints/{checkpoint_seq}/delta-runs/{delta_run_id}/tables/{family}-{segment_index}.sst.zst` |
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
 

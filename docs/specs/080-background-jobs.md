@@ -12,6 +12,8 @@ A checkpoint summarizes namespace metadata at one chosen `seq`.
 
 A checkpoint is useful only after it is verified. Readers must prefer verified checkpoints plus the visible WAL segment chain over unverified or partial checkpoints.
 
+The checkpoint manifest is the durable materialization descriptor. It may reference full base metadata tables and immutable delta-run tables generated from WAL ranges after that base. Delta runs are not a second source of truth; they are rebuildable metadata rows used to keep normal basis reconstruction from replaying an unbounded WAL tail.
+
 ### 2.2 Retention management
 
 Retention management decides how far back incremental replay is still promised.

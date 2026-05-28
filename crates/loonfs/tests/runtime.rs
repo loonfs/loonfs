@@ -1,5 +1,8 @@
+use loon_api::decode_checkpoint_manifest_json;
 use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
+use loon_objectstore::keys::{
+    checkpoint_manifest, namespace_descriptor, namespace_head, namespace_lease,
+};
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
@@ -1198,6 +1201,70 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
         .expect("status after checkpoint");
     assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(1)));
     assert_eq!(status.wal_tail_segments, 0);
+}
+
+#[test]
+fn maintenance_tick_after_existing_checkpoint_publishes_delta_checkpoint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "tick-delta-publish-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::default(),
+    )
+    .expect("put first file");
+    fs.maintenance_tick_namespace(
+        &namespace_id,
+        MaintenanceTickOptions {
+            max_wal_tail_segments: 1,
+        },
+    )
+    .expect("first maintenance tick");
+
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/second.txt",
+        b"second",
+        PutFileOptions::default(),
+    )
+    .expect("put second file");
+    let tick = fs
+        .maintenance_tick_namespace(
+            &namespace_id,
+            MaintenanceTickOptions {
+                max_wal_tail_segments: 1,
+            },
+        )
+        .expect("second maintenance tick");
+    assert_eq!(
+        tick.outcome,
+        MaintenanceTickOutcome::CheckpointPublished {
+            checkpoint_seq: ChangeSeq(2)
+        }
+    );
+
+    let status = fs
+        .namespace_status(&namespace_id)
+        .expect("status after delta checkpoint");
+    assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(2)));
+    assert_eq!(status.wal_tail_segments, 0);
+
+    let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let manifest_key = checkpoint_manifest(namespace_id.as_str(), 2);
+    let manifest_bytes = raw_store
+        .get(&manifest_key, None)
+        .expect("read checkpoint manifest")
+        .expect("checkpoint manifest exists");
+    let manifest = decode_checkpoint_manifest_json(&manifest_bytes).expect("decode manifest");
+    assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
+    assert_eq!(manifest.payload.delta_runs.len(), 1);
+    assert_eq!(manifest.payload.delta_runs[0].seq_min, ChangeSeq(2));
+    assert_eq!(manifest.payload.delta_runs[0].seq_max, ChangeSeq(2));
 }
 
 #[test]
