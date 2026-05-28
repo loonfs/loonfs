@@ -1,11 +1,11 @@
 use super::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::basis::load_verified_namespace_basis;
-use crate::content::{read_durable_content_bytes, validate_durable_content_reference};
+use crate::content::read_durable_content_bytes;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath};
 use loon_api::{
-    AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentStoreId,
-    DisplayName, InodeKind, NamespaceId,
+    AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, DisplayName,
+    InodeKind, NamespaceId,
 };
 use loon_objectstore::ObjectStore;
 
@@ -15,11 +15,10 @@ pub fn resolve_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id)?;
-    resolve_path_from_basis(store, &basis, absolute_path)
+    resolve_path_from_basis(&basis, absolute_path)
 }
 
-pub fn resolve_path_from_basis<S: ObjectStore + ?Sized>(
-    store: &S,
+pub fn resolve_path_from_basis(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
@@ -30,9 +29,7 @@ pub fn resolve_path_from_basis<S: ObjectStore + ?Sized>(
         basis.head.seq,
     )?;
     build_authoritative_path_entry(
-        store,
         &basis.head.namespace_id,
-        &basis.content_store_id,
         basis.head.seq,
         &basis.metadata_state,
         &resolved,
@@ -45,11 +42,10 @@ pub fn list_path<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
     let basis = load_verified_namespace_basis(store, namespace_id)?;
-    list_path_from_basis(store, &basis, absolute_path)
+    list_path_from_basis(&basis, absolute_path)
 }
 
-pub fn list_path_from_basis<S: ObjectStore + ?Sized>(
-    store: &S,
+pub fn list_path_from_basis(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
@@ -61,9 +57,7 @@ pub fn list_path_from_basis<S: ObjectStore + ?Sized>(
     )?;
     if resolved.inode_kind == InodeKind::File {
         return Ok(vec![build_authoritative_path_entry(
-            store,
             &basis.head.namespace_id,
-            &basis.content_store_id,
             basis.head.seq,
             &basis.metadata_state,
             &resolved,
@@ -89,9 +83,7 @@ pub fn list_path_from_basis<S: ObjectStore + ?Sized>(
                 .map_err(map_path_error_to_core)?
                 .join(&DisplayName::parse(&direntry.display_name).map_err(map_path_error_to_core)?);
             build_authoritative_path_entry(
-                store,
                 &basis.head.namespace_id,
-                &basis.content_store_id,
                 basis.head.seq,
                 &basis.metadata_state,
                 &ResolvedVisiblePath {
@@ -120,7 +112,7 @@ pub fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
-    let entry = resolve_path_from_basis(store, basis, absolute_path)?;
+    let entry = resolve_path_from_basis(basis, absolute_path)?;
     if entry.inode_kind != InodeKind::File {
         return Err(CoreError::ExpectedFile {
             path: entry.absolute_path,
@@ -138,10 +130,8 @@ pub fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
-    store: &S,
+fn build_authoritative_path_entry(
     namespace_id: &NamespaceId,
-    content_store_id: &ContentStoreId,
     head_seq: ChangeSeq,
     metadata_state: &MetadataState,
     resolved: &ResolvedVisiblePath,
@@ -150,14 +140,9 @@ fn build_authoritative_path_entry<S: ObjectStore + ?Sized>(
     let content_ref = revision
         .as_ref()
         .map(|revision| revision.content_ref.clone());
-    let size_bytes = match content_ref.as_ref() {
-        Some(content_ref) => {
-            let validated =
-                validate_durable_content_reference(store, content_store_id, content_ref)?;
-            Some(validated.file_size_bytes)
-        }
-        None => None,
-    };
+    let size_bytes = content_ref
+        .as_ref()
+        .map(|content_ref| content_ref.size_bytes);
 
     Ok(AuthoritativePathEntry {
         namespace_id: namespace_id.clone(),

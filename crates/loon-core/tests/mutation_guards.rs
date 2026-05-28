@@ -15,8 +15,8 @@ use loon_core::metadata::MetadataState;
 use loon_core::{
     begin_upload, bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
     copy_file_path, create_checkpoint, create_dir_path, delete_path, delete_path_non_recursive,
-    fork_namespace, list_changes_after, list_namespaces, load_verified_namespace_basis, move_path,
-    publish_namespace_mutations_batch, put_file_bytes, read_file_bytes, resolve_path,
+    fork_namespace, list_changes_after, list_namespaces, list_path, load_verified_namespace_basis,
+    move_path, publish_namespace_mutations_batch, put_file_bytes, read_file_bytes, resolve_path,
     store_bytes_as_content, upload_content, write_file_bytes, CoreError, CoreErrorKind,
     DirectObjectStorePublisher, MutationContext, NamespaceMutationCandidate, PathMutationIntent,
     PublishOptions, PutFileBehavior,
@@ -756,6 +756,123 @@ fn begin_upload_does_not_read_checkpoint_or_wal_replay_objects() {
     let begin = begin_upload(&guarded_store, &namespace_id, &context).expect("begin upload");
     assert_eq!(begin.namespace_id, namespace_id);
     assert_eq!(guarded_store.guarded_get_count(), 0);
+}
+
+#[test]
+fn complete_upload_does_not_get_content_blob_after_staging() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let begin = begin_upload(&store, &namespace_id, &context).expect("begin upload");
+    let uploaded = upload_content(&store, &namespace_id, &begin.upload_id, b"hello", &context)
+        .expect("upload content");
+
+    store.reset_content_blob_get_count();
+    let completed = complete_upload(
+        &store,
+        &namespace_id,
+        &begin.upload_id,
+        &CompleteUploadRequest {
+            content_ref: uploaded.content_ref.clone(),
+        },
+        &context,
+    )
+    .expect("complete upload");
+    assert_eq!(completed.content_ref, uploaded.content_ref);
+    assert_eq!(store.content_blob_get_count(), 0);
+
+    store.reset_content_blob_get_count();
+    let completed_again = complete_upload(
+        &store,
+        &namespace_id,
+        &begin.upload_id,
+        &CompleteUploadRequest {
+            content_ref: uploaded.content_ref,
+        },
+        &context,
+    )
+    .expect("complete upload idempotently");
+    assert_eq!(completed_again.content_ref, completed.content_ref);
+    assert_eq!(store.content_blob_get_count(), 0);
+
+    let mismatch_begin = begin_upload(&store, &namespace_id, &context).expect("begin mismatch");
+    let mismatch_uploaded = upload_content(
+        &store,
+        &namespace_id,
+        &mismatch_begin.upload_id,
+        b"staged",
+        &context,
+    )
+    .expect("upload mismatch content");
+    let wrong_ref = ContentRef::whole_file_v0(b"different");
+    assert_ne!(wrong_ref, mismatch_uploaded.content_ref);
+
+    store.reset_content_blob_get_count();
+    let mismatch = complete_upload(
+        &store,
+        &namespace_id,
+        &mismatch_begin.upload_id,
+        &CompleteUploadRequest {
+            content_ref: wrong_ref,
+        },
+        &context,
+    )
+    .expect_err("mismatched content ref");
+    assert_eq!(mismatch.kind(), CoreErrorKind::InvalidUploadContent);
+    assert_eq!(store.content_blob_get_count(), 0);
+}
+
+#[test]
+fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    create_dir_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
+        .expect("create docs");
+
+    for index in 0..3 {
+        let path = format!("/docs/file-{index}.txt");
+        let bytes = format!("file-{index}-bytes");
+        let commit_id = format!("put-file-{index}");
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            &path,
+            bytes.as_bytes(),
+            PutFileBehavior::CreateOnly,
+            &context,
+            Some(&commit_id),
+        )
+        .expect("put file");
+    }
+
+    store.reset_content_blob_get_count();
+    let stat = resolve_path(&store, &namespace_id, "/docs/file-1.txt").expect("stat file");
+    assert_eq!(stat.inode_kind, InodeKind::File);
+    assert_eq!(stat.size_bytes, Some("file-1-bytes".len() as u64));
+    assert!(stat.content_ref.is_some());
+    assert_eq!(store.content_blob_get_count(), 0);
+
+    store.reset_content_blob_get_count();
+    let entries = list_path(&store, &namespace_id, "/docs").expect("list docs");
+    assert_eq!(entries.len(), 3);
+    for entry in entries {
+        assert_eq!(entry.inode_kind, InodeKind::File);
+        assert_eq!(entry.size_bytes, Some("file-0-bytes".len() as u64));
+        assert!(entry.content_ref.is_some());
+    }
+    assert_eq!(store.content_blob_get_count(), 0);
+
+    store.reset_content_blob_get_count();
+    let read = read_file_bytes(&store, &namespace_id, "/docs/file-1.txt").expect("read file");
+    assert_eq!(read.bytes, b"file-1-bytes");
+    assert_eq!(store.content_blob_get_count(), 1);
 }
 
 #[test]
@@ -2862,6 +2979,66 @@ impl ObjectStore for ReplayReadGuardStore {
         range: Option<ByteRange>,
     ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
         self.reject_replay_read(key)?;
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
+}
+
+struct ContentBlobGetCountingStore {
+    inner: LocalFsStore,
+    content_blob_gets: AtomicUsize,
+}
+
+impl ContentBlobGetCountingStore {
+    fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("store"),
+            content_blob_gets: AtomicUsize::new(0),
+        }
+    }
+
+    fn content_blob_get_count(&self) -> usize {
+        self.content_blob_gets.load(Ordering::SeqCst)
+    }
+
+    fn reset_content_blob_get_count(&self) {
+        self.content_blob_gets.store(0, Ordering::SeqCst);
+    }
+
+    fn record_content_blob_get(&self, key: &str) {
+        if key.starts_with("content-stores/") && key.contains("/blobs/") {
+            self.content_blob_gets.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl ObjectStore for ContentBlobGetCountingStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.record_content_blob_get(key);
         self.inner.get(key, range)
     }
 

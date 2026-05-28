@@ -295,8 +295,6 @@ pub fn complete_upload<S: ObjectStore + ?Sized>(
                 "completed content ref does not match staged content".to_owned(),
             ));
         }
-        let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
-        validate_durable_content_reference(store, &content_store_id, &request.content_ref)?;
 
         let mut next_state = loaded.envelope.state.clone();
         next_state.completed = Some(CompletedUpload {
