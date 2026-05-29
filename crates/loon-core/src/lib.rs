@@ -25,7 +25,6 @@ pub use basis::{
 pub use checkpoint::{
     advance_retention_floor, create_checkpoint, CheckpointLoadError, CheckpointLoadErrorKind,
 };
-pub use content::ContentValidationKey;
 pub use context::MutationContext;
 pub use error::{CoreError, CoreErrorKind};
 pub use lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
@@ -39,12 +38,11 @@ pub use path::intent::{PathMutationIntent, PutFileBehavior};
 pub use path::planner::PlannedPathMutation;
 pub use protocol::{
     begin_upload, commit_operations, commit_operations_batch, complete_upload, list_changes_after,
-    upload_content, upload_content_with_validation_key,
+    upload_content,
 };
 pub use publisher::{
-    publish_namespace_mutations_batch,
-    publish_namespace_mutations_batch_with_content_validation_hints, DirectObjectStorePublisher,
-    FlushPolicy, NamespaceCommitEngine, NamespaceMutationCandidate, PublishOptions,
+    publish_namespace_mutations_batch, DirectObjectStorePublisher, FlushPolicy,
+    NamespaceCommitEngine, NamespaceMutationCandidate, PublishOptions,
 };
 pub use services::{
     bootstrap_namespace, copy_file_path, create_dir_path, delete_path, delete_path_non_recursive,

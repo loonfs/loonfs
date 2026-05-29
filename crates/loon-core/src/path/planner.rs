@@ -5,7 +5,7 @@ use super::intent::{PathMutationIntent, PutFileBehavior};
 use super::tombstone::reject_tombstoned_path_ancestor;
 use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::commit::SemanticCommitFingerprint;
-use crate::content::{ContentValidationKey, ContentValidationTracker};
+use crate::content::ContentValidationTracker;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
 use loon_api::{
@@ -25,7 +25,6 @@ pub struct PlannedPathMutation {
     pub commit_id: CommitId,
     pub semantic_commit_fingerprint: SemanticCommitFingerprint,
     pub commit_request: ApiCommitRequest,
-    pub validated_content: Vec<ContentValidationKey>,
 }
 
 pub(crate) struct PathPlanner<'a, S: ObjectStore + ?Sized> {
@@ -208,7 +207,6 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
 ) -> Result<PlannedPathMutation, CoreError> {
     let commit_id = intent.commit_id().clone();
     let semantic_fingerprint = semantic_commit_fingerprint_for_path_intent(namespace_id, intent)?;
-    let mut validated_content = Vec::new();
     let view = PathPlanningView {
         head,
         metadata_state,
@@ -231,7 +229,6 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
             &commit_id,
             &view,
             content_validation,
-            &mut validated_content,
         )?,
         PathMutationIntent::DeletePath {
             absolute_path,
@@ -253,14 +250,12 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
             &commit_id,
             &view,
             content_validation,
-            &mut validated_content,
         )?,
     };
     Ok(PlannedPathMutation {
         commit_id,
         semantic_commit_fingerprint: semantic_fingerprint,
         commit_request,
-        validated_content,
     })
 }
 
@@ -363,14 +358,9 @@ fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
     content_validation: &mut ContentValidationTracker,
-    validated_content: &mut Vec<ContentValidationKey>,
 ) -> Result<ApiCommitRequest, CoreError> {
     let absolute_path = parse_mutation_path(absolute_path)?;
-    if let Some(key) =
-        content_validation.ensure_validated(store, view.content_store_id, &content_ref)?
-    {
-        validated_content.push(key);
-    }
+    content_validation.ensure_validated(store, view.content_store_id, &content_ref)?;
     reject_tombstoned_path_ancestor(
         view.metadata_state,
         &absolute_path,
@@ -590,7 +580,6 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
     content_validation: &mut ContentValidationTracker,
-    validated_content: &mut Vec<ContentValidationKey>,
 ) -> Result<ApiCommitRequest, CoreError> {
     let from_path = parse_mutation_path(from_path)?;
     let to_path = parse_mutation_path(to_path)?;
@@ -634,11 +623,7 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
         .metadata_state
         .latest_revision_head_at_seq(source.inode_id, view.head.seq)
         .ok_or_else(|| CoreError::MissingPath(from_path.as_str().to_owned()))?;
-    if let Some(key) =
-        content_validation.ensure_validated(store, view.content_store_id, &revision.content_ref)?
-    {
-        validated_content.push(key);
-    }
+    content_validation.ensure_validated(store, view.content_store_id, &revision.content_ref)?;
 
     let target_parent = resolve_parent_directory(
         view.metadata_state,

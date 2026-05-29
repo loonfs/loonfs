@@ -16,10 +16,8 @@ use loon_core::{
     begin_upload, bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
     copy_file_path, create_checkpoint, create_dir_path, delete_path, delete_path_non_recursive,
     fork_namespace, list_changes_after, list_namespaces, list_path, load_verified_namespace_basis,
-    move_path, publish_namespace_mutations_batch,
-    publish_namespace_mutations_batch_with_content_validation_hints, put_file_bytes,
-    read_file_bytes, resolve_path, store_bytes_as_content, upload_content,
-    upload_content_with_validation_key, write_file_bytes, CoreError, CoreErrorKind,
+    move_path, publish_namespace_mutations_batch, put_file_bytes, read_file_bytes, resolve_path,
+    store_bytes_as_content, upload_content, write_file_bytes, CoreError, CoreErrorKind,
     DirectObjectStorePublisher, MutationContext, NamespaceMutationCandidate, PathMutationIntent,
     PublishOptions, PutFileBehavior,
 };
@@ -889,44 +887,6 @@ fn path_batch_validates_repeated_content_ref_once() {
 
     assert!(responses.iter().all(Result::is_ok));
     assert_eq!(store.content_blob_get_count(), 1);
-}
-
-#[test]
-fn trusted_content_validation_hint_skips_path_put_file_content_get() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = ContentBlobGetCountingStore::new(temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
-    let context = mutation_context();
-
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let begin = begin_upload(&store, &namespace_id, &context).expect("begin upload");
-    let (content, validation_key) = upload_content_with_validation_key(
-        &store,
-        &namespace_id,
-        &begin.upload_id,
-        b"trusted",
-        &context,
-    )
-    .expect("upload content");
-
-    store.reset_content_blob_get_count();
-    let responses = publish_namespace_mutations_batch_with_content_validation_hints(
-        &store,
-        &namespace_id,
-        vec![NamespaceMutationCandidate::Path(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-trusted-content"),
-                absolute_path: "/docs/trusted.txt".to_owned(),
-                content_ref: content.content_ref,
-                behavior: PutFileBehavior::CreateOnly,
-            },
-        )],
-        &context,
-        &[validation_key],
-    );
-
-    assert!(responses[0].is_ok());
-    assert_eq!(store.content_blob_get_count(), 0);
 }
 
 #[test]

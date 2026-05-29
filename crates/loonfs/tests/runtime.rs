@@ -671,7 +671,7 @@ fn upload_flow_is_available_from_runtime() {
 }
 
 #[test]
-fn upload_then_path_put_uses_validated_content_cache() {
+fn upload_then_path_put_uses_private_uploaded_content_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
@@ -847,7 +847,6 @@ fn control_cache_eviction_reloads_head_for_basis_validation() {
             basis_cache_enabled: true,
             control_cache_enabled: true,
             max_cached_namespaces: 1,
-            max_validated_content_refs: RuntimeCacheConfig::default().max_validated_content_refs,
         })
         .build()
         .expect("build runtime");

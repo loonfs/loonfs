@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,15 +22,18 @@ pub use loon_core::{
     PathMutationIntent, PutFileBehavior,
 };
 use loon_core::{
-    ContentValidationKey, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
-    MutationContext, NamespaceCommitEngine, VerifiedNamespaceBasis,
+    ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MutationContext,
+    NamespaceCommitEngine, VerifiedNamespaceBasis,
 };
 use loon_objectstore::keys::namespace_head;
+use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
+const MAX_UPLOADED_CONTENT_CACHE_ENTRIES: usize = 16_384;
+const MAX_UPLOADED_CONTENT_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 pub type SharedObjectStore = Arc<dyn ObjectStore + Send + Sync>;
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -69,7 +72,6 @@ pub struct RuntimeCacheConfig {
     pub basis_cache_enabled: bool,
     pub control_cache_enabled: bool,
     pub max_cached_namespaces: usize,
-    pub max_validated_content_refs: usize,
 }
 
 impl RuntimeCacheConfig {
@@ -78,7 +80,6 @@ impl RuntimeCacheConfig {
             basis_cache_enabled: false,
             control_cache_enabled: false,
             max_cached_namespaces: 0,
-            max_validated_content_refs: 0,
         }
     }
 }
@@ -89,7 +90,6 @@ impl Default for RuntimeCacheConfig {
             basis_cache_enabled: true,
             control_cache_enabled: true,
             max_cached_namespaces: 64,
-            max_validated_content_refs: 16_384,
         }
     }
 }
@@ -105,7 +105,7 @@ struct FsInner {
     basis_cache: Mutex<BasisCache>,
     commit_engines: Mutex<CommitEngineCache>,
     control_cache: Mutex<RuntimeControlCache>,
-    validated_content_cache: Mutex<ValidatedContentCache>,
+    uploaded_content_cache: Mutex<UploadedContentCache>,
     cache_stats: RuntimeCacheStatsInner,
 }
 
@@ -156,71 +156,149 @@ impl BasisCache {
     }
 }
 
-#[derive(Debug, Default)]
-struct ValidatedContentCache {
-    entries: HashMap<ContentValidationKey, ContentRef>,
-    by_content_ref: HashMap<ContentRef, HashSet<ContentValidationKey>>,
-    order: VecDeque<ContentValidationKey>,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UploadedContentCacheKey {
+    namespace_id: NamespaceId,
+    content_ref: ContentRef,
 }
 
-impl ValidatedContentCache {
-    fn insert(&mut self, key: ContentValidationKey, content_ref: ContentRef, max_entries: usize) {
-        if max_entries == 0 {
+#[derive(Debug, Clone)]
+struct UploadedContentCacheEntry {
+    bytes: Arc<Vec<u8>>,
+}
+
+#[derive(Debug, Default)]
+struct UploadedContentCache {
+    entries: HashMap<UploadedContentCacheKey, UploadedContentCacheEntry>,
+    order: VecDeque<UploadedContentCacheKey>,
+    total_bytes: usize,
+}
+
+impl UploadedContentCache {
+    fn insert(&mut self, namespace_id: &NamespaceId, content_ref: ContentRef, bytes: &[u8]) {
+        if bytes.len() > MAX_UPLOADED_CONTENT_CACHE_BYTES {
             return;
         }
-        if let Some(previous_ref) = self.entries.insert(key.clone(), content_ref.clone()) {
-            self.remove_from_index(&previous_ref, &key);
+        let key = UploadedContentCacheKey {
+            namespace_id: namespace_id.clone(),
+            content_ref,
+        };
+        if let Some(previous) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous.bytes.len());
         }
-        self.by_content_ref
-            .entry(content_ref)
-            .or_default()
-            .insert(key.clone());
+        let bytes = Arc::new(bytes.to_vec());
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+        self.entries
+            .insert(key.clone(), UploadedContentCacheEntry { bytes });
         self.touch(&key);
-        while self.entries.len() > max_entries {
+        while self.entries.len() > MAX_UPLOADED_CONTENT_CACHE_ENTRIES
+            || self.total_bytes > MAX_UPLOADED_CONTENT_CACHE_BYTES
+        {
             let Some(evicted) = self.order.pop_front() else {
                 break;
             };
-            if let Some(content_ref) = self.entries.remove(&evicted) {
-                self.remove_from_index(&content_ref, &evicted);
+            if let Some(entry) = self.entries.remove(&evicted) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes.len());
             }
         }
     }
 
-    fn trusted_keys_for_refs(&mut self, content_refs: &[ContentRef]) -> Vec<ContentValidationKey> {
+    fn snapshot_for_refs(
+        &mut self,
+        namespace_id: &NamespaceId,
+        content_refs: &[ContentRef],
+    ) -> UploadedContentSnapshot {
         if content_refs.is_empty() {
-            return Vec::new();
+            return UploadedContentSnapshot::default();
         }
-        let mut keys = Vec::new();
-        let mut seen = HashSet::new();
+        let mut by_digest = HashMap::new();
+        let mut touched = Vec::new();
         for content_ref in content_refs {
-            if let Some(candidates) = self.by_content_ref.get(content_ref) {
-                for key in candidates {
-                    if seen.insert(key.clone()) {
-                        keys.push(key.clone());
-                    }
-                }
+            let key = UploadedContentCacheKey {
+                namespace_id: namespace_id.clone(),
+                content_ref: content_ref.clone(),
+            };
+            if let Some(entry) = self.entries.get(&key) {
+                by_digest.insert(content_ref.digest.clone(), Arc::clone(&entry.bytes));
+                touched.push(key);
             }
         }
-        for key in &keys {
-            self.touch(key);
+        for key in touched {
+            self.touch(&key);
         }
-        keys
+        UploadedContentSnapshot { by_digest }
     }
 
-    fn remove_from_index(&mut self, content_ref: &ContentRef, key: &ContentValidationKey) {
-        let Some(indexed) = self.by_content_ref.get_mut(content_ref) else {
-            return;
-        };
-        indexed.remove(key);
-        if indexed.is_empty() {
-            self.by_content_ref.remove(content_ref);
-        }
-    }
-
-    fn touch(&mut self, key: &ContentValidationKey) {
+    fn touch(&mut self, key: &UploadedContentCacheKey) {
         self.order.retain(|existing| existing != key);
         self.order.push_back(key.clone());
     }
+}
+
+#[derive(Debug, Default)]
+struct UploadedContentSnapshot {
+    by_digest: HashMap<String, Arc<Vec<u8>>>,
+}
+
+impl UploadedContentSnapshot {
+    fn get(&self, key: &str) -> Option<Vec<u8>> {
+        let digest = content_blob_digest_from_key(key)?;
+        self.by_digest
+            .get(&digest)
+            .map(|bytes| bytes.as_ref().clone())
+    }
+}
+
+struct UploadedContentReadThroughStore<'a> {
+    inner: &'a (dyn ObjectStore + Send + Sync),
+    uploaded_content: UploadedContentSnapshot,
+}
+
+impl ObjectStore for UploadedContentReadThroughStore<'_> {
+    fn head(&self, key: &str) -> std::result::Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> std::result::Result<Option<Vec<u8>>, ObjectStoreError> {
+        if range.is_none() {
+            if let Some(bytes) = self.uploaded_content.get(key) {
+                return Ok(Some(bytes));
+            }
+        }
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> std::result::Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> std::result::Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> std::result::Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
+}
+
+fn content_blob_digest_from_key(key: &str) -> Option<String> {
+    if !key.contains("/blobs/sha256/") {
+        return None;
+    }
+    let hex = key.rsplit('/').next()?;
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("sha256:{}", hex.to_ascii_lowercase()))
 }
 
 #[derive(Debug, Default)]
@@ -535,7 +613,7 @@ impl Fs {
                 basis_cache: Mutex::new(BasisCache::default()),
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
-                validated_content_cache: Mutex::new(ValidatedContentCache::default()),
+                uploaded_content_cache: Mutex::new(UploadedContentCache::default()),
                 cache_stats: RuntimeCacheStatsInner::default(),
             }),
         })
@@ -828,14 +906,14 @@ impl Fs {
         upload_id: &str,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
-        let (response, validation_key) = loon_core::upload_content_with_validation_key(
+        let response = loon_core::upload_content(
             self.store(),
             namespace_id,
             upload_id,
             bytes,
             &self.mutation_context(),
         )?;
-        self.cache_validated_content(validation_key, response.content_ref.clone());
+        self.cache_uploaded_content(namespace_id, response.content_ref.clone(), bytes);
         Ok(response)
     }
 
@@ -891,17 +969,16 @@ impl Fs {
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
-        let content_validation_hints = self.content_validation_hints_for_candidates(&candidates);
+        let uploaded_content = self.uploaded_content_snapshot(namespace_id, &candidates);
+        let store = UploadedContentReadThroughStore {
+            inner: self.store(),
+            uploaded_content,
+        };
         if self.commit_engine_cache_enabled() {
             let engine = self.commit_engine(namespace_id);
             let publish = {
                 let mut engine = engine.lock().expect("commit engine lock poisoned");
-                engine.publish_batch_with_content_validation_hints(
-                    self.store(),
-                    candidates,
-                    &self.mutation_context(),
-                    &content_validation_hints,
-                )
+                engine.publish_batch(&store, candidates, &self.mutation_context())
             };
             self.inner.cache_stats.record_publish_result(&publish);
             if let Some(basis) = publish.warm_basis_update.basis() {
@@ -916,17 +993,15 @@ impl Fs {
                 .collect();
         }
 
-        let results: Vec<_> =
-            loon_core::publish_namespace_mutations_batch_with_content_validation_hints(
-                self.store(),
-                namespace_id,
-                candidates,
-                &self.mutation_context(),
-                &content_validation_hints,
-            )
-            .into_iter()
-            .map(|result| result.map_err(RuntimeError::Core))
-            .collect();
+        let results: Vec<_> = loon_core::publish_namespace_mutations_batch(
+            &store,
+            namespace_id,
+            candidates,
+            &self.mutation_context(),
+        )
+        .into_iter()
+        .map(|result| result.map_err(RuntimeError::Core))
+        .collect();
         self.invalidate_namespace_cache_after_batch(namespace_id, &results);
         results
     }
@@ -1063,35 +1138,41 @@ impl Fs {
         cache_config.basis_cache_enabled && cache_config.max_cached_namespaces > 0
     }
 
-    fn validated_content_cache_enabled(&self) -> bool {
-        self.inner.config.runtime_cache.max_validated_content_refs > 0
+    fn uploaded_content_cache_enabled(&self) -> bool {
+        let cache_config = &self.inner.config.runtime_cache;
+        cache_config.basis_cache_enabled && cache_config.max_cached_namespaces > 0
     }
 
-    fn cache_validated_content(&self, key: ContentValidationKey, content_ref: ContentRef) {
-        let cache_config = &self.inner.config.runtime_cache;
-        if cache_config.max_validated_content_refs == 0 {
+    fn cache_uploaded_content(
+        &self,
+        namespace_id: &NamespaceId,
+        content_ref: ContentRef,
+        bytes: &[u8],
+    ) {
+        if !self.uploaded_content_cache_enabled() {
             return;
         }
         self.inner
-            .validated_content_cache
+            .uploaded_content_cache
             .lock()
-            .expect("validated content cache lock poisoned")
-            .insert(key, content_ref, cache_config.max_validated_content_refs);
+            .expect("uploaded content cache lock poisoned")
+            .insert(namespace_id, content_ref, bytes);
     }
 
-    fn content_validation_hints_for_candidates(
+    fn uploaded_content_snapshot(
         &self,
+        namespace_id: &NamespaceId,
         candidates: &[NamespaceMutationCandidate],
-    ) -> Vec<ContentValidationKey> {
-        if !self.validated_content_cache_enabled() {
-            return Vec::new();
+    ) -> UploadedContentSnapshot {
+        if !self.uploaded_content_cache_enabled() {
+            return UploadedContentSnapshot::default();
         }
         let content_refs = candidate_content_refs(candidates);
         self.inner
-            .validated_content_cache
+            .uploaded_content_cache
             .lock()
-            .expect("validated content cache lock poisoned")
-            .trusted_keys_for_refs(&content_refs)
+            .expect("uploaded content cache lock poisoned")
+            .snapshot_for_refs(namespace_id, &content_refs)
     }
 
     fn commit_engine(&self, namespace_id: &NamespaceId) -> Arc<Mutex<NamespaceCommitEngine>> {

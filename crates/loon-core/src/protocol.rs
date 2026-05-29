@@ -6,7 +6,7 @@ use crate::commit::{
     CommitOp, CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
     PreparedCommit, SemanticCommitFingerprint,
 };
-use crate::content::{write_immutable_object, ContentValidationKey, ContentValidationTracker};
+use crate::content::{write_immutable_object, ContentValidationTracker};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
@@ -200,22 +200,10 @@ pub fn upload_content<S: ObjectStore + ?Sized>(
     bytes: &[u8],
     context: &MutationContext,
 ) -> Result<UploadContentResponse, CoreError> {
-    upload_content_with_validation_key(store, namespace_id, upload_id, bytes, context)
-        .map(|(response, _)| response)
-}
-
-pub fn upload_content_with_validation_key<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    upload_id: &str,
-    bytes: &[u8],
-    context: &MutationContext,
-) -> Result<(UploadContentResponse, ContentValidationKey), CoreError> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
     let content_ref = ContentRef::whole_file_v0(bytes);
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
         .map_err(|err| CoreError::Store(err.to_string()))?;
-    let validation_key = ContentValidationKey::new(content_store_id.clone(), &content_ref);
 
     for _attempt in 0..UPLOAD_SESSION_RETRY_LIMIT {
         let loaded = read_upload_session_object(store, namespace_id, upload_id)?;
@@ -227,14 +215,11 @@ pub fn upload_content_with_validation_key<S: ObjectStore + ?Sized>(
 
         if let Some(existing) = &loaded.envelope.state.staged_content_ref {
             if existing == &content_ref {
-                return Ok((
-                    UploadContentResponse {
-                        namespace_id: namespace_id.clone(),
-                        upload_id: upload_id.to_owned(),
-                        content_ref,
-                    },
-                    validation_key,
-                ));
+                return Ok(UploadContentResponse {
+                    namespace_id: namespace_id.clone(),
+                    upload_id: upload_id.to_owned(),
+                    content_ref,
+                });
             }
             return Err(CoreError::UploadContentConflict {
                 upload_id: upload_id.to_owned(),
@@ -262,14 +247,11 @@ pub fn upload_content_with_validation_key<S: ObjectStore + ?Sized>(
 
         match store.compare_and_swap(&loaded.object_key, expected_etag, &encoded) {
             Ok(_) => {
-                return Ok((
-                    UploadContentResponse {
-                        namespace_id: namespace_id.clone(),
-                        upload_id: upload_id.to_owned(),
-                        content_ref,
-                    },
-                    validation_key,
-                ));
+                return Ok(UploadContentResponse {
+                    namespace_id: namespace_id.clone(),
+                    upload_id: upload_id.to_owned(),
+                    content_ref,
+                });
             }
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
             Err(err) => return Err(CoreError::Store(err.to_string())),
@@ -389,7 +371,7 @@ pub(crate) fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
-    commit_namespace_mutations_batch(store, namespace_id, candidates, context, &[])
+    commit_namespace_mutations_batch(store, namespace_id, candidates, context)
 }
 
 fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
@@ -397,7 +379,6 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
-    trusted_content_validations: &[ContentValidationKey],
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
     if candidates.is_empty() {
         return Vec::new();
@@ -421,7 +402,6 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         &candidates,
         context,
         &basis,
-        trusted_content_validations,
     )
     .results
 }
@@ -432,7 +412,6 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     candidates: &[NamespaceMutationCandidate],
     context: &MutationContext,
     basis: &VerifiedNamespaceBasis,
-    trusted_content_validations: &[ContentValidationKey],
 ) -> PublishBatchAgainstBasisResult {
     if candidates.is_empty() {
         return PublishBatchAgainstBasisResult::unchanged(Vec::new(), basis);
@@ -455,7 +434,7 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
     let mut in_batch_requests: HashMap<CommitId, InBatchRequest> = HashMap::new();
     let mut aliases: Vec<(usize, usize)> = Vec::new();
-    let mut content_validation = ContentValidationTracker::new(trusted_content_validations);
+    let mut content_validation = ContentValidationTracker::default();
 
     for (index, candidate) in candidates.iter().enumerate() {
         let Some(candidate_request) = prepare_candidate_request(
