@@ -5,7 +5,6 @@ use super::intent::{PathMutationIntent, PutFileBehavior};
 use super::tombstone::reject_tombstoned_path_ancestor;
 use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::commit::SemanticCommitFingerprint;
-use crate::content::ContentValidationTracker;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
 use loon_api::{
@@ -14,8 +13,8 @@ use loon_api::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
         CommitRequest as ApiCommitRequest, RenameMode,
     },
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentStoreId, DisplayName, HeadState, InodeId,
-    InodeKind, NameKey, NamespaceId,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, DisplayName, HeadState, InodeId, InodeKind,
+    NameKey, NamespaceId,
 };
 use loon_objectstore::ObjectStore;
 use serde::Serialize;
@@ -51,13 +50,7 @@ impl<'a, S: ObjectStore + ?Sized> PathPlanner<'a, S> {
         intent: &PathMutationIntent,
         basis: &VerifiedNamespaceBasis,
     ) -> Result<PlannedPathMutation, CoreError> {
-        self.plan_against_state(
-            namespace_id,
-            intent,
-            &basis.head,
-            &basis.metadata_state,
-            &basis.content_store_id,
-        )
+        self.plan_against_state(namespace_id, intent, &basis.head, &basis.metadata_state)
     }
 
     pub(crate) fn plan_against_state(
@@ -66,37 +59,8 @@ impl<'a, S: ObjectStore + ?Sized> PathPlanner<'a, S> {
         intent: &PathMutationIntent,
         head: &HeadState,
         metadata_state: &MetadataState,
-        content_store_id: &ContentStoreId,
     ) -> Result<PlannedPathMutation, CoreError> {
-        let mut content_validation = ContentValidationTracker::default();
-        self.plan_against_state_with_content_validation(
-            namespace_id,
-            intent,
-            head,
-            metadata_state,
-            content_store_id,
-            &mut content_validation,
-        )
-    }
-
-    pub(crate) fn plan_against_state_with_content_validation(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: &PathMutationIntent,
-        head: &HeadState,
-        metadata_state: &MetadataState,
-        content_store_id: &ContentStoreId,
-        content_validation: &mut ContentValidationTracker,
-    ) -> Result<PlannedPathMutation, CoreError> {
-        plan_path_mutation_against_state(
-            self.store,
-            namespace_id,
-            intent,
-            head,
-            metadata_state,
-            content_store_id,
-            content_validation,
-        )
+        plan_path_mutation_against_state(namespace_id, intent, head, metadata_state)
     }
 }
 
@@ -196,21 +160,17 @@ fn normalized_path_for_fingerprint(absolute_path: &str) -> Result<String, CoreEr
         .to_owned())
 }
 
-pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
-    store: &S,
+pub(crate) fn plan_path_mutation_against_state(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
     head: &HeadState,
     metadata_state: &MetadataState,
-    content_store_id: &ContentStoreId,
-    content_validation: &mut ContentValidationTracker,
 ) -> Result<PlannedPathMutation, CoreError> {
     let commit_id = intent.commit_id().clone();
     let semantic_fingerprint = semantic_commit_fingerprint_for_path_intent(namespace_id, intent)?;
     let view = PathPlanningView {
         head,
         metadata_state,
-        content_store_id,
     };
     let commit_request = match intent {
         PathMutationIntent::CreateDir { absolute_path, .. } => {
@@ -222,13 +182,11 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
             behavior,
             ..
         } => plan_put_file_content_ref(
-            store,
             absolute_path,
             content_ref.clone(),
             *behavior,
             &commit_id,
             &view,
-            content_validation,
         )?,
         PathMutationIntent::DeletePath {
             absolute_path,
@@ -243,14 +201,7 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
         } => plan_move_path(from_path, to_path, *mode, &commit_id, &view)?,
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
-        } => plan_copy_file_path(
-            store,
-            from_path,
-            to_path,
-            &commit_id,
-            &view,
-            content_validation,
-        )?,
+        } => plan_copy_file_path(from_path, to_path, &commit_id, &view)?,
     };
     Ok(PlannedPathMutation {
         commit_id,
@@ -262,7 +213,6 @@ pub(crate) fn plan_path_mutation_against_state<S: ObjectStore + ?Sized>(
 struct PathPlanningView<'a> {
     head: &'a HeadState,
     metadata_state: &'a MetadataState,
-    content_store_id: &'a ContentStoreId,
 }
 
 fn binding_is_precondition(
@@ -350,17 +300,14 @@ fn plan_create_dir(
     })
 }
 
-fn plan_put_file_content_ref<S: ObjectStore + ?Sized>(
-    store: &S,
+fn plan_put_file_content_ref(
     absolute_path: &str,
     content_ref: ContentRef,
     behavior: PutFileBehavior,
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
-    content_validation: &mut ContentValidationTracker,
 ) -> Result<ApiCommitRequest, CoreError> {
     let absolute_path = parse_mutation_path(absolute_path)?;
-    content_validation.ensure_validated(store, view.content_store_id, &content_ref)?;
     reject_tombstoned_path_ancestor(
         view.metadata_state,
         &absolute_path,
@@ -573,13 +520,11 @@ fn plan_move_path(
     })
 }
 
-fn plan_copy_file_path<S: ObjectStore + ?Sized>(
-    store: &S,
+fn plan_copy_file_path(
     from_path: &str,
     to_path: &str,
     commit_id: &CommitId,
     view: &PathPlanningView<'_>,
-    content_validation: &mut ContentValidationTracker,
 ) -> Result<ApiCommitRequest, CoreError> {
     let from_path = parse_mutation_path(from_path)?;
     let to_path = parse_mutation_path(to_path)?;
@@ -623,7 +568,6 @@ fn plan_copy_file_path<S: ObjectStore + ?Sized>(
         .metadata_state
         .latest_revision_head_at_seq(source.inode_id, view.head.seq)
         .ok_or_else(|| CoreError::MissingPath(from_path.as_str().to_owned()))?;
-    content_validation.ensure_validated(store, view.content_store_id, &revision.content_ref)?;
 
     let target_parent = resolve_parent_directory(
         view.metadata_state,
@@ -786,13 +730,7 @@ mod tests {
     ) -> PlannedPathMutation {
         let basis = load_verified_namespace_basis(store, namespace_id).expect("basis");
         PathPlanner::new(store)
-            .plan_against_state(
-                namespace_id,
-                intent,
-                &basis.head,
-                &basis.metadata_state,
-                &basis.content_store_id,
-            )
+            .plan_against_state(namespace_id, intent, &basis.head, &basis.metadata_state)
             .expect("plan")
     }
 
@@ -996,7 +934,6 @@ mod tests {
                 },
                 &basis.head,
                 &basis.metadata_state,
-                &basis.content_store_id,
             )
             .expect_err("tombstoned ancestor");
 

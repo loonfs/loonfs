@@ -449,7 +449,6 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             &mut outcomes,
             &mut in_batch_requests,
             &mut aliases,
-            &mut content_validation,
         ) else {
             continue;
         };
@@ -625,7 +624,6 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     outcomes: &mut [Option<Result<ApiCommitResponse, CoreError>>],
     in_batch_requests: &mut HashMap<CommitId, InBatchRequest>,
     aliases: &mut Vec<(usize, usize)>,
-    content_validation: &mut ContentValidationTracker,
 ) -> Option<CandidateCoreRequest> {
     let conversion_context = CommitExecutionContext {
         namespace_id: namespace_id.clone(),
@@ -695,13 +693,11 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             ) {
                 return None;
             }
-            let planned = match PathPlanner::new(store).plan_against_state_with_content_validation(
+            let planned = match PathPlanner::new(store).plan_against_state(
                 namespace_id,
                 intent,
                 current_head,
                 current_metadata_state,
-                &basis.content_store_id,
-                content_validation,
             ) {
                 Ok(value) => value,
                 Err(error) => {
