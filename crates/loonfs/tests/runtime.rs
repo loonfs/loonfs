@@ -969,7 +969,7 @@ fn explicit_commit_appears_in_change_feed() {
 }
 
 #[test]
-fn namespace_status_reports_checkpoint_lag_from_head() {
+fn namespace_status_reports_wal_tail_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "status-test");
     let namespace_id = namespace();
@@ -982,7 +982,7 @@ fn namespace_status_reports_checkpoint_lag_from_head() {
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
     assert_eq!(status.checkpoint_hint_seq, None);
-    assert_eq!(status.uncheckpointed_commits, 0);
+    assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
     fs.put_file_bytes(
@@ -998,7 +998,7 @@ fn namespace_status_reports_checkpoint_lag_from_head() {
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
     assert_eq!(status.checkpoint_hint_seq, None);
-    assert_eq!(status.uncheckpointed_commits, 1);
+    assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 }
 
@@ -1065,17 +1065,17 @@ fn maintenance_tick_below_threshold_is_not_needed() {
         .maintenance_tick_namespace(
             &namespace_id,
             MaintenanceTickOptions {
-                max_uncheckpointed_commits: 2,
+                max_wal_tail_segments: 2,
             },
         )
         .expect("maintenance tick");
     assert_eq!(tick.namespace_id, namespace_id);
-    assert_eq!(tick.status_before.uncheckpointed_commits, 1);
+    assert_eq!(tick.status_before.wal_tail_segments, 1);
     assert_eq!(tick.outcome, MaintenanceTickOutcome::NotNeeded);
 }
 
 #[test]
-fn maintenance_tick_at_threshold_publishes_checkpoint() {
+fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-publish-test");
     let namespace_id = namespace();
@@ -1094,7 +1094,7 @@ fn maintenance_tick_at_threshold_publishes_checkpoint() {
         .maintenance_tick_namespace(
             &namespace_id,
             MaintenanceTickOptions {
-                max_uncheckpointed_commits: 1,
+                max_wal_tail_segments: 1,
             },
         )
         .expect("maintenance tick");
@@ -1110,7 +1110,91 @@ fn maintenance_tick_at_threshold_publishes_checkpoint() {
         .namespace_status(&namespace_id)
         .expect("status after checkpoint");
     assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(1)));
-    assert_eq!(status.uncheckpointed_commits, 0);
+    assert_eq!(status.wal_tail_segments, 0);
+}
+
+#[test]
+fn maintenance_tick_counts_segments_not_commits() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "tick-segment-count-test");
+    let namespace_id = namespace();
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let first_batch = fs.commit_operations_batch(
+        &namespace_id,
+        vec![
+            CommitRequest {
+                commit_id: CommitId::parse("create-a").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "a".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+            CommitRequest {
+                commit_id: CommitId::parse("create-b").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "b".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+        ],
+    );
+    assert!(first_batch.iter().all(Result::is_ok));
+
+    let status = fs
+        .namespace_status(&namespace_id)
+        .expect("status after first batch");
+    assert_eq!(status.head_seq, ChangeSeq(2));
+    assert_eq!(status.wal_tail_segments, 1);
+
+    let tick = fs
+        .maintenance_tick_namespace(
+            &namespace_id,
+            MaintenanceTickOptions {
+                max_wal_tail_segments: 2,
+            },
+        )
+        .expect("maintenance tick");
+    assert_eq!(tick.outcome, MaintenanceTickOutcome::NotNeeded);
+
+    fs.commit_operations(
+        &namespace_id,
+        CommitRequest {
+            commit_id: CommitId::parse("create-c").expect("valid commit id"),
+            preconditions: Vec::new(),
+            ops: vec![CommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: "c".to_owned(),
+            }],
+            message: None,
+            annotations: None,
+        },
+    )
+    .expect("second segment commit");
+
+    let tick = fs
+        .maintenance_tick_namespace(
+            &namespace_id,
+            MaintenanceTickOptions {
+                max_wal_tail_segments: 2,
+            },
+        )
+        .expect("maintenance tick at segment threshold");
+    assert_eq!(tick.status_before.head_seq, ChangeSeq(3));
+    assert_eq!(tick.status_before.wal_tail_segments, 2);
+    assert_eq!(
+        tick.outcome,
+        MaintenanceTickOutcome::CheckpointPublished {
+            checkpoint_seq: ChangeSeq(3)
+        }
+    );
 }
 
 #[test]
@@ -1125,12 +1209,12 @@ fn maintenance_tick_rejects_zero_threshold() {
         .maintenance_tick_namespace(
             &namespace_id,
             MaintenanceTickOptions {
-                max_uncheckpointed_commits: 0,
+                max_wal_tail_segments: 0,
             },
         )
         .expect_err("zero threshold should fail");
     match error {
-        RuntimeError::Config(message) => assert!(message.contains("max_uncheckpointed_commits")),
+        RuntimeError::Config(message) => assert!(message.contains("max_wal_tail_segments")),
         other => panic!("expected config error, got {other:?}"),
     }
 }
@@ -1164,7 +1248,7 @@ fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
         .maintenance_tick_namespace(
             &namespace_id,
             MaintenanceTickOptions {
-                max_uncheckpointed_commits: 1,
+                max_wal_tail_segments: 1,
             },
         )
         .expect("maintenance tick should not fail on checkpoint hint race");
@@ -1179,7 +1263,7 @@ fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
         .namespace_status(&namespace_id)
         .expect("status after lost race");
     assert_eq!(status.checkpoint_hint_seq, None);
-    assert_eq!(status.uncheckpointed_commits, 1);
+    assert_eq!(status.wal_tail_segments, 1);
 }
 
 #[test]

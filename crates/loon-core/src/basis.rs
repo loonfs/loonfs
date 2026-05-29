@@ -36,6 +36,7 @@ pub struct NamespaceHeadSummary {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
     pub checkpoint_hint_seq: Option<ChangeSeq>,
+    pub wal_tail_segments: u64,
     pub retention_floor_seq: ChangeSeq,
 }
 
@@ -179,10 +180,20 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     let loaded_head = read_head_object(store, expected_namespace)
         .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
     let head = loaded_head.envelope.state;
+    let checkpoint_basis_seq = head.checkpoint_hint_seq.unwrap_or(ChangeSeq(0));
+    let wal_tail_segments = count_stored_wal_tail_segments(
+        store,
+        expected_namespace,
+        checkpoint_basis_seq,
+        head.seq,
+        head.visible_wal_tip.clone(),
+    )
+    .map_err(CoreError::Basis)?;
     Ok(NamespaceHeadSummary {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
         checkpoint_hint_seq: head.checkpoint_hint_seq,
+        wal_tail_segments,
         retention_floor_seq: head.retention_floor_seq,
     })
 }
@@ -264,8 +275,62 @@ fn load_stored_wal_tail<S: ObjectStore + ?Sized>(
     through_seq_inclusive: ChangeSeq,
     visible_wal_tip: Option<WalSegmentPointer>,
 ) -> Result<Vec<StoredWalObject>, BasisLoadError> {
+    let mut reversed = Vec::new();
+    walk_stored_wal_tail(
+        store,
+        expected_namespace,
+        from_seq_exclusive,
+        through_seq_inclusive,
+        visible_wal_tip,
+        |pointer, encoded_bytes| {
+            reversed.push(StoredWalObject {
+                object_key: pointer.object_key.clone(),
+                encoded_bytes,
+            });
+            Ok(())
+        },
+    )?;
+
+    reversed.reverse();
+    Ok(reversed)
+}
+
+fn count_stored_wal_tail_segments<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    from_seq_exclusive: ChangeSeq,
+    through_seq_inclusive: ChangeSeq,
+    visible_wal_tip: Option<WalSegmentPointer>,
+) -> Result<u64, BasisLoadError> {
+    let mut count = 0u64;
+    walk_stored_wal_tail(
+        store,
+        expected_namespace,
+        from_seq_exclusive,
+        through_seq_inclusive,
+        visible_wal_tip,
+        |_pointer, _encoded_bytes| {
+            count = count.saturating_add(1);
+            Ok(())
+        },
+    )?;
+    Ok(count)
+}
+
+fn walk_stored_wal_tail<S, F>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    from_seq_exclusive: ChangeSeq,
+    through_seq_inclusive: ChangeSeq,
+    visible_wal_tip: Option<WalSegmentPointer>,
+    mut visit: F,
+) -> Result<(), BasisLoadError>
+where
+    S: ObjectStore + ?Sized,
+    F: FnMut(&WalSegmentPointer, Vec<u8>) -> Result<(), BasisLoadError>,
+{
     if through_seq_inclusive <= from_seq_exclusive {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let prefix = format!("namespaces/{}/wal/", expected_namespace.as_str());
@@ -273,7 +338,6 @@ fn load_stored_wal_tail<S: ObjectStore + ?Sized>(
         prefix: prefix.clone(),
         seq: through_seq_inclusive,
     })?;
-    let mut reversed = Vec::new();
 
     loop {
         if pointer.end_seq <= from_seq_exclusive {
@@ -308,16 +372,12 @@ fn load_stored_wal_tail<S: ObjectStore + ?Sized>(
             ));
         }
         let prev = envelope.payload.prev_visible_segment.clone();
-        reversed.push(StoredWalObject {
-            object_key: pointer.object_key.clone(),
-            encoded_bytes,
-        });
+        visit(&pointer, encoded_bytes)?;
         let Some(prev) = prev else {
             break;
         };
         pointer = prev;
     }
 
-    reversed.reverse();
-    Ok(reversed)
+    Ok(())
 }
