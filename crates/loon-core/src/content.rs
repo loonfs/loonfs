@@ -4,6 +4,7 @@ use loon_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, Namesp
 use loon_objectstore::keys::content_blob;
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +29,28 @@ pub struct StoredContent {
     pub content_ref: ContentRef,
     pub file_digest_sha256: String,
     pub file_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ContentValidationTracker {
+    validated: HashSet<(ContentStoreId, ContentRef)>,
+}
+
+impl ContentValidationTracker {
+    pub(crate) fn ensure_validated<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        content_store_id: &ContentStoreId,
+        content_ref: &ContentRef,
+    ) -> Result<(), DurableContentValidationError> {
+        let key = (content_store_id.clone(), content_ref.clone());
+        if self.validated.contains(&key) {
+            return Ok(());
+        }
+        validate_durable_content_reference(store, content_store_id, content_ref)?;
+        self.validated.insert(key);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]

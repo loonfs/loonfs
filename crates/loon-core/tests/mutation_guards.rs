@@ -826,6 +826,97 @@ fn complete_upload_does_not_get_content_blob_after_staging() {
 }
 
 #[test]
+fn path_put_file_validates_cold_content_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
+
+    store.reset_content_blob_get_count();
+    let responses = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![NamespaceMutationCandidate::Path(
+            PathMutationIntent::PutFile {
+                commit_id: CommitId::from("put-cold-content"),
+                absolute_path: "/docs/hello.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+        )],
+        &context,
+    );
+
+    assert!(responses[0].is_ok());
+    assert_eq!(store.content_blob_get_count(), 1);
+}
+
+#[test]
+fn path_planning_does_not_validate_content() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"planned").expect("stage content");
+
+    store.reset_content_blob_get_count();
+    let planned = DirectObjectStorePublisher::new(&store)
+        .plan_path_intent(
+            &namespace_id,
+            &PathMutationIntent::PutFile {
+                commit_id: CommitId::from("plan-put-content"),
+                absolute_path: "/docs/planned.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+        )
+        .expect("plan path intent");
+
+    assert_eq!(planned.commit_id, CommitId::from("plan-put-content"));
+    assert_eq!(store.content_blob_get_count(), 0);
+}
+
+#[test]
+fn path_batch_validates_repeated_content_ref_once() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let namespace_id = NamespaceId::from("demo");
+    let context = mutation_context();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"shared").expect("stage content");
+
+    store.reset_content_blob_get_count();
+    let responses = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                commit_id: CommitId::from("put-shared-a"),
+                absolute_path: "/docs/a.txt".to_owned(),
+                content_ref: content.content_ref.clone(),
+                behavior: PutFileBehavior::CreateOnly,
+            }),
+            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+                commit_id: CommitId::from("put-shared-b"),
+                absolute_path: "/docs/b.txt".to_owned(),
+                content_ref: content.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            }),
+        ],
+        &context,
+    );
+
+    assert!(responses.iter().all(Result::is_ok));
+    assert_eq!(store.content_blob_get_count(), 1);
+}
+
+#[test]
 fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());

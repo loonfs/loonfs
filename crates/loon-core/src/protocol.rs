@@ -6,7 +6,7 @@ use crate::commit::{
     CommitOp, CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
     PreparedCommit, SemanticCommitFingerprint,
 };
-use crate::content::{validate_durable_content_reference, write_immutable_object};
+use crate::content::{write_immutable_object, ContentValidationTracker};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
@@ -28,8 +28,8 @@ use loon_api::v0::{
 };
 use loon_api::{
     decode_wal_segment_envelope_zstd, generate_upload_id, validate_upload_id, ChangeSeq, CommitId,
-    CompletedUpload, ContentRef, ControlObjectKind, HeadState, NamespaceId, UploadSessionEnvelope,
-    UploadSessionState, WalCommitDelta, WalDelta,
+    CompletedUpload, ContentRef, ContentStoreId, ControlObjectKind, HeadState, NamespaceId,
+    UploadSessionEnvelope, UploadSessionState, WalCommitDelta, WalDelta,
 };
 use loon_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -434,6 +434,7 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
     let mut in_batch_requests: HashMap<CommitId, InBatchRequest> = HashMap::new();
     let mut aliases: Vec<(usize, usize)> = Vec::new();
+    let mut content_validation = ContentValidationTracker::default();
 
     for (index, candidate) in candidates.iter().enumerate() {
         let Some(candidate_request) = prepare_candidate_request(
@@ -461,9 +462,10 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
         if let Err(error) = validate_commit_content_references(
             store,
-            namespace_id,
+            &basis.content_store_id,
             &request,
             &resolved_restore_content_refs,
+            &mut content_validation,
         ) {
             outcomes[index] = Some(Err(error));
             continue;
@@ -696,7 +698,6 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 intent,
                 current_head,
                 current_metadata_state,
-                &basis.content_store_id,
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -882,9 +883,10 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> CommitDelta {
 
 fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     request: &CoreCommitRequest,
     resolved_restore_content_refs: &[Option<ContentRef>],
+    content_validation: &mut ContentValidationTracker,
 ) -> Result<(), CoreError> {
     let mut content_refs = Vec::new();
     for (index, op) in request.ops.iter().enumerate() {
@@ -909,9 +911,8 @@ fn validate_commit_content_references<S: ObjectStore + ?Sized>(
         return Ok(());
     }
 
-    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
     for content_ref in content_refs {
-        validate_durable_content_reference(store, &content_store_id, content_ref)?;
+        content_validation.ensure_validated(store, content_store_id, content_ref)?;
     }
 
     Ok(())
