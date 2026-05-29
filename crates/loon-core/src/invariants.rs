@@ -21,7 +21,7 @@ pub const NAMESPACE_CORE_METADATA_APPLY_INVARIANTS: &[&str] = &[
 
 pub const NAMESPACE_CORE_WAL_REPLAY_INVARIANTS: &[&str] = &[
     "wal_payload_checksum_matches_payload",
-    "wal_key_matches_committed_seq",
+    "wal_key_matches_segment_seq_range",
     "head_publish_requires_durable_wal",
     "wal_replay_requires_matching_namespace",
     "wal_replay_requires_matching_base_head_seq",
@@ -229,7 +229,7 @@ pub const INVARIANTS: &[&str] = &[
     "whole_file_content_size_matches_ref",
     "whole_file_content_digest_matches_ref",
     "wal_payload_checksum_matches_payload",
-    "wal_key_matches_committed_seq",
+    "wal_key_matches_segment_seq_range",
     "head_publish_requires_durable_wal",
     "wal_replay_requires_matching_namespace",
     "wal_replay_requires_matching_base_head_seq",

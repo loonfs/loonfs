@@ -5,7 +5,7 @@ use crate::lease::LeaseAcquireError;
 use crate::loading::ControlObjectLoadError;
 use crate::metadata::{MetadataApplyError, VisiblePathError};
 use crate::namespace::catalog::NamespaceCatalogLoadError;
-use crate::wal::WalBuildError;
+use crate::wal::{WalBuildError, WalChainLoadError};
 use loon_api::{
     ChangeSeq, CommitIdValidationError, GeneratedIdValidationError, InodeId, InodeKind,
     NamespaceId, NamespaceIdValidationError,
@@ -235,19 +235,28 @@ fn classify_basis_load_error(error: &BasisLoadError) -> CoreErrorKind {
             }
             _ => classify_control_object_load_error(error),
         },
-        BasisLoadError::InvalidWalObjectKey { .. }
-        | BasisLoadError::DuplicateWalSeq { .. }
-        | BasisLoadError::MissingWalObject { .. }
-        | BasisLoadError::MissingWalObjectAfterList { .. }
-        | BasisLoadError::WalReplay(_)
-        | BasisLoadError::ReconstructedHeadMismatch { .. } => CoreErrorKind::NamespaceCorrupt,
+        BasisLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
+        BasisLoadError::WalReplay(_) | BasisLoadError::ReconstructedHeadMismatch { .. } => {
+            CoreErrorKind::NamespaceCorrupt
+        }
         BasisLoadError::CheckpointLoad(error) => match error.kind() {
             crate::checkpoint::CheckpointLoadErrorKind::Corrupt => CoreErrorKind::NamespaceCorrupt,
             crate::checkpoint::CheckpointLoadErrorKind::Store => CoreErrorKind::ServerError,
         },
-        BasisLoadError::MissingHeadEtag { .. }
-        | BasisLoadError::ListWal { .. }
-        | BasisLoadError::ReadWal { .. } => CoreErrorKind::ServerError,
+        BasisLoadError::MissingHeadEtag { .. } => CoreErrorKind::ServerError,
+    }
+}
+
+fn classify_wal_chain_load_error(error: &WalChainLoadError) -> CoreErrorKind {
+    match error {
+        WalChainLoadError::ReadWal { .. } => CoreErrorKind::ServerError,
+        WalChainLoadError::InvalidSeqRange { .. }
+        | WalChainLoadError::MissingVisibleTip { .. }
+        | WalChainLoadError::TipEndSeqMismatch { .. }
+        | WalChainLoadError::MissingWalObject { .. }
+        | WalChainLoadError::PointerMismatch { .. }
+        | WalChainLoadError::HeadSeqMismatch { .. }
+        | WalChainLoadError::Replay(_) => CoreErrorKind::NamespaceCorrupt,
     }
 }
 

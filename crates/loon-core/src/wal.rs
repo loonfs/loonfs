@@ -6,7 +6,9 @@ use loon_api::{
     WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload, WalSegmentPointer,
 };
 use loon_objectstore::keys::wal_segment;
+use loon_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedWalSegment {
@@ -40,6 +42,87 @@ pub enum WalBuildError {
 pub struct StoredWalObject {
     pub object_key: String,
     pub encoded_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WalChainLoadRequest<'a> {
+    pub(crate) namespace_id: &'a NamespaceId,
+    pub(crate) chain_base_seq: ChangeSeq,
+    pub(crate) head_seq: ChangeSeq,
+    pub(crate) visible_tip: Option<WalSegmentPointer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ValidatedWalSegment {
+    object_key: String,
+    envelope: WalSegmentEnvelope,
+}
+
+impl ValidatedWalSegment {
+    pub(crate) fn object_key(&self) -> &str {
+        &self.object_key
+    }
+
+    pub(crate) fn envelope(&self) -> &WalSegmentEnvelope {
+        &self.envelope
+    }
+
+    pub(crate) fn records(&self) -> &[WalCommitPayload] {
+        &self.envelope.payload.records
+    }
+
+    fn pointer(&self) -> WalSegmentPointer {
+        self.envelope.pointer(self.object_key.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ValidatedWalChain {
+    segments: Vec<ValidatedWalSegment>,
+    checked_invariants: Vec<String>,
+}
+
+impl ValidatedWalChain {
+    pub(crate) fn segments(&self) -> &[ValidatedWalSegment] {
+        &self.segments
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub enum WalChainLoadError {
+    #[error("invalid WAL chain seq range: base `{chain_base_seq:?}` is after head `{head_seq:?}`")]
+    InvalidSeqRange {
+        chain_base_seq: ChangeSeq,
+        head_seq: ChangeSeq,
+    },
+    #[error("missing visible WAL tip for seq `{seq:?}` under `{prefix}`")]
+    MissingVisibleTip { prefix: String, seq: ChangeSeq },
+    #[error("visible WAL tip ends at `{actual:?}`, expected head seq `{expected:?}`")]
+    TipEndSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    #[error("failed to read WAL object `{object_key}`: {message}")]
+    ReadWal { object_key: String, message: String },
+    #[error("missing WAL object `{object_key}`")]
+    MissingWalObject { object_key: String },
+    #[error("WAL pointer does not match segment payload for `{object_key}`")]
+    PointerMismatch { object_key: String },
+    #[error(
+        "WAL chain does not reach expected head seq: expected `{expected:?}`, actual `{actual:?}`"
+    )]
+    HeadSeqMismatch {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
+    #[error("wal replay validation failed: {0:?}")]
+    Replay(WalReplayError),
+}
+
+impl From<WalReplayError> for WalChainLoadError {
+    fn from(value: WalReplayError) -> Self {
+        Self::Replay(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +264,103 @@ pub fn prepare_wal_segment(
     })
 }
 
+pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
+    store: &S,
+    request: WalChainLoadRequest<'_>,
+) -> Result<ValidatedWalChain, WalChainLoadError> {
+    if request.chain_base_seq > request.head_seq {
+        return Err(WalChainLoadError::InvalidSeqRange {
+            chain_base_seq: request.chain_base_seq,
+            head_seq: request.head_seq,
+        });
+    }
+    if request.chain_base_seq == request.head_seq {
+        return Ok(ValidatedWalChain {
+            segments: Vec::new(),
+            checked_invariants: Vec::new(),
+        });
+    }
+
+    let prefix = format!("namespaces/{}/wal/", request.namespace_id.as_str());
+    let mut pointer = request
+        .visible_tip
+        .clone()
+        .ok_or(WalChainLoadError::MissingVisibleTip {
+            prefix,
+            seq: request.head_seq,
+        })?;
+    if pointer.end_seq != request.head_seq {
+        return Err(WalChainLoadError::TipEndSeqMismatch {
+            expected: request.head_seq,
+            actual: pointer.end_seq,
+        });
+    }
+
+    let mut reversed = Vec::new();
+    loop {
+        if pointer.end_seq <= request.chain_base_seq {
+            break;
+        }
+
+        let object_key = pointer.object_key.clone();
+        let encoded_bytes = store
+            .get(&object_key, None)
+            .map_err(|err| WalChainLoadError::ReadWal {
+                object_key: object_key.clone(),
+                message: err.to_string(),
+            })?
+            .ok_or_else(|| WalChainLoadError::MissingWalObject {
+                object_key: object_key.clone(),
+            })?;
+        let envelope = decode_wal_segment_envelope_zstd(&encoded_bytes)
+            .map_err(|err| WalReplayError::Codec(err.to_string()))?;
+        validate_pointer_matches_envelope(&pointer, &object_key, &envelope)?;
+
+        let prev = envelope.payload.prev_visible_segment.clone();
+        reversed.push(ValidatedWalSegment {
+            object_key,
+            envelope,
+        });
+
+        if reversed
+            .last()
+            .map(|segment| segment.envelope.payload.base_head_seq <= request.chain_base_seq)
+            .unwrap_or(false)
+        {
+            break;
+        }
+
+        pointer = prev.ok_or(WalReplayError::SegmentSummaryMismatch)?;
+    }
+
+    reversed.reverse();
+
+    let mut expected_base_seq = request.chain_base_seq;
+    let mut checked_invariants = Vec::new();
+    for segment in &reversed {
+        validate_decoded_replayed_wal(
+            request.namespace_id,
+            expected_base_seq,
+            segment.object_key(),
+            segment.envelope(),
+        )?;
+        expected_base_seq = segment.envelope.payload.end_seq;
+        extend_wal_replay_invariants(&mut checked_invariants);
+    }
+
+    if expected_base_seq != request.head_seq {
+        return Err(WalChainLoadError::HeadSeqMismatch {
+            expected: request.head_seq,
+            actual: expected_base_seq,
+        });
+    }
+
+    Ok(ValidatedWalChain {
+        segments: reversed,
+        checked_invariants,
+    })
+}
+
 pub fn replay_wal_segment(
     current_head: &HeadState,
     wal_object: &StoredWalObject,
@@ -271,6 +451,44 @@ pub fn replay_wal_tail_with_metadata(
     })
 }
 
+pub(crate) fn replay_validated_wal_tail_with_metadata(
+    basis_head: &HeadState,
+    basis_metadata_state: &MetadataState,
+    wal_tail: &[ValidatedWalSegment],
+) -> Result<ReplayedWalTail, WalReplayError> {
+    let mut current_head = basis_head.clone();
+    let mut current_metadata_state = basis_metadata_state.clone();
+    let mut checked_invariants = Vec::new();
+
+    for wal_segment in wal_tail {
+        validate_decoded_replayed_wal(
+            &current_head.namespace_id,
+            current_head.seq,
+            wal_segment.object_key(),
+            wal_segment.envelope(),
+        )?;
+        for record in wal_segment.records() {
+            current_head.seq = record.seq;
+            current_head.next_inode_id =
+                replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
+            let applied = current_metadata_state
+                .apply_committed_wal_record(record)
+                .map_err(WalReplayError::MetadataApply)?;
+            current_metadata_state = applied.metadata_state;
+            push_invariant(&mut checked_invariants, "wal_replay_applies_metadata_rows");
+            extend_invariants(&mut checked_invariants, &applied.checked_invariants);
+        }
+        current_head.visible_wal_tip = Some(wal_segment.pointer());
+        extend_wal_replay_invariants(&mut checked_invariants);
+    }
+
+    Ok(ReplayedWalTail {
+        resulting_head: current_head,
+        resulting_metadata_state: current_metadata_state,
+        checked_invariants,
+    })
+}
+
 impl From<&PreparedWalSegment> for StoredWalObject {
     fn from(value: &PreparedWalSegment) -> Self {
         Self {
@@ -286,6 +504,35 @@ fn decode_and_validate_replayed_wal(
 ) -> Result<WalSegmentEnvelope, WalReplayError> {
     let envelope = decode_wal_segment_envelope_zstd(&wal_object.encoded_bytes)
         .map_err(|err| WalReplayError::Codec(err.to_string()))?;
+    validate_decoded_replayed_wal(
+        &current_head.namespace_id,
+        current_head.seq,
+        &wal_object.object_key,
+        &envelope,
+    )?;
+
+    Ok(envelope)
+}
+
+fn validate_pointer_matches_envelope(
+    pointer: &WalSegmentPointer,
+    object_key: &str,
+    envelope: &WalSegmentEnvelope,
+) -> Result<(), WalChainLoadError> {
+    if envelope.pointer(object_key.to_owned()) != *pointer {
+        return Err(WalChainLoadError::PointerMismatch {
+            object_key: object_key.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_decoded_replayed_wal(
+    expected_namespace: &NamespaceId,
+    expected_base_head_seq: ChangeSeq,
+    object_key: &str,
+    envelope: &WalSegmentEnvelope,
+) -> Result<(), WalReplayError> {
     validate_wal_segment_id(&envelope.payload.segment_id)
         .map_err(|err| WalReplayError::Codec(err.to_string()))?;
     let expected_object_key = wal_segment(
@@ -295,29 +542,28 @@ fn decode_and_validate_replayed_wal(
         &envelope.payload.segment_id,
     );
 
-    if wal_object.object_key != expected_object_key {
+    if object_key != expected_object_key {
         return Err(WalReplayError::ObjectKeyMismatch {
             expected: expected_object_key,
-            actual: wal_object.object_key.clone(),
+            actual: object_key.to_owned(),
         });
     }
 
-    if envelope.payload.namespace_id != current_head.namespace_id {
+    if &envelope.payload.namespace_id != expected_namespace {
         return Err(WalReplayError::NamespaceMismatch {
-            expected: current_head.namespace_id.clone(),
+            expected: expected_namespace.clone(),
             actual: envelope.payload.namespace_id.clone(),
         });
     }
 
-    if envelope.payload.base_head_seq != current_head.seq {
+    if envelope.payload.base_head_seq != expected_base_head_seq {
         return Err(WalReplayError::BaseHeadSeqMismatch {
-            expected: current_head.seq,
+            expected: expected_base_head_seq,
             actual: envelope.payload.base_head_seq,
         });
     }
 
-    let expected_start = current_head
-        .seq
+    let expected_start = expected_base_head_seq
         .0
         .checked_add(1)
         .map(ChangeSeq)
@@ -352,15 +598,27 @@ fn decode_and_validate_replayed_wal(
                 actual: record.seq,
             });
         }
-        if record.namespace_id != current_head.namespace_id {
+        if &record.namespace_id != expected_namespace {
             return Err(WalReplayError::NamespaceMismatch {
-                expected: current_head.namespace_id.clone(),
+                expected: expected_namespace.clone(),
                 actual: record.namespace_id.clone(),
             });
         }
     }
 
-    Ok(envelope)
+    Ok(())
+}
+
+fn extend_wal_replay_invariants(checked_invariants: &mut Vec<String>) {
+    for invariant in [
+        "wal_payload_checksum_matches_payload",
+        "wal_key_matches_segment_seq_range",
+        "wal_replay_requires_matching_namespace",
+        "wal_replay_requires_matching_base_head_seq",
+        "wal_tail_seq_is_contiguous",
+    ] {
+        push_invariant(checked_invariants, invariant);
+    }
 }
 
 fn replay_next_inode_id(current_next_inode_id: InodeId, deltas: &[WalDelta]) -> InodeId {
@@ -406,6 +664,9 @@ mod tests {
     use super::*;
     use crate::commit::{materialize_commit, CommitOp, CommitPlan, CommitRequest, PreparedCommit};
     use loon_api::{CommitId, FenceToken};
+    use loon_objectstore::fs::LocalFsStore;
+    use loon_objectstore::ObjectStore;
+    use tempfile::tempdir;
 
     #[test]
     fn build_wal_record_payload_matches_segment_record_payload() {
@@ -483,6 +744,115 @@ mod tests {
         validate_wal_segment_id(&second.segment_id).expect("second segment id shape");
     }
 
+    #[test]
+    fn validated_wal_chain_loads_visible_segments_in_ascending_order() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let segment = prepare_wal_segment(
+            namespace_id.clone(),
+            None,
+            &[materialized_create_dir(
+                &namespace_id,
+                "c_wal_chain_a",
+                "alpha",
+                ChangeSeq(0),
+                ChangeSeq(1),
+            )],
+            "test-writer",
+        )
+        .expect("prepare wal segment");
+        store
+            .put_if_absent(&segment.object_key, &segment.encoded_bytes)
+            .expect("write wal segment");
+
+        let chain = load_validated_wal_chain(
+            &store,
+            WalChainLoadRequest {
+                namespace_id: &namespace_id,
+                chain_base_seq: ChangeSeq(0),
+                head_seq: ChangeSeq(1),
+                visible_tip: Some(segment.envelope.pointer(segment.object_key.clone())),
+            },
+        )
+        .expect("load valid chain");
+
+        assert_eq!(chain.segments().len(), 1);
+        assert_eq!(chain.segments()[0].records()[0].seq, ChangeSeq(1));
+    }
+
+    #[test]
+    fn validated_wal_chain_rejects_corrupt_visible_segments() {
+        assert_wal_chain_corruption_rejected(|object_key, _envelope, pointer| {
+            *object_key = wal_segment("demo", 1, 1, "seg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            pointer.object_key = object_key.clone();
+        });
+        assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
+            envelope.payload.namespace_id =
+                NamespaceId::parse("other").expect("valid namespace id");
+            rewrap_envelope(envelope);
+            *object_key = wal_segment(
+                envelope.payload.namespace_id.as_str(),
+                envelope.payload.start_seq.0,
+                envelope.payload.end_seq.0,
+                &envelope.payload.segment_id,
+            );
+            *pointer = envelope.pointer(object_key.clone());
+        });
+        assert_wal_chain_corruption_rejected(|_object_key, envelope, _pointer| {
+            envelope.payload.segment_id = "seg_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned();
+            rewrap_envelope(envelope);
+        });
+        assert_wal_chain_corruption_rejected(|_object_key, _envelope, pointer| {
+            pointer.payload_checksum_sha256 = "sha256:not-the-payload".to_owned();
+        });
+        assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
+            envelope.payload.records.clear();
+            rewrap_envelope(envelope);
+            *pointer = envelope.pointer(object_key.clone());
+        });
+        assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
+            envelope.payload.end_seq = ChangeSeq(2);
+            rewrap_envelope(envelope);
+            *object_key = wal_segment(
+                envelope.payload.namespace_id.as_str(),
+                envelope.payload.start_seq.0,
+                envelope.payload.end_seq.0,
+                &envelope.payload.segment_id,
+            );
+            *pointer = envelope.pointer(object_key.clone());
+        });
+        assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
+            let mut skipped = envelope.payload.records[0].clone();
+            skipped.seq = ChangeSeq(3);
+            skipped.apply_after_seq = ChangeSeq(1);
+            envelope.payload.records.push(skipped);
+            envelope.payload.end_seq = ChangeSeq(3);
+            rewrap_envelope(envelope);
+            *object_key = wal_segment(
+                envelope.payload.namespace_id.as_str(),
+                envelope.payload.start_seq.0,
+                envelope.payload.end_seq.0,
+                &envelope.payload.segment_id,
+            );
+            *pointer = envelope.pointer(object_key.clone());
+        });
+        assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
+            envelope.payload.base_head_seq = ChangeSeq(1);
+            envelope.payload.start_seq = ChangeSeq(2);
+            envelope.payload.end_seq = ChangeSeq(2);
+            envelope.payload.records[0].seq = ChangeSeq(2);
+            rewrap_envelope(envelope);
+            *object_key = wal_segment(
+                envelope.payload.namespace_id.as_str(),
+                envelope.payload.start_seq.0,
+                envelope.payload.end_seq.0,
+                &envelope.payload.segment_id,
+            );
+            *pointer = envelope.pointer(object_key.clone());
+        });
+    }
+
     fn materialized_create_dir(
         namespace_id: &NamespaceId,
         commit_id: &str,
@@ -518,5 +888,56 @@ mod tests {
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
         materialize_commit(prepared).expect("materialize commit")
+    }
+
+    fn assert_wal_chain_corruption_rejected(
+        corrupt: impl FnOnce(&mut String, &mut WalSegmentEnvelope, &mut WalSegmentPointer),
+    ) {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let segment = prepare_wal_segment(
+            namespace_id.clone(),
+            None,
+            &[materialized_create_dir(
+                &namespace_id,
+                "c_wal_corrupt",
+                "docs",
+                ChangeSeq(0),
+                ChangeSeq(1),
+            )],
+            "test-writer",
+        )
+        .expect("prepare wal segment");
+        let mut object_key = segment.object_key;
+        let mut envelope = segment.envelope;
+        let mut pointer = envelope.pointer(object_key.clone());
+
+        corrupt(&mut object_key, &mut envelope, &mut pointer);
+
+        let encoded =
+            encode_wal_segment_envelope_zstd(&envelope).expect("encode corrupted envelope");
+        store
+            .put_if_absent(&object_key, &encoded)
+            .expect("write corrupted wal segment");
+
+        load_validated_wal_chain(
+            &store,
+            WalChainLoadRequest {
+                namespace_id: &namespace_id,
+                chain_base_seq: ChangeSeq(0),
+                head_seq: pointer.end_seq,
+                visible_tip: Some(pointer),
+            },
+        )
+        .expect_err("corrupted WAL chain should be rejected");
+    }
+
+    fn rewrap_envelope(envelope: &mut WalSegmentEnvelope) {
+        *envelope = WalSegmentEnvelope::from_payload(
+            envelope.writer_version.clone(),
+            envelope.payload.clone(),
+        )
+        .expect("rewrap wal envelope");
     }
 }
