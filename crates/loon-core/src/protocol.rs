@@ -787,19 +787,14 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
 
-    let checkpoint_basis_seq = basis.head.checkpoint_hint_seq.unwrap_or(ChangeSeq(0));
-    let chain_base_seq = if after_seq < checkpoint_basis_seq {
-        basis.head.retention_floor_seq
-    } else {
-        checkpoint_basis_seq
-    };
     let wal_chain = load_validated_wal_chain(
         store,
         WalChainLoadRequest {
             namespace_id,
-            chain_base_seq,
+            chain_base_seq: basis.head.retention_floor_seq,
             head_seq: basis.head.seq,
             visible_tip: basis.head.visible_wal_tip.clone(),
+            stop_after_seq: Some(after_seq),
         },
     )
     .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;

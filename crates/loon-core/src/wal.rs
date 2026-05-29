@@ -50,6 +50,7 @@ pub(crate) struct WalChainLoadRequest<'a> {
     pub(crate) chain_base_seq: ChangeSeq,
     pub(crate) head_seq: ChangeSeq,
     pub(crate) visible_tip: Option<WalSegmentPointer>,
+    pub(crate) stop_after_seq: Option<ChangeSeq>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +116,8 @@ pub enum WalChainLoadError {
         expected: ChangeSeq,
         actual: ChangeSeq,
     },
+    #[error("WAL chain suffix does not cover requested cursor `{after_seq:?}`")]
+    CursorNotCovered { after_seq: ChangeSeq },
     #[error("wal replay validation failed: {0:?}")]
     Replay(WalReplayError),
 }
@@ -296,9 +299,10 @@ pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
         });
     }
 
+    let stop_after_seq = request.stop_after_seq.unwrap_or(request.chain_base_seq);
     let mut reversed = Vec::new();
     loop {
-        if pointer.end_seq <= request.chain_base_seq {
+        if pointer.end_seq <= stop_after_seq {
             break;
         }
 
@@ -324,7 +328,7 @@ pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
 
         if reversed
             .last()
-            .map(|segment| segment.envelope.payload.base_head_seq <= request.chain_base_seq)
+            .map(|segment| segment.envelope.payload.base_head_seq <= stop_after_seq)
             .unwrap_or(false)
         {
             break;
@@ -335,7 +339,27 @@ pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
 
     reversed.reverse();
 
-    let mut expected_base_seq = request.chain_base_seq;
+    let Some(first_segment) = reversed.first() else {
+        return Ok(ValidatedWalChain {
+            segments: Vec::new(),
+            checked_invariants: Vec::new(),
+        });
+    };
+    if let Some(after_seq) = request.stop_after_seq {
+        if first_segment.envelope.payload.base_head_seq > after_seq
+            || first_segment.envelope.payload.end_seq <= after_seq
+        {
+            return Err(WalChainLoadError::CursorNotCovered { after_seq });
+        }
+    }
+
+    let mut expected_base_seq = first_segment.envelope.payload.base_head_seq;
+    if request.stop_after_seq.is_none() && expected_base_seq != request.chain_base_seq {
+        return Err(WalChainLoadError::HeadSeqMismatch {
+            expected: request.chain_base_seq,
+            actual: expected_base_seq,
+        });
+    }
     let mut checked_invariants = Vec::new();
     for segment in &reversed {
         validate_decoded_replayed_wal(
@@ -749,22 +773,15 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let segment = prepare_wal_segment(
-            namespace_id.clone(),
+        let segment = write_create_dir_segment(
+            &store,
+            &namespace_id,
             None,
-            &[materialized_create_dir(
-                &namespace_id,
-                "c_wal_chain_a",
-                "alpha",
-                ChangeSeq(0),
-                ChangeSeq(1),
-            )],
-            "test-writer",
-        )
-        .expect("prepare wal segment");
-        store
-            .put_if_absent(&segment.object_key, &segment.encoded_bytes)
-            .expect("write wal segment");
+            "c_wal_chain_a",
+            "alpha",
+            ChangeSeq(0),
+            ChangeSeq(1),
+        );
 
         let chain = load_validated_wal_chain(
             &store,
@@ -773,12 +790,53 @@ mod tests {
                 chain_base_seq: ChangeSeq(0),
                 head_seq: ChangeSeq(1),
                 visible_tip: Some(segment.envelope.pointer(segment.object_key.clone())),
+                stop_after_seq: None,
             },
         )
         .expect("load valid chain");
 
         assert_eq!(chain.segments().len(), 1);
         assert_eq!(chain.segments()[0].records()[0].seq, ChangeSeq(1));
+    }
+
+    #[test]
+    fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let first = write_create_dir_segment(
+            &store,
+            &namespace_id,
+            None,
+            "c_wal_suffix_a",
+            "alpha",
+            ChangeSeq(0),
+            ChangeSeq(1),
+        );
+        let second = write_create_dir_segment(
+            &store,
+            &namespace_id,
+            Some(first.envelope.pointer(first.object_key.clone())),
+            "c_wal_suffix_b",
+            "beta",
+            ChangeSeq(1),
+            ChangeSeq(2),
+        );
+
+        let chain = load_validated_wal_chain(
+            &store,
+            WalChainLoadRequest {
+                namespace_id: &namespace_id,
+                chain_base_seq: ChangeSeq(0),
+                head_seq: ChangeSeq(2),
+                visible_tip: Some(second.envelope.pointer(second.object_key.clone())),
+                stop_after_seq: Some(ChangeSeq(1)),
+            },
+        )
+        .expect("load suffix chain");
+
+        assert_eq!(chain.segments().len(), 1);
+        assert_eq!(chain.segments()[0].records()[0].seq, ChangeSeq(2));
     }
 
     #[test]
@@ -928,9 +986,38 @@ mod tests {
                 chain_base_seq: ChangeSeq(0),
                 head_seq: pointer.end_seq,
                 visible_tip: Some(pointer),
+                stop_after_seq: None,
             },
         )
         .expect_err("corrupted WAL chain should be rejected");
+    }
+
+    fn write_create_dir_segment(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        prev_visible_segment: Option<WalSegmentPointer>,
+        commit_id: &str,
+        display_name: &str,
+        apply_after_seq: ChangeSeq,
+        assigned_seq: ChangeSeq,
+    ) -> PreparedWalSegment {
+        let segment = prepare_wal_segment(
+            namespace_id.clone(),
+            prev_visible_segment,
+            &[materialized_create_dir(
+                namespace_id,
+                commit_id,
+                display_name,
+                apply_after_seq,
+                assigned_seq,
+            )],
+            "test-writer",
+        )
+        .expect("prepare wal segment");
+        store
+            .put_if_absent(&segment.object_key, &segment.encoded_bytes)
+            .expect("write wal segment");
+        segment
     }
 
     fn rewrap_envelope(envelope: &mut WalSegmentEnvelope) {

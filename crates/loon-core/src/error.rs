@@ -256,6 +256,7 @@ fn classify_wal_chain_load_error(error: &WalChainLoadError) -> CoreErrorKind {
         | WalChainLoadError::MissingWalObject { .. }
         | WalChainLoadError::PointerMismatch { .. }
         | WalChainLoadError::HeadSeqMismatch { .. }
+        | WalChainLoadError::CursorNotCovered { .. }
         | WalChainLoadError::Replay(_) => CoreErrorKind::NamespaceCorrupt,
     }
 }

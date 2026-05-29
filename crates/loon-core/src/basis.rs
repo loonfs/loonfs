@@ -125,6 +125,7 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
             chain_base_seq: initial_head.seq,
             head_seq: loaded_head.envelope.state.seq,
             visible_tip: loaded_head.envelope.state.visible_wal_tip.clone(),
+            stop_after_seq: None,
         },
     )?;
     let replayed = replay_validated_wal_tail_with_metadata(
@@ -177,6 +178,7 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
             chain_base_seq: checkpoint_basis_seq,
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
+            stop_after_seq: None,
         },
     )
     .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
