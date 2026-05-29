@@ -16,7 +16,7 @@ pub use loon_api::{
     ContentRef, CreateCheckpointResponse, FilesystemOperationResponse, InodeId, MutationResult,
     NamespaceId, NamespaceSummary,
 };
-use loon_core::publisher::{NamespaceCommitEnginePublishResult, WarmBasisEvent};
+use loon_core::publisher::{BasisReuseEvent, NamespaceCommitEnginePublishResult};
 pub use loon_core::{
     BootstrapNamespaceError, CoreError, CoreErrorKind, NamespaceMutationCandidate,
     PathMutationIntent, PutFileBehavior,
@@ -119,12 +119,39 @@ pub struct FsBuilder {
 
 #[derive(Debug, Default)]
 struct BasisCache {
-    entries: HashMap<NamespaceId, Arc<VerifiedNamespaceBasis>>,
+    entries: HashMap<NamespaceId, CachedVerifiedBasis>,
     order: VecDeque<NamespaceId>,
 }
 
+#[derive(Debug, Clone)]
+struct CachedVerifiedBasis {
+    basis: Arc<VerifiedNamespaceBasis>,
+    head_etag_reuse_token: String,
+}
+
+impl CachedVerifiedBasis {
+    fn new(basis: Arc<VerifiedNamespaceBasis>) -> Self {
+        Self {
+            head_etag_reuse_token: basis.head_etag.clone(),
+            basis,
+        }
+    }
+
+    fn basis_arc(&self) -> Arc<VerifiedNamespaceBasis> {
+        Arc::clone(&self.basis)
+    }
+
+    fn matches_head_etag(&self, head_etag: &str) -> bool {
+        self.head_etag_reuse_token == head_etag
+    }
+
+    fn matches_head_etag_probe(&self, probe: &loon_core::NamespaceHeadEtagProbe) -> bool {
+        self.matches_head_etag(&probe.head_etag)
+    }
+}
+
 impl BasisCache {
-    fn get(&mut self, namespace_id: &NamespaceId) -> Option<Arc<VerifiedNamespaceBasis>> {
+    fn get(&mut self, namespace_id: &NamespaceId) -> Option<CachedVerifiedBasis> {
         let basis = self.entries.get(namespace_id).cloned()?;
         self.touch(namespace_id);
         Some(basis)
@@ -135,7 +162,8 @@ impl BasisCache {
             return;
         }
         let namespace_id = basis.head.namespace_id.clone();
-        self.entries.insert(namespace_id.clone(), basis);
+        self.entries
+            .insert(namespace_id.clone(), CachedVerifiedBasis::new(basis));
         self.touch(&namespace_id);
         while self.entries.len() > max_cached_namespaces {
             let Some(evicted) = self.order.pop_front() else {
@@ -391,23 +419,23 @@ impl RuntimeCacheStatsInner {
     }
 
     fn record_publish_result(&self, result: &NamespaceCommitEnginePublishResult) {
-        match result.warm_basis_event {
-            WarmBasisEvent::Reused => {
+        match result.basis_reuse_event {
+            BasisReuseEvent::ReusedAfterHeadEtagMatch => {
                 self.publish_warm_basis_hits.fetch_add(1, Ordering::SeqCst);
             }
-            WarmBasisEvent::ColdLoaded | WarmBasisEvent::InvalidatedThenColdLoaded => {
+            BasisReuseEvent::ColdLoaded | BasisReuseEvent::InvalidatedThenColdLoaded => {
                 self.publish_warm_basis_misses
                     .fetch_add(1, Ordering::SeqCst);
             }
-            WarmBasisEvent::Disabled => {}
+            BasisReuseEvent::Disabled => {}
         }
-        if result.warm_basis_event == WarmBasisEvent::InvalidatedThenColdLoaded
-            || result.warm_basis_update.is_invalidated()
+        if result.basis_reuse_event == BasisReuseEvent::InvalidatedThenColdLoaded
+            || result.verified_basis_cache_update.is_invalidated()
         {
             self.publish_warm_basis_invalidations
                 .fetch_add(1, Ordering::SeqCst);
         }
-        if result.warm_basis_update.is_advanced() {
+        if result.verified_basis_cache_update.is_advanced() {
             self.publish_warm_basis_advances
                 .fetch_add(1, Ordering::SeqCst);
         }
@@ -981,9 +1009,12 @@ impl Fs {
                 engine.publish_batch(&store, candidates, &self.mutation_context())
             };
             self.inner.cache_stats.record_publish_result(&publish);
-            if let Some(basis) = publish.warm_basis_update.basis() {
+            if let Some(basis) = publish
+                .verified_basis_cache_update
+                .verified_basis_to_cache()
+            {
                 self.cache_basis(Arc::new(basis.clone()));
-            } else if publish.warm_basis_update.is_invalidated() {
+            } else if publish.verified_basis_cache_update.is_invalidated() {
                 self.invalidate_namespace_cache(namespace_id);
             }
             return publish
@@ -1202,17 +1233,23 @@ impl Fs {
         if let Some(basis) = cached {
             if self.control_cache_enabled() {
                 match self.load_namespace_head_cached(namespace_id) {
-                    Ok(head) if head.identity.etag == basis.head_etag => {
-                        return Ok(basis);
+                    Ok(head) if basis.matches_head_etag(&head.identity.etag) => {
+                        // A matching ETag only proves the durable head object is
+                        // unchanged since this basis was reconstructed and
+                        // verified; the cache itself is not authoritative.
+                        return Ok(basis.basis_arc());
                     }
                     Ok(_) | Err(_) => {
                         self.invalidate_namespace_cache(namespace_id);
                     }
                 }
             } else {
-                match loon_core::load_namespace_head_identity(self.store(), namespace_id) {
-                    Ok(identity) if identity.head_etag == basis.head_etag => {
-                        return Ok(basis);
+                match loon_core::probe_namespace_head_etag(self.store(), namespace_id) {
+                    Ok(probe) if basis.matches_head_etag_probe(&probe) => {
+                        // A matching ETag only proves the durable head object is
+                        // unchanged since this basis was reconstructed and
+                        // verified; the cache itself is not authoritative.
+                        return Ok(basis.basis_arc());
                     }
                     Ok(_) | Err(_) => {
                         self.invalidate_namespace_cache(namespace_id);

@@ -19,8 +19,8 @@ pub mod services;
 pub mod wal;
 
 pub use basis::{
-    load_namespace_head_identity, load_namespace_head_summary, load_verified_namespace_basis,
-    BasisLoadError, NamespaceHeadIdentity, NamespaceHeadSummary, VerifiedNamespaceBasis,
+    load_namespace_head_summary, load_verified_namespace_basis, probe_namespace_head_etag,
+    BasisLoadError, NamespaceHeadEtagProbe, NamespaceHeadSummary, VerifiedNamespaceBasis,
 };
 pub use checkpoint::{
     advance_retention_floor, create_checkpoint, CheckpointLoadError, CheckpointLoadErrorKind,
