@@ -1,4 +1,5 @@
 use crate::commit::{semantic_commit_fingerprint_for_v0_request, SemanticCommitFingerprint};
+use crate::content::ContentValidationKey;
 use crate::context::MutationContext;
 use crate::error::{CoreError, CoreErrorKind};
 use crate::path::intent::PathMutationIntent;
@@ -129,6 +130,16 @@ impl NamespaceCommitEngine {
         candidates: Vec<NamespaceMutationCandidate>,
         context: &MutationContext,
     ) -> NamespaceCommitEnginePublishResult {
+        self.publish_batch_with_content_validation_hints(store, candidates, context, &[])
+    }
+
+    pub fn publish_batch_with_content_validation_hints<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        candidates: Vec<NamespaceMutationCandidate>,
+        context: &MutationContext,
+        trusted_content_validations: &[ContentValidationKey],
+    ) -> NamespaceCommitEnginePublishResult {
         if candidates.is_empty() {
             return NamespaceCommitEnginePublishResult {
                 results: Vec::new(),
@@ -172,6 +183,7 @@ impl NamespaceCommitEngine {
             &candidates,
             context,
             &basis,
+            trusted_content_validations,
         );
         if should_retry_reused_warm_rejection(warm_basis_event, &published) {
             self.invalidate();
@@ -191,6 +203,7 @@ impl NamespaceCommitEngine {
                 &candidates,
                 context,
                 &cold_basis,
+                trusted_content_validations,
             );
             return self.finish_publish_result(retried, WarmBasisEvent::InvalidatedThenColdLoaded);
         }
@@ -360,6 +373,29 @@ pub fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse, CoreError>> {
+    publish_namespace_mutations_batch_with_content_validation_hints(
+        store,
+        namespace_id,
+        candidates,
+        context,
+        &[],
+    )
+}
+
+pub fn publish_namespace_mutations_batch_with_content_validation_hints<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidates: Vec<NamespaceMutationCandidate>,
+    context: &MutationContext,
+    trusted_content_validations: &[ContentValidationKey],
+) -> Vec<Result<ApiCommitResponse, CoreError>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    engine.publish_batch(store, candidates, context).results
+    engine
+        .publish_batch_with_content_validation_hints(
+            store,
+            candidates,
+            context,
+            trusted_content_validations,
+        )
+        .results
 }

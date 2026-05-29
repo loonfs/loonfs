@@ -671,6 +671,93 @@ fn upload_flow_is_available_from_runtime() {
 }
 
 #[test]
+fn upload_then_path_put_uses_validated_content_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("validated-content-cache-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let begin = fs.begin_upload(&namespace_id).expect("begin upload");
+    let staged = fs
+        .upload_content(&namespace_id, &begin.upload_id, b"uploaded")
+        .expect("upload content");
+    fs.complete_upload(
+        &namespace_id,
+        &begin.upload_id,
+        &CompleteUploadRequest {
+            content_ref: staged.content_ref.clone(),
+        },
+    )
+    .expect("complete upload");
+
+    raw_store.reset_content_blob_get_count();
+    let responses = fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![NamespaceMutationCandidate::Path(
+            PathMutationIntent::PutFile {
+                commit_id: CommitId::from("put-cached-upload"),
+                absolute_path: "/docs/cached.txt".to_owned(),
+                content_ref: staged.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+        )],
+    );
+
+    assert!(responses[0].is_ok());
+    assert_eq!(raw_store.content_blob_get_count(), 0);
+}
+
+#[test]
+fn disabled_runtime_cache_falls_back_to_durable_content_validation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("validated-content-cache-disabled-test")
+        .runtime_cache(RuntimeCacheConfig::disabled())
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let begin = fs.begin_upload(&namespace_id).expect("begin upload");
+    let staged = fs
+        .upload_content(&namespace_id, &begin.upload_id, b"uploaded")
+        .expect("upload content");
+    fs.complete_upload(
+        &namespace_id,
+        &begin.upload_id,
+        &CompleteUploadRequest {
+            content_ref: staged.content_ref.clone(),
+        },
+    )
+    .expect("complete upload");
+
+    raw_store.reset_content_blob_get_count();
+    let responses = fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![NamespaceMutationCandidate::Path(
+            PathMutationIntent::PutFile {
+                commit_id: CommitId::from("put-uncached-upload"),
+                absolute_path: "/docs/uncached.txt".to_owned(),
+                content_ref: staged.content_ref,
+                behavior: PutFileBehavior::CreateOnly,
+            },
+        )],
+    );
+
+    assert!(responses[0].is_ok());
+    assert_eq!(raw_store.content_blob_get_count(), 1);
+}
+
+#[test]
 fn begin_upload_validates_controls_without_replay_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
@@ -760,6 +847,7 @@ fn control_cache_eviction_reloads_head_for_basis_validation() {
             basis_cache_enabled: true,
             control_cache_enabled: true,
             max_cached_namespaces: 1,
+            max_validated_content_refs: RuntimeCacheConfig::default().max_validated_content_refs,
         })
         .build()
         .expect("build runtime");
@@ -1410,6 +1498,63 @@ impl ObjectStore for HeadCasFailureStore {
         {
             return Err(ObjectStoreError::PreconditionFailed);
         }
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct ContentBlobGetCountingStore {
+    inner: LocalFsStore,
+    content_blob_gets: AtomicUsize,
+}
+
+impl ContentBlobGetCountingStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            content_blob_gets: AtomicUsize::new(0),
+        }
+    }
+
+    fn reset_content_blob_get_count(&self) {
+        self.content_blob_gets.store(0, Ordering::SeqCst);
+    }
+
+    fn content_blob_get_count(&self) -> usize {
+        self.content_blob_gets.load(Ordering::SeqCst)
+    }
+}
+
+impl ObjectStore for ContentBlobGetCountingStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        if key.starts_with("content-stores/") && key.contains("/blobs/") {
+            self.content_blob_gets.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.inner.put(key, bytes, mode)
     }
 

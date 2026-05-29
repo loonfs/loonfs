@@ -4,6 +4,7 @@ use loon_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, Namesp
 use loon_objectstore::keys::content_blob;
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +29,59 @@ pub struct StoredContent {
     pub content_ref: ContentRef,
     pub file_digest_sha256: String,
     pub file_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContentValidationKey {
+    content_store_id: ContentStoreId,
+    kind: ContentRefKind,
+    digest: String,
+    size_bytes: u64,
+}
+
+impl ContentValidationKey {
+    pub(crate) fn new(content_store_id: ContentStoreId, content_ref: &ContentRef) -> Self {
+        Self {
+            content_store_id,
+            kind: content_ref.kind,
+            digest: content_ref.digest.clone(),
+            size_bytes: content_ref.size_bytes,
+        }
+    }
+
+    pub fn matches_content_ref(&self, content_ref: &ContentRef) -> bool {
+        self.kind == content_ref.kind
+            && self.digest == content_ref.digest
+            && self.size_bytes == content_ref.size_bytes
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ContentValidationTracker {
+    validated: HashSet<ContentValidationKey>,
+}
+
+impl ContentValidationTracker {
+    pub(crate) fn new(trusted: &[ContentValidationKey]) -> Self {
+        Self {
+            validated: trusted.iter().cloned().collect(),
+        }
+    }
+
+    pub(crate) fn ensure_validated<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        content_store_id: &ContentStoreId,
+        content_ref: &ContentRef,
+    ) -> Result<Option<ContentValidationKey>, DurableContentValidationError> {
+        let key = ContentValidationKey::new(content_store_id.clone(), content_ref);
+        if self.validated.contains(&key) {
+            return Ok(None);
+        }
+        validate_durable_content_reference(store, content_store_id, content_ref)?;
+        self.validated.insert(key.clone());
+        Ok(Some(key))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
