@@ -44,9 +44,11 @@ LoonFS uses distinct naming conventions for distinct surfaces:
 - Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, and `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`.
 - Durable work-class names use lowercase-kebab, e.g. `checkpoint-builder`.
 - JSON enum values use snake_case.
-- Namespace IDs are human/operator slugs; prefer lowercase kebab-case while preserving the namespace grammar.
+- Namespace IDs are human/operator slugs. They use the durable slug grammar: 1-128 bytes, no leading or trailing whitespace, not `.` or `..`, first character lowercase ASCII letter or digit, and remaining characters lowercase ASCII letters, digits, `.`, `_`, or `-`. Prefer lowercase kebab-case within that grammar.
 
 Namespace IDs are durable storage identities. A `namespace_id` must not be reused after namespace destruction; future user-facing display names or aliases may be reused only by mapping them to a new namespace ID.
+
+Implementations must reject invalid namespace IDs before object-key construction. Durable objects that deserialize to invalid typed namespace IDs must be treated as invalid at load boundaries rather than coerced or normalized.
 
 Generated runtime IDs must be unguessable, high-entropy, and never reused within the relevant namespace incarnation.
 
