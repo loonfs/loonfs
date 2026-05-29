@@ -1154,7 +1154,7 @@ mod tests {
     fn checkpoint_round_trip_uses_checkpoint_basis_for_mixed_namespace() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
         write_file_bytes(
@@ -1202,7 +1202,7 @@ mod tests {
     fn checkpoint_round_trip_preserves_direntry_unbind_rows() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
         write_file_bytes(
@@ -1243,7 +1243,7 @@ mod tests {
     fn checkpoint_round_trip_supports_empty_namespace() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
@@ -1256,7 +1256,7 @@ mod tests {
     fn strict_checkpoint_consumption_fails_when_manifest_is_corrupted() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
         write_file_bytes(
@@ -1284,7 +1284,7 @@ mod tests {
     #[test]
     fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
         let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         let manifest_key = checkpoint_manifest(namespace_id.as_str(), 1);
         let store = ConflictOnManifestCreateStore::new(
@@ -1318,7 +1318,7 @@ mod tests {
     fn retention_advancement_requires_published_checkpoint_and_updates_floor_only() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
@@ -1360,7 +1360,7 @@ mod tests {
     fn checkpoint_materialization_uses_written_segments() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
         write_file_bytes(
@@ -1398,7 +1398,7 @@ mod tests {
     fn older_checkpoint_can_publish_after_head_advances() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
         write_file_bytes(
@@ -1463,7 +1463,7 @@ mod tests {
     #[test]
     fn checkpoint_hint_cas_retry_exhaustion_is_stale_head() {
         let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         let store = HeadCasFailureStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),

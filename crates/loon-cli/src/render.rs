@@ -218,7 +218,7 @@ mod tests {
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
-    use loon_api::NamespaceSummary;
+    use loon_api::{NamespaceId, NamespaceSummary};
 
     #[test]
     fn human_profile_list_snapshot() {
@@ -254,10 +254,10 @@ mod tests {
             data: CommandData::NamespaceList {
                 namespaces: vec![
                     NamespaceSummary {
-                        namespace_id: "alpha".into(),
+                        namespace_id: NamespaceId::parse("alpha").expect("valid namespace id"),
                     },
                     NamespaceSummary {
-                        namespace_id: "prod".into(),
+                        namespace_id: NamespaceId::parse("prod").expect("valid namespace id"),
                     },
                 ],
             },

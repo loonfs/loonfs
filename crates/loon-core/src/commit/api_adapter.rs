@@ -133,7 +133,7 @@ mod tests {
     fn api_adapter_maps_all_v0_ops_and_preconditions() {
         let content_ref = ContentRef::whole_file_v0(b"hello");
         let request = api_v0::CommitRequest {
-            commit_id: CommitId::from("commit-a"),
+            commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             preconditions: vec![
                 ApiCommitPrecondition::InodeRevisionIs {
                     inode_id: InodeId(2),
@@ -196,7 +196,7 @@ mod tests {
 
         let core = commit_request_from_v0(
             CommitExecutionContext {
-                namespace_id: NamespaceId::from("demo"),
+                namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 writer_id: "writer-a".to_owned(),
                 writer_fence_token: FenceToken(9),
             },

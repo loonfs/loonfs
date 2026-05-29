@@ -353,7 +353,7 @@ pub fn list_namespaces<S: ObjectStore + ?Sized>(
         if leaf != "descriptor.json" {
             continue;
         }
-        let namespace_id = NamespaceId::from(namespace.to_owned());
+        let namespace_id = NamespaceId::parse(namespace)?;
         load_namespace_descriptor(store, &namespace_id)?;
         names.insert(namespace_id);
     }

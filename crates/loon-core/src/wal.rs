@@ -409,10 +409,10 @@ mod tests {
 
     #[test]
     fn build_wal_record_payload_matches_segment_record_payload() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let request = CommitRequest {
             namespace_id: namespace_id.clone(),
-            commit_id: CommitId::from("c_wal_payload"),
+            commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::CreateDir {
@@ -425,7 +425,7 @@ mod tests {
         };
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),
-            commit_id: CommitId::from("c_wal_payload"),
+            commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             apply_after_seq: ChangeSeq(0),
             assigned_seq: ChangeSeq(1),
             allocated_inode_ids: vec![InodeId(2)],
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn prepared_wal_segments_use_unique_segment_ids_and_object_keys() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let record = materialized_create_dir(
             &namespace_id,
             "c_wal_unique",
@@ -492,7 +492,7 @@ mod tests {
     ) -> MaterializedCommit {
         let request = CommitRequest {
             namespace_id: namespace_id.clone(),
-            commit_id: CommitId::from(commit_id),
+            commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::CreateDir {
@@ -505,7 +505,7 @@ mod tests {
         };
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),
-            commit_id: CommitId::from(commit_id),
+            commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             apply_after_seq,
             assigned_seq,
             allocated_inode_ids: vec![InodeId(2)],

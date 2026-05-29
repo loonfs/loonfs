@@ -343,7 +343,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         annotations.insert("source".to_owned(), json!("http-smoke"));
         annotations.insert("kind".to_owned(), json!("service-proxied"));
         let commit_request = ApiCommitRequest {
-            commit_id: CommitId::from("req-phase-2a-create-file"),
+            commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(1),
@@ -357,7 +357,10 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .client
             .commit_operations(namespace, &commit_request)
             .expect("commit uploaded file");
-        assert_eq!(commit.commit_id, CommitId::from("req-phase-2a-create-file"));
+        assert_eq!(
+            commit.commit_id,
+            CommitId::parse("req-phase-2a-create-file").expect("valid commit id")
+        );
         assert_eq!(commit.committed_seq, ChangeSeq(1));
         assert_eq!(
             commit.results,
@@ -452,7 +455,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .commit_operations(
                 namespace,
                 &ApiCommitRequest {
-                    commit_id: CommitId::from("req-restore-create"),
+                    commit_id: CommitId::parse("req-restore-create").expect("valid commit id"),
                     preconditions: Vec::new(),
                     ops: vec![CommitOp::CreateFile {
                         parent_inode: InodeId(1),
@@ -476,7 +479,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .commit_operations(
                 namespace,
                 &ApiCommitRequest {
-                    commit_id: CommitId::from("req-restore-replace"),
+                    commit_id: CommitId::parse("req-restore-replace").expect("valid commit id"),
                     preconditions: Vec::new(),
                     ops: vec![CommitOp::ReplaceFile {
                         inode_id,
@@ -495,7 +498,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .commit_operations(
                 namespace,
                 &ApiCommitRequest {
-                    commit_id: CommitId::from("req-restore-restore"),
+                    commit_id: CommitId::parse("req-restore-restore").expect("valid commit id"),
                     preconditions: Vec::new(),
                     ops: vec![CommitOp::RestoreRevision {
                         inode_id,
@@ -538,7 +541,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
         assert_eq!(changes.changes.len(), 3);
         assert_eq!(
             changes.changes[2].commit_id,
-            CommitId::from("req-restore-restore")
+            CommitId::parse("req-restore-restore").expect("valid commit id")
         );
         assert_eq!(changes.changes[2].ops, restore.results);
     })
@@ -573,7 +576,8 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
             .commit_operations(
                 namespace,
                 &ApiCommitRequest {
-                    commit_id: CommitId::from("req-restore-missing-source-create"),
+                    commit_id: CommitId::parse("req-restore-missing-source-create")
+                        .expect("valid commit id"),
                     preconditions: Vec::new(),
                     ops: vec![CommitOp::CreateFile {
                         parent_inode: InodeId(1),
@@ -593,7 +597,8 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
         match harness.client.commit_operations(
             namespace,
             &ApiCommitRequest {
-                commit_id: CommitId::from("req-restore-missing-source-restore"),
+                commit_id: CommitId::parse("req-restore-missing-source-restore")
+                    .expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::RestoreRevision {
                     inode_id,
@@ -638,7 +643,7 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
         let first_content_ref =
             stage_uploaded_content_ref(&harness.client, namespace, b"first payload\n");
         let first_request = ApiCommitRequest {
-            commit_id: CommitId::from("req-phase-2a-conflict"),
+            commit_id: CommitId::parse("req-phase-2a-conflict").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateFile {
                 parent_inode: InodeId(1),

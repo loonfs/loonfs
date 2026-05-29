@@ -717,7 +717,7 @@ mod tests {
     ) {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
         (temp_dir, store, namespace_id, context)
@@ -741,7 +741,7 @@ mod tests {
             &store,
             &namespace_id,
             &PathMutationIntent::CreateDir {
-                commit_id: CommitId::from("mkdir-docs"),
+                commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
                 absolute_path: "/docs".to_owned(),
             },
         );
@@ -774,7 +774,7 @@ mod tests {
             &store,
             &namespace_id,
             &PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-nested"),
+                commit_id: CommitId::parse("put-nested").expect("valid commit id"),
                 absolute_path: "/docs/nested/a.txt".to_owned(),
                 content_ref: staged.content_ref.clone(),
                 behavior: PutFileBehavior::CreateOnly,
@@ -821,7 +821,7 @@ mod tests {
             &store,
             &namespace_id,
             &PathMutationIntent::MovePath {
-                commit_id: CommitId::from("move-file"),
+                commit_id: CommitId::parse("move-file").expect("valid commit id"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
                 mode: RenameMode::NoReplace,
@@ -869,7 +869,7 @@ mod tests {
             &store,
             &namespace_id,
             &PathMutationIntent::CopyFilePath {
-                commit_id: CommitId::from("copy-file"),
+                commit_id: CommitId::parse("copy-file").expect("valid commit id"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/copy.txt".to_owned(),
             },
@@ -927,7 +927,7 @@ mod tests {
             .plan_against_state(
                 &namespace_id,
                 &PathMutationIntent::PutFile {
-                    commit_id: CommitId::from("put-under-dead"),
+                    commit_id: CommitId::parse("put-under-dead").expect("valid commit id"),
                     absolute_path: "/dead/new.txt".to_owned(),
                     content_ref: staged.content_ref,
                     behavior: PutFileBehavior::CreateOnly,

@@ -687,7 +687,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let fs = test_runtime(store.clone(), "runtime-writer");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .expect("create namespace through runtime");
         fs.put_file_bytes(
@@ -696,7 +696,7 @@ mod tests {
             b"hello from runtime",
             PutFileOptions {
                 behavior: PutFileBehavior::CreateOnly,
-                commit_id: Some(CommitId::from("runtime-put")),
+                commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
             },
         )
         .expect("write file through runtime");
@@ -738,7 +738,10 @@ mod tests {
         .expect("join blocking task");
 
         let file = fs
-            .read_file_bytes(&NamespaceId::from("demo"), "/notes/from-http.txt")
+            .read_file_bytes(
+                &NamespaceId::parse("demo").expect("valid namespace id"),
+                "/notes/from-http.txt",
+            )
             .expect("read file through runtime");
         assert_eq!(file.bytes, b"hello from http");
 
@@ -807,7 +810,7 @@ mod tests {
         let now_ms = now_ms();
         bootstrap_namespace(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             &context("server-writer", now_ms),
             false,
         )
@@ -835,11 +838,11 @@ mod tests {
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let now_ms = now_ms();
         let context = context("server-writer", now_ms);
-        bootstrap_namespace(store.as_ref(), &"demo".into(), &context, false)
+        bootstrap_namespace(store.as_ref(), &namespace_id("demo"), &context, false)
             .expect("bootstrap namespace");
         write_file_bytes(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             "/docs/readme.txt",
             b"readme",
             &context,
@@ -848,7 +851,7 @@ mod tests {
         .expect("seed docs");
         write_file_bytes(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             "/tmp/a.txt",
             b"from tmp",
             &context,
@@ -857,7 +860,7 @@ mod tests {
         .expect("seed tmp");
         write_file_bytes(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             "/docs/a.txt",
             b"in docs",
             &context,
@@ -896,11 +899,11 @@ mod tests {
         let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
         let now_ms = now_ms();
         let context = context("server-writer", now_ms);
-        bootstrap_namespace(store.as_ref(), &"demo".into(), &context, false)
+        bootstrap_namespace(store.as_ref(), &namespace_id("demo"), &context, false)
             .expect("bootstrap namespace");
         write_file_bytes(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             "/docs/old.txt",
             b"old",
             &context,
@@ -909,7 +912,7 @@ mod tests {
         .expect("seed docs");
         write_file_bytes(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             "/tmp/source.txt",
             b"source",
             &context,
@@ -918,7 +921,7 @@ mod tests {
         .expect("seed source");
         delete_path(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             "/docs",
             &context,
             Some("delete-docs"),
@@ -957,7 +960,7 @@ mod tests {
         let now_ms = now_ms();
         bootstrap_namespace(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             &context("server-writer", now_ms),
             false,
         )
@@ -985,7 +988,7 @@ mod tests {
         let now_ms = now_ms();
         bootstrap_namespace(
             store.as_ref(),
-            &"demo".into(),
+            &namespace_id("demo"),
             &context("other-writer", now_ms),
             false,
         )
@@ -1066,6 +1069,10 @@ mod tests {
             now_ms,
             lease_duration_ms: 60_000,
         }
+    }
+
+    fn namespace_id(value: &str) -> NamespaceId {
+        NamespaceId::parse(value).expect("valid namespace id")
     }
 
     fn now_ms() -> u64 {

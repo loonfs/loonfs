@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Borrow;
 use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
@@ -7,15 +8,15 @@ const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
 
 /// Unique identifier for a namespace (a logical sync boundary).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct NamespaceId(pub String);
+pub struct NamespaceId(String);
 
 /// Unique identifier for an immutable content store.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ContentStoreId(pub String);
+pub struct ContentStoreId(String);
 
 /// Client-supplied stable identifier for one logical commit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CommitId(pub String);
+pub struct CommitId(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("invalid namespace_id {value:?}: {reason}")]
@@ -69,12 +70,6 @@ impl GeneratedIdValidationError {
 }
 
 impl NamespaceId {
-    /// Constructs a namespace id without validation. Use [`NamespaceId::parse`]
-    /// for user-supplied or durable-boundary input.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
     pub fn parse(value: impl AsRef<str>) -> Result<Self, NamespaceIdValidationError> {
         let value = value.as_ref();
         validate_namespace_id(value)?;
@@ -93,12 +88,6 @@ impl NamespaceId {
 }
 
 impl CommitId {
-    /// Constructs a commit id without validation. Use [`CommitId::parse`]
-    /// for user-supplied or durable-boundary input.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
     pub fn parse(value: impl AsRef<str>) -> Result<Self, CommitIdValidationError> {
         let value = value.as_ref();
         validate_commit_id(value)?;
@@ -235,10 +224,6 @@ fn generated_id_error(value: &str, reason: String) -> GeneratedIdValidationError
 }
 
 impl ContentStoreId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
     pub fn generate() -> Self {
         Self(generated_id("cs"))
     }
@@ -260,39 +245,87 @@ impl ContentStoreId {
     }
 }
 
-impl From<&str> for NamespaceId {
-    fn from(value: &str) -> Self {
-        Self::new(value)
+impl TryFrom<&str> for NamespaceId {
+    type Error = NamespaceIdValidationError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
     }
 }
 
-impl From<String> for NamespaceId {
-    fn from(value: String) -> Self {
-        Self::new(value)
+impl TryFrom<String> for NamespaceId {
+    type Error = NamespaceIdValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
     }
 }
 
-impl From<&str> for ContentStoreId {
-    fn from(value: &str) -> Self {
-        Self::new(value)
+impl TryFrom<&str> for ContentStoreId {
+    type Error = GeneratedIdValidationError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
     }
 }
 
-impl From<String> for ContentStoreId {
-    fn from(value: String) -> Self {
-        Self::new(value)
+impl TryFrom<String> for ContentStoreId {
+    type Error = GeneratedIdValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
     }
 }
 
-impl From<&str> for CommitId {
-    fn from(value: &str) -> Self {
-        Self::new(value)
+impl TryFrom<&str> for CommitId {
+    type Error = CommitIdValidationError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
     }
 }
 
-impl From<String> for CommitId {
-    fn from(value: String) -> Self {
-        Self::new(value)
+impl TryFrom<String> for CommitId {
+    type Error = CommitIdValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl AsRef<str> for NamespaceId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for ContentStoreId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for CommitId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for NamespaceId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for ContentStoreId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for CommitId {
+    fn borrow(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -328,7 +361,8 @@ impl<'de> Deserialize<'de> for NamespaceId {
     where
         D: Deserializer<'de>,
     {
-        Ok(Self(String::deserialize(deserializer)?))
+        let value = String::deserialize(deserializer)?;
+        NamespaceId::try_new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -448,19 +482,66 @@ mod tests {
     }
 
     #[test]
-    fn namespace_id_unchecked_construction_remains_available() {
-        let namespace_id = NamespaceId::from("invalid/name");
-
-        assert_eq!(namespace_id.as_str(), "invalid/name");
-    }
-
-    #[test]
     fn commit_id_parse_uses_same_allowed_grammar() {
         let parsed = CommitId::parse("c_demo-1").expect("valid commit_id");
 
         assert_eq!(parsed.as_str(), "c_demo-1");
         assert!(CommitId::parse("c/demo").is_err());
         assert!(CommitId::parse("C_demo").is_err());
+    }
+
+    #[test]
+    fn identity_try_from_validates_values() {
+        assert_eq!(
+            NamespaceId::try_from("demo")
+                .expect("valid namespace id")
+                .as_str(),
+            "demo"
+        );
+        assert_eq!(
+            CommitId::try_from("commit-1")
+                .expect("valid commit id")
+                .as_str(),
+            "commit-1"
+        );
+        assert_eq!(
+            ContentStoreId::try_from("cs_00000000000000000000000000000001")
+                .expect("valid content store id")
+                .as_str(),
+            "cs_00000000000000000000000000000001"
+        );
+
+        assert!(NamespaceId::try_from("invalid/name").is_err());
+        assert!(CommitId::try_from("invalid/name").is_err());
+        assert!(ContentStoreId::try_from("cs_0000000000000000000000000000000g").is_err());
+    }
+
+    #[test]
+    fn identity_deserialize_validates_values() {
+        let namespace_id: NamespaceId =
+            serde_json::from_str(r#""demo""#).expect("valid namespace id json");
+        assert_eq!(namespace_id.as_str(), "demo");
+        let commit_id: CommitId =
+            serde_json::from_str(r#""commit-1""#).expect("valid commit id json");
+        assert_eq!(commit_id.as_str(), "commit-1");
+        let content_store_id: ContentStoreId =
+            serde_json::from_str(r#""cs_00000000000000000000000000000001""#)
+                .expect("valid content store id json");
+        assert_eq!(
+            content_store_id.as_str(),
+            "cs_00000000000000000000000000000001"
+        );
+
+        let namespace_error = serde_json::from_str::<NamespaceId>(r#""invalid/name""#)
+            .expect_err("invalid namespace id json");
+        assert!(namespace_error.to_string().contains("namespace_id"));
+        let commit_error = serde_json::from_str::<CommitId>(r#""invalid/name""#)
+            .expect_err("invalid commit id json");
+        assert!(commit_error.to_string().contains("commit_id"));
+        let content_store_error =
+            serde_json::from_str::<ContentStoreId>(r#""cs_0000000000000000000000000000000g""#)
+                .expect_err("invalid content store id json");
+        assert!(content_store_error.to_string().contains("generated id"));
     }
 
     #[test]

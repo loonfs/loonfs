@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn find_commit_receipt_returns_latest_matching_receipt() {
-        let commit_id = CommitId::from("same-commit");
+        let commit_id = CommitId::parse("same-commit").expect("valid commit id");
         let metadata_state = MetadataState::from_rows(
             Vec::new(),
             Vec::new(),
@@ -862,7 +862,7 @@ mod tests {
                     results: Vec::new(),
                 },
                 CommitReceiptRecord {
-                    commit_id: CommitId::from("other-commit"),
+                    commit_id: CommitId::parse("other-commit").expect("valid commit id"),
                     semantic_commit_fingerprint_sha256: "other".to_owned(),
                     committed_seq: ChangeSeq(3),
                     results: Vec::new(),

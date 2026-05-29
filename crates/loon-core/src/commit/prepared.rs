@@ -459,8 +459,8 @@ mod tests {
 
     fn request() -> CommitRequest {
         CommitRequest {
-            namespace_id: NamespaceId::from("demo"),
-            commit_id: CommitId::from("commit-a"),
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::CreateDir {
@@ -475,8 +475,8 @@ mod tests {
 
     fn plan() -> CommitPlan {
         CommitPlan {
-            namespace_id: NamespaceId::from("demo"),
-            commit_id: CommitId::from("commit-a"),
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             apply_after_seq: ChangeSeq(0),
             assigned_seq: ChangeSeq(1),
             allocated_inode_ids: vec![InodeId(2)],
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn prepared_commit_rejects_namespace_mismatch() {
         let mut plan = plan();
-        plan.namespace_id = NamespaceId::from("other");
+        plan.namespace_id = NamespaceId::parse("other").expect("valid namespace id");
 
         assert!(matches!(
             PreparedCommit::new(request(), plan),
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn prepared_commit_rejects_commit_id_mismatch() {
         let mut plan = plan();
-        plan.commit_id = CommitId::from("commit-b");
+        plan.commit_id = CommitId::parse("commit-b").expect("valid commit id");
 
         assert!(matches!(
             PreparedCommit::new(request(), plan),

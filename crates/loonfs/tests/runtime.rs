@@ -701,7 +701,7 @@ fn upload_then_path_put_uses_private_uploaded_content_cache() {
         &namespace_id,
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-cached-upload"),
+                commit_id: CommitId::parse("put-cached-upload").expect("valid commit id"),
                 absolute_path: "/docs/cached.txt".to_owned(),
                 content_ref: staged.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
@@ -745,7 +745,7 @@ fn disabled_runtime_cache_falls_back_to_durable_content_validation() {
         &namespace_id,
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-uncached-upload"),
+                commit_id: CommitId::parse("put-uncached-upload").expect("valid commit id"),
                 absolute_path: "/docs/uncached.txt".to_owned(),
                 content_ref: staged.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
@@ -1030,7 +1030,7 @@ fn explicit_commit_appears_in_change_feed() {
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let commit_id = CommitId::new("explicit-create-dir");
+    let commit_id = CommitId::parse("explicit-create-dir").expect("valid commit id");
     let response = fs
         .commit_operations(
             &namespace_id,

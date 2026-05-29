@@ -94,10 +94,10 @@ mod tests {
 
     #[test]
     fn durable_adapter_builds_expected_wal_payload() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let request = CommitRequest {
             namespace_id: namespace_id.clone(),
-            commit_id: CommitId::from("c_wal_payload"),
+            commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::CreateDir {
@@ -110,7 +110,7 @@ mod tests {
         };
         let plan = CommitPlan {
             namespace_id: namespace_id.clone(),
-            commit_id: CommitId::from("c_wal_payload"),
+            commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             apply_after_seq: ChangeSeq(0),
             assigned_seq: ChangeSeq(1),
             allocated_inode_ids: vec![InodeId(2)],

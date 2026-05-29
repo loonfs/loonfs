@@ -126,7 +126,7 @@ fn stale_revision_precondition_is_rejected() {
     let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        commit_id: CommitId::from("stale-revision"),
+        commit_id: CommitId::parse("stale-revision").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         ops: vec![CommitOp::ReplaceFile {
@@ -168,7 +168,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let create_error = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            commit_id: CommitId::from("create-under-tombstone"),
+            commit_id: CommitId::parse("create-under-tombstone").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::CreateFile {
@@ -194,7 +194,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let replace_error = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            commit_id: CommitId::from("replace-under-tombstone"),
+            commit_id: CommitId::parse("replace-under-tombstone").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::ReplaceFile {
@@ -225,7 +225,7 @@ fn restore_revision_validation_rejects_missing_inode() {
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        commit_id: CommitId::from("restore-missing-inode"),
+        commit_id: CommitId::parse("restore-missing-inode").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         ops: vec![CommitOp::RestoreRevision {
@@ -254,7 +254,7 @@ fn restore_revision_validation_rejects_non_file_target() {
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        commit_id: CommitId::from("restore-non-file"),
+        commit_id: CommitId::parse("restore-non-file").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         ops: vec![CommitOp::RestoreRevision {
@@ -295,7 +295,7 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let stale_base = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            commit_id: CommitId::from("restore-stale-base"),
+            commit_id: CommitId::parse("restore-stale-base").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::RestoreRevision {
@@ -322,7 +322,7 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let missing_source = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            commit_id: CommitId::from("restore-missing-source"),
+            commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::RestoreRevision {
@@ -363,7 +363,7 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let plan = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            commit_id: CommitId::from("restore-same-request-source"),
+            commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![
@@ -409,7 +409,8 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     let plan = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            commit_id: CommitId::from("restore-after-restore-same-request"),
+            commit_id: CommitId::parse("restore-after-restore-same-request")
+                .expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![
@@ -458,7 +459,7 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     let error = build_commit_plan(
         &CommitRequest {
             namespace_id: namespace_id(),
-            commit_id: CommitId::from("restore-under-tombstone"),
+            commit_id: CommitId::parse("restore-under-tombstone").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token: FenceToken(1),
             ops: vec![CommitOp::RestoreRevision {
@@ -514,7 +515,7 @@ fn restore_revision_overflow_is_rejected() {
     let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
-        commit_id: CommitId::from("restore-overflow"),
+        commit_id: CommitId::parse("restore-overflow").expect("valid commit id"),
         writer_id: "writer-a".to_owned(),
         writer_fence_token: FenceToken(1),
         ops: vec![CommitOp::RestoreRevision {
@@ -603,8 +604,13 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].namespace_id.as_str(), "demo");
 
-    let partial_error = bootstrap_namespace(&store, &NamespaceId::from("partial"), &context, false)
-        .expect_err("partial namespace should be rejected");
+    let partial_error = bootstrap_namespace(
+        &store,
+        &NamespaceId::parse("partial").expect("valid namespace id"),
+        &context,
+        false,
+    )
+    .expect_err("partial namespace should be rejected");
     assert!(matches!(
         partial_error,
         loon_core::BootstrapNamespaceError::NamespacePartiallyInitialized { .. }
@@ -642,70 +648,10 @@ fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
 }
 
 #[test]
-fn public_namespace_operations_reject_invalid_namespace_id_before_key_construction() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    let invalid_namespace = NamespaceId::from("bad/name");
-
-    let bootstrap_error = bootstrap_namespace(&store, &invalid_namespace, &context, false)
-        .expect_err("invalid namespace_id");
-    match bootstrap_error {
-        loon_core::BootstrapNamespaceError::InvalidNamespaceId(error) => {
-            assert_eq!(error.value(), "bad/name");
-        }
-        other => panic!("expected invalid namespace_id, got {other:?}"),
-    }
-    assert_eq!(
-        store
-            .list_prefix("namespaces/")
-            .expect("list namespace objects"),
-        Vec::<String>::new()
-    );
-
-    let read_error = resolve_path(&store, &invalid_namespace, "/")
-        .expect_err("invalid namespace_id should be rejected before lookup");
-    assert_eq!(read_error.kind(), CoreErrorKind::InvalidNamespaceId);
-
-    let begin_upload_error = begin_upload(&store, &invalid_namespace, &context)
-        .expect_err("invalid namespace_id should be rejected before upload session creation");
-    assert_eq!(begin_upload_error.kind(), CoreErrorKind::InvalidNamespaceId);
-
-    let delete_error = delete_path_non_recursive(
-        &store,
-        &invalid_namespace,
-        "/missing.txt",
-        &context,
-        Some("invalid-delete"),
-    )
-    .expect_err("invalid namespace_id should be rejected before retry lookup");
-    assert_eq!(delete_error.kind(), CoreErrorKind::InvalidNamespaceId);
-
-    let complete_error = complete_upload(
-        &store,
-        &invalid_namespace,
-        "upl_invalid",
-        &CompleteUploadRequest {
-            content_ref: ContentRef::whole_file_v0(b""),
-        },
-        &context,
-    )
-    .expect_err("invalid namespace_id should be rejected before upload key lookup");
-    assert_eq!(complete_error.kind(), CoreErrorKind::InvalidNamespaceId);
-
-    assert_eq!(
-        store
-            .list_prefix("namespaces/")
-            .expect("list namespace objects"),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
 fn begin_upload_rejects_missing_and_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     let missing_error =
@@ -726,7 +672,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
 fn begin_upload_does_not_read_checkpoint_or_wal_replay_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     bootstrap_namespace(&setup_store, &namespace_id, &context, false).expect("bootstrap");
@@ -762,7 +708,7 @@ fn begin_upload_does_not_read_checkpoint_or_wal_replay_objects() {
 fn complete_upload_does_not_get_content_blob_after_staging() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
@@ -829,7 +775,7 @@ fn complete_upload_does_not_get_content_blob_after_staging() {
 fn path_put_file_validates_cold_content_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
@@ -841,7 +787,7 @@ fn path_put_file_validates_cold_content_once() {
         &namespace_id,
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-cold-content"),
+                commit_id: CommitId::parse("put-cold-content").expect("valid commit id"),
                 absolute_path: "/docs/hello.txt".to_owned(),
                 content_ref: content.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
@@ -858,7 +804,7 @@ fn path_put_file_validates_cold_content_once() {
 fn path_planning_does_not_validate_content() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
@@ -869,7 +815,7 @@ fn path_planning_does_not_validate_content() {
         .plan_path_intent(
             &namespace_id,
             &PathMutationIntent::PutFile {
-                commit_id: CommitId::from("plan-put-content"),
+                commit_id: CommitId::parse("plan-put-content").expect("valid commit id"),
                 absolute_path: "/docs/planned.txt".to_owned(),
                 content_ref: content.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
@@ -877,7 +823,10 @@ fn path_planning_does_not_validate_content() {
         )
         .expect("plan path intent");
 
-    assert_eq!(planned.commit_id, CommitId::from("plan-put-content"));
+    assert_eq!(
+        planned.commit_id,
+        CommitId::parse("plan-put-content").expect("valid commit id")
+    );
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
@@ -885,7 +834,7 @@ fn path_planning_does_not_validate_content() {
 fn path_batch_validates_repeated_content_ref_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
@@ -897,13 +846,13 @@ fn path_batch_validates_repeated_content_ref_once() {
         &namespace_id,
         vec![
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-shared-a"),
+                commit_id: CommitId::parse("put-shared-a").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
                 behavior: PutFileBehavior::CreateOnly,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-shared-b"),
+                commit_id: CommitId::parse("put-shared-b").expect("valid commit id"),
                 absolute_path: "/docs/b.txt".to_owned(),
                 content_ref: content.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
@@ -967,42 +916,10 @@ fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
 }
 
 #[test]
-fn commit_operations_reject_invalid_commit_id_before_wal_key_construction() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-
-    let error = commit_operations(
-        &store,
-        &namespace_id,
-        ApiCommitRequest {
-            commit_id: CommitId::from("bad/commit"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDir {
-                parent_inode: InodeId(1),
-                display_name: "docs".to_owned(),
-            }],
-            message: None,
-            annotations: None,
-        },
-        &context,
-    )
-    .expect_err("invalid commit_id should be rejected");
-
-    assert_eq!(error.kind(), CoreErrorKind::InvalidCommitId);
-    assert_eq!(
-        store.list_prefix("namespaces/demo/wal/").expect("list wal"),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
 fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
@@ -1029,7 +946,7 @@ fn upload_content_rejects_invalid_upload_id_before_key_construction() {
 fn batch_commit_writes_one_segment_and_expands_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
@@ -1038,7 +955,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
         &namespace_id,
         vec![
             ApiCommitRequest {
-                commit_id: CommitId::from("req-batch-a"),
+                commit_id: CommitId::parse("req-batch-a").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
@@ -1048,7 +965,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
                 annotations: None,
             },
             ApiCommitRequest {
-                commit_id: CommitId::from("req-batch-b"),
+                commit_id: CommitId::parse("req-batch-b").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
@@ -1098,8 +1015,14 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
     assert_eq!(changes.changes.len(), 2);
-    assert_eq!(changes.changes[0].commit_id, CommitId::from("req-batch-a"));
-    assert_eq!(changes.changes[1].commit_id, CommitId::from("req-batch-b"));
+    assert_eq!(
+        changes.changes[0].commit_id,
+        CommitId::parse("req-batch-a").expect("valid commit id")
+    );
+    assert_eq!(
+        changes.changes[1].commit_id,
+        CommitId::parse("req-batch-b").expect("valid commit id")
+    );
     assert_eq!(changes.changes[0].ops, first.results);
     assert_eq!(changes.changes[0].deltas.len(), 2);
     assert!(matches!(
@@ -1127,7 +1050,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 fn binding_is_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     write_file_bytes(
@@ -1156,7 +1079,8 @@ fn binding_is_precondition_observes_earlier_batch_candidate() {
         &namespace_id,
         vec![
             ApiCommitRequest {
-                commit_id: CommitId::from("move-before-child-name-check"),
+                commit_id: CommitId::parse("move-before-child-name-check")
+                    .expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::Rename {
                     inode_id: file_inode,
@@ -1168,7 +1092,7 @@ fn binding_is_precondition_observes_earlier_batch_candidate() {
                 annotations: None,
             },
             ApiCommitRequest {
-                commit_id: CommitId::from("delete-with-stale-binding"),
+                commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
                 preconditions: vec![CommitPrecondition::BindingIs {
                     parent_inode: docs_inode,
                     name_key: original_binding.name_key,
@@ -1200,14 +1124,14 @@ fn binding_is_precondition_observes_earlier_batch_candidate() {
 fn directory_empty_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     let seed = commit_operations(
         &store,
         &namespace_id,
         ApiCommitRequest {
-            commit_id: CommitId::from("seed-empty-dir"),
+            commit_id: CommitId::parse("seed-empty-dir").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -1230,7 +1154,8 @@ fn directory_empty_precondition_observes_earlier_batch_candidate() {
         &namespace_id,
         vec![
             ApiCommitRequest {
-                commit_id: CommitId::from("create-child-before-empty-check"),
+                commit_id: CommitId::parse("create-child-before-empty-check")
+                    .expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateFile {
                     parent_inode: docs_inode,
@@ -1241,7 +1166,8 @@ fn directory_empty_precondition_observes_earlier_batch_candidate() {
                 annotations: None,
             },
             ApiCommitRequest {
-                commit_id: CommitId::from("delete-dir-with-stale-empty-check"),
+                commit_id: CommitId::parse("delete-dir-with-stale-empty-check")
+                    .expect("valid commit id"),
                 preconditions: vec![CommitPrecondition::DirectoryEmpty {
                     inode_id: docs_inode,
                 }],
@@ -1268,7 +1194,7 @@ fn directory_empty_precondition_observes_earlier_batch_candidate() {
 #[test]
 fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
@@ -1279,7 +1205,7 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::PutFile {
-                commit_id: CommitId::from("retry-after-orphan"),
+                commit_id: CommitId::parse("retry-after-orphan").expect("valid commit id"),
                 absolute_path: "/retry.txt".to_owned(),
                 content_ref: content.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
@@ -1319,14 +1245,14 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
     assert_eq!(visible_segment.payload.records.len(), 1);
     assert_eq!(
         visible_segment.payload.records[0].commit_id,
-        CommitId::from("retry-after-orphan")
+        CommitId::parse("retry-after-orphan").expect("valid commit id")
     );
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(
         changes.changes[0].commit_id,
-        CommitId::from("retry-after-orphan")
+        CommitId::parse("retry-after-orphan").expect("valid commit id")
     );
 }
 
@@ -1334,12 +1260,12 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
 fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
     let request = ApiCommitRequest {
-        commit_id: CommitId::from("req-duplicate"),
+        commit_id: CommitId::parse("req-duplicate").expect("valid commit id"),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDir {
             parent_inode: InodeId(1),
@@ -1372,7 +1298,7 @@ fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(
         changes.changes[0].commit_id,
-        CommitId::from("req-duplicate")
+        CommitId::parse("req-duplicate").expect("valid commit id")
     );
 }
 
@@ -1380,12 +1306,12 @@ fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
 fn visible_commit_id_retry_aliases_across_writer_takeover() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer_a = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &writer_a, false).expect("bootstrap");
 
     let request = ApiCommitRequest {
-        commit_id: CommitId::from("retry-across-writer"),
+        commit_id: CommitId::parse("retry-across-writer").expect("valid commit id"),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDir {
             parent_inode: InodeId(1),
@@ -1417,7 +1343,7 @@ fn visible_commit_id_retry_aliases_across_writer_takeover() {
 fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
@@ -1426,7 +1352,7 @@ fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         &namespace_id,
         vec![
             ApiCommitRequest {
-                commit_id: CommitId::from("req-conflict"),
+                commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
@@ -1436,7 +1362,7 @@ fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
                 annotations: None,
             },
             ApiCommitRequest {
-                commit_id: CommitId::from("req-conflict"),
+                commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDir {
                     parent_inode: InodeId(1),
@@ -1467,14 +1393,17 @@ fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
 
     let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
     assert_eq!(changes.changes.len(), 1);
-    assert_eq!(changes.changes[0].commit_id, CommitId::from("req-conflict"));
+    assert_eq!(
+        changes.changes[0].commit_id,
+        CommitId::parse("req-conflict").expect("valid commit id")
+    );
 }
 
 #[test]
 fn explicit_commit_rejects_invalid_display_names() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
@@ -1482,7 +1411,7 @@ fn explicit_commit_rejects_invalid_display_names() {
         &store,
         &namespace_id,
         ApiCommitRequest {
-            commit_id: CommitId::from("invalid-create-name"),
+            commit_id: CommitId::parse("invalid-create-name").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -1525,7 +1454,7 @@ fn explicit_commit_rejects_invalid_display_names() {
         &store,
         &namespace_id,
         ApiCommitRequest {
-            commit_id: CommitId::from("invalid-rename-name"),
+            commit_id: CommitId::parse("invalid-rename-name").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::Rename {
                 inode_id: file.inode_id,
@@ -1552,7 +1481,7 @@ fn explicit_commit_rejects_invalid_display_names() {
 fn direct_publisher_path_intents_cover_basic_mutations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     let publisher = DirectObjectStorePublisher::new(&store);
@@ -1562,7 +1491,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-path"),
+                commit_id: CommitId::parse("put-path").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
                 behavior: PutFileBehavior::CreateOnly,
@@ -1577,7 +1506,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::MovePath {
-                commit_id: CommitId::from("move-path"),
+                commit_id: CommitId::parse("move-path").expect("valid commit id"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
                 mode: loon_api::v0::RenameMode::NoReplace,
@@ -1592,7 +1521,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::CopyFilePath {
-                commit_id: CommitId::from("copy-path"),
+                commit_id: CommitId::parse("copy-path").expect("valid commit id"),
                 from_path: "/docs/b.txt".to_owned(),
                 to_path: "/docs/c.txt".to_owned(),
             },
@@ -1606,7 +1535,7 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::DeletePath {
-                commit_id: CommitId::from("delete-path"),
+                commit_id: CommitId::parse("delete-path").expect("valid commit id"),
                 absolute_path: "/docs/b.txt".to_owned(),
                 recursive: false,
             },
@@ -1625,14 +1554,14 @@ fn direct_publisher_path_intents_cover_basic_mutations() {
 fn direct_publisher_uses_durable_path_commit_receipt_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     let publisher = DirectObjectStorePublisher::new(&store);
     let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
 
     let intent = PathMutationIntent::PutFile {
-        commit_id: CommitId::from("same-path-request"),
+        commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
         absolute_path: "/same//path.txt".to_owned(),
         content_ref: content.content_ref.clone(),
         behavior: PutFileBehavior::CreateOnly,
@@ -1649,7 +1578,7 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::PutFile {
-                commit_id: CommitId::from("same-path-request"),
+                commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
                 absolute_path: "/same/path.txt".to_owned(),
                 content_ref: content.content_ref.clone(),
                 behavior: PutFileBehavior::CreateOnly,
@@ -1664,7 +1593,7 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
         .submit_path_intent(
             &namespace_id,
             PathMutationIntent::DeletePath {
-                commit_id: CommitId::from("same-path-request"),
+                commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
                 absolute_path: "/same/path.txt".to_owned(),
                 recursive: false,
             },
@@ -1685,7 +1614,7 @@ fn direct_publisher_uses_durable_path_commit_receipt_index() {
 fn path_intents_in_one_batch_see_tentative_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::from("demo");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"hello").expect("stage content");
@@ -1695,13 +1624,13 @@ fn path_intents_in_one_batch_see_tentative_state() {
         &namespace_id,
         vec![
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::from("put-batched-path"),
+                commit_id: CommitId::parse("put-batched-path").expect("valid commit id"),
                 absolute_path: "/docs/a.txt".to_owned(),
                 content_ref: content.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
-                commit_id: CommitId::from("move-batched-path"),
+                commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
                 mode: loon_api::v0::RenameMode::NoReplace,
@@ -1768,7 +1697,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let source_namespace_id = namespace_id();
-    let clone_namespace_id = NamespaceId::from("clone");
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
     bootstrap_namespace(&store, &source_namespace_id, &context, false)
         .expect("bootstrap source namespace");
@@ -1902,7 +1831,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 fn fork_target_head_reservation_failure_writes_no_checkpoint_artifacts() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
-    let clone_namespace_id = NamespaceId::from("clone");
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1934,7 +1863,7 @@ fn fork_target_head_reservation_failure_writes_no_checkpoint_artifacts() {
 fn fork_failure_after_target_head_reserves_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
-    let clone_namespace_id = NamespaceId::from("clone");
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -1972,7 +1901,7 @@ fn fork_failure_after_target_head_reserves_partial_namespace() {
 fn fork_failure_after_target_checkpoint_artifacts_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
-    let clone_namespace_id = NamespaceId::from("clone");
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -2017,7 +1946,7 @@ fn fork_failure_after_target_checkpoint_artifacts_remains_partial() {
 fn fork_target_control_conflict_rechecks_complete_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
-    let clone_namespace_id = NamespaceId::from("clone");
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     seed_source_namespace_for_fork(&inner, &source_namespace_id, &context);
@@ -2076,7 +2005,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("restore-create"),
+            commit_id: CommitId::parse("restore-create").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(1),
@@ -2099,7 +2028,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("restore-replace"),
+            commit_id: CommitId::parse("restore-replace").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
@@ -2124,7 +2053,7 @@ fn restore_revision_revalidates_durable_content_before_publish() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("restore-missing-content"),
+            commit_id: CommitId::parse("restore-missing-content").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::RestoreRevision {
                 inode_id,
@@ -2169,7 +2098,7 @@ fn metadata_only_commit_does_not_validate_content_store_refs() {
         &guarded_store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("metadata-only-delete"),
+            commit_id: CommitId::parse("metadata-only-delete").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::DeleteFile { inode_id }],
             message: None,
@@ -2198,7 +2127,8 @@ fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("create-missing-parent-missing-content"),
+            commit_id: CommitId::parse("create-missing-parent-missing-content")
+                .expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(99),
@@ -2242,7 +2172,7 @@ fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("replace-stale-missing-content"),
+            commit_id: CommitId::parse("replace-stale-missing-content").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
@@ -2286,7 +2216,7 @@ fn restore_revision_missing_source_is_revision_not_found() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("restore-missing-source"),
+            commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::RestoreRevision {
                 inode_id,
@@ -2314,7 +2244,8 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("resolve-before-durable-check-create"),
+            commit_id: CommitId::parse("resolve-before-durable-check-create")
+                .expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode: InodeId(1),
@@ -2344,7 +2275,8 @@ fn restore_revision_resolves_same_request_source_before_durable_content_validati
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("resolve-before-durable-check-commit"),
+            commit_id: CommitId::parse("resolve-before-durable-check-commit")
+                .expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![
                 ApiCommitOp::ReplaceFile {
@@ -2571,7 +2503,7 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("delete-with-stale-binding"),
+            commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
             preconditions: vec![CommitPrecondition::BindingIs {
                 parent_inode: old_binding.parent_inode_id,
                 name_key: old_binding.name_key,
@@ -2620,7 +2552,7 @@ fn unsupported_rename_mode_is_named_bad_request_failure() {
         &store,
         &namespace_id(),
         ApiCommitRequest {
-            commit_id: CommitId::from("unsupported-rename-mode"),
+            commit_id: CommitId::parse("unsupported-rename-mode").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::Rename {
                 inode_id: file.inode_id,
@@ -3011,7 +2943,7 @@ fn mutation_context() -> MutationContext {
 }
 
 fn namespace_id() -> NamespaceId {
-    NamespaceId::from("demo".to_owned())
+    NamespaceId::parse("demo").expect("valid namespace id")
 }
 
 fn content_ref(seed: &str) -> ContentRef {
