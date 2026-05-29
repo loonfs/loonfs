@@ -31,28 +31,9 @@ pub struct StoredContent {
     pub file_size_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ContentValidationKey {
-    content_store_id: ContentStoreId,
-    kind: ContentRefKind,
-    digest: String,
-    size_bytes: u64,
-}
-
-impl ContentValidationKey {
-    pub(crate) fn new(content_store_id: ContentStoreId, content_ref: &ContentRef) -> Self {
-        Self {
-            content_store_id,
-            kind: content_ref.kind,
-            digest: content_ref.digest.clone(),
-            size_bytes: content_ref.size_bytes,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContentValidationTracker {
-    validated: HashSet<ContentValidationKey>,
+    validated: HashSet<(ContentStoreId, ContentRef)>,
 }
 
 impl ContentValidationTracker {
@@ -62,7 +43,7 @@ impl ContentValidationTracker {
         content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
     ) -> Result<(), DurableContentValidationError> {
-        let key = ContentValidationKey::new(content_store_id.clone(), content_ref);
+        let key = (content_store_id.clone(), content_ref.clone());
         if self.validated.contains(&key) {
             return Ok(());
         }
