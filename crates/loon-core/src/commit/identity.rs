@@ -4,12 +4,13 @@ use loon_api::{payload_checksum_sha256, v0 as api_v0, NamespaceId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const SEMANTIC_CORE_COMMIT_DOMAIN: &str = "loonfs.core.commit.semantic.v0";
+const CORE_COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.core.commit.semantic.v0";
+pub(crate) const PATH_INTENT_FINGERPRINT_DOMAIN: &str = "loonfs.path.intent.semantic.v0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SemanticCommitFingerprint(String);
+pub struct CoreCommitFingerprint(String);
 
-impl SemanticCommitFingerprint {
+impl CoreCommitFingerprint {
     pub(crate) fn new_unchecked(value: String) -> Self {
         Self(value)
     }
@@ -19,16 +20,44 @@ impl SemanticCommitFingerprint {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PathIntentFingerprint(String);
+
+impl PathIntentFingerprint {
+    pub(crate) fn new_unchecked(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SemanticMutationIdentity {
+    CoreCommit(CoreCommitFingerprint),
+    PathIntent(PathIntentFingerprint),
+}
+
+impl SemanticMutationIdentity {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::CoreCommit(fingerprint) => fingerprint.as_str(),
+            Self::PathIntent(fingerprint) => fingerprint.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CommitFingerprintError {
     #[error("commit fingerprint codec error: {0}")]
     Codec(String),
 }
 
-pub fn semantic_commit_fingerprint(
+pub fn core_commit_fingerprint(
     request: &CommitRequest,
-) -> Result<SemanticCommitFingerprint, CommitFingerprintError> {
-    semantic_commit_fingerprint_from_parts(
+) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
+    core_commit_fingerprint_from_parts(
         &request.namespace_id,
         &request.preconditions,
         &request.ops,
@@ -37,10 +66,10 @@ pub fn semantic_commit_fingerprint(
     )
 }
 
-pub fn semantic_commit_fingerprint_for_v0_request(
+pub fn core_commit_fingerprint_for_v0_request(
     namespace_id: &NamespaceId,
     request: &api_v0::CommitRequest,
-) -> Result<SemanticCommitFingerprint, CommitFingerprintError> {
+) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
     let preconditions = request
         .preconditions
         .iter()
@@ -53,7 +82,7 @@ pub fn semantic_commit_fingerprint_for_v0_request(
         .cloned()
         .map(commit_op_from_v0)
         .collect::<Vec<_>>();
-    semantic_commit_fingerprint_from_parts(
+    core_commit_fingerprint_from_parts(
         namespace_id,
         &preconditions,
         &ops,
@@ -62,15 +91,15 @@ pub fn semantic_commit_fingerprint_for_v0_request(
     )
 }
 
-fn semantic_commit_fingerprint_from_parts(
+fn core_commit_fingerprint_from_parts(
     namespace_id: &NamespaceId,
     preconditions: &[Precondition],
     ops: &[CommitOp],
     message: &Option<String>,
     annotations: &Option<api_v0::CommitAnnotations>,
-) -> Result<SemanticCommitFingerprint, CommitFingerprintError> {
+) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
     #[derive(Serialize)]
-    struct CanonicalSemanticCommit<'a> {
+    struct CanonicalCoreCommit<'a> {
         domain: &'static str,
         namespace_id: &'a NamespaceId,
         preconditions: &'a [Precondition],
@@ -79,15 +108,15 @@ fn semantic_commit_fingerprint_from_parts(
         annotations: &'a Option<api_v0::CommitAnnotations>,
     }
 
-    payload_checksum_sha256(&CanonicalSemanticCommit {
-        domain: SEMANTIC_CORE_COMMIT_DOMAIN,
+    payload_checksum_sha256(&CanonicalCoreCommit {
+        domain: CORE_COMMIT_FINGERPRINT_DOMAIN,
         namespace_id,
         preconditions,
         ops,
         message,
         annotations,
     })
-    .map(SemanticCommitFingerprint::new_unchecked)
+    .map(CoreCommitFingerprint::new_unchecked)
     .map_err(|err| CommitFingerprintError::Codec(err.to_string()))
 }
 
@@ -114,29 +143,27 @@ mod tests {
     }
 
     #[test]
-    fn semantic_fingerprint_is_stable_for_same_logical_commit() {
-        let left =
-            semantic_commit_fingerprint(&core_request(FenceToken(1))).expect("left fingerprint");
+    fn core_commit_fingerprint_is_stable_for_same_logical_commit() {
+        let left = core_commit_fingerprint(&core_request(FenceToken(1))).expect("left fingerprint");
         let right =
-            semantic_commit_fingerprint(&core_request(FenceToken(1))).expect("right fingerprint");
+            core_commit_fingerprint(&core_request(FenceToken(1))).expect("right fingerprint");
 
         assert_eq!(left, right);
     }
 
     #[test]
-    fn semantic_fingerprint_excludes_writer_context_and_commit_id() {
-        let left =
-            semantic_commit_fingerprint(&core_request(FenceToken(1))).expect("left fingerprint");
-        let different_fence = semantic_commit_fingerprint(&core_request(FenceToken(2)))
+    fn core_commit_fingerprint_excludes_writer_context_and_commit_id() {
+        let left = core_commit_fingerprint(&core_request(FenceToken(1))).expect("left fingerprint");
+        let different_fence = core_commit_fingerprint(&core_request(FenceToken(2)))
             .expect("different fence fingerprint");
         let mut different_writer = core_request(FenceToken(1));
         different_writer.writer_id = "writer-b".to_owned();
         let different_writer =
-            semantic_commit_fingerprint(&different_writer).expect("different writer fingerprint");
+            core_commit_fingerprint(&different_writer).expect("different writer fingerprint");
         let mut different_commit_id = core_request(FenceToken(1));
         different_commit_id.commit_id = CommitId::parse("commit-b").expect("valid commit id");
-        let different_commit_id = semantic_commit_fingerprint(&different_commit_id)
-            .expect("different commit id fingerprint");
+        let different_commit_id =
+            core_commit_fingerprint(&different_commit_id).expect("different commit id fingerprint");
 
         assert_eq!(left, different_fence);
         assert_eq!(left, different_writer);
@@ -144,22 +171,22 @@ mod tests {
     }
 
     #[test]
-    fn semantic_fingerprint_changes_when_logical_inputs_change() {
-        let baseline = semantic_commit_fingerprint(&core_request(FenceToken(1)))
-            .expect("baseline fingerprint");
+    fn core_commit_fingerprint_changes_when_logical_inputs_change() {
+        let baseline =
+            core_commit_fingerprint(&core_request(FenceToken(1))).expect("baseline fingerprint");
         let mut changed = core_request(FenceToken(1));
         changed.ops = vec![CommitOp::CreateDir {
             parent_inode: InodeId(1),
             display_name: "drafts".to_owned(),
         }];
 
-        let changed = semantic_commit_fingerprint(&changed).expect("changed fingerprint");
+        let changed = core_commit_fingerprint(&changed).expect("changed fingerprint");
 
         assert_ne!(baseline, changed);
     }
 
     #[test]
-    fn v0_semantic_fingerprint_matches_core_semantic_fingerprint() {
+    fn v0_core_commit_fingerprint_matches_core_commit_fingerprint() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let api_request = api_v0::CommitRequest {
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
@@ -182,9 +209,9 @@ mod tests {
         .expect("core request");
 
         assert_eq!(
-            semantic_commit_fingerprint_for_v0_request(&namespace_id, &api_request)
+            core_commit_fingerprint_for_v0_request(&namespace_id, &api_request)
                 .expect("api fingerprint"),
-            semantic_commit_fingerprint(&core).expect("core fingerprint")
+            core_commit_fingerprint(&core).expect("core fingerprint")
         );
     }
 }

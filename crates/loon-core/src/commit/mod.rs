@@ -16,13 +16,14 @@ mod publish;
 
 pub use self::api_adapter::{commit_request_from_v0, CommitConversionError};
 pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
+pub(crate) use self::identity::PATH_INTENT_FINGERPRINT_DOMAIN;
 pub use self::identity::{
-    semantic_commit_fingerprint, semantic_commit_fingerprint_for_v0_request,
-    CommitFingerprintError, SemanticCommitFingerprint,
+    core_commit_fingerprint, core_commit_fingerprint_for_v0_request, CommitFingerprintError,
+    CoreCommitFingerprint, PathIntentFingerprint, SemanticMutationIdentity,
 };
 pub use self::ordered::build_commit_plan;
 pub(crate) use self::ordered::resolve_restore_content_refs;
-pub(crate) use self::prepared::CommitFingerprintSource;
+pub(crate) use self::prepared::CommitIdentitySource;
 pub use self::prepared::{
     materialize_commit, CommitExecutionContext, CommitMaterializationError, CommitPrepareError,
     MaterializedCommit, MaterializedCommitDelta, PreparedCommit,

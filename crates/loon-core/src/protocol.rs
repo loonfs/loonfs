@@ -1,10 +1,10 @@
 use crate::basis::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use crate::commit::{
-    build_commit_plan, commit_request_from_v0, materialize_commit, prepare_commit_head_publish,
-    publish_commit_head, resolve_restore_content_refs, semantic_commit_fingerprint,
-    wal_payload_from_materialized_commit, CommitExecutionContext, CommitFingerprintSource,
-    CommitOp, CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
-    PreparedCommit, SemanticCommitFingerprint,
+    build_commit_plan, commit_request_from_v0, core_commit_fingerprint, materialize_commit,
+    prepare_commit_head_publish, publish_commit_head, resolve_restore_content_refs,
+    wal_payload_from_materialized_commit, CommitExecutionContext, CommitIdentitySource, CommitOp,
+    CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
+    PreparedCommit, SemanticMutationIdentity,
 };
 use crate::content::{write_immutable_object, ContentValidationTracker};
 use crate::context::MutationContext;
@@ -14,7 +14,7 @@ use crate::namespace::catalog::{
     load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
 };
-use crate::path::planner::{semantic_commit_fingerprint_for_path_intent, PathPlanner};
+use crate::path::planner::{path_intent_fingerprint_for_path_intent, PathPlanner};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{prepare_wal_segment, StoredWalObject};
 use crate::{
@@ -89,12 +89,12 @@ struct LoadedUploadSessionObject {
 #[derive(Debug, Clone)]
 struct InBatchRequest {
     primary_index: usize,
-    semantic_commit_fingerprint: SemanticCommitFingerprint,
+    semantic_identity: SemanticMutationIdentity,
 }
 
 struct CandidateCoreRequest {
     request: CoreCommitRequest,
-    fingerprint_source: CommitFingerprintSource,
+    identity_source: CommitIdentitySource,
 }
 
 pub fn begin_upload<S: ObjectStore + ?Sized>(
@@ -477,19 +477,17 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
                 continue;
             }
         };
-        let prepared = match PreparedCommit::prepare(
-            request,
-            plan.clone(),
-            candidate_request.fingerprint_source,
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                outcomes[index] = Some(Err(CoreError::Store(format!(
-                    "commit preparation failed: {error}"
-                ))));
-                continue;
-            }
-        };
+        let prepared =
+            match PreparedCommit::prepare(request, plan.clone(), candidate_request.identity_source)
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(CoreError::Store(format!(
+                        "commit preparation failed: {error}"
+                    ))));
+                    continue;
+                }
+            };
         let materialized = match materialize_commit(prepared) {
             Ok(value) => value,
             Err(error) => {
@@ -643,13 +641,14 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                     return None;
                 }
             };
-            let semantic_fingerprint = match semantic_commit_fingerprint(&request) {
+            let semantic_identity = match core_commit_fingerprint(&request) {
                 Ok(value) => value,
                 Err(error) => {
                     outcomes[index] = Some(Err(CoreError::Store(error.to_string())));
                     return None;
                 }
             };
+            let semantic_identity = SemanticMutationIdentity::CoreCommit(semantic_identity);
             if !record_primary_request_or_complete_idempotent(
                 namespace_id,
                 &basis.metadata_state,
@@ -658,13 +657,13 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 aliases,
                 index,
                 &request.commit_id,
-                &semantic_fingerprint,
+                &semantic_identity,
             ) {
                 return None;
             }
             Some(CandidateCoreRequest {
                 request,
-                fingerprint_source: CommitFingerprintSource::ComputeFromRequest,
+                identity_source: CommitIdentitySource::CoreCommitRequest,
             })
         }
         NamespaceMutationCandidate::Path(intent) => {
@@ -672,14 +671,16 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 outcomes[index] = Some(Err(error));
                 return None;
             }
-            let semantic_fingerprint =
-                match semantic_commit_fingerprint_for_path_intent(namespace_id, intent) {
+            let path_intent_fingerprint =
+                match path_intent_fingerprint_for_path_intent(namespace_id, intent) {
                     Ok(value) => value,
                     Err(error) => {
                         outcomes[index] = Some(Err(error));
                         return None;
                     }
                 };
+            let semantic_identity =
+                SemanticMutationIdentity::PathIntent(path_intent_fingerprint.clone());
             let commit_id = intent.commit_id().clone();
             if !record_primary_request_or_complete_idempotent(
                 namespace_id,
@@ -689,7 +690,7 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 aliases,
                 index,
                 &commit_id,
-                &semantic_fingerprint,
+                &semantic_identity,
             ) {
                 return None;
             }
@@ -714,9 +715,7 @@ fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             };
             Some(CandidateCoreRequest {
                 request,
-                fingerprint_source: CommitFingerprintSource::TrustedPrecomputed(
-                    planned.semantic_commit_fingerprint,
-                ),
+                identity_source: CommitIdentitySource::PathIntent(planned.path_intent_fingerprint),
             })
         }
     }
@@ -737,11 +736,11 @@ fn record_primary_request_or_complete_idempotent(
     aliases: &mut Vec<(usize, usize)>,
     index: usize,
     commit_id: &CommitId,
-    semantic_commit_fingerprint: &SemanticCommitFingerprint,
+    semantic_identity: &SemanticMutationIdentity,
 ) -> bool {
     if let Some(existing) = find_commit_receipt(visible_metadata_state, commit_id) {
         outcomes[index] = Some(
-            if existing.semantic_commit_fingerprint_sha256 != semantic_commit_fingerprint.as_str() {
+            if existing.semantic_commit_fingerprint_sha256 != semantic_identity.as_str() {
                 Err(CoreError::CommitIdReuseConflict(commit_id.to_string()))
             } else {
                 Ok(commit_response_from_commit_receipt(namespace_id, existing))
@@ -750,7 +749,7 @@ fn record_primary_request_or_complete_idempotent(
         return false;
     }
     if let Some(existing) = in_batch_requests.get(commit_id) {
-        if existing.semantic_commit_fingerprint != *semantic_commit_fingerprint {
+        if existing.semantic_identity != *semantic_identity {
             outcomes[index] = Some(Err(CoreError::CommitIdReuseConflict(commit_id.to_string())));
         } else {
             aliases.push((index, existing.primary_index));
@@ -761,7 +760,7 @@ fn record_primary_request_or_complete_idempotent(
         commit_id.clone(),
         InBatchRequest {
             primary_index: index,
-            semantic_commit_fingerprint: semantic_commit_fingerprint.clone(),
+            semantic_identity: semantic_identity.clone(),
         },
     );
     true

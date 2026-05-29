@@ -4,7 +4,7 @@ use super::helpers::{
 use super::intent::{PathMutationIntent, PutFileBehavior};
 use super::tombstone::reject_tombstoned_path_ancestor;
 use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
-use crate::commit::SemanticCommitFingerprint;
+use crate::commit::{PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
 use loon_api::{
@@ -22,7 +22,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedPathMutation {
     pub commit_id: CommitId,
-    pub semantic_commit_fingerprint: SemanticCommitFingerprint,
+    pub path_intent_fingerprint: PathIntentFingerprint,
     pub commit_request: ApiCommitRequest,
 }
 
@@ -95,18 +95,27 @@ enum PathFingerprintInput {
     },
 }
 
-fn path_semantic_commit_fingerprint(
+fn path_intent_fingerprint(
     identity: &PathFingerprintInput,
-) -> Result<SemanticCommitFingerprint, CoreError> {
-    payload_checksum_sha256(identity)
-        .map(SemanticCommitFingerprint::new_unchecked)
-        .map_err(|err| CoreError::Store(err.to_string()))
+) -> Result<PathIntentFingerprint, CoreError> {
+    #[derive(Serialize)]
+    struct CanonicalPathIntent<'a> {
+        domain: &'static str,
+        intent: &'a PathFingerprintInput,
+    }
+
+    payload_checksum_sha256(&CanonicalPathIntent {
+        domain: PATH_INTENT_FINGERPRINT_DOMAIN,
+        intent: identity,
+    })
+    .map(PathIntentFingerprint::new_unchecked)
+    .map_err(|err| CoreError::Store(err.to_string()))
 }
 
-pub(crate) fn semantic_commit_fingerprint_for_path_intent(
+pub(crate) fn path_intent_fingerprint_for_path_intent(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
-) -> Result<SemanticCommitFingerprint, CoreError> {
+) -> Result<PathIntentFingerprint, CoreError> {
     let identity = match intent {
         PathMutationIntent::CreateDir { absolute_path, .. } => PathFingerprintInput::CreateDir {
             namespace_id: namespace_id.clone(),
@@ -151,7 +160,7 @@ pub(crate) fn semantic_commit_fingerprint_for_path_intent(
             to_path: normalized_path_for_fingerprint(to_path)?,
         },
     };
-    path_semantic_commit_fingerprint(&identity)
+    path_intent_fingerprint(&identity)
 }
 
 fn normalized_path_for_fingerprint(absolute_path: &str) -> Result<String, CoreError> {
@@ -167,7 +176,7 @@ pub(crate) fn plan_path_mutation_against_state(
     metadata_state: &MetadataState,
 ) -> Result<PlannedPathMutation, CoreError> {
     let commit_id = intent.commit_id().clone();
-    let semantic_fingerprint = semantic_commit_fingerprint_for_path_intent(namespace_id, intent)?;
+    let path_intent_fingerprint = path_intent_fingerprint_for_path_intent(namespace_id, intent)?;
     let view = PathPlanningView {
         head,
         metadata_state,
@@ -205,7 +214,7 @@ pub(crate) fn plan_path_mutation_against_state(
     };
     Ok(PlannedPathMutation {
         commit_id,
-        semantic_commit_fingerprint: semantic_fingerprint,
+        path_intent_fingerprint,
         commit_request,
     })
 }
@@ -690,12 +699,13 @@ fn resolve_parent_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit::core_commit_fingerprint_for_v0_request;
     use crate::context::MutationContext;
     use crate::error::CoreErrorKind;
     use crate::services::{
         bootstrap_namespace, delete_path, put_file_bytes, store_bytes_as_content,
     };
-    use loon_api::v0::{CommitOp, CommitPrecondition};
+    use loon_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
     use loon_api::RevisionNo;
     use loon_objectstore::fs::LocalFsStore;
     use tempfile::tempdir;
@@ -732,6 +742,81 @@ mod tests {
         PathPlanner::new(store)
             .plan_against_state(namespace_id, intent, &basis.head, &basis.metadata_state)
             .expect("plan")
+    }
+
+    #[test]
+    fn path_intent_fingerprint_normalizes_paths() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let left = path_intent_fingerprint_for_path_intent(
+            &namespace_id,
+            &PathMutationIntent::CreateDir {
+                commit_id: CommitId::parse("mkdir-docs-a").expect("valid commit id"),
+                absolute_path: "/docs//a/".to_owned(),
+            },
+        )
+        .expect("left fingerprint");
+        let right = path_intent_fingerprint_for_path_intent(
+            &namespace_id,
+            &PathMutationIntent::CreateDir {
+                commit_id: CommitId::parse("mkdir-docs-b").expect("valid commit id"),
+                absolute_path: "/docs/a".to_owned(),
+            },
+        )
+        .expect("right fingerprint");
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn path_intent_fingerprint_changes_when_logical_inputs_change() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let baseline = path_intent_fingerprint_for_path_intent(
+            &namespace_id,
+            &PathMutationIntent::CreateDir {
+                commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
+                absolute_path: "/docs".to_owned(),
+            },
+        )
+        .expect("baseline fingerprint");
+        let changed = path_intent_fingerprint_for_path_intent(
+            &namespace_id,
+            &PathMutationIntent::CreateDir {
+                commit_id: CommitId::parse("mkdir-drafts").expect("valid commit id"),
+                absolute_path: "/drafts".to_owned(),
+            },
+        )
+        .expect("changed fingerprint");
+
+        assert_ne!(baseline, changed);
+    }
+
+    #[test]
+    fn path_intent_and_core_commit_fingerprints_use_distinct_domains() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let path_fingerprint = path_intent_fingerprint_for_path_intent(
+            &namespace_id,
+            &PathMutationIntent::CreateDir {
+                commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
+                absolute_path: "/docs".to_owned(),
+            },
+        )
+        .expect("path fingerprint");
+        let core_fingerprint = core_commit_fingerprint_for_v0_request(
+            &namespace_id,
+            &ApiCommitRequest {
+                commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateDir {
+                    parent_inode: InodeId(1),
+                    display_name: "docs".to_owned(),
+                }],
+                message: None,
+                annotations: None,
+            },
+        )
+        .expect("core fingerprint");
+
+        assert_ne!(path_fingerprint.as_str(), core_fingerprint.as_str());
     }
 
     #[test]

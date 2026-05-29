@@ -1,9 +1,9 @@
-use crate::commit::{semantic_commit_fingerprint_for_v0_request, SemanticCommitFingerprint};
+use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::context::MutationContext;
 use crate::error::{CoreError, CoreErrorKind};
 use crate::path::intent::PathMutationIntent;
 use crate::path::planner::{
-    semantic_commit_fingerprint_for_path_intent, PathPlanner, PlannedPathMutation,
+    path_intent_fingerprint_for_path_intent, PathPlanner, PlannedPathMutation,
 };
 use crate::{
     load_namespace_head_identity, load_namespace_lease_control, load_verified_namespace_basis,
@@ -30,16 +30,16 @@ impl NamespaceMutationCandidate {
         }
     }
 
-    pub fn semantic_commit_fingerprint(
+    pub fn semantic_identity(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<SemanticCommitFingerprint, CoreError> {
+    ) -> Result<SemanticMutationIdentity, CoreError> {
         match self {
-            Self::Commit(request) => {
-                semantic_commit_fingerprint_for_v0_request(namespace_id, request)
-                    .map_err(|err| CoreError::Store(err.to_string()))
-            }
-            Self::Path(intent) => semantic_commit_fingerprint_for_path_intent(namespace_id, intent),
+            Self::Commit(request) => core_commit_fingerprint_for_v0_request(namespace_id, request)
+                .map(SemanticMutationIdentity::CoreCommit)
+                .map_err(|err| CoreError::Store(err.to_string())),
+            Self::Path(intent) => path_intent_fingerprint_for_path_intent(namespace_id, intent)
+                .map(SemanticMutationIdentity::PathIntent),
         }
     }
 }
