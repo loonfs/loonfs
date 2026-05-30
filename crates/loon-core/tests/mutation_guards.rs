@@ -1047,6 +1047,29 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 }
 
 #[test]
+fn change_feed_validates_wal_chain_before_checkpoint_hint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    create_dir_path(&store, &namespace_id, "/docs", &context, None).expect("create docs");
+    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+
+    let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    store
+        .put_overwrite(&wal_keys[0], b"not a wal segment")
+        .expect("corrupt wal");
+
+    load_verified_namespace_basis(&store, &namespace_id)
+        .expect("checkpoint-backed basis should not read pre-checkpoint wal");
+    let error =
+        list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect_err("corrupt wal chain");
+    assert_eq!(error.kind(), CoreErrorKind::NamespaceCorrupt);
+}
+
+#[test]
 fn binding_is_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

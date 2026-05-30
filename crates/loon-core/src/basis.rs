@@ -9,11 +9,11 @@ use crate::namespace::catalog::{
     load_namespace_catalog_entry, namespace_initialization_state, NamespaceCatalogLoadError,
     NamespaceInitializationError, NamespaceInitializationState,
 };
-use crate::wal::{replay_wal_tail_with_metadata, StoredWalObject, WalReplayError};
-use loon_api::{
-    decode_wal_segment_envelope_zstd, ChangeSeq, ContentStoreId, HeadState,
-    NamespaceDescriptorState, NamespaceId, WalSegmentPointer,
+use crate::wal::{
+    load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadError,
+    WalChainLoadRequest, WalReplayError,
 };
+use loon_api::{ChangeSeq, ContentStoreId, HeadState, NamespaceDescriptorState, NamespaceId};
 use loon_objectstore::{
     keys::{namespace_descriptor, namespace_head},
     ObjectStore,
@@ -57,25 +57,8 @@ pub enum BasisLoadError {
     LoadLease(ControlObjectLoadError),
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
-    #[error("failed to list WAL objects under `{prefix}`: {message}")]
-    ListWal { prefix: String, message: String },
-    #[error("invalid WAL object key `{object_key}`")]
-    InvalidWalObjectKey { object_key: String },
-    #[error("duplicate WAL seq `{seq:?}` with keys `{first}` and `{second}`")]
-    DuplicateWalSeq {
-        seq: loon_api::ChangeSeq,
-        first: String,
-        second: String,
-    },
-    #[error("missing WAL object for seq `{seq:?}` under `{prefix}`")]
-    MissingWalObject {
-        prefix: String,
-        seq: loon_api::ChangeSeq,
-    },
-    #[error("failed to read WAL object `{object_key}`: {message}")]
-    ReadWal { object_key: String, message: String },
-    #[error("missing WAL object after list `{object_key}`")]
-    MissingWalObjectAfterList { object_key: String },
+    #[error(transparent)]
+    WalChainLoad(#[from] WalChainLoadError),
     #[error(transparent)]
     CheckpointLoad(#[from] CheckpointLoadError),
     #[error("wal replay failed: {0:?}")]
@@ -135,15 +118,22 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
             bootstrap_basis_metadata_state(),
         )
     };
-    let wal_tail = load_stored_wal_tail(
+    let wal_chain = load_validated_wal_chain(
         store,
-        expected_namespace,
-        initial_head.seq,
-        loaded_head.envelope.state.seq,
-        loaded_head.envelope.state.visible_wal_tip.clone(),
+        WalChainLoadRequest {
+            namespace_id: expected_namespace,
+            chain_base_seq: initial_head.seq,
+            head_seq: loaded_head.envelope.state.seq,
+            visible_tip: loaded_head.envelope.state.visible_wal_tip.clone(),
+            stop_after_seq: None,
+        },
     )?;
-    let replayed = replay_wal_tail_with_metadata(&initial_head, &initial_metadata_state, &wal_tail)
-        .map_err(BasisLoadError::WalReplay)?;
+    let replayed = replay_validated_wal_tail_with_metadata(
+        &initial_head,
+        &initial_metadata_state,
+        wal_chain.segments(),
+    )
+    .map_err(BasisLoadError::WalReplay)?;
     ensure_reconstructed_head_matches(&loaded_head.envelope.state, &replayed.resulting_head)?;
 
     Ok(VerifiedNamespaceBasis {
@@ -181,14 +171,19 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
     let head = loaded_head.envelope.state;
     let checkpoint_basis_seq = head.checkpoint_hint_seq.unwrap_or(ChangeSeq(0));
-    let wal_tail_segments = count_stored_wal_tail_segments(
+    let wal_chain = load_validated_wal_chain(
         store,
-        expected_namespace,
-        checkpoint_basis_seq,
-        head.seq,
-        head.visible_wal_tip.clone(),
+        WalChainLoadRequest {
+            namespace_id: expected_namespace,
+            chain_base_seq: checkpoint_basis_seq,
+            head_seq: head.seq,
+            visible_tip: head.visible_wal_tip.clone(),
+            stop_after_seq: None,
+        },
     )
-    .map_err(CoreError::Basis)?;
+    .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
+    let wal_tail_segments = u64::try_from(wal_chain.segments().len())
+        .map_err(|_| CoreError::Store("WAL tail segment count overflow".to_owned()))?;
     Ok(NamespaceHeadSummary {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
@@ -265,119 +260,5 @@ fn ensure_reconstructed_head_matches(
             actual: Box::new(reconstructed.clone()),
         });
     }
-    Ok(())
-}
-
-fn load_stored_wal_tail<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace: &NamespaceId,
-    from_seq_exclusive: ChangeSeq,
-    through_seq_inclusive: ChangeSeq,
-    visible_wal_tip: Option<WalSegmentPointer>,
-) -> Result<Vec<StoredWalObject>, BasisLoadError> {
-    let mut reversed = Vec::new();
-    walk_stored_wal_tail(
-        store,
-        expected_namespace,
-        from_seq_exclusive,
-        through_seq_inclusive,
-        visible_wal_tip,
-        |pointer, encoded_bytes| {
-            reversed.push(StoredWalObject {
-                object_key: pointer.object_key.clone(),
-                encoded_bytes,
-            });
-            Ok(())
-        },
-    )?;
-
-    reversed.reverse();
-    Ok(reversed)
-}
-
-fn count_stored_wal_tail_segments<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace: &NamespaceId,
-    from_seq_exclusive: ChangeSeq,
-    through_seq_inclusive: ChangeSeq,
-    visible_wal_tip: Option<WalSegmentPointer>,
-) -> Result<u64, BasisLoadError> {
-    let mut count = 0u64;
-    walk_stored_wal_tail(
-        store,
-        expected_namespace,
-        from_seq_exclusive,
-        through_seq_inclusive,
-        visible_wal_tip,
-        |_pointer, _encoded_bytes| {
-            count = count.saturating_add(1);
-            Ok(())
-        },
-    )?;
-    Ok(count)
-}
-
-fn walk_stored_wal_tail<S, F>(
-    store: &S,
-    expected_namespace: &NamespaceId,
-    from_seq_exclusive: ChangeSeq,
-    through_seq_inclusive: ChangeSeq,
-    visible_wal_tip: Option<WalSegmentPointer>,
-    mut visit: F,
-) -> Result<(), BasisLoadError>
-where
-    S: ObjectStore + ?Sized,
-    F: FnMut(&WalSegmentPointer, Vec<u8>) -> Result<(), BasisLoadError>,
-{
-    if through_seq_inclusive <= from_seq_exclusive {
-        return Ok(());
-    }
-
-    let prefix = format!("namespaces/{}/wal/", expected_namespace.as_str());
-    let mut pointer = visible_wal_tip.ok_or_else(|| BasisLoadError::MissingWalObject {
-        prefix: prefix.clone(),
-        seq: through_seq_inclusive,
-    })?;
-
-    loop {
-        if pointer.end_seq <= from_seq_exclusive {
-            break;
-        }
-        let encoded_bytes = store
-            .get(&pointer.object_key, None)
-            .map_err(|err| BasisLoadError::ReadWal {
-                object_key: pointer.object_key.clone(),
-                message: err.to_string(),
-            })?
-            .ok_or_else(|| BasisLoadError::MissingWalObjectAfterList {
-                object_key: pointer.object_key.clone(),
-            })?;
-        let envelope = decode_wal_segment_envelope_zstd(&encoded_bytes)
-            .map_err(|err| BasisLoadError::WalReplay(WalReplayError::Codec(err.to_string())))?;
-        if envelope.payload.namespace_id != *expected_namespace {
-            return Err(BasisLoadError::WalReplay(
-                WalReplayError::NamespaceMismatch {
-                    expected: expected_namespace.clone(),
-                    actual: envelope.payload.namespace_id.clone(),
-                },
-            ));
-        }
-        if envelope.payload.segment_id != pointer.segment_id
-            || envelope.payload.start_seq != pointer.start_seq
-            || envelope.payload.end_seq != pointer.end_seq
-            || envelope.payload_checksum_sha256 != pointer.payload_checksum_sha256
-        {
-            return Err(BasisLoadError::WalReplay(
-                WalReplayError::SegmentSummaryMismatch,
-            ));
-        }
-        let prev = envelope.payload.prev_visible_segment.clone();
-        visit(&pointer, encoded_bytes)?;
-        let Some(prev) = prev else {
-            break;
-        };
-        pointer = prev;
-    }
-
     Ok(())
 }

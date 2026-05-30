@@ -16,7 +16,7 @@ use crate::namespace::catalog::{
 };
 use crate::path::planner::{path_intent_fingerprint_for_path_intent, PathPlanner};
 use crate::publisher::NamespaceMutationCandidate;
-use crate::wal::{prepare_wal_segment, StoredWalObject};
+use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
 use crate::{
     load_content_store_descriptor_control, load_namespace_descriptor_control,
     load_namespace_head_control, load_namespace_lease_control,
@@ -27,9 +27,9 @@ use loon_api::v0::{
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
 use loon_api::{
-    decode_wal_segment_envelope_zstd, generate_upload_id, validate_upload_id, ChangeSeq, CommitId,
-    CompletedUpload, ContentRef, ContentStoreId, ControlObjectKind, HeadState, NamespaceId,
-    UploadSessionEnvelope, UploadSessionState, WalCommitDelta, WalDelta,
+    generate_upload_id, validate_upload_id, ChangeSeq, CommitId, CompletedUpload, ContentRef,
+    ContentStoreId, ControlObjectKind, HeadState, NamespaceId, UploadSessionEnvelope,
+    UploadSessionState, WalCommitDelta, WalDelta,
 };
 use loon_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -787,19 +787,27 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
 
-    let wal_objects = load_wal_range(store, namespace_id, after_seq, basis.head.seq, &basis.head)?;
+    let wal_chain = load_validated_wal_chain(
+        store,
+        WalChainLoadRequest {
+            namespace_id,
+            chain_base_seq: basis.head.retention_floor_seq,
+            head_seq: basis.head.seq,
+            visible_tip: basis.head.visible_wal_tip.clone(),
+            stop_after_seq: Some(after_seq),
+        },
+    )
+    .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
     let mut changes = Vec::new();
-    for wal_object in wal_objects {
-        let envelope = decode_wal_segment_envelope_zstd(&wal_object.encoded_bytes)
-            .map_err(|err| CoreError::Store(err.to_string()))?;
-        for record in envelope.payload.records {
+    for segment in wal_chain.segments() {
+        for record in segment.records() {
             if record.seq > after_seq {
                 changes.push(CommittedChange {
                     seq: record.seq,
-                    commit_id: record.commit_id,
-                    message: record.message,
-                    annotations: record.annotations,
-                    ops: record.results,
+                    commit_id: record.commit_id.clone(),
+                    message: record.message.clone(),
+                    annotations: record.annotations.clone(),
+                    ops: record.results.clone(),
                     deltas: record.deltas.iter().map(commit_delta_from_wal).collect(),
                 });
             }
@@ -968,54 +976,6 @@ fn read_upload_session_object<S: ObjectStore + ?Sized>(
         metadata,
         envelope,
     })
-}
-
-fn load_wal_range<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    from_seq_exclusive: ChangeSeq,
-    through_seq_inclusive: ChangeSeq,
-    head: &loon_api::HeadState,
-) -> Result<Vec<crate::wal::StoredWalObject>, CoreError> {
-    if through_seq_inclusive <= from_seq_exclusive {
-        return Ok(Vec::new());
-    }
-    let prefix = format!("namespaces/{}/wal/", namespace_id.as_str());
-    let mut pointer =
-        head.visible_wal_tip
-            .clone()
-            .ok_or_else(|| BasisLoadError::MissingWalObject {
-                prefix: prefix.clone(),
-                seq: through_seq_inclusive,
-            })?;
-    let mut out = Vec::new();
-    loop {
-        if pointer.end_seq <= from_seq_exclusive {
-            break;
-        }
-        let encoded_bytes = store
-            .get(&pointer.object_key, None)
-            .map_err(|err| BasisLoadError::ReadWal {
-                object_key: pointer.object_key.clone(),
-                message: err.to_string(),
-            })?
-            .ok_or_else(|| BasisLoadError::MissingWalObjectAfterList {
-                object_key: pointer.object_key.clone(),
-            })?;
-        let envelope = decode_wal_segment_envelope_zstd(&encoded_bytes)
-            .map_err(|err| CoreError::Store(err.to_string()))?;
-        let prev = envelope.payload.prev_visible_segment.clone();
-        out.push(StoredWalObject {
-            object_key: pointer.object_key,
-            encoded_bytes,
-        });
-        let Some(prev) = prev else {
-            break;
-        };
-        pointer = prev;
-    }
-    out.reverse();
-    Ok(out)
 }
 
 fn find_commit_receipt<'a>(
