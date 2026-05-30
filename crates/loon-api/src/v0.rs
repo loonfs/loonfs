@@ -1,4 +1,7 @@
-use crate::{ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NamespaceId, RevisionNo};
+use crate::{
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamePolicy,
+    NamespaceId, RevisionNo,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -118,11 +121,11 @@ pub enum CommitPrecondition {
     },
     ChildNameAbsent {
         parent_inode: InodeId,
-        name_key: String,
+        name_key: NameKey,
     },
     BindingIs {
         parent_inode: InodeId,
-        name_key: String,
+        name_key: NameKey,
         child_inode: InodeId,
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
@@ -185,7 +188,7 @@ pub enum CommitDelta {
         semantic_op_index: u32,
         delta_index: u32,
         parent_inode: InodeId,
-        name_key: String,
+        name_key: NameKey,
         display_name: String,
         child_inode: InodeId,
     },
@@ -193,7 +196,7 @@ pub enum CommitDelta {
         semantic_op_index: u32,
         delta_index: u32,
         parent_inode: InodeId,
-        name_key: String,
+        name_key: NameKey,
         child_inode: InodeId,
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
@@ -230,4 +233,118 @@ pub struct ChangesResponse {
     pub from_exclusive_seq: ChangeSeq,
     pub through_seq: ChangeSeq,
     pub changes: Vec<CommittedChange>,
+}
+
+impl CommitPrecondition {
+    pub fn child_name_absent(parent_inode: InodeId, name_key: NameKey) -> Self {
+        Self::ChildNameAbsent {
+            parent_inode,
+            name_key,
+        }
+    }
+
+    pub fn child_display_name_absent(
+        parent_inode: InodeId,
+        name_policy: NamePolicy,
+        display_name: &DisplayName,
+    ) -> Self {
+        Self::child_name_absent(
+            parent_inode,
+            NameKey::for_display_name(name_policy, display_name),
+        )
+    }
+
+    pub fn binding_is(
+        parent_inode: InodeId,
+        name_key: NameKey,
+        child_inode: InodeId,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
+    ) -> Self {
+        Self::BindingIs {
+            parent_inode,
+            name_key,
+            child_inode,
+            bind_seq,
+            bind_delta_index,
+        }
+    }
+
+    pub fn display_name_binding_is(
+        parent_inode: InodeId,
+        name_policy: NamePolicy,
+        display_name: &DisplayName,
+        child_inode: InodeId,
+        bind_seq: ChangeSeq,
+        bind_delta_index: u32,
+    ) -> Self {
+        Self::binding_is(
+            parent_inode,
+            NameKey::for_display_name(name_policy, display_name),
+            child_inode,
+            bind_seq,
+            bind_delta_index,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommitDelta, CommitPrecondition};
+    use crate::{ChangeSeq, InodeId, InodeKind, NameKey};
+
+    #[test]
+    fn commit_precondition_name_key_serializes_as_plain_string() {
+        let precondition = CommitPrecondition::ChildNameAbsent {
+            parent_inode: InodeId(1),
+            name_key: NameKey::parse("report.txt").expect("valid name key"),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&precondition).expect("serialize precondition"),
+            r#"{"type":"child_name_absent","parent_inode":1,"name_key":"report.txt"}"#
+        );
+    }
+
+    #[test]
+    fn commit_delta_name_key_serializes_as_plain_string() {
+        let delta = CommitDelta::BindDirentry {
+            semantic_op_index: 0,
+            delta_index: 1,
+            parent_inode: InodeId(1),
+            name_key: NameKey::parse("report.txt").expect("valid name key"),
+            display_name: "Report.txt".to_owned(),
+            child_inode: InodeId(2),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&delta).expect("serialize delta"),
+            r#"{"delta":"bind_direntry","semantic_op_index":0,"delta_index":1,"parent_inode":1,"name_key":"report.txt","display_name":"Report.txt","child_inode":2}"#
+        );
+
+        let unbind = CommitDelta::UnbindDirentry {
+            semantic_op_index: 0,
+            delta_index: 2,
+            parent_inode: InodeId(1),
+            name_key: NameKey::parse("report.txt").expect("valid name key"),
+            child_inode: InodeId(2),
+            bind_seq: ChangeSeq(7),
+            bind_delta_index: 1,
+        };
+        assert_eq!(
+            serde_json::to_string(&unbind).expect("serialize unbind delta"),
+            r#"{"delta":"unbind_direntry","semantic_op_index":0,"delta_index":2,"parent_inode":1,"name_key":"report.txt","child_inode":2,"bind_seq":7,"bind_delta_index":1}"#
+        );
+
+        let create_inode = CommitDelta::CreateInode {
+            semantic_op_index: 0,
+            delta_index: 0,
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+        };
+        assert_eq!(
+            serde_json::to_string(&create_inode).expect("serialize create inode"),
+            r#"{"delta":"create_inode","semantic_op_index":0,"delta_index":0,"inode_id":2,"inode_kind":"file"}"#
+        );
+    }
 }

@@ -1,9 +1,10 @@
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
+use loon_api::v0::{CommitAnnotations, RenameMode};
+use loon_api::wire::control::{HeadState, HeadStateEnvelope, LeaseState};
 use loon_api::{
-    v0::{CommitAnnotations, RenameMode},
-    ChangeSeq, CommitId, ContentRef, FenceToken, HeadState, HeadStateEnvelope, InodeId, InodeKind,
-    LeaseState, NamePolicy, NamespaceId, RevisionNo,
+    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, NamePolicy, NamespaceId,
+    RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 

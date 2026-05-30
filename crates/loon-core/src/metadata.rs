@@ -1,7 +1,8 @@
 use crate::invariants::InvariantId;
+use loon_api::wire::wal::{WalCommitPayload, WalDelta};
 use loon_api::{
     v0::CommitOpResult, AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
-    NamePolicy, RevisionNo, WalCommitPayload, WalDelta,
+    NamePolicy, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

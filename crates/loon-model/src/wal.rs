@@ -1,5 +1,7 @@
 use crate::metadata::{MetadataApplyError, MetadataState};
-use loon_api::{ChangeSeq, HeadState, InodeId, WalDelta};
+use loon_api::wire::control::HeadState;
+use loon_api::wire::wal::WalDelta;
+use loon_api::{ChangeSeq, InodeId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

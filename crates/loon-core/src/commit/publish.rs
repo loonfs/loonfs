@@ -1,7 +1,8 @@
 use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan, PreparedCommitHeadPublish};
 use crate::invariants::InvariantId;
 use crate::wal::PreparedWalSegment;
-use loon_api::{ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope};
+use loon_api::wire::control::{ControlObjectKind, HeadState, HeadStateEnvelope};
+use loon_api::ChangeSeq;
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::ObjectStoreError;
 use loon_objectstore::{ObjectMetadata, ObjectStore};
@@ -127,10 +128,8 @@ fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loon_api::{
-        CommitId, FenceToken, InodeId, NamespaceId, WalCommitPayload, WalSegmentEnvelope,
-        WalSegmentPayload,
-    };
+    use loon_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
+    use loon_api::{CommitId, FenceToken, InodeId, NamespaceId};
 
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
         HeadState {

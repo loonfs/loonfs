@@ -1,6 +1,6 @@
+use loon_api::wire::wal::WalDelta;
 use loon_api::{
     AbsolutePath, ChangeSeq, ContentRef, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo,
-    WalDelta,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;

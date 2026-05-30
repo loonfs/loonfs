@@ -26,10 +26,13 @@ use loon_api::v0::{
     CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
     CompleteUploadResponse, UploadContentResponse, UploadMode,
 };
+use loon_api::wire::control::{
+    CompletedUpload, ControlObjectKind, HeadState, UploadSessionEnvelope, UploadSessionState,
+};
+use loon_api::wire::wal::{WalCommitDelta, WalDelta};
 use loon_api::{
-    generate_upload_id, validate_upload_id, ChangeSeq, CommitId, CompletedUpload, ContentRef,
-    ContentStoreId, ControlObjectKind, HeadState, NamespaceId, UploadSessionEnvelope,
-    UploadSessionState, WalCommitDelta, WalDelta,
+    generate_upload_id, validate_upload_id, ChangeSeq, CommitId, ContentRef, ContentStoreId,
+    NameKey, NamespaceId,
 };
 use loon_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
@@ -808,7 +811,11 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
                     message: record.message.clone(),
                     annotations: record.annotations.clone(),
                     ops: record.results.clone(),
-                    deltas: record.deltas.iter().map(commit_delta_from_wal).collect(),
+                    deltas: record
+                        .deltas
+                        .iter()
+                        .map(commit_delta_from_wal)
+                        .collect::<Result<Vec<_>, _>>()?,
                 });
             }
         }
@@ -822,9 +829,9 @@ pub fn list_changes_after<S: ObjectStore + ?Sized>(
     })
 }
 
-fn commit_delta_from_wal(delta: &WalCommitDelta) -> CommitDelta {
+fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta, CoreError> {
     let semantic_op_index = delta.semantic_op_index;
-    match &delta.delta {
+    Ok(match &delta.delta {
         WalDelta::CreateInode {
             delta_index,
             inode_id,
@@ -845,7 +852,8 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> CommitDelta {
             semantic_op_index,
             delta_index: *delta_index,
             parent_inode: *parent_inode,
-            name_key: name_key.clone(),
+            name_key: NameKey::try_new(name_key.clone())
+                .map_err(|err| CoreError::Store(format!("invalid WAL name_key: {err}")))?,
             display_name: display_name.clone(),
             child_inode: *child_inode,
         },
@@ -860,7 +868,8 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> CommitDelta {
             semantic_op_index,
             delta_index: *delta_index,
             parent_inode: *parent_inode,
-            name_key: name_key.clone(),
+            name_key: NameKey::try_new(name_key.clone())
+                .map_err(|err| CoreError::Store(format!("invalid WAL name_key: {err}")))?,
             child_inode: *child_inode,
             bind_seq: *bind_seq,
             bind_delta_index: *bind_delta_index,
@@ -885,7 +894,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> CommitDelta {
             delta_index: *delta_index,
             root_inode: *root_inode,
         },
-    }
+    })
 }
 
 fn validate_commit_content_references<S: ObjectStore + ?Sized>(

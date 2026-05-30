@@ -1,3 +1,4 @@
+use crate::control::WalSegmentPointer;
 use crate::digest::sha256_hex;
 use crate::v0::{CommitAnnotations, CommitOpResult};
 use crate::{
@@ -104,7 +105,7 @@ pub struct WalSegmentPayload {
     pub namespace_id: NamespaceId,
     pub segment_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prev_visible_segment: Option<crate::WalSegmentPointer>,
+    pub prev_visible_segment: Option<WalSegmentPointer>,
     pub base_head_seq: ChangeSeq,
     pub start_seq: ChangeSeq,
     pub end_seq: ChangeSeq,
@@ -138,8 +139,8 @@ impl WalSegmentEnvelope {
         Ok(self.payload_checksum_sha256 == wal_payload_checksum_sha256(&self.payload)?)
     }
 
-    pub fn pointer(&self, object_key: String) -> crate::WalSegmentPointer {
-        crate::WalSegmentPointer {
+    pub fn pointer(&self, object_key: String) -> WalSegmentPointer {
+        WalSegmentPointer {
             object_key,
             segment_id: self.payload.segment_id.clone(),
             start_seq: self.payload.start_seq,

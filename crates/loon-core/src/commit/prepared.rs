@@ -2,9 +2,10 @@ use super::{
     core_commit_fingerprint, CommitFingerprintError, CommitOp, CommitPlan, CommitRequest,
     PathIntentFingerprint, ResolvedBinding, SemanticMutationIdentity,
 };
+use loon_api::wire::wal::WalDelta;
 use loon_api::{
     name_key_for_display_name, v0::CommitOpResult, ContentRef, FenceToken, InodeId, InodeKind,
-    NamePolicy, NamespaceId, RevisionNo, WalDelta,
+    NamePolicy, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

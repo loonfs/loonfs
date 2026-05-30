@@ -8,14 +8,19 @@ use crate::metadata::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
     MetadataStateBuilder, RevisionRecord, SubtreeTombstoneRecord,
 };
-use loon_api::{
+use loon_api::wire::checkpoint::{
     checkpoint_page_checksum_sha256, checkpoint_segment_payload_checksum_sha256,
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
     encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
-    AdvanceRetentionResponse, ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload,
-    CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-    CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest, ControlObjectKind,
-    CreateCheckpointResponse, FenceToken, HeadState, HeadStateEnvelope, InodeId, NamespaceId,
+    CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage, CheckpointRow,
+    CheckpointSegmentDescriptor, CheckpointSegmentEnvelope, CheckpointSegmentPayload,
+    CheckpointTableFamily, CheckpointTableManifest,
+};
+use loon_api::wire::control::{
+    ControlObjectKind, HeadState, HeadStateEnvelope, ProgressStateEnvelope,
+};
+use loon_api::{
+    AdvanceRetentionResponse, ChangeSeq, CreateCheckpointResponse, FenceToken, InodeId, NamespaceId,
 };
 use loon_objectstore::keys::{
     checkpoint_manifest, checkpoint_table, derived_progress,
@@ -617,7 +622,7 @@ fn ensure_required_retention_progress<S: ObjectStore + ?Sized>(
                 namespace_id.as_str()
             )));
         };
-        let progress: loon_api::ProgressStateEnvelope =
+        let progress: ProgressStateEnvelope =
             serde_json::from_slice(&bytes).map_err(|err| CoreError::Store(err.to_string()))?;
         if progress.state.through_seq < target_floor {
             return Err(CoreError::CheckpointUnavailable(format!(
@@ -1141,7 +1146,8 @@ mod tests {
         write_file_bytes, BasisLoadError, CoreError, CoreErrorKind, MutationContext,
         PutFileBehavior,
     };
-    use loon_api::{ChangeSeq, CheckpointManifestEnvelope, CheckpointManifestPayload, NamespaceId};
+    use loon_api::wire::checkpoint::{CheckpointManifestEnvelope, CheckpointManifestPayload};
+    use loon_api::{ChangeSeq, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{
         checkpoint_manifest, checkpoint_table, namespace_head, CheckpointTableFamily,

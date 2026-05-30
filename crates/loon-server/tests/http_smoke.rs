@@ -3,8 +3,9 @@ use loon_api::{
         CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
-    AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, ControlObjectKind,
-    CreateCheckpointResponse, InodeId, InodeKind, LeaseStateEnvelope, RevisionNo,
+    wire::control::{ControlObjectKind, LeaseStateEnvelope},
+    AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
+    InodeId, InodeKind, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_objectstore::keys::{checkpoint_manifest, namespace_lease};
@@ -414,7 +415,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
                 name_key,
                 display_name,
                 ..
-            } if name_key == "uploaded.txt" && display_name == "uploaded.txt"
+            } if name_key.as_str() == "uploaded.txt" && display_name == "uploaded.txt"
         ));
 
         let empty = harness

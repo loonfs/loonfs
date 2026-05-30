@@ -1,9 +1,10 @@
 use crate::context::MutationContext;
 use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::namespace::{next_takeover_head, HeadFenceTakeoverError};
-use loon_api::{
-    ControlObjectKind, FenceToken, HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceId,
+use loon_api::wire::control::{
+    ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
 };
+use loon_api::{FenceToken, NamespaceId};
 use loon_objectstore::ObjectStore;
 use loon_objectstore::ObjectStoreError;
 use serde::{Deserialize, Serialize};
@@ -189,7 +190,7 @@ fn compare_and_swap_head<S: ObjectStore + ?Sized>(
     object_key: &str,
     expected_etag: &str,
     writer_version: &str,
-    next_head: loon_api::HeadState,
+    next_head: HeadState,
 ) -> Result<(), CasOutcome> {
     let envelope =
         HeadStateEnvelope::from_state(ControlObjectKind::NamespaceHead, writer_version, next_head)

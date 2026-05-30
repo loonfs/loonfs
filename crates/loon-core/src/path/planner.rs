@@ -7,14 +7,16 @@ use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::commit::{PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use loon_api::wire::control::payload_checksum_sha256;
+use loon_api::wire::control::HeadState;
+use loon_api::wire::wal::WalDelta;
 use loon_api::{
-    payload_checksum_sha256,
     v0::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
         CommitRequest as ApiCommitRequest, RenameMode,
     },
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, DisplayName, HeadState, InodeId, InodeKind,
-    NameKey, NamespaceId,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey,
+    NamespaceId,
 };
 use loon_objectstore::ObjectStore;
 use serde::Serialize;
@@ -240,7 +242,8 @@ fn binding_is_precondition(
     }
     Ok(ApiCommitPrecondition::BindingIs {
         parent_inode,
-        name_key: binding.name_key,
+        name_key: NameKey::try_new(binding.name_key)
+            .map_err(|err| CoreError::InvalidPath(err.value().to_owned()))?,
         child_inode: binding.child_inode_id,
         bind_seq: binding.bind_seq,
         bind_delta_index: binding.bind_delta_index,
@@ -257,7 +260,7 @@ fn child_name_absent_precondition(
     let name_key = NameKey::for_display_name(view.head.name_policy, &display_name);
     ApiCommitPrecondition::ChildNameAbsent {
         parent_inode,
-        name_key: name_key.as_str().to_owned(),
+        name_key,
     }
 }
 
@@ -653,12 +656,12 @@ fn ensure_parent_directories(
         let applied = working.apply_committed_wal_deltas(
             committed_seq,
             &[
-                loon_api::WalDelta::CreateInode {
+                WalDelta::CreateInode {
                     delta_index,
                     inode_id: allocated,
                     inode_kind: InodeKind::Dir,
                 },
-                loon_api::WalDelta::BindDirentry {
+                WalDelta::BindDirentry {
                     delta_index: delta_index.saturating_add(1),
                     parent_inode: current_inode,
                     name_key: name_key.as_str().to_owned(),
@@ -847,7 +850,7 @@ mod tests {
                 CommitPrecondition::ChildNameAbsent {
                     parent_inode: InodeId(1),
                     name_key,
-                } if name_key == "docs"
+                } if name_key.as_str() == "docs"
             )));
     }
 
@@ -932,7 +935,7 @@ mod tests {
             .iter()
             .any(|precondition| matches!(
                 precondition,
-                CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key == "b.txt"
+                CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key.as_str() == "b.txt"
             )));
     }
 
@@ -981,7 +984,7 @@ mod tests {
             .iter()
             .any(|precondition| matches!(
                 precondition,
-                CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key == "copy.txt"
+                CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key.as_str() == "copy.txt"
             )));
     }
 

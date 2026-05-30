@@ -10,7 +10,8 @@ use crate::{
     BasisLoadError, NamespaceHeadEtagProbe, VerifiedNamespaceBasis,
 };
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
-use loon_api::{CommitId, LeaseState, MutationResult, NamespaceId};
+use loon_api::wire::control::LeaseState;
+use loon_api::{CommitId, MutationResult, NamespaceId};
 use loon_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -402,7 +403,8 @@ mod tests {
     use super::*;
     use crate::metadata::MetadataState;
     use crate::NamespaceHeadEtagProbe;
-    use loon_api::{ChangeSeq, ContentStoreId, FenceToken, HeadState, NamespaceDescriptorState};
+    use loon_api::wire::control::{HeadState, NamespaceDescriptorState};
+    use loon_api::{ChangeSeq, ContentStoreId, FenceToken};
 
     #[test]
     fn cached_verified_basis_refreshes_only_lease_state() {
