@@ -41,7 +41,7 @@ pub struct NamespaceHeadSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceHeadIdentity {
+pub struct NamespaceHeadEtagProbe {
     pub head_etag: String,
 }
 
@@ -198,10 +198,10 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn load_namespace_head_identity<S: ObjectStore + ?Sized>(
+pub fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
-) -> Result<NamespaceHeadIdentity, CoreError> {
+) -> Result<NamespaceHeadEtagProbe, CoreError> {
     NamespaceId::parse(expected_namespace.as_str())?;
     let object_key = namespace_head(expected_namespace.as_str());
     let metadata = store
@@ -223,7 +223,7 @@ pub fn load_namespace_head_identity<S: ObjectStore + ?Sized>(
         .ok_or(CoreError::Basis(BasisLoadError::MissingHeadEtag {
             object_key,
         }))?;
-    Ok(NamespaceHeadIdentity { head_etag })
+    Ok(NamespaceHeadEtagProbe { head_etag })
 }
 
 fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {
