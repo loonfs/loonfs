@@ -99,8 +99,8 @@ mod tests {
 
     fn core_request(writer_fence_token: FenceToken) -> CommitRequest {
         CommitRequest {
-            namespace_id: NamespaceId::from("demo"),
-            commit_id: CommitId::from("commit-a"),
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             writer_id: "writer-a".to_owned(),
             writer_fence_token,
             ops: vec![CommitOp::CreateDir {
@@ -134,7 +134,7 @@ mod tests {
         let different_writer =
             semantic_commit_fingerprint(&different_writer).expect("different writer fingerprint");
         let mut different_commit_id = core_request(FenceToken(1));
-        different_commit_id.commit_id = CommitId::from("commit-b");
+        different_commit_id.commit_id = CommitId::parse("commit-b").expect("valid commit id");
         let different_commit_id = semantic_commit_fingerprint(&different_commit_id)
             .expect("different commit id fingerprint");
 
@@ -160,9 +160,9 @@ mod tests {
 
     #[test]
     fn v0_semantic_fingerprint_matches_core_semantic_fingerprint() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let api_request = api_v0::CommitRequest {
-            commit_id: CommitId::from("commit-a"),
+            commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![api_v0::CommitOp::CreateDir {
                 parent_inode: InodeId(1),

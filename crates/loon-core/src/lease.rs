@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn namespace_id() -> NamespaceId {
-        NamespaceId::from("demo")
+        NamespaceId::parse("demo").expect("valid namespace id")
     }
 
     fn context(writer_id: &str, now_ms: u64) -> MutationContext {
@@ -369,7 +369,7 @@ mod tests {
 
     fn create_dir_request(commit_id: &str, display_name: &str) -> ApiCommitRequest {
         ApiCommitRequest {
-            commit_id: CommitId::from(commit_id),
+            commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateDir {
                 parent_inode: InodeId(1),

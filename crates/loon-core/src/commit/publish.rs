@@ -144,7 +144,7 @@ mod tests {
     fn plan(namespace_id: NamespaceId, assigned_seq: ChangeSeq) -> CommitPlan {
         CommitPlan {
             namespace_id,
-            commit_id: CommitId::from("publish-plan"),
+            commit_id: CommitId::parse("publish-plan").expect("valid commit id"),
             apply_after_seq: ChangeSeq(assigned_seq.0.saturating_sub(1)),
             assigned_seq,
             allocated_inode_ids: Vec::new(),
@@ -172,7 +172,8 @@ mod tests {
                     namespace_id: namespace_id.clone(),
                     seq,
                     apply_after_seq: ChangeSeq(seq.0.saturating_sub(1)),
-                    commit_id: CommitId::from(format!("publish-record-{index}")),
+                    commit_id: CommitId::try_new(format!("publish-record-{index}"))
+                        .expect("valid commit id"),
                     semantic_commit_fingerprint_sha256: format!("fingerprint-{index}"),
                     writer_id: "writer-a".to_owned(),
                     writer_fence_token: FenceToken(1),
@@ -211,7 +212,7 @@ mod tests {
 
     #[test]
     fn head_publish_accepts_segment_connecting_current_head_to_plan() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let current_head = head(namespace_id.clone(), ChangeSeq(7));
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(9), 2);
@@ -228,7 +229,7 @@ mod tests {
 
     #[test]
     fn head_publish_rejects_segment_base_after_current_head() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let current_head = head(namespace_id.clone(), ChangeSeq(7));
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(8), ChangeSeq(9), ChangeSeq(9), 1);
@@ -244,7 +245,7 @@ mod tests {
 
     #[test]
     fn head_publish_rejects_segment_base_before_current_head() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let current_head = head(namespace_id.clone(), ChangeSeq(7));
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(6), ChangeSeq(7), ChangeSeq(9), 3);
@@ -260,7 +261,7 @@ mod tests {
 
     #[test]
     fn head_publish_rejects_empty_segment() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let current_head = head(namespace_id.clone(), ChangeSeq(7));
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(9), 0);
@@ -273,7 +274,7 @@ mod tests {
 
     #[test]
     fn head_publish_rejects_segment_start_that_skips_current_head() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let current_head = head(namespace_id.clone(), ChangeSeq(7));
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(9), ChangeSeq(9), 1);
@@ -289,7 +290,7 @@ mod tests {
 
     #[test]
     fn head_publish_rejects_segment_end_that_differs_from_plan() {
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let current_head = head(namespace_id.clone(), ChangeSeq(7));
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(10), 3);
@@ -305,10 +306,16 @@ mod tests {
 
     #[test]
     fn head_publish_rejects_segment_namespace_mismatch() {
-        let current_head = head(NamespaceId::from("demo"), ChangeSeq(7));
-        let plan = plan(NamespaceId::from("demo"), ChangeSeq(9));
+        let current_head = head(
+            NamespaceId::parse("demo").expect("valid namespace id"),
+            ChangeSeq(7),
+        );
+        let plan = plan(
+            NamespaceId::parse("demo").expect("valid namespace id"),
+            ChangeSeq(9),
+        );
         let wal = wal_segment(
-            NamespaceId::from("other"),
+            NamespaceId::parse("other").expect("valid namespace id"),
             ChangeSeq(7),
             ChangeSeq(8),
             ChangeSeq(9),
@@ -318,7 +325,7 @@ mod tests {
         assert!(matches!(
             prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer"),
             Err(CommitHeadPublishError::WalSegmentNamespaceMismatch { head, wal })
-                if head == NamespaceId::from("demo") && wal == NamespaceId::from("other")
+                if head == NamespaceId::parse("demo").expect("valid namespace id") && wal == NamespaceId::parse("other").expect("valid namespace id")
         ));
     }
 }

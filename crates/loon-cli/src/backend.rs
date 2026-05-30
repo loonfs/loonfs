@@ -568,7 +568,10 @@ mod tests {
         let changes = target
             .backend
             .fs
-            .list_changes_after(&NamespaceId::from("demo"), ChangeSeq(0))
+            .list_changes_after(
+                &NamespaceId::parse("demo").expect("valid namespace id"),
+                ChangeSeq(0),
+            )
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
         assert!(!changes.changes[0].commit_id.as_str().trim().is_empty());

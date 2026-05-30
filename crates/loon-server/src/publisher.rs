@@ -504,7 +504,7 @@ mod tests {
         display_name: impl Into<String>,
     ) -> CommitRequest {
         CommitRequest {
-            commit_id: CommitId::from(commit_id.into()),
+            commit_id: CommitId::try_new(commit_id.into()).expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -549,7 +549,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_admits_pending_batch_while_active_publish_blocks() {
         let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
@@ -602,7 +602,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
         let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
@@ -643,7 +643,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
         let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
@@ -710,7 +710,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn publisher_full_batch_does_not_wait_on_missed_full_notification() {
         let temp_dir = tempdir().expect("tempdir");
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let config = test_config(temp_dir.path());
@@ -761,13 +761,13 @@ mod tests {
                 key_prefix: None,
             },
         });
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let fs = test_fs(store.clone(), &config);
         create_namespace(&fs, &namespace_id);
         let registry = PublisherRegistry::new(fs);
 
         let request_a = CommitRequest {
-            commit_id: CommitId::from("req-a"),
+            commit_id: CommitId::parse("req-a").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -777,7 +777,7 @@ mod tests {
             annotations: None,
         };
         let request_b = CommitRequest {
-            commit_id: CommitId::from("req-b"),
+            commit_id: CommitId::parse("req-b").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -813,7 +813,7 @@ mod tests {
                 key_prefix: None,
             },
         });
-        let namespace_id = NamespaceId::from("demo");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let fs = test_fs(store.clone(), &config);
         create_namespace(&fs, &namespace_id);
         let content =
@@ -821,7 +821,7 @@ mod tests {
         let registry = PublisherRegistry::new(fs);
 
         let explicit = CommitRequest {
-            commit_id: CommitId::from("explicit-commit"),
+            commit_id: CommitId::parse("explicit-commit").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDir {
                 parent_inode: InodeId(1),
@@ -831,7 +831,7 @@ mod tests {
             annotations: None,
         };
         let path_intent = PathMutationIntent::PutFile {
-            commit_id: CommitId::from("path-put"),
+            commit_id: CommitId::parse("path-put").expect("valid commit id"),
             absolute_path: "/file.txt".to_owned(),
             content_ref: content.content_ref,
             behavior: PutFileBehavior::CreateOnly,

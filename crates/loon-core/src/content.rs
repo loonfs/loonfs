@@ -327,7 +327,8 @@ mod tests {
     fn test_store() -> (tempfile::TempDir, LocalFsStore, ContentStoreId) {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let content_store_id = ContentStoreId::from("cs_00000000000000000000000000000001");
+        let content_store_id = ContentStoreId::parse("cs_00000000000000000000000000000001")
+            .expect("valid content store id");
         (temp_dir, store, content_store_id)
     }
 
