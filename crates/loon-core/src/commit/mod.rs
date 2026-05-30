@@ -1,3 +1,4 @@
+use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
 use loon_api::{
     v0::{CommitAnnotations, RenameMode},
@@ -126,7 +127,7 @@ pub struct CommitPlan {
     pub resulting_next_inode_id: InodeId,
     pub name_policy: NamePolicy,
     pub metadata_preconditions: Vec<Precondition>,
-    pub checked_invariants: Vec<String>,
+    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,7 +145,7 @@ pub struct PreparedCommitHeadPublish {
     pub resulting_head: HeadState,
     pub envelope: HeadStateEnvelope,
     pub encoded_bytes: Vec<u8>,
-    pub checked_invariants: Vec<String>,
+    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,8 +360,8 @@ pub enum CommitHeadPublishError {
     Store(String),
 }
 
-pub(crate) fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
-    if !invariants.iter().any(|existing| existing == name) {
-        invariants.push(name.to_owned());
+pub(crate) fn push_unique_invariant(invariants: &mut Vec<InvariantId>, id: InvariantId) {
+    if !invariants.contains(&id) {
+        invariants.push(id);
     }
 }

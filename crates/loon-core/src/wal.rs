@@ -1,4 +1,5 @@
 use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
+use crate::invariants::InvariantId;
 use crate::metadata::{MetadataApplyError, MetadataState};
 use loon_api::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, generate_wal_segment_id,
@@ -16,7 +17,7 @@ pub struct PreparedWalSegment {
     pub segment_id: String,
     pub envelope: WalSegmentEnvelope,
     pub encoded_bytes: Vec<u8>,
-    pub checked_invariants: Vec<String>,
+    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +81,7 @@ impl ValidatedWalSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ValidatedWalChain {
     segments: Vec<ValidatedWalSegment>,
-    checked_invariants: Vec<String>,
+    checked_invariants: Vec<InvariantId>,
 }
 
 impl ValidatedWalChain {
@@ -133,7 +134,7 @@ pub struct ReplayedWalSegment {
     pub object_key: String,
     pub envelope: WalSegmentEnvelope,
     pub resulting_head: HeadState,
-    pub checked_invariants: Vec<String>,
+    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,14 +143,14 @@ pub struct ReplayedWalSegmentWithMetadata {
     pub envelope: WalSegmentEnvelope,
     pub resulting_head: HeadState,
     pub resulting_metadata_state: MetadataState,
-    pub checked_invariants: Vec<String>,
+    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayedWalTail {
     pub resulting_head: HeadState,
     pub resulting_metadata_state: MetadataState,
-    pub checked_invariants: Vec<String>,
+    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,9 +261,9 @@ pub fn prepare_wal_segment(
         envelope,
         encoded_bytes,
         checked_invariants: vec![
-            "wal_payload_checksum_matches_payload".to_owned(),
-            "wal_key_matches_segment_seq_range".to_owned(),
-            "head_publish_requires_durable_wal".to_owned(),
+            InvariantId::WalPayloadChecksumMatchesPayload,
+            InvariantId::WalKeyMatchesSegmentSeqRange,
+            InvariantId::HeadPublishRequiresDurableWal,
         ],
     })
 }
@@ -403,11 +404,11 @@ pub fn replay_wal_segment(
         envelope,
         resulting_head,
         checked_invariants: vec![
-            "wal_payload_checksum_matches_payload".to_owned(),
-            "wal_key_matches_segment_seq_range".to_owned(),
-            "wal_replay_requires_matching_namespace".to_owned(),
-            "wal_replay_requires_matching_base_head_seq".to_owned(),
-            "wal_tail_seq_is_contiguous".to_owned(),
+            InvariantId::WalPayloadChecksumMatchesPayload,
+            InvariantId::WalKeyMatchesSegmentSeqRange,
+            InvariantId::WalReplayRequiresMatchingNamespace,
+            InvariantId::WalReplayRequiresMatchingBaseHeadSeq,
+            InvariantId::WalTailSeqIsContiguous,
         ],
     })
 }
@@ -425,7 +426,10 @@ pub fn replay_wal_segment_with_metadata(
             .apply_committed_wal_record(record)
             .map_err(WalReplayError::MetadataApply)?;
         current_metadata_state = applied.metadata_state;
-        push_invariant(&mut checked_invariants, "wal_replay_applies_metadata_rows");
+        push_invariant(
+            &mut checked_invariants,
+            InvariantId::WalReplayAppliesMetadataRows,
+        );
         extend_invariants(&mut checked_invariants, &applied.checked_invariants);
     }
 
@@ -499,7 +503,10 @@ pub(crate) fn replay_validated_wal_tail_with_metadata(
                 .apply_committed_wal_record(record)
                 .map_err(WalReplayError::MetadataApply)?;
             current_metadata_state = applied.metadata_state;
-            push_invariant(&mut checked_invariants, "wal_replay_applies_metadata_rows");
+            push_invariant(
+                &mut checked_invariants,
+                InvariantId::WalReplayAppliesMetadataRows,
+            );
             extend_invariants(&mut checked_invariants, &applied.checked_invariants);
         }
         current_head.visible_wal_tip = Some(wal_segment.pointer());
@@ -633,13 +640,13 @@ fn validate_decoded_replayed_wal(
     Ok(())
 }
 
-fn extend_wal_replay_invariants(checked_invariants: &mut Vec<String>) {
+fn extend_wal_replay_invariants(checked_invariants: &mut Vec<InvariantId>) {
     for invariant in [
-        "wal_payload_checksum_matches_payload",
-        "wal_key_matches_segment_seq_range",
-        "wal_replay_requires_matching_namespace",
-        "wal_replay_requires_matching_base_head_seq",
-        "wal_tail_seq_is_contiguous",
+        InvariantId::WalPayloadChecksumMatchesPayload,
+        InvariantId::WalKeyMatchesSegmentSeqRange,
+        InvariantId::WalReplayRequiresMatchingNamespace,
+        InvariantId::WalReplayRequiresMatchingBaseHeadSeq,
+        InvariantId::WalTailSeqIsContiguous,
     ] {
         push_invariant(checked_invariants, invariant);
     }
@@ -668,18 +675,15 @@ fn replay_next_inode_id_from_commit_deltas(
     })
 }
 
-fn extend_invariants(checked_invariants: &mut Vec<String>, new_invariants: &[String]) {
+fn extend_invariants(checked_invariants: &mut Vec<InvariantId>, new_invariants: &[InvariantId]) {
     for invariant in new_invariants {
-        push_invariant(checked_invariants, invariant);
+        push_invariant(checked_invariants, *invariant);
     }
 }
 
-fn push_invariant(checked_invariants: &mut Vec<String>, invariant: &str) {
-    if !checked_invariants
-        .iter()
-        .any(|existing| existing == invariant)
-    {
-        checked_invariants.push(invariant.to_owned());
+fn push_invariant(checked_invariants: &mut Vec<InvariantId>, invariant: InvariantId) {
+    if !checked_invariants.contains(&invariant) {
+        checked_invariants.push(invariant);
     }
 }
 
