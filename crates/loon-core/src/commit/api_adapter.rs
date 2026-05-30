@@ -100,7 +100,7 @@ pub(super) fn commit_precondition_from_v0(
             name_key,
         } => Precondition::ChildNameAbsent {
             parent_inode,
-            name_key,
+            name_key: name_key.as_str().to_owned(),
         },
         api_v0::CommitPrecondition::BindingIs {
             parent_inode,
@@ -110,7 +110,7 @@ pub(super) fn commit_precondition_from_v0(
             bind_delta_index,
         } => Precondition::BindingIs {
             parent_inode,
-            name_key,
+            name_key: name_key.as_str().to_owned(),
             child_inode,
             bind_seq,
             bind_delta_index,
@@ -126,7 +126,7 @@ mod tests {
     use super::*;
     use loon_api::{
         v0::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition},
-        CommitId, ContentRef, FenceToken, InodeId, NamespaceId, RevisionNo,
+        CommitId, ContentRef, FenceToken, InodeId, NameKey, NamespaceId, RevisionNo,
     };
 
     #[test]
@@ -144,11 +144,11 @@ mod tests {
                 },
                 ApiCommitPrecondition::ChildNameAbsent {
                     parent_inode: InodeId(1),
-                    name_key: "docs".to_owned(),
+                    name_key: NameKey::parse("docs").expect("valid name key"),
                 },
                 ApiCommitPrecondition::BindingIs {
                     parent_inode: InodeId(1),
-                    name_key: "file.txt".to_owned(),
+                    name_key: NameKey::parse("file.txt").expect("valid name key"),
                     child_inode: InodeId(2),
                     bind_seq: loon_api::ChangeSeq(4),
                     bind_delta_index: 1,

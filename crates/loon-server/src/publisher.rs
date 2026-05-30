@@ -346,6 +346,7 @@ mod tests {
     use super::*;
     use crate::config::{ServerConfig, StoreConfig};
     use loon_api::v0::{CommitOp, CommitRequest};
+    use loon_api::wire::wal::decode_wal_segment_envelope_zstd;
     use loon_api::{ChangeSeq, InodeId};
     use loon_core::{store_bytes_as_content, PathMutationIntent, PutFileBehavior};
     use loon_objectstore::fs::LocalFsStore;
@@ -856,8 +857,7 @@ mod tests {
             .get(&wal_keys[0], None)
             .expect("read wal")
             .expect("wal exists");
-        let segment =
-            loon_api::decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");
+        let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode wal segment");
         assert_eq!(segment.payload.records.len(), 2);
     }
 }

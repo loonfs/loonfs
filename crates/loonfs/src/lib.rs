@@ -10,7 +10,7 @@ pub use loon_api::v0::{
     CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
     UploadContentResponse,
 };
-use loon_api::HeadState;
+use loon_api::wire::control::HeadState;
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
     ContentRef, CreateCheckpointResponse, FilesystemOperationResponse, InodeId, MutationResult,

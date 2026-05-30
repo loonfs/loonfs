@@ -11,11 +11,13 @@ use crate::namespace::catalog::{
     load_namespace_descriptor, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
 };
+use loon_api::wire::control::{
+    ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ControlObjectKind, HeadState,
+    HeadStateEnvelope, LeaseState, LeaseStateEnvelope, NamespaceDescriptorEnvelope,
+    NamespaceDescriptorState,
+};
 use loon_api::{
-    ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ContentStoreId, ControlObjectKind,
-    FenceToken, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId, NamespaceIdValidationError,
-    NamespaceSummary,
+    ContentStoreId, FenceToken, NamespaceId, NamespaceIdValidationError, NamespaceSummary,
 };
 use loon_objectstore::keys::{
     content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,

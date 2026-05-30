@@ -39,6 +39,13 @@ pub struct GeneratedIdValidationError {
     reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid name_key {value:?}: {reason}")]
+pub struct NameKeyValidationError {
+    value: String,
+    reason: &'static str,
+}
+
 impl NamespaceIdValidationError {
     pub fn value(&self) -> &str {
         &self.value
@@ -66,6 +73,16 @@ impl GeneratedIdValidationError {
 
     pub fn reason(&self) -> &str {
         &self.reason
+    }
+}
+
+impl NameKeyValidationError {
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn reason(&self) -> &'static str {
+        self.reason
     }
 }
 
@@ -170,6 +187,19 @@ fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
     validate_id_grammar(value).map_err(|reason| commit_id_error(value, reason))
 }
 
+fn validate_name_key(value: &str) -> Result<(), NameKeyValidationError> {
+    if value.is_empty() {
+        return Err(name_key_error(value, "must not be empty"));
+    }
+    if value.contains('/') {
+        return Err(name_key_error(value, "must not contain `/`"));
+    }
+    if matches!(value, "." | "..") {
+        return Err(name_key_error(value, "must not be `.` or `..`"));
+    }
+    Ok(())
+}
+
 fn validate_id_grammar(value: &str) -> Result<(), &'static str> {
     if value.is_empty() {
         return Err("must not be empty");
@@ -223,6 +253,13 @@ fn generated_id_error(value: &str, reason: String) -> GeneratedIdValidationError
     }
 }
 
+fn name_key_error(value: &str, reason: &'static str) -> NameKeyValidationError {
+    NameKeyValidationError {
+        value: value.to_owned(),
+        reason,
+    }
+}
+
 impl ContentStoreId {
     pub fn generate() -> Self {
         Self(generated_id("cs"))
@@ -238,6 +275,31 @@ impl ContentStoreId {
         let value = value.into();
         validate_generated_id("cs", &value)?;
         Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl NameKey {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, NameKeyValidationError> {
+        let value = value.as_ref();
+        validate_name_key(value)?;
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn try_new(value: impl Into<String>) -> Result<Self, NameKeyValidationError> {
+        let value = value.into();
+        validate_name_key(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn for_display_name(policy: crate::NamePolicy, display_name: &crate::DisplayName) -> Self {
+        Self(crate::name_key_for_display_name(
+            policy,
+            display_name.as_str(),
+        ))
     }
 
     pub fn as_str(&self) -> &str {
@@ -311,6 +373,12 @@ impl AsRef<str> for CommitId {
     }
 }
 
+impl AsRef<str> for NameKey {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 impl Borrow<str> for NamespaceId {
     fn borrow(&self) -> &str {
         self.as_str()
@@ -324,6 +392,12 @@ impl Borrow<str> for ContentStoreId {
 }
 
 impl Borrow<str> for CommitId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for NameKey {
     fn borrow(&self) -> &str {
         self.as_str()
     }
@@ -348,6 +422,15 @@ impl Serialize for ContentStoreId {
 }
 
 impl Serialize for CommitId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl Serialize for NameKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -386,6 +469,16 @@ impl<'de> Deserialize<'de> for ContentStoreId {
     }
 }
 
+impl<'de> Deserialize<'de> for NameKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        NameKey::try_new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Numeric identity of a file or directory within a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InodeId(pub u64);
@@ -403,8 +496,8 @@ pub struct ChangeSeq(pub u64);
 pub struct FenceToken(pub u64);
 
 /// Name-policy-derived directory entry name used as a lookup key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NameKey(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NameKey(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -444,6 +537,12 @@ impl fmt::Display for CommitId {
     }
 }
 
+impl fmt::Display for NameKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl fmt::Display for InodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "inode-{}", self.0)
@@ -454,7 +553,7 @@ impl fmt::Display for InodeId {
 mod tests {
     use super::{
         generate_upload_id, generate_wal_segment_id, validate_upload_id, validate_wal_segment_id,
-        CommitId, ContentStoreId, NamespaceId,
+        CommitId, ContentStoreId, NameKey, NamespaceId,
     };
     use std::collections::BTreeSet;
 
@@ -613,5 +712,36 @@ mod tests {
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "generated id body must be lowercase hex: {value}"
         );
+    }
+
+    #[test]
+    fn name_key_parse_rejects_invalid_values() {
+        assert_eq!(
+            NameKey::parse("").expect_err("empty").reason(),
+            "must not be empty"
+        );
+        assert_eq!(
+            NameKey::parse("a/b").expect_err("slash").reason(),
+            "must not contain `/`"
+        );
+        assert_eq!(
+            NameKey::parse(".").expect_err("dot").reason(),
+            "must not be `.` or `..`"
+        );
+    }
+
+    #[test]
+    fn name_key_serializes_as_string_and_validates_deserialize() {
+        let name_key = NameKey::parse("report.txt").expect("valid name key");
+
+        assert_eq!(
+            serde_json::to_string(&name_key).expect("serialize name key"),
+            "\"report.txt\""
+        );
+        assert_eq!(
+            serde_json::from_str::<NameKey>("\"report.txt\"").expect("deserialize name key"),
+            name_key
+        );
+        assert!(serde_json::from_str::<NameKey>("\"a/b\"").is_err());
     }
 }

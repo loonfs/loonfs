@@ -1,11 +1,12 @@
 use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
 use crate::invariants::InvariantId;
 use crate::metadata::{MetadataApplyError, MetadataState};
-use loon_api::{
-    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, generate_wal_segment_id,
-    validate_wal_segment_id, ChangeSeq, HeadState, InodeId, NamespaceId, WalCommitDelta,
-    WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload, WalSegmentPointer,
+use loon_api::wire::control::{HeadState, WalSegmentPointer};
+use loon_api::wire::wal::{
+    decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
+    WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
+use loon_api::{generate_wal_segment_id, validate_wal_segment_id, ChangeSeq, InodeId, NamespaceId};
 use loon_objectstore::keys::wal_segment;
 use loon_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};

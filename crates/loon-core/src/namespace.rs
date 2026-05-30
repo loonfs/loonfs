@@ -1,7 +1,7 @@
 pub(crate) mod catalog;
 
+pub use loon_api::wire::control::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
 use loon_api::FenceToken;
-pub use loon_api::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
 use thiserror::Error;
 
 pub fn head_and_lease_fence_tokens_agree(head: &HeadState, lease: &LeaseState) -> bool {

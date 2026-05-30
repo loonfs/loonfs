@@ -1,7 +1,8 @@
 use crate::loading::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };
-use loon_api::{ContentStoreId, NamespaceDescriptorState, NamespaceId, NamespaceIdValidationError};
+use loon_api::wire::control::NamespaceDescriptorState;
+use loon_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
 use loon_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
 use loon_objectstore::ObjectStore;
 use thiserror::Error;

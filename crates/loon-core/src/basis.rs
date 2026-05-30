@@ -13,7 +13,8 @@ use crate::wal::{
     load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadError,
     WalChainLoadRequest, WalReplayError,
 };
-use loon_api::{ChangeSeq, ContentStoreId, HeadState, NamespaceDescriptorState, NamespaceId};
+use loon_api::wire::control::{HeadState, LeaseState, NamespaceDescriptorState};
+use loon_api::{ChangeSeq, ContentStoreId, NamespaceId};
 use loon_objectstore::{
     keys::{namespace_descriptor, namespace_head},
     ObjectStore,
@@ -27,7 +28,7 @@ pub struct VerifiedNamespaceBasis {
     pub content_store_id: ContentStoreId,
     pub head: HeadState,
     pub head_etag: String,
-    pub lease: loon_api::LeaseState,
+    pub lease: LeaseState,
     pub metadata_state: MetadataState,
 }
 

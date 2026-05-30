@@ -1,6 +1,8 @@
 use super::api_adapter::{commit_op_from_v0, commit_precondition_from_v0};
 use super::{CommitOp, CommitRequest, Precondition};
-use loon_api::{payload_checksum_sha256, v0 as api_v0, NamespaceId};
+use loon_api::v0 as api_v0;
+use loon_api::wire::control::payload_checksum_sha256;
+use loon_api::NamespaceId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

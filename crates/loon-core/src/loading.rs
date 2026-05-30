@@ -1,9 +1,9 @@
-use loon_api::{
+use loon_api::wire::control::{
     payload_checksum_sha256, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ContentStoreId, ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState,
-    LeaseStateEnvelope, NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId,
-    CONTROL_OBJECT_FORMAT_VERSION,
+    ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
+    NamespaceDescriptorEnvelope, NamespaceDescriptorState, CONTROL_OBJECT_FORMAT_VERSION,
 };
+use loon_api::{ContentStoreId, NamespaceId};
 use loon_objectstore::keys::{
     content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
 };

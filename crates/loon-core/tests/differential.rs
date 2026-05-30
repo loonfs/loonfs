@@ -1,5 +1,6 @@
+use loon_api::wire::wal::WalDelta;
 use loon_api::{
-    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo, WalDelta,
+    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, RevisionNo,
 };
 use loon_core::metadata::MetadataState as CoreMetadataState;
 use loon_model::metadata::MetadataState as ModelMetadataState;

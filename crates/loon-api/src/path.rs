@@ -1,4 +1,3 @@
-use crate::{name_key_for_display_name, NameKey, NamePolicy};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -164,16 +163,6 @@ impl DisplayName {
     }
 }
 
-impl NameKey {
-    pub fn for_display_name(policy: NamePolicy, display_name: &DisplayName) -> Self {
-        Self(name_key_for_display_name(policy, display_name.as_str()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 impl PathError {
     pub fn invalid_path_input(&self) -> &str {
         match self {
@@ -190,8 +179,8 @@ impl PathError {
 
 #[cfg(test)]
 mod tests {
-    use super::{AbsolutePath, DisplayName, NameKey, PathError};
-    use crate::{name_key_for_display_name, NamePolicy};
+    use super::{AbsolutePath, DisplayName, PathError};
+    use crate::{name_key_for_display_name, NameKey, NamePolicy};
 
     #[test]
     fn absolute_path_root_is_valid() {

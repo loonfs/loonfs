@@ -1,12 +1,16 @@
 use loon_api::{
-    decode_wal_segment_envelope_zstd, sha256_digest,
+    sha256_digest,
     v0::{
         CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, ContentStoreDescriptorEnvelope,
-    ControlObjectKind, FenceToken, HeadState, InodeId, InodeKind, LeaseState,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceId, RevisionNo,
+    wire::control::{
+        ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState, LeaseState,
+        NamespaceDescriptorEnvelope, NamespaceDescriptorState,
+    },
+    wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, FenceToken, InodeId, InodeKind,
+    NameKey, NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
     build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
@@ -37,14 +41,14 @@ fn wal_create_dir(
     inode_id: InodeId,
     parent_inode: InodeId,
     display_name: String,
-) -> Vec<loon_api::WalDelta> {
+) -> Vec<WalDelta> {
     vec![
-        loon_api::WalDelta::CreateInode {
+        WalDelta::CreateInode {
             delta_index,
             inode_id,
             inode_kind: InodeKind::Dir,
         },
-        loon_api::WalDelta::BindDirentry {
+        WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
             name_key: loon_api::name_key_for_display_name(
@@ -63,14 +67,14 @@ fn wal_create_file(
     parent_inode: InodeId,
     display_name: String,
     content_ref: ContentRef,
-) -> Vec<loon_api::WalDelta> {
+) -> Vec<WalDelta> {
     vec![
-        loon_api::WalDelta::CreateInode {
+        WalDelta::CreateInode {
             delta_index,
             inode_id,
             inode_kind: InodeKind::File,
         },
-        loon_api::WalDelta::BindDirentry {
+        WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode,
             name_key: loon_api::name_key_for_display_name(
@@ -80,7 +84,7 @@ fn wal_create_file(
             display_name,
             child_inode: inode_id,
         },
-        loon_api::WalDelta::AppendFileRevision {
+        WalDelta::AppendFileRevision {
             delta_index: delta_index.saturating_add(2),
             inode_id,
             revision_no: RevisionNo(1),
@@ -94,8 +98,8 @@ fn wal_append_revision(
     inode_id: InodeId,
     revision_no: RevisionNo,
     content_ref: ContentRef,
-) -> Vec<loon_api::WalDelta> {
-    vec![loon_api::WalDelta::AppendFileRevision {
+) -> Vec<WalDelta> {
+    vec![WalDelta::AppendFileRevision {
         delta_index,
         inode_id,
         revision_no,
@@ -103,8 +107,8 @@ fn wal_append_revision(
     }]
 }
 
-fn wal_tombstone(delta_index: u32, root_inode: InodeId) -> Vec<loon_api::WalDelta> {
-    vec![loon_api::WalDelta::TombstoneSubtree {
+fn wal_tombstone(delta_index: u32, root_inode: InodeId) -> Vec<WalDelta> {
+    vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode,
     }]
@@ -492,7 +496,7 @@ fn restore_revision_overflow_is_rejected() {
         "overflow.txt".to_owned(),
         content_ref("content-max"),
     );
-    deltas[2] = loon_api::WalDelta::AppendFileRevision {
+    deltas[2] = WalDelta::AppendFileRevision {
         delta_index: 2,
         inode_id: InodeId(2),
         revision_no: RevisionNo(u64::MAX),
@@ -501,7 +505,7 @@ fn restore_revision_overflow_is_rejected() {
     let metadata_state = MetadataState::default()
         .apply_committed_wal_deltas(
             ChangeSeq(0),
-            &[loon_api::WalDelta::CreateInode {
+            &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Dir,
@@ -996,7 +1000,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     assert_eq!(segment.payload.records[0].deltas[0].semantic_op_index, 0);
     assert_eq!(segment.payload.records[0].deltas[1].semantic_op_index, 0);
     match &segment.payload.records[0].deltas[1].delta {
-        loon_api::WalDelta::BindDirentry {
+        WalDelta::BindDirentry {
             name_key,
             display_name,
             ..
@@ -1042,7 +1046,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
             name_key,
             display_name,
             ..
-        } if name_key == "alpha" && display_name == "alpha"
+        } if name_key.as_str() == "alpha" && display_name == "alpha"
     ));
 }
 
@@ -1118,7 +1122,7 @@ fn binding_is_precondition_observes_earlier_batch_candidate() {
                 commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
                 preconditions: vec![CommitPrecondition::BindingIs {
                     parent_inode: docs_inode,
-                    name_key: original_binding.name_key,
+                    name_key: NameKey::try_new(original_binding.name_key).expect("valid name key"),
                     child_inode: file_inode,
                     bind_seq: original_binding.bind_seq,
                     bind_delta_index: original_binding.bind_delta_index,
@@ -2529,7 +2533,7 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
             commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
             preconditions: vec![CommitPrecondition::BindingIs {
                 parent_inode: old_binding.parent_inode_id,
-                name_key: old_binding.name_key,
+                name_key: NameKey::try_new(old_binding.name_key).expect("valid name key"),
                 child_inode: old_binding.child_inode_id,
                 bind_seq: old_binding.bind_seq,
                 bind_delta_index: old_binding.bind_delta_index,
@@ -2902,11 +2906,11 @@ impl ObjectStore for InjectCreateFailureStore {
     }
 }
 
-fn metadata_state_after(sequences: &[Vec<loon_api::WalDelta>]) -> MetadataState {
+fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
     let mut state = MetadataState::default()
         .apply_committed_wal_deltas(
             ChangeSeq(0),
-            &[loon_api::WalDelta::CreateInode {
+            &[WalDelta::CreateInode {
                 delta_index: 0,
                 inode_id: InodeId(1),
                 inode_kind: InodeKind::Dir,
