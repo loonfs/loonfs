@@ -1,3 +1,4 @@
+use crate::invariants::InvariantId;
 use loon_api::{
     v0::CommitOpResult, AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
     NamePolicy, RevisionNo, WalCommitPayload, WalDelta,
@@ -77,7 +78,7 @@ pub struct CommitReceiptRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppliedMetadataState {
     pub metadata_state: MetadataState,
-    pub checked_invariants: Vec<String>,
+    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,7 +186,10 @@ impl MetadataState {
                         inode_kind: inode_kind.clone(),
                         created_seq: committed_seq,
                     });
-                    push_unique_invariant(&mut checked_invariants, "create_inode_writes_inode_row");
+                    push_unique_invariant(
+                        &mut checked_invariants,
+                        InvariantId::CreateInodeWritesInodeRow,
+                    );
                 }
                 WalDelta::BindDirentry {
                     delta_index,
@@ -204,7 +208,7 @@ impl MetadataState {
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "bind_direntry_writes_direntry_bind_row",
+                        InvariantId::BindDirentryWritesDirentryBindRow,
                     );
                 }
                 WalDelta::UnbindDirentry {
@@ -226,7 +230,7 @@ impl MetadataState {
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "unbind_direntry_writes_unbind_row",
+                        InvariantId::UnbindDirentryWritesUnbindRow,
                     );
                 }
                 WalDelta::AppendFileRevision {
@@ -244,7 +248,7 @@ impl MetadataState {
                     });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "append_file_revision_writes_revision_row",
+                        InvariantId::AppendFileRevisionWritesRevisionRow,
                     );
                 }
                 WalDelta::TombstoneSubtree {
@@ -260,7 +264,7 @@ impl MetadataState {
                         });
                     push_unique_invariant(
                         &mut checked_invariants,
-                        "tombstone_subtree_writes_tombstone_row",
+                        InvariantId::TombstoneSubtreeWritesTombstoneRow,
                     );
                 }
             }
@@ -295,7 +299,7 @@ impl MetadataState {
             });
         push_unique_invariant(
             &mut applied.checked_invariants,
-            "wal_replay_records_commit_receipt",
+            InvariantId::WalReplayRecordsCommitReceipt,
         );
         Ok(applied)
     }
@@ -670,9 +674,9 @@ impl MetadataStateBuilder {
     }
 }
 
-fn push_unique_invariant(invariants: &mut Vec<String>, name: &str) {
-    if !invariants.iter().any(|existing| existing == name) {
-        invariants.push(name.to_owned());
+fn push_unique_invariant(invariants: &mut Vec<InvariantId>, id: InvariantId) {
+    if !invariants.contains(&id) {
+        invariants.push(id);
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::error::CoreError;
+use crate::invariants::InvariantId;
 use crate::namespace::catalog::load_namespace_content_store_id;
 use loon_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, NamespaceId};
 use loon_objectstore::keys::content_blob;
@@ -13,7 +14,7 @@ pub struct ValidatedDurableContent {
     pub object_key: String,
     pub file_size_bytes: u64,
     pub file_digest_sha256: String,
-    pub checked_invariants: Vec<String>,
+    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,10 +155,10 @@ fn validate_loaded_content_bytes(
         file_size_bytes: actual_size,
         file_digest_sha256: actual_digest,
         checked_invariants: vec![
-            "whole_file_content_ref_kind_is_supported".to_owned(),
-            "whole_file_content_object_key_matches_digest".to_owned(),
-            "whole_file_content_size_matches_ref".to_owned(),
-            "whole_file_content_digest_matches_ref".to_owned(),
+            InvariantId::WholeFileContentRefKindIsSupported,
+            InvariantId::WholeFileContentObjectKeyMatchesDigest,
+            InvariantId::WholeFileContentSizeMatchesRef,
+            InvariantId::WholeFileContentDigestMatchesRef,
         ],
     })
 }

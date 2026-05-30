@@ -4,7 +4,7 @@ use super::{
     push_unique_invariant, CommitMaterializationError, CommitOp, CommitPlan, CommitRequest,
     CommitValidationContext, CommitValidationError, Precondition, ResolvedBinding,
 };
-use crate::invariants::INVARIANTS;
+use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
 use loon_api::{
     name_key_for_display_name, ChangeSeq, ContentRef, DisplayName, InodeId, InodeKind, NamePolicy,
@@ -77,19 +77,11 @@ pub fn build_commit_plan(
 ) -> Result<CommitPlan, CommitValidationError> {
     validate_commit_request_frame(request, context)?;
 
-    let mut checked_invariants = INVARIANTS
-        .iter()
-        .copied()
-        .filter(|name| {
-            matches!(
-                *name,
-                "stale_writer_cannot_publish"
-                    | "head_and_lease_fence_tokens_agree"
-                    | "next_inode_id_is_monotonic"
-            )
-        })
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    let mut checked_invariants = vec![
+        InvariantId::StaleWriterCannotPublish,
+        InvariantId::HeadAndLeaseFenceTokensAgree,
+        InvariantId::NextInodeIdIsMonotonic,
+    ];
     let shape = compute_commit_shape(request, context)?;
     let resolved_metadata = validate_metadata_preconditions(
         request,
@@ -103,7 +95,7 @@ pub fn build_commit_plan(
     if !shape.allocated_inode_ids.is_empty() {
         push_unique_invariant(
             &mut checked_invariants,
-            "create_mutation_consumes_next_inode_id",
+            InvariantId::CreateMutationConsumesNextInodeId,
         );
     }
     if request
@@ -113,7 +105,7 @@ pub fn build_commit_plan(
     {
         push_unique_invariant(
             &mut checked_invariants,
-            "create_file_requires_durable_content",
+            InvariantId::CreateFileRequiresDurableContent,
         );
     }
     if request
@@ -123,7 +115,7 @@ pub fn build_commit_plan(
     {
         push_unique_invariant(
             &mut checked_invariants,
-            "replace_file_requires_durable_content",
+            InvariantId::ReplaceFileRequiresDurableContent,
         );
     }
     if request
@@ -133,7 +125,7 @@ pub fn build_commit_plan(
     {
         push_unique_invariant(
             &mut checked_invariants,
-            "restore_revision_requires_durable_content",
+            InvariantId::RestoreRevisionRequiresDurableContent,
         );
     }
 
@@ -204,7 +196,7 @@ fn validate_metadata_preconditions(
     committed_seq: ChangeSeq,
     allocated_inode_ids: &[InodeId],
     name_policy: NamePolicy,
-    checked_invariants: &mut Vec<String>,
+    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<ResolvedMetadataPreconditions, CommitValidationError> {
     let mut ephemeral_metadata_state = metadata_state.clone();
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
@@ -484,7 +476,7 @@ fn validate_explicit_preconditions(
     preconditions: &[Precondition],
     metadata_state: &MetadataState,
     base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
+    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CommitValidationError> {
     for precondition in preconditions {
         match precondition {
@@ -762,7 +754,7 @@ fn validate_ancestors_not_subtree_deleted(
     metadata_state: &MetadataState,
     inode_id: InodeId,
     base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
+    checked_invariants: &mut Vec<InvariantId>,
     is_create: bool,
 ) -> Result<(), CommitValidationError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
@@ -783,7 +775,7 @@ fn validate_ancestors_not_subtree_deleted(
 
     push_unique_invariant(
         checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
+        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
     );
     Ok(())
 }
@@ -792,7 +784,7 @@ fn validate_restore_not_covered(
     metadata_state: &MetadataState,
     inode_id: InodeId,
     base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
+    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CommitValidationError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
         return Err(
@@ -806,7 +798,7 @@ fn validate_restore_not_covered(
 
     push_unique_invariant(
         checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
+        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
     );
     Ok(())
 }
@@ -851,7 +843,7 @@ fn validate_delete_file_not_covered(
     metadata_state: &MetadataState,
     inode_id: InodeId,
     base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
+    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CommitValidationError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
         return Err(CommitValidationError::DeleteFileCoveredByTombstone {
@@ -863,7 +855,7 @@ fn validate_delete_file_not_covered(
 
     push_unique_invariant(
         checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
+        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
     );
     Ok(())
 }
@@ -872,7 +864,7 @@ fn validate_delete_subtree_not_covered(
     metadata_state: &MetadataState,
     root_inode: InodeId,
     base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
+    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CommitValidationError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(root_inode, base_seq) {
         return Err(CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
@@ -884,7 +876,7 @@ fn validate_delete_subtree_not_covered(
 
     push_unique_invariant(
         checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
+        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
     );
     Ok(())
 }
@@ -971,7 +963,7 @@ fn validate_rename_inode_not_covered(
     metadata_state: &MetadataState,
     inode_id: InodeId,
     base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
+    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CommitValidationError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id, base_seq) {
         return Err(CommitValidationError::RenameInodeUnderSubtreeTombstone {
@@ -983,7 +975,7 @@ fn validate_rename_inode_not_covered(
 
     push_unique_invariant(
         checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
+        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
     );
     Ok(())
 }
@@ -992,7 +984,7 @@ fn validate_rename_target_parent_not_covered(
     metadata_state: &MetadataState,
     parent_inode: InodeId,
     base_seq: ChangeSeq,
-    checked_invariants: &mut Vec<String>,
+    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CommitValidationError> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(parent_inode, base_seq) {
         return Err(
@@ -1006,7 +998,7 @@ fn validate_rename_target_parent_not_covered(
 
     push_unique_invariant(
         checked_invariants,
-        "subtree_tombstone_blocks_descendant_mutation",
+        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
     );
     Ok(())
 }

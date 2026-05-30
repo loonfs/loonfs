@@ -1,4 +1,5 @@
 use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan, PreparedCommitHeadPublish};
+use crate::invariants::InvariantId;
 use crate::wal::PreparedWalSegment;
 use loon_api::{ChangeSeq, ControlObjectKind, HeadState, HeadStateEnvelope};
 use loon_objectstore::keys::namespace_head;
@@ -82,7 +83,10 @@ pub fn prepare_commit_head_publish(
         .map_err(|err| CommitHeadPublishError::Codec(err.to_string()))?;
 
     let mut checked_invariants = plan.checked_invariants.clone();
-    push_unique_invariant(&mut checked_invariants, "head_publish_requires_durable_wal");
+    push_unique_invariant(
+        &mut checked_invariants,
+        InvariantId::HeadPublishRequiresDurableWal,
+    );
 
     Ok(PreparedCommitHeadPublish {
         object_key: namespace_head(current_head.namespace_id.as_str()),
