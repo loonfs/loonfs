@@ -1,6 +1,6 @@
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::{CommitId, NamespaceId};
-use loon_core::commit::{CommitHeadPublishError, SemanticCommitFingerprint};
+use loon_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
 use loonfs::{CoreError, Fs, NamespaceMutationCandidate, PathMutationIntent, RuntimeError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -91,7 +91,7 @@ struct BatchCandidate {
 }
 
 struct InFlightRequest {
-    fingerprint: SemanticCommitFingerprint,
+    semantic_identity: SemanticMutationIdentity,
     waiters: Vec<oneshot::Sender<CommitResult>>,
 }
 
@@ -111,9 +111,9 @@ impl NamespacePublisher {
 
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
-        let fingerprint = candidate.semantic_commit_fingerprint(&self.namespace_id)?;
+        let semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
         let (sender, receiver) = oneshot::channel();
-        self.admit(commit_id, candidate, fingerprint, sender)?;
+        self.admit(commit_id, candidate, semantic_identity, sender)?;
         receiver
             .await
             .unwrap_or_else(|_| Err(CoreError::Store("publisher task stopped".to_owned())))
@@ -123,7 +123,7 @@ impl NamespacePublisher {
         &self,
         commit_id: CommitId,
         candidate: NamespaceMutationCandidate,
-        fingerprint: SemanticCommitFingerprint,
+        semantic_identity: SemanticMutationIdentity,
         waiter: oneshot::Sender<CommitResult>,
     ) -> Result<(), CoreError> {
         let mut should_spawn = false;
@@ -134,7 +134,7 @@ impl NamespacePublisher {
                 .lock()
                 .expect("namespace publisher mutex poisoned");
             if let Some(existing) = state.in_flight.get_mut(&commit_id) {
-                if existing.fingerprint != fingerprint {
+                if existing.semantic_identity != semantic_identity {
                     return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
                 }
                 existing.waiters.push(waiter);
@@ -163,7 +163,7 @@ impl NamespacePublisher {
             state.in_flight.insert(
                 commit_id,
                 InFlightRequest {
-                    fingerprint,
+                    semantic_identity,
                     waiters: vec![waiter],
                 },
             );
@@ -530,9 +530,9 @@ mod tests {
     ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
         let commit_id = request.commit_id.clone();
         let candidate = NamespaceMutationCandidate::Commit(request);
-        let fingerprint = candidate.semantic_commit_fingerprint(namespace_id)?;
+        let semantic_identity = candidate.semantic_identity(namespace_id)?;
         let (sender, receiver) = oneshot::channel();
-        publisher.admit(commit_id, candidate, fingerprint, sender)?;
+        publisher.admit(commit_id, candidate, semantic_identity, sender)?;
         Ok(receiver)
     }
 

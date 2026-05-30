@@ -1,6 +1,6 @@
 use super::{
-    semantic_commit_fingerprint, CommitFingerprintError, CommitOp, CommitPlan, CommitRequest,
-    ResolvedBinding, SemanticCommitFingerprint,
+    core_commit_fingerprint, CommitFingerprintError, CommitOp, CommitPlan, CommitRequest,
+    PathIntentFingerprint, ResolvedBinding, SemanticMutationIdentity,
 };
 use loon_api::{
     name_key_for_display_name, v0::CommitOpResult, ContentRef, FenceToken, InodeId, InodeKind,
@@ -17,16 +17,16 @@ pub struct CommitExecutionContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CommitFingerprintSource {
-    ComputeFromRequest,
-    TrustedPrecomputed(SemanticCommitFingerprint),
+pub(crate) enum CommitIdentitySource {
+    CoreCommitRequest,
+    PathIntent(PathIntentFingerprint),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedCommit {
     pub request: CommitRequest,
     pub plan: CommitPlan,
-    pub semantic_commit_fingerprint: SemanticCommitFingerprint,
+    pub semantic_identity: SemanticMutationIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,13 +89,13 @@ pub enum CommitMaterializationError {
 
 impl PreparedCommit {
     pub fn new(request: CommitRequest, plan: CommitPlan) -> Result<Self, CommitPrepareError> {
-        Self::prepare(request, plan, CommitFingerprintSource::ComputeFromRequest)
+        Self::prepare(request, plan, CommitIdentitySource::CoreCommitRequest)
     }
 
     pub(crate) fn prepare(
         request: CommitRequest,
         plan: CommitPlan,
-        fingerprint_source: CommitFingerprintSource,
+        identity_source: CommitIdentitySource,
     ) -> Result<Self, CommitPrepareError> {
         if request.namespace_id != plan.namespace_id {
             return Err(CommitPrepareError::NamespaceMismatch {
@@ -106,15 +106,19 @@ impl PreparedCommit {
         if request.commit_id != plan.commit_id {
             return Err(CommitPrepareError::CommitIdMismatch);
         }
-        let semantic_commit_fingerprint = match fingerprint_source {
-            CommitFingerprintSource::ComputeFromRequest => semantic_commit_fingerprint(&request)?,
-            CommitFingerprintSource::TrustedPrecomputed(fingerprint) => fingerprint,
+        let semantic_identity = match identity_source {
+            CommitIdentitySource::CoreCommitRequest => {
+                SemanticMutationIdentity::CoreCommit(core_commit_fingerprint(&request)?)
+            }
+            CommitIdentitySource::PathIntent(fingerprint) => {
+                SemanticMutationIdentity::PathIntent(fingerprint)
+            }
         };
 
         Ok(Self {
             request,
             plan,
-            semantic_commit_fingerprint,
+            semantic_identity,
         })
     }
 }
@@ -520,16 +524,19 @@ mod tests {
     }
 
     #[test]
-    fn prepared_commit_uses_trusted_precomputed_fingerprint() {
-        let fingerprint = SemanticCommitFingerprint::new_unchecked("trusted".to_owned());
+    fn prepared_commit_uses_path_intent_identity() {
+        let fingerprint = PathIntentFingerprint::new_unchecked("path-intent".to_owned());
         let prepared = PreparedCommit::prepare(
             request(),
             plan(),
-            CommitFingerprintSource::TrustedPrecomputed(fingerprint.clone()),
+            CommitIdentitySource::PathIntent(fingerprint.clone()),
         )
         .expect("prepare commit");
 
-        assert_eq!(prepared.semantic_commit_fingerprint, fingerprint);
+        assert_eq!(
+            prepared.semantic_identity,
+            SemanticMutationIdentity::PathIntent(fingerprint)
+        );
     }
 
     #[test]

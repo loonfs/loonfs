@@ -18,10 +18,7 @@ pub fn wal_payload_from_materialized_commit(
         seq: prepared.plan.assigned_seq,
         apply_after_seq: prepared.plan.apply_after_seq,
         commit_id: prepared.plan.commit_id.clone(),
-        semantic_commit_fingerprint_sha256: prepared
-            .semantic_commit_fingerprint
-            .as_str()
-            .to_owned(),
+        semantic_commit_fingerprint_sha256: prepared.semantic_identity.as_str().to_owned(),
         writer_id: prepared.request.writer_id.clone(),
         writer_fence_token: prepared.request.writer_fence_token,
         message: prepared.request.message.clone(),
