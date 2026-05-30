@@ -242,8 +242,9 @@ fn binding_is_precondition(
     }
     Ok(ApiCommitPrecondition::BindingIs {
         parent_inode,
-        name_key: NameKey::try_new(binding.name_key)
-            .map_err(|err| CoreError::InvalidPath(err.value().to_owned()))?,
+        name_key: NameKey::try_new(binding.name_key).map_err(|err| {
+            CoreError::NamespaceCorrupt(format!("invalid metadata name_key: {err}"))
+        })?,
         child_inode: binding.child_inode_id,
         bind_seq: binding.bind_seq,
         bind_delta_index: binding.bind_delta_index,
@@ -705,6 +706,7 @@ mod tests {
     use crate::commit::core_commit_fingerprint_for_v0_request;
     use crate::context::MutationContext;
     use crate::error::CoreErrorKind;
+    use crate::metadata::{DirentryBindRecord, InodeRecord};
     use crate::services::{
         bootstrap_namespace, delete_path, put_file_bytes, store_bytes_as_content,
     };
@@ -937,6 +939,55 @@ mod tests {
                 precondition,
                 CommitPrecondition::ChildNameAbsent { name_key, .. } if name_key.as_str() == "b.txt"
             )));
+    }
+
+    #[test]
+    fn binding_is_precondition_reports_invalid_durable_name_key_as_namespace_corrupt() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let mut head = HeadState::initial(namespace_id);
+        head.seq = ChangeSeq(1);
+        let metadata_state = MetadataState::from_rows(
+            vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(0),
+                },
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+            ],
+            vec![DirentryBindRecord {
+                parent_inode_id: InodeId(1),
+                name_key: "bad/key".to_owned(),
+                display_name: "file.txt".to_owned(),
+                child_inode_id: InodeId(2),
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: 0,
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let view = PathPlanningView {
+            head: &head,
+            metadata_state: &metadata_state,
+        };
+        let resolved = ResolvedVisiblePath {
+            absolute_path: "/file.txt".to_owned(),
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            parent_inode_id: Some(InodeId(1)),
+            display_name: "file.txt".to_owned(),
+        };
+
+        let error =
+            binding_is_precondition(&view, &resolved).expect_err("invalid durable name key");
+
+        assert_eq!(error.kind(), CoreErrorKind::NamespaceCorrupt);
     }
 
     #[test]

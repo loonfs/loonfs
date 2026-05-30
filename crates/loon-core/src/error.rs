@@ -114,6 +114,8 @@ pub enum CoreError {
     },
     #[error("path component `{0}` is not a directory")]
     NonDirectoryPathComponent(String),
+    #[error("namespace corrupt: {0}")]
+    NamespaceCorrupt(String),
     #[error("object store error: {0}")]
     Store(String),
     #[error("namespace `{namespace_id}` already exists")]
@@ -202,6 +204,7 @@ impl CoreError {
             CoreError::DirectoryNotEmpty(_) => CoreErrorKind::DirectoryNotEmpty,
             CoreError::TombstoneConflict { .. } => CoreErrorKind::TombstoneConflict,
             CoreError::NonDirectoryPathComponent(_) => CoreErrorKind::InvalidPath,
+            CoreError::NamespaceCorrupt(_) => CoreErrorKind::NamespaceCorrupt,
         }
     }
 }
