@@ -6,15 +6,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use loon_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitOp, CommitOpResult, CommitPrecondition,
-    CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-    UploadContentResponse,
+    BeginUploadResponse, ChangesResponse, CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
+    CommitPrecondition, CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest,
+    CompleteUploadResponse, RenameMode, UploadContentResponse, UploadMode,
 };
 use loon_api::wire::control::HeadState;
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
-    ContentRef, CreateCheckpointResponse, FilesystemOperationResponse, InodeId, MutationResult,
-    NamespaceId, NamespaceSummary,
+    ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName, FilesystemOperationResponse,
+    InodeId, InodeKind, MutationResult, NameKey, NamePolicy, NamespaceId, NamespaceSummary,
+    RevisionNo,
 };
 use loon_core::publisher::{BasisReuseEvent, NamespaceCommitEnginePublishResult};
 pub use loon_core::{
@@ -1399,4 +1400,43 @@ fn current_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, DisplayName, InodeId,
+        NameKey, NamePolicy, RenameMode, RevisionNo,
+    };
+
+    #[test]
+    fn explicit_commit_facade_exports_constructor_types() {
+        let display_name = DisplayName::parse("Report.txt").expect("valid display name");
+        let name_key = NameKey::for_display_name(NamePolicy::default(), &display_name);
+        let precondition =
+            CommitPrecondition::binding_is(InodeId(1), name_key, InodeId(2), ChangeSeq(3), 4);
+
+        let request = CommitRequest {
+            commit_id: CommitId::generate(),
+            preconditions: vec![precondition],
+            ops: vec![
+                CommitOp::RestoreRevision {
+                    inode_id: InodeId(2),
+                    source_revision_no: RevisionNo(1),
+                    base_revision_no: RevisionNo(2),
+                },
+                CommitOp::Rename {
+                    inode_id: InodeId(2),
+                    new_parent_inode: InodeId(1),
+                    new_display_name: "report.txt".to_owned(),
+                    mode: RenameMode::NoReplace,
+                },
+            ],
+            message: None,
+            annotations: None,
+        };
+
+        assert_eq!(request.preconditions.len(), 1);
+        assert_eq!(request.ops.len(), 2);
+    }
 }
