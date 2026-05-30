@@ -10,8 +10,9 @@ use loon_api::{
     },
     ApiError, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ForkNamespaceRequest, ListNamespacesResponse, MutationResult,
-    NamespaceId, NamespaceSummary,
+    FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
+    ListNamespacesResponse, MutationResult, NamespaceId, NamespaceSummary,
+    RestoreFileRevisionRequest, RevisionNo,
 };
 use serde::Deserialize;
 use std::fs;
@@ -182,13 +183,64 @@ impl Client {
             namespace,
             urlencoding::encode(&spec.absolute_path)
         );
-        let request = self.authenticated(self.agent.get(&url));
-        let response = request.call().map_err(|err| self.map_error(err))?;
-        let mut reader = response.into_reader();
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut bytes)
-            .map_err(|err| ClientError::Io(err.to_string()))?;
-        Ok(bytes)
+        self.request_bytes(&url)
+    }
+
+    pub fn read_file_revision_bytes(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, ClientError> {
+        let namespace = namespace_url_segment(&spec.namespace)?;
+        let url = format!(
+            "{}/v0/namespaces/{}/filesystem/content?path={}&revision_no={}",
+            self.base_url,
+            namespace,
+            urlencoding::encode(&spec.absolute_path),
+            revision_no.0
+        );
+        self.request_bytes(&url)
+    }
+
+    pub fn list_file_revisions(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<ListFileRevisionsResponse, ClientError> {
+        let namespace = namespace_url_segment(&spec.namespace)?;
+        let url = format!(
+            "{}/v0/namespaces/{}/filesystem/revisions?path={}",
+            self.base_url,
+            namespace,
+            urlencoding::encode(&spec.absolute_path)
+        );
+        self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
+    }
+
+    pub fn list_file_revisions_for_inode(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+    ) -> Result<ListFileRevisionsResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!(
+            "{}/v0/namespaces/{namespace}/inodes/{}/revisions",
+            self.base_url, inode_id.0
+        );
+        self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
+    }
+
+    pub fn read_file_revision_bytes_for_inode(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let url = format!(
+            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/{}/content",
+            self.base_url, inode_id.0, revision_no.0
+        );
+        self.request_bytes(&url)
     }
 
     pub fn healthz(&self) -> Result<(), ClientError> {
@@ -458,6 +510,57 @@ impl Client {
         Ok(response.into())
     }
 
+    pub fn restore_file_revision(
+        &self,
+        spec: &NamespacePath,
+        source_revision_no: RevisionNo,
+    ) -> Result<MutationResult, ClientError> {
+        self.restore_file_revision_with_commit_id(spec, source_revision_no, &generated_commit_id())
+    }
+
+    pub fn restore_file_revision_with_commit_id(
+        &self,
+        spec: &NamespacePath,
+        source_revision_no: RevisionNo,
+        commit_id: &str,
+    ) -> Result<MutationResult, ClientError> {
+        let commit_id = parse_commit_id(commit_id)?;
+        let response = self.apply_filesystem_operation(
+            &spec.namespace,
+            &FilesystemOperationRequest {
+                commit_id,
+                operation: FilesystemOperation::RestoreRevision {
+                    path: spec.absolute_path.clone(),
+                    source_revision_no,
+                },
+            },
+        )?;
+        Ok(response.into())
+    }
+
+    pub fn restore_file_revision_for_inode(
+        &self,
+        namespace: &str,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        base_revision_no: RevisionNo,
+        commit_id: &str,
+    ) -> Result<ApiCommitResponse, ClientError> {
+        let namespace = namespace_url_segment(namespace)?;
+        let commit_id = parse_commit_id(commit_id)?;
+        let url = format!(
+            "{}/v0/namespaces/{namespace}/inodes/{}/revisions/{}/restore",
+            self.base_url, inode_id.0, source_revision_no.0
+        );
+        self.request_json::<_, ApiCommitResponse>(
+            self.agent.post(&url),
+            Some(&RestoreFileRevisionRequest {
+                commit_id,
+                base_revision_no,
+            }),
+        )
+    }
+
     pub fn get_to_path(
         &self,
         spec: &NamespacePath,
@@ -581,6 +684,16 @@ impl Client {
         };
         serde_json::from_reader(response.into_reader())
             .map_err(|err| ClientError::Json(err.to_string()))
+    }
+
+    fn request_bytes(&self, url: &str) -> Result<Vec<u8>, ClientError> {
+        let request = self.authenticated(self.agent.get(url));
+        let response = request.call().map_err(|err| self.map_error(err))?;
+        let mut reader = response.into_reader();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut bytes)
+            .map_err(|err| ClientError::Io(err.to_string()))?;
+        Ok(bytes)
     }
 
     fn authenticated(&self, request: ureq::Request) -> ureq::Request {

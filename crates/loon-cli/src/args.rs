@@ -27,9 +27,11 @@ pub enum Command {
     Current(CurrentArgs),
     Ls(FilesystemLsArgs),
     Stat(FilesystemPathArgs),
-    Cat(FilesystemPathArgs),
+    Cat(FilesystemCatArgs),
     Get(FilesystemGetArgs),
     Put(FilesystemPutArgs),
+    Revisions(FilesystemPathArgs),
+    Restore(FilesystemRestoreArgs),
     Mkdir(FilesystemPathArgs),
     Rm(FilesystemPathArgs),
     Mv(FilesystemMoveArgs),
@@ -214,11 +216,22 @@ pub struct FilesystemPathArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct FilesystemCatArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: String,
+    #[arg(long)]
+    pub revision: Option<u64>,
+}
+
+#[derive(Debug, Args)]
 pub struct FilesystemGetArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub remote_path: String,
     pub local_destination: Option<String>,
+    #[arg(long)]
+    pub revision: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -237,6 +250,15 @@ pub struct FilesystemMoveArgs {
     pub target: TargetSelectorArgs,
     pub source_path: String,
     pub dest_path: String,
+}
+
+#[derive(Debug, Args)]
+pub struct FilesystemRestoreArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    pub path: String,
+    #[arg(long)]
+    pub revision: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -285,6 +307,8 @@ pub enum CommandKind {
     FilesystemCat,
     FilesystemGet,
     FilesystemPut,
+    FilesystemRevisions,
+    FilesystemRestore,
     FilesystemMkdir,
     FilesystemRm,
     FilesystemMv,
@@ -314,6 +338,8 @@ impl CommandKind {
             CommandKind::FilesystemCat => "filesystem_cat",
             CommandKind::FilesystemGet => "filesystem_get",
             CommandKind::FilesystemPut => "filesystem_put",
+            CommandKind::FilesystemRevisions => "filesystem_revisions",
+            CommandKind::FilesystemRestore => "filesystem_restore",
             CommandKind::FilesystemMkdir => "filesystem_mkdir",
             CommandKind::FilesystemRm => "filesystem_rm",
             CommandKind::FilesystemMv => "filesystem_mv",
@@ -353,6 +379,8 @@ impl Cli {
             Command::Cat(_) => CommandKind::FilesystemCat,
             Command::Get(_) => CommandKind::FilesystemGet,
             Command::Put(_) => CommandKind::FilesystemPut,
+            Command::Revisions(_) => CommandKind::FilesystemRevisions,
+            Command::Restore(_) => CommandKind::FilesystemRestore,
             Command::Mkdir(_) => CommandKind::FilesystemMkdir,
             Command::Rm(_) => CommandKind::FilesystemRm,
             Command::Mv(_) => CommandKind::FilesystemMv,

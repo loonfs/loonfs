@@ -14,8 +14,9 @@ use loon_api::{
     },
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ForkNamespaceRequest, ListNamespacesResponse, NamespaceId,
-    NamespaceIdValidationError,
+    FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
+    ListNamespacesResponse, NamespaceId, NamespaceIdValidationError, RestoreFileRevisionRequest,
+    RevisionNo,
 };
 use loonfs::{
     BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs, FsConfig,
@@ -37,6 +38,12 @@ struct AppState {
 #[derive(Debug, serde::Deserialize)]
 struct PathQuery {
     path: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContentQuery {
+    path: String,
+    revision_no: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -82,8 +89,24 @@ fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
             get(get_content),
         )
         .route(
+            "/v0/namespaces/:namespace/filesystem/revisions",
+            get(list_path_revisions),
+        )
+        .route(
             "/v0/namespaces/:namespace/filesystem/operations",
             post(filesystem_operation),
+        )
+        .route(
+            "/v0/namespaces/:namespace/inodes/:inode_id/revisions",
+            get(list_inode_revisions),
+        )
+        .route(
+            "/v0/namespaces/:namespace/inodes/:inode_id/revisions/:revision_no/content",
+            get(get_inode_revision_content),
+        )
+        .route(
+            "/v0/namespaces/:namespace/inodes/:inode_id/revisions/:source_revision_no/restore",
+            post(restore_inode_revision),
         )
         .route(
             "/v0/namespaces/:namespace/uploads",
@@ -235,18 +258,111 @@ async fn get_content(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-    Query(query): Query<PathQuery>,
+    Query(query): Query<ContentQuery>,
 ) -> Result<Response, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let path = query.path;
+    let revision_no = query
+        .revision_no
+        .as_deref()
+        .map(parse_revision_no)
+        .transpose()?;
     let file = run_blocking(move || {
-        fs.read_file_bytes(&namespace_id, &path)
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
+        match revision_no {
+            Some(revision_no) => fs.read_file_revision_bytes(&namespace_id, &path, revision_no),
+            None => fs.read_file_bytes(&namespace_id, &path),
+        }
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
     })
     .await?;
     Ok((StatusCode::OK, file.bytes).into_response())
+}
+
+async fn list_path_revisions(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+    headers: HeaderMap,
+    Query(query): Query<PathQuery>,
+) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let fs = state.fs.clone();
+    let namespace_id = parse_namespace_id(namespace)?;
+    let path = query.path;
+    let response = run_blocking(move || {
+        fs.list_file_revisions(&namespace_id, &path)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+async fn list_inode_revisions(
+    State(state): State<AppState>,
+    AxumPath((namespace, inode_id)): AxumPath<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let fs = state.fs.clone();
+    let namespace_id = parse_namespace_id(namespace)?;
+    let inode_id = parse_inode_id(&inode_id)?;
+    let response = run_blocking(move || {
+        fs.list_file_revisions_for_inode(&namespace_id, inode_id)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
+    })
+    .await?;
+    Ok(Json(response))
+}
+
+async fn get_inode_revision_content(
+    State(state): State<AppState>,
+    AxumPath((namespace, inode_id, revision_no)): AxumPath<(String, String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let fs = state.fs.clone();
+    let namespace_id = parse_namespace_id(namespace)?;
+    let inode_id = parse_inode_id(&inode_id)?;
+    let revision_no = parse_revision_no(&revision_no)?;
+    let bytes = run_blocking(move || {
+        fs.read_file_revision_bytes_for_inode(&namespace_id, inode_id, revision_no)
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))
+    })
+    .await?;
+    Ok((StatusCode::OK, bytes).into_response())
+}
+
+async fn restore_inode_revision(
+    State(state): State<AppState>,
+    AxumPath((namespace, inode_id, source_revision_no)): AxumPath<(String, String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<RestoreFileRevisionRequest>,
+) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = parse_namespace_id(namespace)?;
+    let inode_id = parse_inode_id(&inode_id)?;
+    let source_revision_no = parse_revision_no(&source_revision_no)?;
+    let commit = ApiCommitRequest {
+        commit_id: request.commit_id,
+        preconditions: vec![loon_api::v0::CommitPrecondition::InodeRevisionIs {
+            inode_id,
+            revision_no: request.base_revision_no,
+        }],
+        ops: vec![loon_api::v0::CommitOp::RestoreRevision {
+            inode_id,
+            source_revision_no,
+            base_revision_no: request.base_revision_no,
+        }],
+        message: None,
+        annotations: None,
+    };
+    let response = state
+        .publisher
+        .submit_commit(namespace_id.clone(), commit)
+        .await
+        .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
 }
 
 async fn filesystem_operation(
@@ -295,6 +411,14 @@ async fn filesystem_operation(
             commit_id,
             from_path,
             to_path,
+        },
+        FilesystemOperation::RestoreRevision {
+            path,
+            source_revision_no,
+        } => PathMutationIntent::RestoreRevision {
+            commit_id,
+            absolute_path: path,
+            source_revision_no,
         },
     };
     let response = state
@@ -454,6 +578,26 @@ fn map_filesystem_put_behavior(value: FilesystemPutBehavior) -> PutFileBehavior 
 
 fn parse_namespace_id(value: String) -> Result<NamespaceId, ApiResponseError> {
     NamespaceId::parse(&value).map_err(ApiResponseError::invalid_namespace_id)
+}
+
+fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
+    value.parse::<u64>().map(InodeId).map_err(|err| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_inode_id",
+            &format!("invalid inode_id `{value}`: {err}"),
+        )
+    })
+}
+
+fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {
+    value.parse::<u64>().map(RevisionNo).map_err(|err| {
+        ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_revision_no",
+            &format!("invalid revision_no `{value}`: {err}"),
+        )
+    })
 }
 
 async fn run_blocking<T, F>(operation: F) -> Result<T, ApiResponseError>

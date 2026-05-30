@@ -76,17 +76,23 @@ Filesystem operations
   loon stat [--profile <name>] [--namespace <name>] <path>
     Show metadata for a path
 
-  loon cat [--profile <name>] [--namespace <name>] <path>
+  loon cat [--profile <name>] [--namespace <name>] [--revision <n>] <path>
     Print file contents to stdout
 
-  loon get [--profile <name>] [--namespace <name>] <remote-path> [local-destination]
+  loon get [--profile <name>] [--namespace <name>] [--revision <n>] <remote-path> [local-destination]
     Download a remote file
 
   loon put [--profile <name>] [--namespace <name>] <local-path> [remote-path] [--force]
     Upload a local file
 
+  loon revisions [--profile <name>] [--namespace <name>] <path>
+    List file revisions
+
   loon mkdir [--profile <name>] [--namespace <name>] <path>
     Create a directory
+
+  loon restore [--profile <name>] [--namespace <name>] --revision <n> <path>
+    Restore a file to a prior revision
 
   loon rm [--profile <name>] [--namespace <name>] <path>
     Remove a path

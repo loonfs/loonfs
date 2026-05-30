@@ -115,6 +115,12 @@ Given a visible file inode at seq N:
 4. For `whole_file_v0`, fetch the object at `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}`, where `hex` is the digest suffix from `content_ref.digest`.
 5. Verify that the fetched bytes match `content_ref.size_bytes` and `content_ref.digest`.
 
+A **file revision** is an immutable content state for one file inode, identified by that inode's
+monotonic `revision_no`. A namespace commit `seq` is the global visibility order for committed
+mutations; it is not a file revision number. Revision reads may target either the current path's
+current inode or an inode id directly. Path-based revision reads first resolve the path at the
+current head; inode-based revision reads use the retained revision rows for that inode.
+
 ### 2.5 Directory listing
 
 Given a visible directory inode at seq N:

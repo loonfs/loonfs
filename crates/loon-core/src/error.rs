@@ -73,6 +73,11 @@ pub enum CoreError {
     InvalidUploadId(GeneratedIdValidationError),
     #[error("path not found `{0}`")]
     MissingPath(String),
+    #[error("revision `{revision_no:?}` not found for inode `{inode_id}`")]
+    MissingRevision {
+        inode_id: InodeId,
+        revision_no: loon_api::RevisionNo,
+    },
     #[error("expected file at `{path}` but found `{kind:?}`")]
     ExpectedFile { path: String, kind: InodeKind },
     #[error("expected directory at `{path}` but found `{kind:?}`")]
@@ -188,6 +193,7 @@ impl CoreError {
             CoreError::InvalidCommitId(_) => CoreErrorKind::InvalidCommitId,
             CoreError::InvalidUploadId(_) => CoreErrorKind::InvalidUploadId,
             CoreError::MissingPath(_) => CoreErrorKind::PathNotFound,
+            CoreError::MissingRevision { .. } => CoreErrorKind::RevisionNotFound,
             CoreError::NamespaceAlreadyExists { .. } => CoreErrorKind::NamespaceExists,
             CoreError::NamespacePartiallyInitialized { .. } => CoreErrorKind::NamespacePartial,
             CoreError::CommitIdReuseConflict(_) => CoreErrorKind::CommitIdReuseConflict,

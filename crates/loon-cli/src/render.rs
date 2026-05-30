@@ -178,6 +178,22 @@ pub fn human_success(output: &CommandOutput) -> String {
             }
             lines.join("\n")
         }
+        CommandData::FileRevisions { target, revisions } => {
+            let mut lines = vec![
+                format!("revisions for {target}"),
+                "REVISION\tSEQ\tSIZE\tDIGEST".to_owned(),
+            ];
+            for revision in revisions {
+                lines.push(format!(
+                    "{}\t{}\t{}\t{}",
+                    revision.revision_no.0,
+                    revision.committed_seq.0,
+                    revision.content_ref.size_bytes,
+                    revision.content_ref.digest
+                ));
+            }
+            lines.join("\n")
+        }
         CommandData::FileTransfer {
             destination,
             bytes_written,

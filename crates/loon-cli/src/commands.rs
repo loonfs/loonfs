@@ -1,8 +1,9 @@
 use crate::args::{
-    Cli, Command, CommandKind, ConfigCommand, CurrentArgs, FilesystemGetArgs, FilesystemLsArgs,
-    FilesystemMoveArgs, FilesystemPathArgs, FilesystemPutArgs, InitArgs, NamespaceCommand,
-    NamespaceCreateArgs, NamespaceForkArgs, NamespaceListArgs, NamespaceUseArgs, ProfileCommand,
-    ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior, TargetSelectorArgs,
+    Cli, Command, CommandKind, ConfigCommand, CurrentArgs, FilesystemCatArgs, FilesystemGetArgs,
+    FilesystemLsArgs, FilesystemMoveArgs, FilesystemPathArgs, FilesystemPutArgs,
+    FilesystemRestoreArgs, InitArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceForkArgs,
+    NamespaceListArgs, NamespaceUseArgs, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs,
+    RuntimeBehavior, TargetSelectorArgs,
 };
 use crate::config::{
     default_config_path, load_config, load_config_if_exists, load_or_default_config, save_config,
@@ -17,7 +18,9 @@ use crate::prompt;
 use crate::resolve::{
     load_cli_config, resolve_namespace, resolve_target_profile, resolve_target_profile_from_config,
 };
-use loon_api::{AuthoritativePathEntry, InodeKind, NamespaceId, NamespaceSummary};
+use loon_api::{
+    AuthoritativePathEntry, FileRevision, InodeKind, NamespaceId, NamespaceSummary, RevisionNo,
+};
 use loon_client::NamespacePath;
 use serde::Serialize;
 use std::fs;
@@ -96,6 +99,10 @@ pub enum CommandData {
         entries: Vec<AuthoritativePathEntry>,
     },
     PathEntry(AuthoritativePathEntry),
+    FileRevisions {
+        target: String,
+        revisions: Vec<FileRevision>,
+    },
     FileTransfer {
         target: String,
         destination: String,
@@ -158,6 +165,8 @@ fn run_inner(cli: Cli, runtime: RuntimeBehavior) -> Result<CommandOutput, Comman
         Command::Cat(args) => run_filesystem_cat(kind, args),
         Command::Get(args) => run_filesystem_get(kind, args, runtime),
         Command::Put(args) => run_filesystem_put(kind, args),
+        Command::Revisions(args) => run_filesystem_revisions(kind, args),
+        Command::Restore(args) => run_filesystem_restore(kind, args),
         Command::Mkdir(args) => run_filesystem_mkdir(kind, args),
         Command::Rm(args) => run_filesystem_rm(kind, args),
         Command::Mv(args) => run_filesystem_mv(kind, args),
@@ -674,10 +683,39 @@ fn run_filesystem_stat(
 
 fn run_filesystem_cat(
     kind: CommandKind,
-    args: FilesystemPathArgs,
+    args: FilesystemCatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_path_lookup(kind, args, |backend, spec| {
-        backend.read_file_bytes(spec).map(CommandData::StreamBytes)
+    let context = resolve_command_context(kind, &args.target)?;
+    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let revision_no = args.revision.map(RevisionNo);
+    let bytes = match revision_no {
+        Some(revision_no) => context
+            .target
+            .backend()
+            .read_file_revision_bytes(&spec, revision_no),
+        None => context.target.backend().read_file_bytes(&spec),
+    }
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::StreamBytes(bytes),
     })
 }
 
@@ -724,18 +762,22 @@ fn run_filesystem_get(
         ));
     }
 
-    let bytes = context
-        .target
-        .backend()
-        .read_file_bytes(&spec)
-        .map_err(|error| {
-            fail(
-                kind,
-                Some(context.profile_name.clone()),
-                Some(context.mode.clone()),
-                error,
-            )
-        })?;
+    let revision_no = args.revision.map(RevisionNo);
+    let bytes = match revision_no {
+        Some(revision_no) => context
+            .target
+            .backend()
+            .read_file_revision_bytes(&spec, revision_no),
+        None => context.target.backend().read_file_bytes(&spec),
+    }
+    .map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
     let data = match args.local_destination.as_deref() {
         Some("-") => CommandData::StreamBytes(bytes),
         other => {
@@ -769,6 +811,43 @@ fn run_filesystem_get(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data,
+    })
+}
+
+fn run_filesystem_revisions(
+    kind: CommandKind,
+    args: FilesystemPathArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let response = context
+        .target
+        .backend()
+        .list_file_revisions(&spec)
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::FileRevisions {
+            target: render_target(&context.namespace, &spec.absolute_path),
+            revisions: response.revisions,
+        },
     })
 }
 
@@ -876,6 +955,43 @@ fn run_filesystem_rm(
         .target
         .backend()
         .delete_path(&spec)
+        .map_err(|error| {
+            fail(
+                kind,
+                Some(context.profile_name.clone()),
+                Some(context.mode.clone()),
+                error,
+            )
+        })?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::FileMutation {
+            target: render_target(&context.namespace, &spec.absolute_path),
+            committed_seq: result.committed_seq.0,
+        },
+    })
+}
+
+fn run_filesystem_restore(
+    kind: CommandKind,
+    args: FilesystemRestoreArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target)?;
+    let spec = namespace_path(&context.namespace, &args.path, false).map_err(|error| {
+        fail(
+            kind,
+            Some(context.profile_name.clone()),
+            Some(context.mode.clone()),
+            error,
+        )
+    })?;
+    let result = context
+        .target
+        .backend()
+        .restore_file_revision(&spec, RevisionNo(args.revision))
         .map_err(|error| {
             fail(
                 kind,
