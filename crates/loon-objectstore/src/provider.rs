@@ -21,7 +21,6 @@ pub struct ActiveContractProfile {
     pub scoped_key_prefixing: Expectation,
     pub traversal_rejection: Expectation,
     pub sorted_list_prefix: Expectation,
-    pub sha256_checksum_metadata: Expectation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +50,6 @@ pub const LOCAL_FS: ProviderProfile = ProviderProfile {
         scoped_key_prefixing: Expectation::ExpectedNo,
         traversal_rejection: Expectation::VerifyByConformance,
         sorted_list_prefix: Expectation::VerifyByConformance,
-        sha256_checksum_metadata: Expectation::VerifyByConformance,
     },
     future_capabilities: FutureCapabilityProfile {
         multipart_upload: Expectation::ExpectedNo,
@@ -73,7 +71,6 @@ pub const AWS_S3: ProviderProfile = ProviderProfile {
         scoped_key_prefixing: Expectation::ExpectedYes,
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
-        sha256_checksum_metadata: Expectation::ExpectedYes,
     },
     future_capabilities: FutureCapabilityProfile {
         multipart_upload: Expectation::ExpectedYes,
@@ -95,7 +92,6 @@ pub const CLOUDFLARE_R2: ProviderProfile = ProviderProfile {
         scoped_key_prefixing: Expectation::ExpectedYes,
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
-        sha256_checksum_metadata: Expectation::VerifyByConformance,
     },
     future_capabilities: FutureCapabilityProfile {
         multipart_upload: Expectation::ExpectedYes,

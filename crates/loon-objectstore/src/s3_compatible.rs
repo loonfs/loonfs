@@ -27,12 +27,14 @@ pub(crate) struct S3CompatibleConfig {
     pub session_token: Option<String>,
     pub key_prefix: Option<String>,
     pub force_path_style: bool,
+    pub sha256_checksum_metadata: bool,
 }
 
 pub(crate) struct S3CompatibleStore {
     provider_name: &'static str,
     bucket: String,
     key_prefix: Option<String>,
+    sha256_checksum_metadata: bool,
     client_config: S3CompatibleConfig,
     client: OnceLock<Client>,
     runtime: BlockingRuntime,
@@ -76,6 +78,7 @@ impl S3CompatibleStore {
             provider_name: config.provider_name,
             bucket: config.bucket.clone(),
             key_prefix,
+            sha256_checksum_metadata: config.sha256_checksum_metadata,
             client_config: config,
             client: OnceLock::new(),
             runtime: BlockingRuntime::new()?,
@@ -112,13 +115,14 @@ impl S3CompatibleStore {
             .head_object()
             .bucket(&self.bucket)
             .key(scoped_key);
-        if include_checksum {
+        let include_sha256_checksum = include_checksum && self.sha256_checksum_metadata;
+        if include_sha256_checksum {
             request = request.checksum_mode(ChecksumMode::Enabled);
         }
 
         match request.send().await {
             Ok(output) => {
-                let checksum_sha256 = if include_checksum {
+                let checksum_sha256 = if include_sha256_checksum {
                     output
                         .checksum_sha256()
                         .map(checksum::sha256_digest_from_base64)
@@ -144,28 +148,37 @@ impl S3CompatibleStore {
         bytes: &[u8],
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let checksum_sha256 = checksum::sha256_base64(bytes);
+        let checksum_sha256 = self
+            .sha256_checksum_metadata
+            .then(|| checksum::sha256_base64(bytes));
         let result = match &mode {
             PutMode::Overwrite => {
-                self.client()
+                let mut request = self
+                    .client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
-                    .content_length(bytes.len() as i64)
-                    .checksum_algorithm(ChecksumAlgorithm::Sha256)
-                    .checksum_sha256(checksum_sha256.clone())
-                    .body(ByteStream::from(bytes.to_vec()))
-                    .send()
-                    .await
+                    .content_length(bytes.len() as i64);
+                if let Some(checksum) = checksum_sha256.as_deref() {
+                    request = request
+                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                        .checksum_sha256(checksum);
+                }
+                request.body(ByteStream::from(bytes.to_vec())).send().await
             }
             PutMode::CreateIfAbsent => {
-                self.client()
+                let mut request = self
+                    .client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
-                    .content_length(bytes.len() as i64)
-                    .checksum_algorithm(ChecksumAlgorithm::Sha256)
-                    .checksum_sha256(checksum_sha256.clone())
+                    .content_length(bytes.len() as i64);
+                if let Some(checksum) = checksum_sha256.as_deref() {
+                    request = request
+                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                        .checksum_sha256(checksum);
+                }
+                request
                     .body(ByteStream::from(bytes.to_vec()))
                     .customize()
                     .await
@@ -185,13 +198,18 @@ impl S3CompatibleStore {
                     ))
                 })?;
 
-                self.client()
+                let mut request = self
+                    .client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
-                    .content_length(bytes.len() as i64)
-                    .checksum_algorithm(ChecksumAlgorithm::Sha256)
-                    .checksum_sha256(checksum_sha256)
+                    .content_length(bytes.len() as i64);
+                if let Some(checksum) = checksum_sha256.as_deref() {
+                    request = request
+                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                        .checksum_sha256(checksum);
+                }
+                request
                     .body(ByteStream::from(bytes.to_vec()))
                     .customize()
                     .await
@@ -212,7 +230,9 @@ impl S3CompatibleStore {
                         self.provider_name, scoped_key
                     ))
                 })?;
-                metadata.checksum_sha256 = Some(checksum::sha256_digest(bytes));
+                if self.sha256_checksum_metadata {
+                    metadata.checksum_sha256 = Some(checksum::sha256_digest(bytes));
+                }
                 Ok(metadata)
             }
             Err(err) if put_error_maps_to_precondition_failed(&mode, &err) => {
@@ -540,6 +560,7 @@ mod tests {
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
+            sha256_checksum_metadata: true,
         })
         .expect("construct store");
 
@@ -565,6 +586,7 @@ mod tests {
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
+            sha256_checksum_metadata: true,
         })
         .expect("construct store");
 

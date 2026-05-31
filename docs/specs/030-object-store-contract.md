@@ -14,7 +14,6 @@ A conforming object-store layer must provide the following behavior.
 | **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
 | **Strong consistency** | A successful put/delete operation must become authoritative immediately after it succeeds. |
 | **Prefix enumeration** | Checkpoint discovery, WAL segment discovery for repair and cleanup, and general namespace inspection need a reliable way to enumerate objects by prefix. |
-| **SHA-256 checksum metadata for written objects** | Commit validation can prove immutable content identity without re-reading whole blobs when the provider exposes a verified full-object checksum. |
 | **Deterministic key scoping** | Providers must not allow objects outside the configured namespace or tenant prefix to leak into operations. |
 | **Consistent error signaling for failed preconditions** | Higher layers need one generic way to detect stale writes and retry or fail safely. |
 
@@ -74,7 +73,7 @@ The content model has four rules.
 2. A `content_ref` describes one complete file revision.
 3. Immutable content objects are written with create-if-absent semantics.
 4. A metadata commit may reference a `content_ref` only after the referenced object is already durable.
-5. When checksum metadata is available, the object-store layer must expose it as `sha256:<64hex>` over the full object bytes. If checksum metadata is absent, readers and writers must fall back to reading and hashing bytes before treating a `content_ref` as verified.
+5. When provider-verified full-object SHA-256 metadata is available, the object-store layer may expose it as `sha256:<64hex>`. If SHA-256 metadata is absent, readers and writers must fall back to reading and hashing bytes before treating a `content_ref` as verified.
 
 In v0, file content is stored as one whole-file object whose `content_ref.kind` is `whole_file_v0`. The digest remains serialized as `sha256:<64hex>`, while the object key partitions the hex as `sha256/ab/cd/<hex>`.
 

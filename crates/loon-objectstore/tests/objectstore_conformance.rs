@@ -57,10 +57,6 @@ fn provider_profiles_exist() {
         Expectation::VerifyByConformance
     );
     assert_eq!(
-        LOCAL_FS.active_contract.sha256_checksum_metadata,
-        Expectation::VerifyByConformance
-    );
-    assert_eq!(
         AWS_S3.active_contract.opaque_compare_token_for_cas,
         Expectation::ExpectedYes
     );
@@ -83,10 +79,6 @@ fn provider_profiles_exist() {
     );
     assert_eq!(
         AWS_S3.active_contract.sorted_list_prefix,
-        Expectation::ExpectedYes
-    );
-    assert_eq!(
-        AWS_S3.active_contract.sha256_checksum_metadata,
         Expectation::ExpectedYes
     );
     assert_eq!(
@@ -118,10 +110,6 @@ fn provider_profiles_exist() {
     assert_eq!(
         CLOUDFLARE_R2.active_contract.sorted_list_prefix,
         Expectation::ExpectedYes
-    );
-    assert_eq!(
-        CLOUDFLARE_R2.active_contract.sha256_checksum_metadata,
-        Expectation::VerifyByConformance
     );
     assert_eq!(
         LOCAL_FS.future_capabilities.multipart_upload,
@@ -258,7 +246,6 @@ fn local_fs_contract_probes_match_doctor_surface() {
             "create_if_absent",
             "compare_and_swap",
             "visibility_after_write",
-            "sha256_checksum_metadata",
             "visibility_after_delete",
             "sorted_listing",
             "scoped_prefix_behavior",
@@ -312,30 +299,9 @@ fn assert_provider_conformance<S: ObjectStore>(store: &S) {
     assert_overwrite_updates_head_and_body(store);
     assert_delete_missing_is_idempotent(store);
     assert_lists_immediately_after_write_and_delete(store);
-    assert_sha256_checksum_metadata(store);
     assert_sorted_list_prefix(store);
     assert_supports_range_reads(store);
     assert_rejects_invalid_keys_consistently(store);
-}
-
-fn assert_sha256_checksum_metadata<S: ObjectStore>(store: &S) {
-    let key = namespace_head("ns-checksum");
-    let bytes = br#"{"seq":99,"checksum":true}"#;
-    let _ = store.delete(&key);
-
-    store
-        .put_if_absent(&key, bytes)
-        .expect("create checksum object");
-    let metadata = store
-        .head_with_checksum(&key)
-        .expect("head checksum object")
-        .expect("checksum object exists");
-    assert_eq!(
-        metadata.checksum_sha256.as_deref(),
-        Some(loon_api::sha256_digest(bytes).as_str())
-    );
-
-    store.delete(&key).expect("cleanup checksum object");
 }
 
 fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {

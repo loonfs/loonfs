@@ -1,6 +1,5 @@
 use crate::keys::{derived_progress, namespace_head, namespace_lease, DerivedWorkClass};
 use crate::{ObjectStore, ObjectStoreError};
-use loon_api::sha256_digest;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -34,9 +33,6 @@ pub fn run_contract_probes<S: ObjectStore + ?Sized>(
     probe_visibility_after_write(store, run_id)?;
     checks.push("visibility_after_write".to_owned());
 
-    probe_sha256_checksum_metadata(store, run_id)?;
-    checks.push("sha256_checksum_metadata".to_owned());
-
     probe_visibility_after_delete(store, run_id)?;
     checks.push("visibility_after_delete".to_owned());
 
@@ -50,40 +46,6 @@ pub fn run_contract_probes<S: ObjectStore + ?Sized>(
         run_id: run_id.to_owned(),
         checks,
     })
-}
-
-fn probe_sha256_checksum_metadata<S: ObjectStore + ?Sized>(
-    store: &S,
-    run_id: &str,
-) -> Result<(), ContractProbeError> {
-    let key = namespace_head(&probe_namespace(run_id, "checksum"));
-    let bytes = br#"{"seq":99,"checksum":true}"#;
-    let _ = store.delete(&key);
-
-    store
-        .put_if_absent(&key, bytes)
-        .map_err(|err| probe_error("sha256_checksum_metadata", err))?;
-    let metadata = store
-        .head_with_checksum(&key)
-        .map_err(|err| probe_error("sha256_checksum_metadata", err))?
-        .ok_or_else(|| ContractProbeError::Probe {
-            probe: "sha256_checksum_metadata",
-            message: "expected object metadata after checksum probe write".to_owned(),
-        })?;
-
-    if metadata.checksum_sha256.as_deref() != Some(sha256_digest(bytes).as_str()) {
-        return Err(ContractProbeError::Probe {
-            probe: "sha256_checksum_metadata",
-            message: format!(
-                "expected SHA-256 checksum {}, got {:?}",
-                sha256_digest(bytes),
-                metadata.checksum_sha256
-            ),
-        });
-    }
-
-    cleanup_key(store, "sha256_checksum_metadata", &key);
-    Ok(())
 }
 
 fn probe_create_if_absent<S: ObjectStore + ?Sized>(
