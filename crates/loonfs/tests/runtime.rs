@@ -671,13 +671,13 @@ fn upload_flow_is_available_from_runtime() {
 }
 
 #[test]
-fn upload_then_path_put_uses_private_uploaded_content_cache() {
+fn upload_then_path_put_uses_checksum_metadata_without_blob_get() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
-        .writer_id("validated-content-cache-test")
+        .writer_id("validated-content-checksum-test")
         .build()
         .expect("build runtime");
 
@@ -701,8 +701,8 @@ fn upload_then_path_put_uses_private_uploaded_content_cache() {
         &namespace_id,
         vec![NamespaceMutationCandidate::Path(
             PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-cached-upload").expect("valid commit id"),
-                absolute_path: "/docs/cached.txt".to_owned(),
+                commit_id: CommitId::parse("put-checksum-upload").expect("valid commit id"),
+                absolute_path: "/docs/checksum.txt".to_owned(),
                 content_ref: staged.content_ref,
                 behavior: PutFileBehavior::CreateOnly,
             },
@@ -714,13 +714,13 @@ fn upload_then_path_put_uses_private_uploaded_content_cache() {
 }
 
 #[test]
-fn disabled_runtime_cache_falls_back_to_durable_content_validation() {
+fn disabled_runtime_cache_still_uses_checksum_metadata_for_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = Fs::builder(object_store)
-        .writer_id("validated-content-cache-disabled-test")
+        .writer_id("validated-content-checksum-disabled-test")
         .runtime_cache(RuntimeCacheConfig::disabled())
         .build()
         .expect("build runtime");
@@ -754,7 +754,7 @@ fn disabled_runtime_cache_falls_back_to_durable_content_validation() {
     );
 
     assert!(responses[0].is_ok());
-    assert_eq!(raw_store.content_blob_get_count(), 1);
+    assert_eq!(raw_store.content_blob_get_count(), 0);
 }
 
 #[test]
@@ -1535,6 +1535,10 @@ impl ContentBlobGetCountingStore {
 impl ObjectStore for ContentBlobGetCountingStore {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key)
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head_with_checksum(key)
     }
 
     fn get(

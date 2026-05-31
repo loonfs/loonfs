@@ -32,7 +32,7 @@ Before evaluating commit requests, the server reconstructs the current metadata 
 The server validates each commit request against the reconstructed state:
 
 1. Resolve any operation-local references needed to identify referenced content.
-2. Verify that all referenced content objects are already durable in object storage, and that `content_ref.kind`, digest, and size match.
+2. Verify that all referenced content objects are already durable in object storage, and that `content_ref.kind`, digest, and size match. When provider-verified SHA-256 metadata is present, this validation may use metadata instead of downloading the whole object; otherwise it must read and hash the object bytes.
 3. Evaluate preconditions in order (see §6 for the precondition catalogue).
 4. Resolve inode references and allocate new inode ids monotonically from the head's `next_inode_id`.
 
@@ -46,7 +46,8 @@ Content reference validation fails before metadata preconditions are evaluated w
 - `content_ref.digest` is not a valid `sha256:<64 lowercase hex>` digest;
 - the referenced object is missing from the namespace's content store;
 - the object size differs from `content_ref.size_bytes`; or
-- the object bytes hash to a different digest than `content_ref.digest`.
+- provider-verified checksum metadata, when present, differs from `content_ref.digest`; or
+- when checksum metadata is absent, the object bytes hash to a different digest than `content_ref.digest`.
 
 ### 1.4 WAL segment publication and head advance
 

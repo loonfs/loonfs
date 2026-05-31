@@ -46,6 +46,10 @@ impl ObjectStore for R2Store {
         self.inner.head(key)
     }
 
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head_with_checksum(key)
+    }
+
     fn get(
         &self,
         key: &str,

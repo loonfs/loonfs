@@ -10,6 +10,11 @@ pub struct ObjectMetadata {
     /// canonical content identity and callers must not derive provider-specific meaning from it.
     pub etag: Option<String>,
     pub size_bytes: u64,
+    /// Provider-verified full-object SHA-256 when available, normalized as `sha256:<64hex>`.
+    ///
+    /// This is part of the object-store contract only when present. Callers must fall back to
+    /// reading and hashing object bytes if this field is absent.
+    pub checksum_sha256: Option<String>,
 }
 
 /// Controls the write semantics of a `put` call.
@@ -52,6 +57,9 @@ pub enum ObjectStoreError {
 
 pub trait ObjectStore {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError>;
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.head(key)
+    }
     fn get(&self, key: &str, range: Option<ByteRange>)
         -> Result<Option<Vec<u8>>, ObjectStoreError>;
     fn put(
