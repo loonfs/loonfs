@@ -671,7 +671,7 @@ fn upload_flow_is_available_from_runtime() {
 }
 
 #[test]
-fn upload_then_path_put_uses_checksum_metadata_without_blob_get() {
+fn upload_then_path_put_uses_memory_proof_without_blob_validation_call() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
@@ -696,7 +696,7 @@ fn upload_then_path_put_uses_checksum_metadata_without_blob_get() {
     )
     .expect("complete upload");
 
-    raw_store.reset_content_blob_get_count();
+    raw_store.reset_content_blob_counters();
     let responses = fs.publish_namespace_mutations_batch(
         &namespace_id,
         vec![NamespaceMutationCandidate::Path(
@@ -711,10 +711,11 @@ fn upload_then_path_put_uses_checksum_metadata_without_blob_get() {
 
     assert!(responses[0].is_ok());
     assert_eq!(raw_store.content_blob_get_count(), 0);
+    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
 
 #[test]
-fn disabled_runtime_cache_still_uses_checksum_metadata_for_content_validation() {
+fn disabled_runtime_cache_still_uses_memory_proof_without_blob_validation_call() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
@@ -740,7 +741,7 @@ fn disabled_runtime_cache_still_uses_checksum_metadata_for_content_validation() 
     )
     .expect("complete upload");
 
-    raw_store.reset_content_blob_get_count();
+    raw_store.reset_content_blob_counters();
     let responses = fs.publish_namespace_mutations_batch(
         &namespace_id,
         vec![NamespaceMutationCandidate::Path(
@@ -755,6 +756,34 @@ fn disabled_runtime_cache_still_uses_checksum_metadata_for_content_validation() 
 
     assert!(responses[0].is_ok());
     assert_eq!(raw_store.content_blob_get_count(), 0);
+    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
+}
+
+#[test]
+fn put_file_bytes_uses_memory_proof_without_blob_validation_call() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("put-file-memory-proof-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    raw_store.reset_content_blob_counters();
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/direct.txt",
+        b"direct bytes",
+        PutFileOptions::default(),
+    )
+    .expect("put file bytes");
+
+    assert_eq!(raw_store.content_blob_get_count(), 0);
+    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
 }
 
 #[test]
@@ -1513,6 +1542,7 @@ impl ObjectStore for HeadCasFailureStore {
 struct ContentBlobGetCountingStore {
     inner: LocalFsStore,
     content_blob_gets: AtomicUsize,
+    content_blob_checksum_heads: AtomicUsize,
 }
 
 impl ContentBlobGetCountingStore {
@@ -1520,15 +1550,21 @@ impl ContentBlobGetCountingStore {
         Self {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             content_blob_gets: AtomicUsize::new(0),
+            content_blob_checksum_heads: AtomicUsize::new(0),
         }
     }
 
-    fn reset_content_blob_get_count(&self) {
+    fn reset_content_blob_counters(&self) {
         self.content_blob_gets.store(0, Ordering::SeqCst);
+        self.content_blob_checksum_heads.store(0, Ordering::SeqCst);
     }
 
     fn content_blob_get_count(&self) -> usize {
         self.content_blob_gets.load(Ordering::SeqCst)
+    }
+
+    fn content_blob_checksum_head_count(&self) -> usize {
+        self.content_blob_checksum_heads.load(Ordering::SeqCst)
     }
 }
 
@@ -1538,6 +1574,10 @@ impl ObjectStore for ContentBlobGetCountingStore {
     }
 
     fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        if key.starts_with("content-stores/") && key.contains("/blobs/") {
+            self.content_blob_checksum_heads
+                .fetch_add(1, Ordering::SeqCst);
+        }
         self.inner.head_with_checksum(key)
     }
 

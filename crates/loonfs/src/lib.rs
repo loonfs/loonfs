@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use loon_api::sha256_digest;
 pub use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
     CommitPrecondition, CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest,
@@ -27,11 +28,13 @@ use loon_core::{
     NamespaceCommitEngine, VerifiedNamespaceBasis,
 };
 use loon_objectstore::keys::namespace_head;
+use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
+const MAX_UPLOADED_CONTENT_PROOF_ENTRIES: usize = 16_384;
 
 pub type SharedObjectStore = Arc<dyn ObjectStore + Send + Sync>;
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -103,6 +106,7 @@ struct FsInner {
     basis_cache: Mutex<BasisCache>,
     commit_engines: Mutex<CommitEngineCache>,
     control_cache: Mutex<RuntimeControlCache>,
+    uploaded_content_proofs: Mutex<UploadedContentProofCache>,
     cache_stats: RuntimeCacheStatsInner,
 }
 
@@ -179,6 +183,146 @@ impl BasisCache {
         self.order.retain(|candidate| candidate != namespace_id);
         self.order.push_back(namespace_id.clone());
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UploadedContentProofKey {
+    namespace_id: NamespaceId,
+    digest: String,
+}
+
+#[derive(Debug, Default)]
+struct UploadedContentProofCache {
+    entries: HashMap<UploadedContentProofKey, ContentRef>,
+    order: VecDeque<UploadedContentProofKey>,
+}
+
+impl UploadedContentProofCache {
+    fn insert(&mut self, namespace_id: &NamespaceId, content_ref: ContentRef) {
+        let key = UploadedContentProofKey {
+            namespace_id: namespace_id.clone(),
+            digest: content_ref.digest.clone(),
+        };
+        self.entries.insert(key.clone(), content_ref);
+        self.touch(&key);
+        while self.entries.len() > MAX_UPLOADED_CONTENT_PROOF_ENTRIES {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+    }
+
+    fn get(&mut self, namespace_id: &NamespaceId, digest: &str) -> Option<ContentRef> {
+        let key = UploadedContentProofKey {
+            namespace_id: namespace_id.clone(),
+            digest: digest.to_owned(),
+        };
+        let content_ref = self.entries.get(&key)?.clone();
+        self.touch(&key);
+        Some(content_ref)
+    }
+
+    fn touch(&mut self, key: &UploadedContentProofKey) {
+        self.order.retain(|existing| existing != key);
+        self.order.push_back(key.clone());
+    }
+}
+
+struct UploadedContentProofStore<'a> {
+    inner: &'a (dyn ObjectStore + Send + Sync),
+    namespace_id: &'a NamespaceId,
+    proofs: &'a Mutex<UploadedContentProofCache>,
+}
+
+impl UploadedContentProofStore<'_> {
+    fn proof_metadata(&self, key: &str) -> Option<ObjectMetadata> {
+        let digest = content_blob_digest_from_key(key)?;
+        let content_ref = self
+            .proofs
+            .lock()
+            .expect("uploaded content proof cache lock poisoned")
+            .get(self.namespace_id, &digest)?;
+        Some(ObjectMetadata {
+            etag: None,
+            size_bytes: content_ref.size_bytes,
+            checksum_sha256: Some(content_ref.digest),
+        })
+    }
+
+    fn record_write_proof(&self, key: &str, bytes: &[u8]) {
+        let Some(digest) = content_blob_digest_from_key(key) else {
+            return;
+        };
+        if sha256_digest(bytes) != digest {
+            return;
+        }
+        self.proofs
+            .lock()
+            .expect("uploaded content proof cache lock poisoned")
+            .insert(
+                self.namespace_id,
+                ContentRef {
+                    kind: loon_api::ContentRefKind::WholeFileV0,
+                    digest,
+                    size_bytes: bytes.len() as u64,
+                },
+            );
+    }
+}
+
+impl ObjectStore for UploadedContentProofStore<'_> {
+    fn head(&self, key: &str) -> std::result::Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn head_with_checksum(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<ObjectMetadata>, ObjectStoreError> {
+        if let Some(metadata) = self.proof_metadata(key) {
+            return Ok(Some(metadata));
+        }
+        self.inner.head_with_checksum(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> std::result::Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> std::result::Result<ObjectMetadata, ObjectStoreError> {
+        let metadata = self.inner.put(key, bytes, mode)?;
+        self.record_write_proof(key, bytes);
+        Ok(metadata)
+    }
+
+    fn delete(&self, key: &str) -> std::result::Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> std::result::Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
+}
+
+fn content_blob_digest_from_key(key: &str) -> Option<String> {
+    if !key.contains("/blobs/sha256/") {
+        return None;
+    }
+    let hex = key.rsplit('/').next()?;
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("sha256:{}", hex.to_ascii_lowercase()))
 }
 
 #[derive(Debug, Default)]
@@ -498,6 +642,7 @@ impl Fs {
                 basis_cache: Mutex::new(BasisCache::default()),
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
+                uploaded_content_proofs: Mutex::new(UploadedContentProofCache::default()),
                 cache_stats: RuntimeCacheStatsInner::default(),
             }),
         })
@@ -714,8 +859,9 @@ impl Fs {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> Result<MutationResult> {
+        let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_bytes(
-            self.store(),
+            &store,
             namespace_id,
             absolute_path,
             bytes,
@@ -734,8 +880,9 @@ impl Fs {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> Result<MutationResult> {
+        let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_content_ref(
-            self.store(),
+            &store,
             namespace_id,
             absolute_path,
             content_ref,
@@ -889,8 +1036,9 @@ impl Fs {
         upload_id: &str,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
+        let store = self.uploaded_content_proof_store(namespace_id);
         Ok(loon_core::upload_content(
-            self.store(),
+            &store,
             namespace_id,
             upload_id,
             bytes,
@@ -950,11 +1098,12 @@ impl Fs {
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
+        let store = self.uploaded_content_proof_store(namespace_id);
         if self.commit_engine_cache_enabled() {
             let engine = self.commit_engine(namespace_id);
             let publish = {
                 let mut engine = engine.lock().expect("commit engine lock poisoned");
-                engine.publish_batch(self.store(), candidates, &self.mutation_context())
+                engine.publish_batch(&store, candidates, &self.mutation_context())
             };
             self.inner.cache_stats.record_publish_result(&publish);
             if let Some(basis) = publish
@@ -973,7 +1122,7 @@ impl Fs {
         }
 
         let results: Vec<_> = loon_core::publish_namespace_mutations_batch(
-            self.store(),
+            &store,
             namespace_id,
             candidates,
             &self.mutation_context(),
@@ -1229,6 +1378,17 @@ impl Fs {
 
     fn store(&self) -> &(dyn ObjectStore + Send + Sync) {
         self.inner.store.as_ref()
+    }
+
+    fn uploaded_content_proof_store<'a>(
+        &'a self,
+        namespace_id: &'a NamespaceId,
+    ) -> UploadedContentProofStore<'a> {
+        UploadedContentProofStore {
+            inner: self.store(),
+            namespace_id,
+            proofs: &self.inner.uploaded_content_proofs,
+        }
     }
 
     fn mutation_context(&self) -> MutationContext {
