@@ -36,6 +36,7 @@ pub enum CheckpointTableFamily {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointSegmentDescriptor {
     pub object_key: String,
+    pub table_seq: ChangeSeq,
     pub segment_index: u32,
     pub row_count: u64,
     pub min_key: String,
@@ -48,6 +49,14 @@ pub struct CheckpointSegmentDescriptor {
 pub struct CheckpointTableManifest {
     pub family: CheckpointTableFamily,
     pub segments: Vec<CheckpointSegmentDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointDeltaRunManifest {
+    pub delta_run_id: String,
+    pub seq_min: ChangeSeq,
+    pub seq_max: ChangeSeq,
+    pub tables: Vec<CheckpointTableManifest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,11 +237,13 @@ impl CheckpointSegmentEnvelope {
 pub struct CheckpointManifestPayload {
     pub namespace_id: NamespaceId,
     pub checkpoint_seq: ChangeSeq,
+    pub base_seq: ChangeSeq,
     pub active_fence_token: FenceToken,
     pub next_inode_id: InodeId,
     pub retention_floor_seq: ChangeSeq,
     pub verified: bool,
-    pub tables: Vec<CheckpointTableManifest>,
+    pub base_tables: Vec<CheckpointTableManifest>,
+    pub delta_runs: Vec<CheckpointDeltaRunManifest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,4 +402,87 @@ pub fn decode_checkpoint_segment_envelope_zstd(
     }
 
     Ok(envelope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        decode_checkpoint_manifest_json, encode_checkpoint_manifest_json,
+        CheckpointDeltaRunManifest, CheckpointManifestEnvelope, CheckpointManifestPayload,
+        CheckpointSegmentDescriptor, CheckpointTableFamily, CheckpointTableManifest,
+    };
+    use crate::{ChangeSeq, FenceToken, InodeId, NamespaceId};
+
+    #[test]
+    fn checkpoint_manifest_codec_round_trips_base_only_materialization() {
+        let envelope = CheckpointManifestEnvelope::from_payload(
+            "test-writer",
+            CheckpointManifestPayload {
+                namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+                checkpoint_seq: ChangeSeq(10),
+                base_seq: ChangeSeq(10),
+                active_fence_token: FenceToken(2),
+                next_inode_id: InodeId(42),
+                retention_floor_seq: ChangeSeq(0),
+                verified: true,
+                base_tables: vec![table_manifest("base/inodes.sst.zst", ChangeSeq(10))],
+                delta_runs: Vec::new(),
+            },
+        )
+        .expect("manifest");
+
+        let encoded = encode_checkpoint_manifest_json(&envelope).expect("encode manifest");
+        let decoded = decode_checkpoint_manifest_json(&encoded).expect("decode manifest");
+
+        assert_eq!(decoded, envelope);
+        assert_eq!(decoded.payload.base_seq, ChangeSeq(10));
+        assert!(decoded.payload.delta_runs.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_manifest_codec_round_trips_delta_run_materialization() {
+        let envelope = CheckpointManifestEnvelope::from_payload(
+            "test-writer",
+            CheckpointManifestPayload {
+                namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+                checkpoint_seq: ChangeSeq(12),
+                base_seq: ChangeSeq(10),
+                active_fence_token: FenceToken(2),
+                next_inode_id: InodeId(42),
+                retention_floor_seq: ChangeSeq(0),
+                verified: true,
+                base_tables: vec![table_manifest("base/inodes.sst.zst", ChangeSeq(10))],
+                delta_runs: vec![CheckpointDeltaRunManifest {
+                    delta_run_id: "dr_00000000000000000000000000000001".to_owned(),
+                    seq_min: ChangeSeq(11),
+                    seq_max: ChangeSeq(12),
+                    tables: vec![table_manifest("delta/inodes.sst.zst", ChangeSeq(12))],
+                }],
+            },
+        )
+        .expect("manifest");
+
+        let encoded = encode_checkpoint_manifest_json(&envelope).expect("encode manifest");
+        let decoded = decode_checkpoint_manifest_json(&encoded).expect("decode manifest");
+
+        assert_eq!(decoded, envelope);
+        assert_eq!(decoded.payload.delta_runs[0].seq_min, ChangeSeq(11));
+        assert_eq!(decoded.payload.delta_runs[0].seq_max, ChangeSeq(12));
+    }
+
+    fn table_manifest(object_key: &str, table_seq: ChangeSeq) -> CheckpointTableManifest {
+        CheckpointTableManifest {
+            family: CheckpointTableFamily::Inodes,
+            segments: vec![CheckpointSegmentDescriptor {
+                object_key: object_key.to_owned(),
+                table_seq,
+                segment_index: 0,
+                row_count: 0,
+                min_key: String::new(),
+                max_key: String::new(),
+                payload_checksum_sha256: "sha256:unused".to_owned(),
+                page_checksums_sha256: Vec::new(),
+            }],
+        }
+    }
 }

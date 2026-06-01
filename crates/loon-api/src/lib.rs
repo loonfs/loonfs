@@ -35,11 +35,11 @@ pub use http::{
     MutationResult, NamespaceSummary, RestoreFileRevisionRequest,
 };
 pub use ids::{
-    generate_upload_id, generate_wal_segment_id, generated_id, validate_generated_id,
-    validate_upload_id, validate_wal_segment_id, ChangeSeq, CommitId, CommitIdValidationError,
-    ConflictDisposition, ContentStoreId, FenceToken, GeneratedIdValidationError, Identity, InodeId,
-    InodeKind, NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError,
-    RevisionNo,
+    generate_checkpoint_delta_run_id, generate_upload_id, generate_wal_segment_id, generated_id,
+    validate_checkpoint_delta_run_id, validate_generated_id, validate_upload_id,
+    validate_wal_segment_id, ChangeSeq, CommitId, CommitIdValidationError, ConflictDisposition,
+    ContentStoreId, FenceToken, GeneratedIdValidationError, Identity, InodeId, InodeKind, NameKey,
+    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo,
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
