@@ -64,7 +64,11 @@ A representative v0 binding is shown below.
 | Create a namespace | `POST /v0/namespaces` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
 | List a path | `GET /v0/namespaces/{ns}/filesystem/list?path=/docs` |
+| List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
+| Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
+| List file revisions by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions` |
+| Read prior file content by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
 | Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
@@ -170,6 +174,31 @@ The same endpoint also accepts path directory creation:
     "op": "create_dir",
     "path": "/docs"
   }
+}
+```
+
+and path revision restore:
+
+```json
+{
+  "commit_id": "c_8f9a1b2c3d4e4f50a6b7c8d9e0f12345",
+  "operation": {
+    "op": "restore_revision",
+    "path": "/docs/report.txt",
+    "source_revision_no": 3
+  }
+}
+```
+
+Inode-based restore is available when a caller already has stable inode identity and the expected
+current base revision:
+
+`POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{source_revision_no}/restore`
+
+```json
+{
+  "commit_id": "c_271e8c2b45a04e5da6a7e8d9f0012345",
+  "base_revision_no": 7
 }
 ```
 

@@ -16,7 +16,7 @@ use loon_api::{
         CommitRequest as ApiCommitRequest, RenameMode,
     },
     AbsolutePath, ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey,
-    NamespaceId,
+    NamespaceId, RevisionNo,
 };
 use loon_objectstore::ObjectStore;
 use serde::Serialize;
@@ -95,6 +95,11 @@ enum PathFingerprintInput {
         from_path: String,
         to_path: String,
     },
+    RestoreRevision {
+        namespace_id: NamespaceId,
+        absolute_path: String,
+        source_revision_no: RevisionNo,
+    },
 }
 
 fn path_intent_fingerprint(
@@ -161,6 +166,15 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             from_path: normalized_path_for_fingerprint(from_path)?,
             to_path: normalized_path_for_fingerprint(to_path)?,
         },
+        PathMutationIntent::RestoreRevision {
+            absolute_path,
+            source_revision_no,
+            ..
+        } => PathFingerprintInput::RestoreRevision {
+            namespace_id: namespace_id.clone(),
+            absolute_path: normalized_path_for_fingerprint(absolute_path)?,
+            source_revision_no: *source_revision_no,
+        },
     };
     path_intent_fingerprint(&identity)
 }
@@ -213,6 +227,11 @@ pub(crate) fn plan_path_mutation_against_state(
         PathMutationIntent::CopyFilePath {
             from_path, to_path, ..
         } => plan_copy_file_path(from_path, to_path, &commit_id, &view)?,
+        PathMutationIntent::RestoreRevision {
+            absolute_path,
+            source_revision_no,
+            ..
+        } => plan_restore_revision(absolute_path, *source_revision_no, &commit_id, &view)?,
     };
     Ok(PlannedPathMutation {
         commit_id,
@@ -608,6 +627,57 @@ fn plan_copy_file_path(
             child_name_absent_precondition(view, target_parent, &target_name),
             ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: target_parent,
+            },
+        ],
+        message: None,
+        annotations: None,
+    })
+}
+
+fn plan_restore_revision(
+    absolute_path: &str,
+    source_revision_no: RevisionNo,
+    commit_id: &CommitId,
+    view: &PathPlanningView<'_>,
+) -> Result<ApiCommitRequest, CoreError> {
+    let absolute_path = parse_mutation_path(absolute_path)?;
+    reject_tombstoned_path_ancestor(
+        view.metadata_state,
+        &absolute_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    let target = view.metadata_state.resolve_visible_path(
+        &absolute_path,
+        view.head.name_policy,
+        view.head.seq,
+    )?;
+    if target.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            path: absolute_path.as_str().to_owned(),
+            kind: target.inode_kind,
+        });
+    }
+    let revision = view
+        .metadata_state
+        .latest_revision_head_at_seq(target.inode_id, view.head.seq)
+        .ok_or_else(|| CoreError::MissingPath(absolute_path.as_str().to_owned()))?;
+
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops: vec![ApiCommitOp::RestoreRevision {
+            inode_id: target.inode_id,
+            source_revision_no,
+            base_revision_no: revision.revision_no,
+        }],
+        preconditions: vec![
+            binding_is_precondition(view, &target)?,
+            ApiCommitPrecondition::InodeRevisionIs {
+                inode_id: target.inode_id,
+                revision_no: revision.revision_no,
+            },
+            ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: target.inode_id,
             },
         ],
         message: None,

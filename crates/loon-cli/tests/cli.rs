@@ -85,8 +85,10 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     harness.add_embedded_profile("default");
 
     let upload_path = harness.temp_dir.path().join("upload.txt");
+    let update_path = harness.temp_dir.path().join("updated.txt");
     let download_path = harness.temp_dir.path().join("downloaded.txt");
     fs::write(&upload_path, b"hello from direct core\n").expect("upload payload");
+    fs::write(&update_path, b"updated from direct core\n").expect("updated payload");
 
     assert_success(&harness.run(&["namespace", "create", "demo"]));
     assert_success(&harness.run(&["use", "demo"]));
@@ -120,11 +122,22 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     let put_force = harness.run(&[
         "--json",
         "put",
-        upload_path.to_str().unwrap(),
+        update_path.to_str().unwrap(),
         "/docs/hello.txt",
         "--force",
     ]);
     assert_success(&put_force);
+
+    let revisions = harness.run(&["--json", "revisions", "/docs/hello.txt"]);
+    assert_success(&revisions);
+    assert_eq!(
+        json_data(&revisions)["revisions"].as_array().unwrap().len(),
+        2
+    );
+
+    let old_cat = harness.run(&["cat", "--revision", "1", "/docs/hello.txt"]);
+    assert_success(&old_cat);
+    assert_eq!(old_cat.stdout, b"hello from direct core\n");
 
     let cp = harness.run(&["--json", "cp", "/docs/hello.txt", "/docs/copy.txt"]);
     assert_success(&cp);
@@ -141,11 +154,15 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 
     let cat = harness.run(&["cat", "/docs/hello.txt"]);
     assert_success(&cat);
-    assert_eq!(cat.stdout, b"hello from direct core\n");
+    assert_eq!(cat.stdout, b"updated from direct core\n");
 
     let get_stdout = harness.run(&["get", "/docs/hello.txt", "-"]);
     assert_success(&get_stdout);
-    assert_eq!(get_stdout.stdout, b"hello from direct core\n");
+    assert_eq!(get_stdout.stdout, b"updated from direct core\n");
+
+    let get_old_stdout = harness.run(&["get", "--revision", "1", "/docs/hello.txt", "-"]);
+    assert_success(&get_old_stdout);
+    assert_eq!(get_old_stdout.stdout, b"hello from direct core\n");
 
     let get_file = harness.run(&[
         "--json",
@@ -156,8 +173,14 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
     assert_success(&get_file);
     assert_eq!(
         fs::read(&download_path).expect("downloaded bytes"),
-        b"hello from direct core\n"
+        b"updated from direct core\n"
     );
+
+    let restore = harness.run(&["--json", "restore", "--revision", "1", "/docs/hello.txt"]);
+    assert_success(&restore);
+    let restored = harness.run(&["cat", "/docs/hello.txt"]);
+    assert_success(&restored);
+    assert_eq!(restored.stdout, b"hello from direct core\n");
 
     let mv = harness.run(&["--json", "mv", "/docs/copy.txt", "/docs/final.txt"]);
     assert_success(&mv);

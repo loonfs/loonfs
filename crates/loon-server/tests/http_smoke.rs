@@ -553,6 +553,105 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loon-server-revisions",
+        "http-revisions",
+        60_000,
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = "demo";
+        harness
+            .client
+            .create_namespace(namespace)
+            .expect("create namespace");
+        let target = NamespacePath::parse("demo:/docs/rev.txt").expect("target");
+        harness
+            .client
+            .put_file_bytes(&target, b"one", false)
+            .expect("create file");
+        harness
+            .client
+            .put_file_bytes(&target, b"two", true)
+            .expect("replace file");
+
+        let entry = harness.client.stat_path(&target).expect("stat file");
+        let revisions = harness
+            .client
+            .list_file_revisions(&target)
+            .expect("path revisions");
+        assert_eq!(revisions.inode_id, entry.inode_id);
+        assert_eq!(revisions.revisions.len(), 2);
+        assert_eq!(
+            harness
+                .client
+                .read_file_revision_bytes(&target, RevisionNo(1))
+                .expect("read path revision"),
+            b"one"
+        );
+
+        let moved = NamespacePath::parse("demo:/docs/moved.txt").expect("moved");
+        harness
+            .client
+            .move_path(&target, &moved)
+            .expect("move path");
+        assert!(matches!(
+            harness.client.list_file_revisions(&target),
+            Err(ClientError::Api { code, .. }) if code == "path_not_found"
+        ));
+        let inode_revisions = harness
+            .client
+            .list_file_revisions_for_inode(namespace, entry.inode_id)
+            .expect("inode revisions");
+        assert_eq!(inode_revisions.revisions.len(), 2);
+        assert_eq!(
+            harness
+                .client
+                .read_file_revision_bytes_for_inode(namespace, entry.inode_id, RevisionNo(2))
+                .expect("read inode revision"),
+            b"two"
+        );
+
+        harness
+            .client
+            .restore_file_revision(&moved, RevisionNo(1))
+            .expect("path restore");
+        assert_eq!(
+            harness
+                .client
+                .read_file_bytes(&moved)
+                .expect("read restored file"),
+            b"one"
+        );
+        harness
+            .client
+            .restore_file_revision_for_inode(
+                namespace,
+                entry.inode_id,
+                RevisionNo(2),
+                RevisionNo(3),
+                "c_restore_inode_revision_0001",
+            )
+            .expect("inode restore");
+        assert_eq!(
+            harness
+                .client
+                .read_file_bytes(&moved)
+                .expect("read inode-restored file"),
+            b"two"
+        );
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_commit_restore_revision_missing_source_returns_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(

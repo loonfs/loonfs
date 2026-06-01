@@ -30,9 +30,9 @@ pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
 pub use http::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
-    FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
-    FilesystemPutBehavior, ForkNamespaceRequest, ListNamespacesResponse, MutationResult,
-    NamespaceSummary,
+    FileRevision, FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
+    FilesystemPutBehavior, ForkNamespaceRequest, ListFileRevisionsResponse, ListNamespacesResponse,
+    MutationResult, NamespaceSummary, RestoreFileRevisionRequest,
 };
 pub use ids::{
     generate_upload_id, generate_wal_segment_id, generated_id, validate_generated_id,

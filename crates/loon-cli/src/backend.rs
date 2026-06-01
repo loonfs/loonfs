@@ -1,11 +1,14 @@
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
-use loon_api::{AuthoritativePathEntry, CommitId, MutationResult, NamespaceId, NamespaceSummary};
+use loon_api::{
+    AuthoritativePathEntry, CommitId, ListFileRevisionsResponse, MutationResult, NamespaceId,
+    NamespaceSummary, RevisionNo,
+};
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs::{
     BootstrapNamespaceError, CopyOptions, CoreError, CoreErrorKind, CreateDirOptions,
     CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, MoveOptions, PutFileBehavior,
-    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    PutFileOptions, RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
 };
 use std::sync::Arc;
 
@@ -22,6 +25,15 @@ pub trait Backend {
     fn list_path(&self, spec: &NamespacePath) -> Result<Vec<AuthoritativePathEntry>, CliError>;
     fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, CliError>;
     fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, CliError>;
+    fn read_file_revision_bytes(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError>;
+    fn list_file_revisions(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<ListFileRevisionsResponse, CliError>;
     fn put_file_bytes(
         &self,
         spec: &NamespacePath,
@@ -39,6 +51,11 @@ pub trait Backend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
+    ) -> Result<MutationResult, CliError>;
+    fn restore_file_revision(
+        &self,
+        spec: &NamespacePath,
+        source_revision_no: RevisionNo,
     ) -> Result<MutationResult, CliError>;
 }
 
@@ -81,6 +98,25 @@ impl Backend for RemoteBackend {
         self.client.read_file_bytes(spec).map_err(map_client_error)
     }
 
+    fn read_file_revision_bytes(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError> {
+        self.client
+            .read_file_revision_bytes(spec, revision_no)
+            .map_err(map_client_error)
+    }
+
+    fn list_file_revisions(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<ListFileRevisionsResponse, CliError> {
+        self.client
+            .list_file_revisions(spec)
+            .map_err(map_client_error)
+    }
+
     fn put_file_bytes(
         &self,
         spec: &NamespacePath,
@@ -114,6 +150,16 @@ impl Backend for RemoteBackend {
         to: &NamespacePath,
     ) -> Result<MutationResult, CliError> {
         self.client.copy_path(from, to).map_err(map_client_error)
+    }
+
+    fn restore_file_revision(
+        &self,
+        spec: &NamespacePath,
+        source_revision_no: RevisionNo,
+    ) -> Result<MutationResult, CliError> {
+        self.client
+            .restore_file_revision(spec, source_revision_no)
+            .map_err(map_client_error)
     }
 }
 
@@ -188,6 +234,29 @@ impl Backend for EmbeddedBackend {
             .read_file_bytes(&ns_id, &spec.absolute_path)
             .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
         Ok(result.bytes)
+    }
+
+    fn read_file_revision_bytes(
+        &self,
+        spec: &NamespacePath,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>, CliError> {
+        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let result = self
+            .fs
+            .read_file_revision_bytes(&ns_id, &spec.absolute_path, revision_no)
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))?;
+        Ok(result.bytes)
+    }
+
+    fn list_file_revisions(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<ListFileRevisionsResponse, CliError> {
+        let ns_id = parse_namespace_id(&spec.namespace)?;
+        self.fs
+            .list_file_revisions(&ns_id, &spec.absolute_path)
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 
     fn put_file_bytes(
@@ -281,6 +350,25 @@ impl Backend for EmbeddedBackend {
                 },
             )
             .map_err(|error| map_namespace_scoped_runtime_error(&from.namespace, error))
+    }
+
+    fn restore_file_revision(
+        &self,
+        spec: &NamespacePath,
+        source_revision_no: RevisionNo,
+    ) -> Result<MutationResult, CliError> {
+        let ns_id = parse_namespace_id(&spec.namespace)?;
+        let commit_id = generated_commit_id();
+        self.fs
+            .restore_file_revision(
+                &ns_id,
+                &spec.absolute_path,
+                source_revision_no,
+                RestoreRevisionOptions {
+                    commit_id: Some(commit_id),
+                },
+            )
+            .map_err(|error| map_namespace_scoped_runtime_error(&spec.namespace, error))
     }
 }
 

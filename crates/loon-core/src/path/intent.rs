@@ -1,4 +1,4 @@
-use loon_api::{v0::RenameMode, CommitId, ContentRef};
+use loon_api::{v0::RenameMode, CommitId, ContentRef, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +35,11 @@ pub enum PathMutationIntent {
         from_path: String,
         to_path: String,
     },
+    RestoreRevision {
+        commit_id: CommitId,
+        absolute_path: String,
+        source_revision_no: RevisionNo,
+    },
 }
 
 impl PathMutationIntent {
@@ -44,7 +49,8 @@ impl PathMutationIntent {
             | Self::PutFile { commit_id, .. }
             | Self::DeletePath { commit_id, .. }
             | Self::MovePath { commit_id, .. }
-            | Self::CopyFilePath { commit_id, .. } => commit_id,
+            | Self::CopyFilePath { commit_id, .. }
+            | Self::RestoreRevision { commit_id, .. } => commit_id,
         }
     }
 }

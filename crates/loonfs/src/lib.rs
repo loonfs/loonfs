@@ -6,15 +6,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use loon_api::v0::{
-    BeginUploadResponse, ChangesResponse, CommitOp, CommitOpResult, CommitPrecondition,
-    CommitRequest, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-    UploadContentResponse,
+    BeginUploadResponse, ChangesResponse, CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
+    CommitPrecondition, CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest,
+    CompleteUploadResponse, RenameMode, UploadContentResponse, UploadMode,
 };
 use loon_api::wire::control::HeadState;
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
-    ContentRef, CreateCheckpointResponse, FilesystemOperationResponse, InodeId, MutationResult,
-    NamespaceId, NamespaceSummary,
+    ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName, FileRevision,
+    FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse, MutationResult,
+    NameKey, NamePolicy, NamespaceId, NamespaceSummary, RevisionNo,
 };
 use loon_core::publisher::{BasisReuseEvent, NamespaceCommitEnginePublishResult};
 pub use loon_core::{
@@ -584,6 +585,11 @@ pub struct CopyOptions {
     pub commit_id: Option<CommitId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RestoreRevisionOptions {
+    pub commit_id: Option<CommitId>,
+}
+
 impl FsBuilder {
     pub fn new(store: SharedObjectStore) -> Self {
         Self {
@@ -797,6 +803,60 @@ impl Fs {
         )?)
     }
 
+    pub fn list_file_revisions(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> Result<ListFileRevisionsResponse> {
+        let basis = self.basis_for_read(namespace_id)?;
+        Ok(loon_core::list_file_revisions_from_basis(
+            basis.as_ref(),
+            absolute_path,
+        )?)
+    }
+
+    pub fn list_file_revisions_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+    ) -> Result<ListFileRevisionsResponse> {
+        let basis = self.basis_for_read(namespace_id)?;
+        Ok(loon_core::list_file_revisions_for_inode_from_basis(
+            basis.as_ref(),
+            inode_id,
+        )?)
+    }
+
+    pub fn read_file_revision_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        revision_no: RevisionNo,
+    ) -> Result<AuthoritativeFileBytes> {
+        let basis = self.basis_for_read(namespace_id)?;
+        Ok(loon_core::read_file_revision_bytes_from_basis(
+            self.store(),
+            basis.as_ref(),
+            absolute_path,
+            revision_no,
+        )?)
+    }
+
+    pub fn read_file_revision_bytes_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Result<Vec<u8>> {
+        let basis = self.basis_for_read(namespace_id)?;
+        Ok(loon_core::read_file_revision_bytes_for_inode_from_basis(
+            self.store(),
+            basis.as_ref(),
+            inode_id,
+            revision_no,
+        )?)
+    }
+
     pub fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -918,6 +978,51 @@ impl Fs {
         )
         .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    pub fn restore_file_revision(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        source_revision_no: RevisionNo,
+        options: RestoreRevisionOptions,
+    ) -> Result<MutationResult> {
+        let result = loon_core::restore_file_revision(
+            self.store(),
+            namespace_id,
+            absolute_path,
+            source_revision_no,
+            &self.mutation_context(),
+            options.commit_id.as_ref().map(CommitId::as_str),
+        )
+        .map_err(RuntimeError::from);
+        self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    pub fn restore_file_revision_for_inode(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        base_revision_no: RevisionNo,
+        options: RestoreRevisionOptions,
+    ) -> Result<CommitResponse> {
+        let commit_id = options.commit_id.unwrap_or_else(CommitId::generate);
+        let request = CommitRequest {
+            commit_id,
+            preconditions: vec![CommitPrecondition::InodeRevisionIs {
+                inode_id,
+                revision_no: base_revision_no,
+            }],
+            ops: vec![CommitOp::RestoreRevision {
+                inode_id,
+                source_revision_no,
+                base_revision_no,
+            }],
+            message: None,
+            annotations: None,
+        };
+        self.commit_operations(namespace_id, request)
     }
 
     pub fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
@@ -1399,4 +1504,43 @@ fn current_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, DisplayName, InodeId,
+        NameKey, NamePolicy, RenameMode, RevisionNo,
+    };
+
+    #[test]
+    fn explicit_commit_facade_exports_constructor_types() {
+        let display_name = DisplayName::parse("Report.txt").expect("valid display name");
+        let name_key = NameKey::for_display_name(NamePolicy::default(), &display_name);
+        let precondition =
+            CommitPrecondition::binding_is(InodeId(1), name_key, InodeId(2), ChangeSeq(3), 4);
+
+        let request = CommitRequest {
+            commit_id: CommitId::generate(),
+            preconditions: vec![precondition],
+            ops: vec![
+                CommitOp::RestoreRevision {
+                    inode_id: InodeId(2),
+                    source_revision_no: RevisionNo(1),
+                    base_revision_no: RevisionNo(2),
+                },
+                CommitOp::Rename {
+                    inode_id: InodeId(2),
+                    new_parent_inode: InodeId(1),
+                    new_display_name: "report.txt".to_owned(),
+                    mode: RenameMode::NoReplace,
+                },
+            ],
+            message: None,
+            annotations: None,
+        };
+
+        assert_eq!(request.preconditions.len(), 1);
+        assert_eq!(request.ops.len(), 2);
+    }
 }

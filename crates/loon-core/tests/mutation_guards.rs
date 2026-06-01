@@ -19,8 +19,10 @@ use loon_core::metadata::MetadataState;
 use loon_core::{
     begin_upload, bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
     copy_file_path, create_checkpoint, create_dir_path, delete_path, delete_path_non_recursive,
-    fork_namespace, list_changes_after, list_namespaces, list_path, load_verified_namespace_basis,
-    move_path, publish_namespace_mutations_batch, put_file_bytes, read_file_bytes, resolve_path,
+    fork_namespace, list_changes_after, list_file_revisions, list_file_revisions_for_inode,
+    list_namespaces, list_path, load_verified_namespace_basis, move_path,
+    publish_namespace_mutations_batch, put_file_bytes, read_file_bytes, read_file_revision_bytes,
+    read_file_revision_bytes_for_inode, resolve_path, restore_file_revision,
     store_bytes_as_content, upload_content, write_file_bytes, CoreError, CoreErrorKind,
     DirectObjectStorePublisher, MutationContext, NamespaceMutationCandidate, PathMutationIntent,
     PublishOptions, PutFileBehavior,
@@ -943,6 +945,100 @@ fn upload_content_rejects_invalid_upload_id_before_key_construction() {
             .list_prefix(&upload_session_prefix(namespace_id.as_str()))
             .expect("list upload sessions"),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn revision_queries_read_historical_bytes_and_path_restore_appends_revision() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/rev.txt",
+        b"one",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("rev-create"),
+    )
+    .expect("create file");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/rev.txt",
+        b"two",
+        &context,
+        Some("rev-replace"),
+    )
+    .expect("replace file");
+
+    let entry = resolve_path(&store, &namespace_id, "/docs/rev.txt").expect("stat file");
+    let inode_id = entry.inode_id;
+    let path_revisions =
+        list_file_revisions(&store, &namespace_id, "/docs/rev.txt").expect("path revisions");
+    assert_eq!(path_revisions.inode_id, inode_id);
+    assert_eq!(
+        path_revisions
+            .revisions
+            .iter()
+            .map(|revision| revision.revision_no)
+            .collect::<Vec<_>>(),
+        vec![RevisionNo(1), RevisionNo(2)]
+    );
+
+    let historical =
+        read_file_revision_bytes(&store, &namespace_id, "/docs/rev.txt", RevisionNo(1))
+            .expect("read first revision");
+    assert_eq!(historical.bytes, b"one");
+    let inode_historical =
+        read_file_revision_bytes_for_inode(&store, &namespace_id, inode_id, RevisionNo(2))
+            .expect("read inode revision");
+    assert_eq!(inode_historical, b"two");
+
+    move_path(
+        &store,
+        &namespace_id,
+        "/docs/rev.txt",
+        "/docs/moved.txt",
+        &context,
+        Some("rev-move"),
+    )
+    .expect("move file");
+    assert_eq!(
+        list_file_revisions(&store, &namespace_id, "/docs/rev.txt")
+            .expect_err("old path no longer resolves")
+            .kind(),
+        CoreErrorKind::PathNotFound
+    );
+    let inode_revisions =
+        list_file_revisions_for_inode(&store, &namespace_id, inode_id).expect("inode revisions");
+    assert_eq!(inode_revisions.revisions.len(), 2);
+
+    restore_file_revision(
+        &store,
+        &namespace_id,
+        "/docs/moved.txt",
+        RevisionNo(1),
+        &context,
+        Some("rev-restore"),
+    )
+    .expect("restore first revision");
+    let restored =
+        read_file_bytes(&store, &namespace_id, "/docs/moved.txt").expect("read restored");
+    assert_eq!(restored.bytes, b"one");
+    let restored_revisions =
+        list_file_revisions_for_inode(&store, &namespace_id, inode_id).expect("restored revisions");
+    assert_eq!(
+        restored_revisions
+            .revisions
+            .iter()
+            .map(|revision| revision.revision_no)
+            .collect::<Vec<_>>(),
+        vec![RevisionNo(1), RevisionNo(2), RevisionNo(3)]
     );
 }
 

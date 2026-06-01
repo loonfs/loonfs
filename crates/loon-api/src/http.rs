@@ -1,4 +1,4 @@
-use crate::{v0::RenameMode, ChangeSeq, CommitId, ContentRef, NamespaceId};
+use crate::{v0::RenameMode, ChangeSeq, CommitId, ContentRef, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +64,10 @@ pub enum FilesystemOperation {
         from_path: String,
         to_path: String,
     },
+    RestoreRevision {
+        path: String,
+        source_revision_no: RevisionNo,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +80,28 @@ pub struct FilesystemOperationRequest {
 pub struct FilesystemOperationResponse {
     pub namespace_id: NamespaceId,
     pub committed_seq: ChangeSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRevision {
+    pub inode_id: InodeId,
+    pub revision_no: RevisionNo,
+    pub committed_seq: ChangeSeq,
+    pub content_ref: ContentRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListFileRevisionsResponse {
+    pub namespace_id: NamespaceId,
+    pub inode_id: InodeId,
+    pub head_seq: ChangeSeq,
+    pub revisions: Vec<FileRevision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestoreFileRevisionRequest {
+    pub commit_id: CommitId,
+    pub base_revision_no: RevisionNo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

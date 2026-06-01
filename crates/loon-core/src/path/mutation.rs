@@ -4,7 +4,7 @@ use crate::content::store_bytes_as_content;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::publisher::{DirectObjectStorePublisher, PublishOptions};
-use loon_api::{v0::RenameMode, CommitId, ContentRef, MutationResult, NamespaceId};
+use loon_api::{v0::RenameMode, CommitId, ContentRef, MutationResult, NamespaceId, RevisionNo};
 use loon_objectstore::ObjectStore;
 
 fn generated_commit_id() -> CommitId {
@@ -183,6 +183,28 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
         commit_id,
         from_path: from_path.to_owned(),
         to_path: to_path.to_owned(),
+    };
+    DirectObjectStorePublisher::new(store).submit_path_intent(
+        namespace_id,
+        intent,
+        context,
+        PublishOptions::default(),
+    )
+}
+
+pub fn restore_file_revision<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    source_revision_no: RevisionNo,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<MutationResult, CoreError> {
+    let commit_id = normalized_commit_id(commit_id)?;
+    let intent = PathMutationIntent::RestoreRevision {
+        commit_id,
+        absolute_path: absolute_path.to_owned(),
+        source_revision_no,
     };
     DirectObjectStorePublisher::new(store).submit_path_intent(
         namespace_id,
