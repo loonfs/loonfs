@@ -1,4 +1,4 @@
-use loon_api::decode_checkpoint_manifest_json;
+use loon_api::wire::checkpoint::decode_checkpoint_manifest_json;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     checkpoint_manifest, namespace_descriptor, namespace_head, namespace_lease,
