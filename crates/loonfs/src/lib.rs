@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use loon_api::sha256_digest;
 pub use loon_api::v0::{
@@ -35,6 +35,7 @@ use thiserror::Error;
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
 const MAX_UPLOADED_CONTENT_PROOF_ENTRIES: usize = 16_384;
+const UPLOADED_CONTENT_PROOF_TTL: Duration = Duration::from_secs(30);
 
 pub type SharedObjectStore = Arc<dyn ObjectStore + Send + Sync>;
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -193,8 +194,14 @@ struct UploadedContentProofKey {
 
 #[derive(Debug, Default)]
 struct UploadedContentProofCache {
-    entries: HashMap<UploadedContentProofKey, ContentRef>,
+    entries: HashMap<UploadedContentProofKey, UploadedContentProof>,
     order: VecDeque<UploadedContentProofKey>,
+}
+
+#[derive(Debug, Clone)]
+struct UploadedContentProof {
+    content_ref: ContentRef,
+    expires_at: SystemTime,
 }
 
 impl UploadedContentProofCache {
@@ -203,8 +210,13 @@ impl UploadedContentProofCache {
             namespace_id: namespace_id.clone(),
             digest: content_ref.digest.clone(),
         };
-        self.entries.insert(key.clone(), content_ref);
-        self.touch(&key);
+        let proof = UploadedContentProof {
+            content_ref,
+            expires_at: SystemTime::now() + UPLOADED_CONTENT_PROOF_TTL,
+        };
+        self.entries.insert(key.clone(), proof);
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key);
         while self.entries.len() > MAX_UPLOADED_CONTENT_PROOF_ENTRIES {
             let Some(evicted) = self.order.pop_front() else {
                 break;
@@ -218,14 +230,46 @@ impl UploadedContentProofCache {
             namespace_id: namespace_id.clone(),
             digest: digest.to_owned(),
         };
-        let content_ref = self.entries.get(&key)?.clone();
-        self.touch(&key);
-        Some(content_ref)
+        let proof = self.entries.get(&key)?;
+        if SystemTime::now() > proof.expires_at {
+            self.entries.remove(&key);
+            self.order.retain(|existing| existing != &key);
+            return None;
+        }
+        Some(proof.content_ref.clone())
     }
+}
 
-    fn touch(&mut self, key: &UploadedContentProofKey) {
-        self.order.retain(|existing| existing != key);
-        self.order.push_back(key.clone());
+#[cfg(test)]
+mod proof_cache_tests {
+    use super::{UploadedContentProofCache, UploadedContentProofKey};
+    use loon_api::{ContentRef, NamespaceId};
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn uploaded_content_proof_expires_without_refresh_on_lookup() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let content_ref = ContentRef::whole_file_v0(b"bytes");
+        let mut cache = UploadedContentProofCache::default();
+        cache.insert(&namespace_id, content_ref.clone());
+
+        assert_eq!(
+            cache.get(&namespace_id, &content_ref.digest),
+            Some(content_ref.clone())
+        );
+
+        let key = UploadedContentProofKey {
+            namespace_id: namespace_id.clone(),
+            digest: content_ref.digest.clone(),
+        };
+        cache
+            .entries
+            .get_mut(&key)
+            .expect("proof exists")
+            .expires_at = SystemTime::now() - Duration::from_secs(1);
+
+        assert_eq!(cache.get(&namespace_id, &content_ref.digest), None);
+        assert!(!cache.entries.contains_key(&key));
     }
 }
 
