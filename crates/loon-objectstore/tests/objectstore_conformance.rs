@@ -382,10 +382,12 @@ fn assert_overwrite_updates_head_and_body<S: ObjectStore>(store: &S) {
             .expect("overwritten body exists"),
         br#"{"seq":42}"#
     );
-    assert_eq!(
-        store.head(&key).expect("head after overwrite"),
-        Some(second.clone())
-    );
+    let head = store
+        .head(&key)
+        .expect("head after overwrite")
+        .expect("overwritten object exists");
+    assert_eq!(head.etag, second.etag);
+    assert_eq!(head.size_bytes, second.size_bytes);
     assert_ne!(first, second, "overwrite should refresh visible metadata");
 
     store.delete(&key).expect("cleanup overwritten object");

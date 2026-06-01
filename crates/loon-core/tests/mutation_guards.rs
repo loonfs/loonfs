@@ -778,7 +778,7 @@ fn complete_upload_does_not_get_content_blob_after_staging() {
 }
 
 #[test]
-fn path_put_file_validates_cold_content_once() {
+fn path_put_file_uses_checksum_metadata_for_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -803,7 +803,7 @@ fn path_put_file_validates_cold_content_once() {
     );
 
     assert!(responses[0].is_ok());
-    assert_eq!(store.content_blob_get_count(), 1);
+    assert_eq!(store.content_blob_get_count(), 0);
 }
 
 #[test]
@@ -837,7 +837,7 @@ fn path_planning_does_not_validate_content() {
 }
 
 #[test]
-fn path_batch_validates_repeated_content_ref_once() {
+fn path_batch_validates_repeated_content_ref_without_blob_gets() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -868,7 +868,7 @@ fn path_batch_validates_repeated_content_ref_once() {
     );
 
     assert!(responses.iter().all(Result::is_ok));
-    assert_eq!(store.content_blob_get_count(), 1);
+    assert_eq!(store.content_blob_get_count(), 0);
 }
 
 #[test]
@@ -3177,6 +3177,10 @@ impl ContentBlobGetCountingStore {
 impl ObjectStore for ContentBlobGetCountingStore {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key)
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head_with_checksum(key)
     }
 
     fn get(

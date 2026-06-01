@@ -92,6 +92,10 @@ pub fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     content_ref: &ContentRef,
 ) -> Result<ValidatedDurableContent, DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
+    if let Some(validated) = validate_content_metadata(store, &object_key, content_ref)? {
+        return Ok(validated);
+    }
+
     let bytes = load_required_object(store, &object_key)?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
 }
@@ -163,6 +167,60 @@ fn validate_loaded_content_bytes(
     })
 }
 
+fn validate_content_metadata<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    content_ref: &ContentRef,
+) -> Result<Option<ValidatedDurableContent>, DurableContentValidationError> {
+    let metadata = match store.head_with_checksum(object_key) {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => {
+            return Err(DurableContentValidationError::MissingContentObject {
+                object_key: object_key.to_owned(),
+            })
+        }
+        Err(err) => {
+            return Err(DurableContentValidationError::Store {
+                object_key: object_key.to_owned(),
+                message: err.to_string(),
+            })
+        }
+    };
+
+    if metadata.size_bytes != content_ref.size_bytes {
+        return Err(DurableContentValidationError::ContentLengthMismatch {
+            object_key: object_key.to_owned(),
+            expected: content_ref.size_bytes,
+            actual: metadata.size_bytes,
+        });
+    }
+
+    let Some(actual_digest) = metadata.checksum_sha256 else {
+        return Ok(None);
+    };
+
+    if actual_digest != content_ref.digest {
+        return Err(DurableContentValidationError::ContentDigestMismatch {
+            object_key: object_key.to_owned(),
+            expected: content_ref.digest.clone(),
+            actual: actual_digest,
+        });
+    }
+
+    Ok(Some(ValidatedDurableContent {
+        content_ref: content_ref.clone(),
+        object_key: object_key.to_owned(),
+        file_size_bytes: metadata.size_bytes,
+        file_digest_sha256: actual_digest,
+        checked_invariants: vec![
+            InvariantId::WholeFileContentRefKindIsSupported,
+            InvariantId::WholeFileContentObjectKeyMatchesDigest,
+            InvariantId::WholeFileContentSizeMatchesRef,
+            InvariantId::WholeFileContentDigestMatchesRef,
+        ],
+    }))
+}
+
 pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -191,24 +249,45 @@ pub(crate) fn write_immutable_object<S: ObjectStore + ?Sized>(
     match store.put_if_absent(object_key, expected_bytes) {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed) => {
-            let existing = store
-                .get(object_key, None)
-                .map_err(|err| ImmutableObjectWriteError::Store(err.to_string()))?
-                .ok_or_else(|| {
-                    ImmutableObjectWriteError::Store(format!(
-                        "missing immutable object `{object_key}` after precondition failure"
-                    ))
-                })?;
-            if existing == expected_bytes {
-                Ok(())
-            } else {
-                Err(ImmutableObjectWriteError::Store(format!(
-                    "immutable object `{object_key}` already exists with different bytes"
-                )))
+            if existing_object_matches_expected_bytes(store, object_key, expected_bytes)? {
+                return Ok(());
             }
+            Err(ImmutableObjectWriteError::Store(format!(
+                "immutable object `{object_key}` already exists with different bytes"
+            )))
         }
         Err(err) => Err(ImmutableObjectWriteError::Store(err.to_string())),
     }
+}
+
+fn existing_object_matches_expected_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    expected_bytes: &[u8],
+) -> Result<bool, ImmutableObjectWriteError> {
+    let expected_size = expected_bytes.len() as u64;
+    let expected_digest = sha256_digest(expected_bytes);
+    if let Some(metadata) = store
+        .head_with_checksum(object_key)
+        .map_err(|err| ImmutableObjectWriteError::Store(err.to_string()))?
+    {
+        if metadata.size_bytes != expected_size {
+            return Ok(false);
+        }
+        if let Some(digest) = metadata.checksum_sha256.as_deref() {
+            return Ok(digest == expected_digest);
+        }
+    }
+
+    let existing = store
+        .get(object_key, None)
+        .map_err(|err| ImmutableObjectWriteError::Store(err.to_string()))?
+        .ok_or_else(|| {
+            ImmutableObjectWriteError::Store(format!(
+                "missing immutable object `{object_key}` after precondition failure"
+            ))
+        })?;
+    Ok(existing == expected_bytes)
 }
 
 fn load_required_object<S: ObjectStore + ?Sized>(
@@ -236,7 +315,8 @@ mod tests {
     use loon_api::{ContentRef, ContentRefKind, ContentStoreId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::content_blob;
-    use loon_objectstore::ObjectStore;
+    use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use std::cell::Cell;
     use tempfile::tempdir;
 
     #[test]
@@ -251,6 +331,20 @@ mod tests {
         assert_eq!(validated.content_ref, content_ref);
         assert_eq!(validated.file_size_bytes, bytes.len() as u64);
         assert_eq!(validated.file_digest_sha256, content_ref.digest);
+    }
+
+    #[test]
+    fn validate_whole_file_content_ref_falls_back_to_get_when_checksum_metadata_is_absent() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = NoChecksumStore::new(inner);
+        let bytes = b"whole file bytes";
+        let content_ref = ContentRef::whole_file_v0(bytes);
+        put_content_object(&store, &content_store_id, &content_ref, bytes);
+
+        store.reset_content_blob_get_count();
+        validate_durable_content_reference(&store, &content_store_id, &content_ref)
+            .expect("validate content ref");
+        assert_eq!(store.content_blob_get_count(), 1);
     }
 
     #[test]
@@ -334,7 +428,7 @@ mod tests {
     }
 
     fn put_content_object(
-        store: &LocalFsStore,
+        store: &impl ObjectStore,
         content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
         bytes: &[u8],
@@ -342,5 +436,66 @@ mod tests {
         let key =
             content_blob(content_store_id.as_str(), &content_ref.digest).expect("content key");
         store.put_if_absent(&key, bytes).expect("put content");
+    }
+
+    struct NoChecksumStore {
+        inner: LocalFsStore,
+        content_blob_gets: Cell<usize>,
+    }
+
+    impl NoChecksumStore {
+        fn new(inner: LocalFsStore) -> Self {
+            Self {
+                inner,
+                content_blob_gets: Cell::new(0),
+            }
+        }
+
+        fn content_blob_get_count(&self) -> usize {
+            self.content_blob_gets.get()
+        }
+
+        fn reset_content_blob_get_count(&self) {
+            self.content_blob_gets.set(0);
+        }
+    }
+
+    impl ObjectStore for NoChecksumStore {
+        fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            let mut metadata = self.inner.head(key)?;
+            if let Some(metadata) = &mut metadata {
+                metadata.checksum_sha256 = None;
+            }
+            Ok(metadata)
+        }
+
+        fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+            if key.starts_with("content-stores/") && key.contains("/blobs/") {
+                self.content_blob_gets
+                    .set(self.content_blob_gets.get().saturating_add(1));
+            }
+            self.inner.get(key, range)
+        }
+
+        fn put(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            self.inner.put(key, bytes, mode)
+        }
+
+        fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            self.inner.delete(key)
+        }
+
+        fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+            self.inner.list_prefix(prefix)
+        }
     }
 }

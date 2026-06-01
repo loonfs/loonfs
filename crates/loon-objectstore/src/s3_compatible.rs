@@ -1,4 +1,5 @@
 use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use crate::checksum;
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
@@ -6,6 +7,7 @@ use crate::ObjectStoreError;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
 use aws_sdk_s3::Client;
 use http::header::{IF_MATCH, IF_NONE_MATCH};
 use http::HeaderValue;
@@ -25,12 +27,14 @@ pub(crate) struct S3CompatibleConfig {
     pub session_token: Option<String>,
     pub key_prefix: Option<String>,
     pub force_path_style: bool,
+    pub sha256_checksum_metadata: bool,
 }
 
 pub(crate) struct S3CompatibleStore {
     provider_name: &'static str,
     bucket: String,
     key_prefix: Option<String>,
+    sha256_checksum_metadata: bool,
     client_config: S3CompatibleConfig,
     client: OnceLock<Client>,
     runtime: BlockingRuntime,
@@ -74,6 +78,7 @@ impl S3CompatibleStore {
             provider_name: config.provider_name,
             bucket: config.bucket.clone(),
             key_prefix,
+            sha256_checksum_metadata: config.sha256_checksum_metadata,
             client_config: config,
             client: OnceLock::new(),
             runtime: BlockingRuntime::new()?,
@@ -103,19 +108,35 @@ impl S3CompatibleStore {
     async fn head_scoped(
         &self,
         scoped_key: &str,
+        include_checksum: bool,
     ) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        match self
+        let mut request = self
             .client()
             .head_object()
             .bucket(&self.bucket)
-            .key(scoped_key)
-            .send()
-            .await
-        {
-            Ok(output) => Ok(Some(ObjectMetadata {
-                etag: output.e_tag().map(ToOwned::to_owned),
-                size_bytes: output.content_length().try_into().unwrap_or_default(),
-            })),
+            .key(scoped_key);
+        let include_sha256_checksum = include_checksum && self.sha256_checksum_metadata;
+        if include_sha256_checksum {
+            request = request.checksum_mode(ChecksumMode::Enabled);
+        }
+
+        match request.send().await {
+            Ok(output) => {
+                let checksum_sha256 = if include_sha256_checksum {
+                    output
+                        .checksum_sha256()
+                        .map(checksum::sha256_digest_from_base64)
+                        .transpose()
+                        .map_err(ObjectStoreError::Transport)?
+                } else {
+                    None
+                };
+                Ok(Some(ObjectMetadata {
+                    etag: output.e_tag().map(ToOwned::to_owned),
+                    size_bytes: output.content_length().try_into().unwrap_or_default(),
+                    checksum_sha256,
+                }))
+            }
             Err(err) if is_not_found(&err) => Ok(None),
             Err(err) => Err(map_sdk_error(err)),
         }
@@ -127,23 +148,37 @@ impl S3CompatibleStore {
         bytes: &[u8],
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let checksum_sha256 = self
+            .sha256_checksum_metadata
+            .then(|| checksum::sha256_base64(bytes));
         let result = match &mode {
             PutMode::Overwrite => {
-                self.client()
+                let mut request = self
+                    .client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
-                    .content_length(bytes.len() as i64)
-                    .body(ByteStream::from(bytes.to_vec()))
-                    .send()
-                    .await
+                    .content_length(bytes.len() as i64);
+                if let Some(checksum) = checksum_sha256.as_deref() {
+                    request = request
+                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                        .checksum_sha256(checksum);
+                }
+                request.body(ByteStream::from(bytes.to_vec())).send().await
             }
             PutMode::CreateIfAbsent => {
-                self.client()
+                let mut request = self
+                    .client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
-                    .content_length(bytes.len() as i64)
+                    .content_length(bytes.len() as i64);
+                if let Some(checksum) = checksum_sha256.as_deref() {
+                    request = request
+                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                        .checksum_sha256(checksum);
+                }
+                request
                     .body(ByteStream::from(bytes.to_vec()))
                     .customize()
                     .await
@@ -163,11 +198,18 @@ impl S3CompatibleStore {
                     ))
                 })?;
 
-                self.client()
+                let mut request = self
+                    .client()
                     .put_object()
                     .bucket(&self.bucket)
                     .key(scoped_key)
-                    .content_length(bytes.len() as i64)
+                    .content_length(bytes.len() as i64);
+                if let Some(checksum) = checksum_sha256.as_deref() {
+                    request = request
+                        .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                        .checksum_sha256(checksum);
+                }
+                request
                     .body(ByteStream::from(bytes.to_vec()))
                     .customize()
                     .await
@@ -181,12 +223,18 @@ impl S3CompatibleStore {
         };
 
         match result {
-            Ok(_) => self.head_scoped(scoped_key).await?.ok_or_else(|| {
-                ObjectStoreError::Transport(format!(
-                    "provider {} reported success for {} but object head is missing",
-                    self.provider_name, scoped_key
-                ))
-            }),
+            Ok(_) => {
+                let mut metadata = self.head_scoped(scoped_key, false).await?.ok_or_else(|| {
+                    ObjectStoreError::Transport(format!(
+                        "provider {} reported success for {} but object head is missing",
+                        self.provider_name, scoped_key
+                    ))
+                })?;
+                if self.sha256_checksum_metadata {
+                    metadata.checksum_sha256 = Some(checksum::sha256_digest(bytes));
+                }
+                Ok(metadata)
+            }
             Err(err) if put_error_maps_to_precondition_failed(&mode, &err) => {
                 Err(ObjectStoreError::PreconditionFailed)
             }
@@ -252,7 +300,12 @@ fn build_client(config: S3CompatibleConfig) -> Client {
 impl ObjectStore for S3CompatibleStore {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let scoped_key = self.scoped_key(key)?;
-        self.run_async(async { self.head_scoped(&scoped_key).await })
+        self.run_async(async { self.head_scoped(&scoped_key, false).await })
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        let scoped_key = self.scoped_key(key)?;
+        self.run_async(async { self.head_scoped(&scoped_key, true).await })
     }
 
     fn get(
@@ -265,7 +318,7 @@ impl ObjectStore for S3CompatibleStore {
             let range_header = match range {
                 None => None,
                 Some(range) => {
-                    let metadata = match self.head_scoped(&scoped_key).await? {
+                    let metadata = match self.head_scoped(&scoped_key, false).await? {
                         Some(metadata) => metadata,
                         None => return Ok(None),
                     };
@@ -507,6 +560,7 @@ mod tests {
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
+            sha256_checksum_metadata: true,
         })
         .expect("construct store");
 
@@ -532,6 +586,7 @@ mod tests {
             session_token: None,
             key_prefix: Some("tenant-a".to_owned()),
             force_path_style: true,
+            sha256_checksum_metadata: true,
         })
         .expect("construct store");
 

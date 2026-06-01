@@ -73,8 +73,11 @@ The content model has four rules.
 2. A `content_ref` describes one complete file revision.
 3. Immutable content objects are written with create-if-absent semantics.
 4. A metadata commit may reference a `content_ref` only after the referenced object is already durable.
+5. When provider-verified full-object SHA-256 metadata is available, the object-store layer may expose it as `sha256:<64hex>`. If SHA-256 metadata is absent, readers and writers must fall back to reading and hashing bytes before treating a `content_ref` as verified.
 
 In v0, file content is stored as one whole-file object whose `content_ref.kind` is `whole_file_v0`. The digest remains serialized as `sha256:<64hex>`, while the object key partitions the hex as `sha256/ab/cd/<hex>`.
+
+ETags remain opaque compare tokens. They may be used for object freshness or compare-and-swap, but they are not content digests unless a provider-specific behavior is separately exposed and verified through this contract.
 
 A reader or writer resolves content through the namespace descriptor: `namespace_id -> content_store_id -> content-stores/{content_store_id}/...`. File revisions and change-feed payloads store only `content_ref`; they do not store content-store ids or object-store paths.
 

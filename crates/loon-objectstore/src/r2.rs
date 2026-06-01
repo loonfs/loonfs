@@ -36,6 +36,7 @@ impl R2Store {
                 session_token: None,
                 key_prefix: config.key_prefix,
                 force_path_style: false,
+                sha256_checksum_metadata: false,
             })?,
         })
     }
@@ -43,6 +44,10 @@ impl R2Store {
 
 impl ObjectStore for R2Store {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key)
     }
 

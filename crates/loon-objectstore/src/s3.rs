@@ -32,6 +32,7 @@ impl AwsS3Store {
                 session_token: config.session_token,
                 key_prefix: config.key_prefix,
                 force_path_style: config.force_path_style,
+                sha256_checksum_metadata: true,
             })?,
         })
     }
@@ -40,6 +41,10 @@ impl AwsS3Store {
 impl ObjectStore for AwsS3Store {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head(key)
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head_with_checksum(key)
     }
 
     fn get(

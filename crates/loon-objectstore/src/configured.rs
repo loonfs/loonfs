@@ -75,6 +75,16 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        match &self.inner {
+            ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
+                store.head_with_checksum(&scope_object_key(key_prefix.as_deref(), key)?)
+            }
+            ConfiguredObjectStoreInner::AwsS3(store) => store.head_with_checksum(key),
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.head_with_checksum(key),
+        }
+    }
+
     fn get(
         &self,
         key: &str,

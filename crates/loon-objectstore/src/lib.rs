@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod checksum;
 mod configured;
 pub mod fs;
 pub mod keys;

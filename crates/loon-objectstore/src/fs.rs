@@ -1,4 +1,5 @@
 use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use crate::checksum;
 use crate::keyspace::validate_segments;
 use crate::ObjectStoreError;
 use std::fs::{self, File, OpenOptions};
@@ -36,7 +37,10 @@ impl LocalFsStore {
         Ok(path)
     }
 
-    fn metadata_for_path(path: &Path) -> Result<ObjectMetadata, ObjectStoreError> {
+    fn metadata_for_path(
+        path: &Path,
+        include_checksum: bool,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         let metadata = fs::metadata(path).map_err(io_error)?;
         if !metadata.is_file() {
             return Err(ObjectStoreError::Transport(format!(
@@ -55,6 +59,10 @@ impl LocalFsStore {
         Ok(ObjectMetadata {
             etag: Some(format!("{:x}-{:x}", metadata.len(), modified_nanos)),
             size_bytes: metadata.len(),
+            checksum_sha256: include_checksum
+                .then(|| fs::read(path).map(|bytes| checksum::sha256_digest(&bytes)))
+                .transpose()
+                .map_err(io_error)?,
         })
     }
 
@@ -122,7 +130,16 @@ impl ObjectStore for LocalFsStore {
             return Ok(None);
         }
 
-        Self::metadata_for_path(&path).map(Some)
+        Self::metadata_for_path(&path, false).map(Some)
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        let path = self.resolve_key(key)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        Self::metadata_for_path(&path, true).map(Some)
     }
 
     fn get(
@@ -189,7 +206,7 @@ impl ObjectStore for LocalFsStore {
             }
         }
 
-        Self::metadata_for_path(&path)
+        Self::metadata_for_path(&path, true)
     }
 
     fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
@@ -350,7 +367,9 @@ mod tests {
             store.get(key, None).expect("get object"),
             Some(br#"{"seq":2}"#.to_vec())
         );
-        assert_eq!(store.head(key).expect("head object"), Some(second.clone()));
+        let head = store.head(key).expect("head object").expect("head exists");
+        assert_eq!(head.etag, second.etag);
+        assert_eq!(head.size_bytes, second.size_bytes);
         assert_ne!(first, second);
     }
 

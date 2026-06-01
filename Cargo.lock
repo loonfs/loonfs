@@ -1394,9 +1394,11 @@ name = "loon-objectstore"
 version = "0.1.1"
 dependencies = [
  "aws-sdk-s3",
+ "base64 0.22.1",
  "http 0.2.12",
  "loon-api",
  "serde",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
