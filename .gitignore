@@ -1,4 +1,5 @@
 /target/
+/.loondb-store/
 crates/loon-objectstore/tests/provider-conformance.env.local
 configs/*.local.toml
 
