@@ -213,6 +213,14 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
             .insert(descriptor.object_key.clone(), rows.clone());
         Ok(rows)
     }
+
+    fn validate_secondary_indexes(&self) -> Result<(), CheckpointLoadError> {
+        validate_direntry_child_bind_index(
+            &self.manifest_object_key,
+            self.scan_prefix(CheckpointTableFamily::DirentryBinds, "")?,
+            self.scan_prefix(CheckpointTableFamily::DirentryChildBinds, "")?,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -637,13 +645,15 @@ pub(crate) fn load_verified_checkpoint_tables<'a, S: ObjectStore + ?Sized>(
             }
         })?;
     }
-    Ok(VerifiedCheckpointTables {
+    let tables = VerifiedCheckpointTables {
         store,
         namespace_id: namespace_id.clone(),
         manifest_object_key: manifest_key,
         manifest,
         segment_cache: RefCell::new(HashMap::new()),
-    })
+    };
+    tables.validate_secondary_indexes()?;
+    Ok(tables)
 }
 
 pub(crate) fn checkpoint_basis_head(
@@ -1186,6 +1196,8 @@ where
     ExpectedObjectKey: FnMut(CheckpointTableFamily, u32) -> String,
 {
     let ordered_tables = ordered_checkpoint_tables(context.manifest_object_key, tables)?;
+    let mut direntry_bind_rows = Vec::new();
+    let mut direntry_child_bind_rows = Vec::new();
     for table in ordered_tables {
         for descriptor in &table.segments {
             if descriptor.table_seq != context.expected_table_seq {
@@ -1209,11 +1221,24 @@ where
                 table.family,
                 descriptor,
             )?;
+            match table.family {
+                CheckpointTableFamily::DirentryBinds => {
+                    direntry_bind_rows.extend(rows.iter().cloned());
+                }
+                CheckpointTableFamily::DirentryChildBinds => {
+                    direntry_child_bind_rows.extend(rows.iter().cloned());
+                }
+                _ => {}
+            }
             append_rows_to_metadata(metadata_state, table.family, &descriptor.object_key, &rows)?;
         }
     }
 
-    Ok(())
+    validate_direntry_child_bind_index(
+        context.manifest_object_key,
+        direntry_bind_rows,
+        direntry_child_bind_rows,
+    )
 }
 
 fn load_checkpoint_segment_rows<S: ObjectStore + ?Sized>(
@@ -1639,6 +1664,72 @@ fn append_rows_to_metadata(
     Ok(())
 }
 
+fn validate_direntry_child_bind_index(
+    object_key: &str,
+    mut direntry_bind_rows: Vec<CheckpointRow>,
+    mut direntry_child_bind_rows: Vec<CheckpointRow>,
+) -> Result<(), CheckpointLoadError> {
+    ensure_direntry_bind_rows(
+        object_key,
+        CheckpointTableFamily::DirentryBinds,
+        &direntry_bind_rows,
+    )?;
+    ensure_direntry_bind_rows(
+        object_key,
+        CheckpointTableFamily::DirentryChildBinds,
+        &direntry_child_bind_rows,
+    )?;
+
+    direntry_bind_rows
+        .sort_by_key(|row| row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds));
+    direntry_child_bind_rows
+        .sort_by_key(|row| row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds));
+
+    if direntry_bind_rows != direntry_child_bind_rows {
+        let first_mismatch = direntry_bind_rows
+            .iter()
+            .zip(direntry_child_bind_rows.iter())
+            .position(|(expected, actual)| expected != actual);
+        let message = match first_mismatch {
+            Some(index) => format!(
+                "direntry-child-binds index mismatch at row {index}: expected `{}`, actual `{}`",
+                direntry_bind_rows[index]
+                    .row_key_for_family(CheckpointTableFamily::DirentryChildBinds),
+                direntry_child_bind_rows[index]
+                    .row_key_for_family(CheckpointTableFamily::DirentryChildBinds)
+            ),
+            None => format!(
+                "direntry-child-binds index row count mismatch: expected {}, actual {}",
+                direntry_bind_rows.len(),
+                direntry_child_bind_rows.len()
+            ),
+        };
+        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+            object_key: object_key.to_owned(),
+            message,
+        });
+    }
+
+    Ok(())
+}
+
+fn ensure_direntry_bind_rows(
+    object_key: &str,
+    family: CheckpointTableFamily,
+    rows: &[CheckpointRow],
+) -> Result<(), CheckpointLoadError> {
+    for row in rows {
+        if !matches!(row, CheckpointRow::DirentryBind { .. }) {
+            return Err(CheckpointLoadError::TableRowKindMismatch {
+                object_key: object_key.to_owned(),
+                family,
+                row_kind: checkpoint_row_kind(row).to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn metadata_states_equivalent(left: &MetadataState, right: &MetadataState) -> bool {
     CHECKPOINT_TABLE_FAMILIES.into_iter().all(|family| {
         checkpoint_rows_for_family(left, family) == checkpoint_rows_for_family(right, family)
@@ -1777,8 +1868,9 @@ mod tests {
         build_checkpoint_tables_from_rows, checkpoint_basis_head, checkpoint_rows_for_family,
         checkpoint_table_family, create_checkpoint, create_checkpoint_with_policy,
         load_checkpoint_materialization_from_manifest, load_verified_checkpoint_materialization,
-        metadata_states_equivalent, publish_checkpoint_hint_seq, write_checkpoint_manifest,
-        CheckpointLoadError, MetadataLsmPolicy, MAX_CHECKPOINT_DELTA_RUNS,
+        load_verified_checkpoint_tables, metadata_states_equivalent, publish_checkpoint_hint_seq,
+        write_checkpoint_manifest, CheckpointLoadError, MetadataLsmPolicy,
+        MAX_CHECKPOINT_DELTA_RUNS,
     };
     use crate::{
         bootstrap_namespace, load_verified_namespace_basis, move_path, put_file_bytes,
@@ -1786,7 +1878,10 @@ mod tests {
         PutFileBehavior,
     };
     use loon_api::wire::checkpoint::{
+        encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
         CheckpointDeltaRunManifest, CheckpointManifestEnvelope, CheckpointManifestPayload,
+        CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
+        CheckpointSegmentPayload, CheckpointTableFamily as ApiCheckpointTableFamily,
     };
     use loon_api::{ChangeSeq, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
@@ -2410,6 +2505,152 @@ mod tests {
                 assert_eq!(object_key, deleted_key);
             }
             other => panic!("expected missing child-bind segment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn checkpoint_rejects_child_bind_index_that_diverges_from_canonical_binds() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/other.txt",
+            b"other\n",
+            &context,
+            None,
+        )
+        .expect("write other");
+
+        let checkpoint = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let materialized = load_verified_checkpoint_materialization(
+            &store,
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+        )
+        .expect("load checkpoint before corruption");
+        let mut manifest = materialized.manifest;
+        let mut child_index_rows = checkpoint_rows_for_family(
+            &materialized.metadata_state,
+            ApiCheckpointTableFamily::DirentryChildBinds,
+        );
+        assert!(child_index_rows.len() >= 2);
+        child_index_rows[0] = child_index_rows[1].clone();
+        child_index_rows.sort_by_key(|row| {
+            row.row_key_for_family(ApiCheckpointTableFamily::DirentryChildBinds)
+        });
+
+        let child_table = manifest
+            .payload
+            .base_tables
+            .iter_mut()
+            .find(|table| table.family == ApiCheckpointTableFamily::DirentryChildBinds)
+            .expect("child bind table");
+        let child_segment = child_table
+            .segments
+            .first_mut()
+            .expect("child bind segment");
+        rewrite_checkpoint_segment(
+            &store,
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+            ApiCheckpointTableFamily::DirentryChildBinds,
+            child_segment,
+            child_index_rows,
+            &context.writer_version,
+        );
+
+        let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint.checkpoint_seq.0);
+        let writer_version = manifest.writer_version.clone();
+        let updated_manifest =
+            CheckpointManifestEnvelope::from_payload(writer_version, manifest.payload)
+                .expect("updated manifest");
+        let manifest_bytes =
+            encode_checkpoint_manifest_json(&updated_manifest).expect("encode updated manifest");
+        store
+            .put_overwrite(&manifest_key, &manifest_bytes)
+            .expect("overwrite manifest");
+
+        assert_child_index_mismatch(load_verified_checkpoint_materialization(
+            &store,
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+        ));
+        assert_child_index_mismatch(load_verified_checkpoint_tables(
+            &store,
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+        ));
+    }
+
+    fn rewrite_checkpoint_segment(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        checkpoint_seq: ChangeSeq,
+        family: ApiCheckpointTableFamily,
+        descriptor: &mut CheckpointSegmentDescriptor,
+        rows: Vec<CheckpointRow>,
+        writer_version: &str,
+    ) {
+        let row_keys = rows
+            .iter()
+            .map(|row| row.row_key_for_family(family))
+            .collect::<Vec<_>>();
+        let min_key = row_keys.first().cloned().unwrap_or_default();
+        let max_key = row_keys.last().cloned().unwrap_or_default();
+        let page = CheckpointPage {
+            page_index: 0,
+            min_key: min_key.clone(),
+            max_key: max_key.clone(),
+            row_keys,
+            rows,
+        };
+        let payload = CheckpointSegmentPayload {
+            namespace_id: namespace_id.clone(),
+            checkpoint_seq,
+            family,
+            segment_index: descriptor.segment_index,
+            row_count: page.rows.len() as u64,
+            min_key,
+            max_key,
+            pages: vec![page],
+        };
+        let envelope = CheckpointSegmentEnvelope::from_payload(writer_version, payload)
+            .expect("rewritten segment");
+        let encoded =
+            encode_checkpoint_segment_envelope_zstd(&envelope).expect("encode rewritten segment");
+        store
+            .put_overwrite(&descriptor.object_key, &encoded)
+            .expect("overwrite segment");
+
+        descriptor.row_count = envelope.payload.row_count;
+        descriptor.min_key = envelope.payload.min_key.clone();
+        descriptor.max_key = envelope.payload.max_key.clone();
+        descriptor.payload_checksum_sha256 = envelope.payload_checksum_sha256.clone();
+        descriptor.page_checksums_sha256 = envelope
+            .page_checksums_sha256()
+            .expect("rewritten page checksums");
+    }
+
+    fn assert_child_index_mismatch<T>(result: Result<T, CheckpointLoadError>) {
+        match result {
+            Err(CheckpointLoadError::SegmentDescriptorMismatch { message, .. }) => {
+                assert!(message.contains("direntry-child-binds index"));
+            }
+            Err(other) => panic!("expected child index mismatch, got {other:?}"),
+            Ok(_) => panic!("expected child index mismatch"),
         }
     }
 
