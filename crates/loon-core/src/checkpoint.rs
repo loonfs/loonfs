@@ -30,7 +30,7 @@ use loon_objectstore::keys::{
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use thiserror::Error;
@@ -716,19 +716,18 @@ fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
                 delta_runs,
             )
         }
-        Some(previous) => (
-            checkpoint_seq,
-            build_compacted_checkpoint_tables(
+        Some(_) => {
+            let base_tables = build_checkpoint_tables(
                 store,
                 namespace_id,
                 checkpoint_seq,
-                &previous.manifest,
                 &basis.metadata_state,
                 writer_version,
                 policy.max_rows_per_segment,
-            )?,
-            Vec::new(),
-        ),
+            )?;
+            debug_assert_checkpoint_table_segments_do_not_overlap(&base_tables);
+            (checkpoint_seq, base_tables, Vec::new())
+        }
         _ => (
             checkpoint_seq,
             build_checkpoint_tables(
@@ -758,278 +757,6 @@ fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))
-}
-
-fn build_compacted_checkpoint_tables<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    checkpoint_seq: ChangeSeq,
-    previous_manifest: &CheckpointManifestEnvelope,
-    metadata_state: &MetadataState,
-    writer_version: &str,
-    max_rows_per_segment: usize,
-) -> Result<Vec<CheckpointTableManifest>, CoreError> {
-    let previous_manifest_key = checkpoint_manifest(
-        previous_manifest.payload.namespace_id.as_str(),
-        previous_manifest.payload.checkpoint_seq.0,
-    );
-    let segment_writer = CompactedBaseSegmentWriter {
-        store,
-        namespace_id,
-        checkpoint_seq,
-        writer_version,
-        max_rows_per_segment,
-    };
-    let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
-    for family in CHECKPOINT_TABLE_FAMILIES {
-        let previous_table = checkpoint_table_for_family(
-            &previous_manifest_key,
-            &previous_manifest.payload.base_tables,
-            family,
-        )
-        .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
-        let current_rows = checkpoint_rows_for_family(metadata_state, family);
-        if current_rows.is_empty() {
-            tables.push(CheckpointTableManifest {
-                family,
-                segments: Vec::new(),
-            });
-            continue;
-        }
-
-        let delta_rows = checkpoint_rows_for_family_after_seq(
-            metadata_state,
-            family,
-            previous_manifest.payload.base_seq,
-        );
-        if checkpoint_family_uses_row_key_range_segments(family) && !delta_rows.is_empty() {
-            // TODO: switch this to gap-aware segmentation so row-key-range
-            // families can reuse unaffected base segments without overlapping
-            // reused ranges.
-            let descriptors = segment_writer.write_segments(family, current_rows, 0)?;
-            validate_compacted_segment_coverage(family, &descriptors)?;
-            tables.push(CheckpointTableManifest {
-                family,
-                segments: descriptors,
-            });
-            continue;
-        }
-
-        let affected_segments = affected_base_segment_indexes(family, previous_table, &delta_rows);
-        let mut descriptors = Vec::new();
-        let mut covered_current_row_indexes = BTreeSet::new();
-        let next_segment_index = previous_table
-            .segments
-            .iter()
-            .map(|descriptor| descriptor.segment_index)
-            .max()
-            .and_then(|index| index.checked_add(1))
-            .unwrap_or(0);
-
-        for descriptor in &previous_table.segments {
-            let mut segment_rows = Vec::new();
-            for (row_index, row) in current_rows.iter().enumerate() {
-                if row_matches_segment_coverage(family, row, descriptor) {
-                    covered_current_row_indexes.insert(row_index);
-                    segment_rows.push(row.clone());
-                }
-            }
-
-            if !affected_segments.contains(&descriptor.segment_index) {
-                descriptors.push(descriptor.clone());
-                continue;
-            }
-
-            if segment_rows.is_empty() {
-                continue;
-            }
-
-            let object_key = checkpoint_table(
-                namespace_id.as_str(),
-                checkpoint_seq.0,
-                checkpoint_table_family(family),
-                descriptor.segment_index,
-            );
-            descriptors.push(write_checkpoint_segment(
-                store,
-                CheckpointSegmentWriteRequest {
-                    namespace_id,
-                    segment_seq: checkpoint_seq,
-                    family,
-                    segment_index: descriptor.segment_index,
-                    segment_key: descriptor.segment_key.clone(),
-                    rows: segment_rows,
-                    object_key,
-                    writer_version,
-                },
-            )?);
-        }
-
-        let outside_rows = current_rows
-            .into_iter()
-            .enumerate()
-            .filter_map(|(row_index, row)| {
-                (!covered_current_row_indexes.contains(&row_index)).then_some(row)
-            })
-            .collect::<Vec<_>>();
-        descriptors.extend(segment_writer.write_segments(
-            family,
-            outside_rows,
-            next_segment_index,
-        )?);
-
-        descriptors.sort_by(|left, right| {
-            left.min_key
-                .cmp(&right.min_key)
-                .then(left.segment_index.cmp(&right.segment_index))
-        });
-        validate_compacted_segment_coverage(family, &descriptors)?;
-        tables.push(CheckpointTableManifest {
-            family,
-            segments: descriptors,
-        });
-    }
-    Ok(tables)
-}
-
-struct CompactedBaseSegmentWriter<'a, S: ObjectStore + ?Sized> {
-    store: &'a S,
-    namespace_id: &'a NamespaceId,
-    checkpoint_seq: ChangeSeq,
-    writer_version: &'a str,
-    max_rows_per_segment: usize,
-}
-
-impl<S: ObjectStore + ?Sized> CompactedBaseSegmentWriter<'_, S> {
-    fn write_segments(
-        &self,
-        family: CheckpointTableFamily,
-        rows: Vec<CheckpointRow>,
-        first_segment_index: u32,
-    ) -> Result<Vec<CheckpointSegmentDescriptor>, CoreError> {
-        let mut descriptors = Vec::new();
-        let mut next_segment_index = first_segment_index;
-        for segment_rows in segment_checkpoint_rows(
-            family,
-            rows,
-            CheckpointTableSegmentation::Base {
-                max_rows_per_segment: self.max_rows_per_segment,
-            },
-        ) {
-            let segment_index = next_segment_index;
-            next_segment_index = next_segment_index
-                .checked_add(1)
-                .ok_or_else(|| CoreError::Store("checkpoint segment index overflow".to_owned()))?;
-            let segment_key = match segment_rows.segment_key {
-                CheckpointSegmentKey::RowKeyRange { .. } => CheckpointSegmentKey::RowKeyRange {
-                    shard: segment_index,
-                },
-                other => other,
-            };
-            let object_key = checkpoint_table(
-                self.namespace_id.as_str(),
-                self.checkpoint_seq.0,
-                checkpoint_table_family(family),
-                segment_index,
-            );
-            descriptors.push(write_checkpoint_segment(
-                self.store,
-                CheckpointSegmentWriteRequest {
-                    namespace_id: self.namespace_id,
-                    segment_seq: self.checkpoint_seq,
-                    family,
-                    segment_index,
-                    segment_key,
-                    rows: segment_rows.rows,
-                    object_key,
-                    writer_version: self.writer_version,
-                },
-            )?);
-        }
-        Ok(descriptors)
-    }
-}
-
-fn checkpoint_family_uses_row_key_range_segments(family: CheckpointTableFamily) -> bool {
-    matches!(
-        family,
-        CheckpointTableFamily::Inodes
-            | CheckpointTableFamily::DirentryChildBinds
-            | CheckpointTableFamily::Revisions
-            | CheckpointTableFamily::Tombstones
-            | CheckpointTableFamily::CommitReceipts
-    )
-}
-
-fn validate_compacted_segment_coverage(
-    family: CheckpointTableFamily,
-    descriptors: &[CheckpointSegmentDescriptor],
-) -> Result<(), CoreError> {
-    if checkpoint_family_uses_row_key_range_segments(family) {
-        let mut previous_max_key: Option<&str> = None;
-        for descriptor in descriptors {
-            if let Some(previous) = previous_max_key {
-                if previous >= descriptor.min_key.as_str() {
-                    return Err(CoreError::Store(format!(
-                        "overlapping checkpoint segment ranges for `{family:?}`"
-                    )));
-                }
-            }
-            previous_max_key = Some(descriptor.max_key.as_str());
-        }
-        return Ok(());
-    }
-
-    let mut parent_inode_ids = BTreeSet::new();
-    for descriptor in descriptors {
-        let CheckpointSegmentKey::DirentryParent { parent_inode_id } = &descriptor.segment_key
-        else {
-            return Err(CoreError::Store(format!(
-                "unexpected checkpoint segment key for `{family:?}`"
-            )));
-        };
-        if !parent_inode_ids.insert(*parent_inode_id) {
-            return Err(CoreError::Store(format!(
-                "duplicate checkpoint parent segment for `{family:?}`"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn affected_base_segment_indexes(
-    family: CheckpointTableFamily,
-    table: &CheckpointTableManifest,
-    delta_rows: &[CheckpointRow],
-) -> BTreeSet<u32> {
-    table
-        .segments
-        .iter()
-        .filter(|descriptor| {
-            delta_rows
-                .iter()
-                .any(|row| row_matches_segment_coverage(family, row, descriptor))
-        })
-        .map(|descriptor| descriptor.segment_index)
-        .collect()
-}
-
-fn row_matches_segment_coverage(
-    family: CheckpointTableFamily,
-    row: &CheckpointRow,
-    descriptor: &CheckpointSegmentDescriptor,
-) -> bool {
-    match &descriptor.segment_key {
-        CheckpointSegmentKey::Full => true,
-        CheckpointSegmentKey::DirentryParent { parent_inode_id } => {
-            checkpoint_row_parent_inode_id(row) == Some(*parent_inode_id)
-        }
-        CheckpointSegmentKey::RowKeyRange { .. } => {
-            let row_key = row.row_key_for_family(family);
-            descriptor.min_key.as_str() <= row_key.as_str()
-                && row_key.as_str() <= descriptor.max_key.as_str()
-        }
-    }
 }
 
 pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
@@ -1227,6 +954,23 @@ fn build_checkpoint_tables<S: ObjectStore + ?Sized>(
             )
         },
     )
+}
+
+fn debug_assert_checkpoint_table_segments_do_not_overlap(tables: &[CheckpointTableManifest]) {
+    #[cfg(debug_assertions)]
+    for table in tables {
+        let mut previous_max_key: Option<&str> = None;
+        for descriptor in &table.segments {
+            if let Some(previous) = previous_max_key {
+                debug_assert!(
+                    previous < descriptor.min_key.as_str(),
+                    "overlapping checkpoint segment ranges for `{:?}`",
+                    table.family
+                );
+            }
+            previous_max_key = Some(descriptor.max_key.as_str());
+        }
+    }
 }
 
 fn build_checkpoint_delta_run_tables<S: ObjectStore + ?Sized>(
@@ -2684,9 +2428,10 @@ mod tests {
         load_checkpoint_materialization_from_manifest, load_verified_checkpoint_materialization,
         metadata_states_equivalent, publish_checkpoint_hint_seq, write_checkpoint_manifest,
         CheckpointLoadError, CheckpointTableSegmentation, MetadataLsmPolicy, MetadataTableCache,
-        MetadataTableCacheConfig, DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT,
-        MAX_CHECKPOINT_DELTA_RUNS,
+        MetadataTableCacheConfig, CHECKPOINT_TABLE_FAMILIES,
+        DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_DELTA_RUNS,
     };
+    use crate::metadata::MetadataState;
     use crate::{
         bootstrap_namespace, load_verified_namespace_basis, move_path, put_file_bytes,
         write_file_bytes, BasisLoadError, CoreError, CoreErrorKind, MutationContext,
@@ -2706,6 +2451,7 @@ mod tests {
         CheckpointTableFamily,
     };
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
     use tempfile::tempdir;
 
@@ -3475,7 +3221,7 @@ mod tests {
     }
 
     #[test]
-    fn segment_aware_compaction_reuses_unaffected_parent_segments() {
+    fn whole_run_compaction_rewrites_base_segments() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3509,18 +3255,7 @@ mod tests {
         let first_materialized =
             load_verified_checkpoint_materialization(&store, &namespace_id, first.checkpoint_seq)
                 .expect("load first checkpoint");
-        let first_basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        let cold_inode_id = crate::resolve_path_from_basis(&first_basis, "/cold")
-            .expect("resolve cold")
-            .inode_id;
-        let cold_key = CheckpointSegmentKey::DirentryParent {
-            parent_inode_id: cold_inode_id,
-        };
-        let reused_before = segment_object_key_for_key(
-            &first_materialized.manifest,
-            ApiCheckpointTableFamily::DirentryBinds,
-            &cold_key,
-        );
+        let first_base_keys = base_segment_object_keys(&first_materialized.manifest);
 
         write_file_bytes(
             &store,
@@ -3551,10 +3286,11 @@ mod tests {
         )
         .expect("load compacted checkpoint");
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        let reused_after = segment_object_key_for_key(
-            &compacted_materialized.manifest,
-            ApiCheckpointTableFamily::DirentryBinds,
-            &cold_key,
+        let compacted_base_keys = base_segment_object_keys(&compacted_materialized.manifest);
+        let compacted_table_prefix = format!(
+            "namespaces/{}/checkpoints/{:020}/tables/",
+            namespace_id.as_str(),
+            compacted.checkpoint_seq.0
         );
 
         assert_eq!(
@@ -3566,7 +3302,14 @@ mod tests {
             .payload
             .delta_runs
             .is_empty());
-        assert_eq!(reused_after, reused_before);
+        assert!(!compacted_base_keys.is_empty());
+        assert!(compacted_base_keys
+            .iter()
+            .all(|key| key.starts_with(&compacted_table_prefix)));
+        assert!(compacted_base_keys
+            .iter()
+            .all(|key| !first_base_keys.contains(key)));
+        assert_checkpoint_rows_have_unique_keys(&compacted_materialized.metadata_state);
         assert!(metadata_states_equivalent(
             &basis_after.metadata_state,
             &compacted_materialized.metadata_state
@@ -3574,7 +3317,7 @@ mod tests {
     }
 
     #[test]
-    fn segment_aware_compaction_resegments_row_key_range_families_with_deltas() {
+    fn whole_run_compaction_resegments_row_key_range_families_with_deltas() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3647,6 +3390,7 @@ mod tests {
             &basis_after.metadata_state,
             &compacted_materialized.metadata_state
         ));
+        assert_checkpoint_rows_have_unique_keys(&compacted_materialized.metadata_state);
     }
 
     #[test]
@@ -3844,23 +3588,18 @@ mod tests {
         }
     }
 
-    fn segment_object_key_for_key(
-        manifest: &CheckpointManifestEnvelope,
-        family: ApiCheckpointTableFamily,
-        segment_key: &CheckpointSegmentKey,
-    ) -> String {
+    fn base_segment_object_keys(manifest: &CheckpointManifestEnvelope) -> Vec<String> {
         manifest
             .payload
             .base_tables
             .iter()
-            .find(|table| table.family == family)
-            .expect("table")
-            .segments
-            .iter()
-            .find(|descriptor| &descriptor.segment_key == segment_key)
-            .expect("segment")
-            .object_key
-            .clone()
+            .flat_map(|table| {
+                table
+                    .segments
+                    .iter()
+                    .map(|descriptor| descriptor.object_key.clone())
+            })
+            .collect()
     }
 
     fn segment_object_keys_for_family(
@@ -3877,6 +3616,20 @@ mod tests {
             .iter()
             .map(|descriptor| descriptor.object_key.clone())
             .collect()
+    }
+
+    fn assert_checkpoint_rows_have_unique_keys(metadata_state: &MetadataState) {
+        for family in CHECKPOINT_TABLE_FAMILIES {
+            let rows = checkpoint_rows_for_family(metadata_state, family);
+            let mut seen = BTreeSet::new();
+            for row in rows {
+                let row_key = row.row_key_for_family(family);
+                assert!(
+                    seen.insert(row_key.clone()),
+                    "duplicate checkpoint row key `{row_key}` in {family:?}"
+                );
+            }
+        }
     }
 
     #[test]
