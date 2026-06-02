@@ -6,5 +6,5 @@ lease_duration_ms = 60000
 
 [store]
 kind = "local-fs"
-root = "./.loondb-store"
+root = "./.loonfs-store"
 key_prefix = "local-demo"
