@@ -89,6 +89,8 @@ The reader builds an in-memory metadata state from two kinds of durable object:
 
 The result is a complete metadata state pinned to one `seq`.
 
+For latest path `stat` and directory `list`, an implementation may avoid hydrating the complete metadata state when `checkpoint_hint_seq` is present. The reader may query verified checkpoint base tables, verified delta-run tables, and the visible WAL tail overlay directly, provided it applies the same visibility rules and treats missing or corrupt checkpoint/WAL objects as hard errors. If no checkpoint is published, latest stat/list falls back to full basis reconstruction.
+
 ### 2.2 Visibility rules
 
 Given a metadata state at seq N:
@@ -128,6 +130,7 @@ Given a visible directory inode at seq N:
 
 1. Collect all active directory bindings whose `parent_inode_id` matches the directory.
 2. For each binding, resolve the child inode. If the child is a file, its latest revision provides size and content identity through `content_ref`.
+3. Normal listing must not fetch or validate every referenced content object; committed metadata is authoritative for size and `content_ref` summaries.
 
 ## 3. Logical commits, sequence numbers, and visibility
 

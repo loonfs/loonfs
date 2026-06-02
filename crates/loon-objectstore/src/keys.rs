@@ -4,6 +4,7 @@ use crate::ObjectStoreError;
 pub enum CheckpointTableFamily {
     Inodes,
     DirentryBinds,
+    DirentryChildBinds,
     DirentryUnbinds,
     Revisions,
     Tombstones,
@@ -15,6 +16,7 @@ impl CheckpointTableFamily {
         match self {
             Self::Inodes => "inodes",
             Self::DirentryBinds => "direntry-binds",
+            Self::DirentryChildBinds => "direntry-child-binds",
             Self::DirentryUnbinds => "direntry-unbinds",
             Self::Revisions => "revisions",
             Self::Tombstones => "tombstones",
@@ -169,6 +171,10 @@ mod tests {
         assert_eq!(
             checkpoint_table("ns-1", 400, CheckpointTableFamily::DirentryBinds, 7),
             "namespaces/ns-1/checkpoints/00000000000000000400/tables/direntry-binds-00007.sst.zst"
+        );
+        assert_eq!(
+            checkpoint_table("ns-1", 400, CheckpointTableFamily::DirentryChildBinds, 8),
+            "namespaces/ns-1/checkpoints/00000000000000000400/tables/direntry-child-binds-00008.sst.zst"
         );
         assert_eq!(
             checkpoint_table("ns-1", 400, CheckpointTableFamily::CommitReceipts, 0),

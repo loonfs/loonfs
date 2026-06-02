@@ -7,8 +7,8 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 1;
-pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 1;
+pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 2;
+pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +27,7 @@ pub enum CheckpointSegmentKind {
 pub enum CheckpointTableFamily {
     Inodes,
     DirentryBinds,
+    DirentryChildBinds,
     DirentryUnbinds,
     Revisions,
     Tombstones,
@@ -117,20 +118,42 @@ pub enum CheckpointRow {
 
 impl CheckpointRow {
     pub fn row_key(&self) -> String {
+        self.row_key_for_family(match self {
+            Self::Inode { .. } => CheckpointTableFamily::Inodes,
+            Self::DirentryBind { .. } => CheckpointTableFamily::DirentryBinds,
+            Self::DirentryUnbind { .. } => CheckpointTableFamily::DirentryUnbinds,
+            Self::Revision { .. } => CheckpointTableFamily::Revisions,
+            Self::Tombstone { .. } => CheckpointTableFamily::Tombstones,
+            Self::CommitReceipt { .. } => CheckpointTableFamily::CommitReceipts,
+        })
+    }
+
+    pub fn row_key_for_family(&self, family: CheckpointTableFamily) -> String {
         match self {
             Self::Inode { inode_id, .. } => format!("inode-{:020}", inode_id.0),
             Self::DirentryBind {
                 parent_inode_id,
                 name_key,
+                child_inode_id,
                 bind_seq,
                 bind_delta_index,
                 ..
-            } => {
-                format!(
-                    "direntry-{:020}-{name_key}-{:020}-{:010}",
-                    parent_inode_id.0, bind_seq.0, bind_delta_index
-                )
-            }
+            } => match family {
+                CheckpointTableFamily::DirentryChildBinds => {
+                    let name_key = hex_encode_row_key_component(name_key);
+                    format!(
+                        "direntry-child-{:020}-{:020}-{:010}-{:020}-{name_key}",
+                        child_inode_id.0, bind_seq.0, bind_delta_index, parent_inode_id.0
+                    )
+                }
+                _ => {
+                    let name_key = hex_encode_row_key_component(name_key);
+                    format!(
+                        "direntry-{:020}-{name_key}-{:020}-{:010}",
+                        parent_inode_id.0, bind_seq.0, bind_delta_index
+                    )
+                }
+            },
             Self::DirentryUnbind {
                 parent_inode_id,
                 name_key,
@@ -140,6 +163,7 @@ impl CheckpointRow {
                 unbind_delta_index,
                 ..
             } => {
+                let name_key = hex_encode_row_key_component(name_key);
                 format!(
                     "direntry-unbind-{:020}-{name_key}-{:020}-{:010}-{:020}-{:010}",
                     parent_inode_id.0,
@@ -174,9 +198,22 @@ impl CheckpointRow {
                 committed_seq,
                 commit_id,
                 ..
-            } => format!("commit-receipt-{commit_id}-{:020}", committed_seq.0),
+            } => {
+                let commit_id = hex_encode_row_key_component(commit_id.as_str());
+                format!("commit-receipt-{commit_id}-{:020}", committed_seq.0)
+            }
         }
     }
+}
+
+pub fn hex_encode_row_key_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(char::from(HEX[(byte >> 4) as usize]));
+        encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    encoded
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +505,44 @@ mod tests {
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.delta_runs[0].seq_min, ChangeSeq(11));
         assert_eq!(decoded.payload.delta_runs[0].seq_max, ChangeSeq(12));
+    }
+
+    #[test]
+    fn direntry_bind_row_key_supports_parent_and_child_indexes() {
+        let row = super::CheckpointRow::DirentryBind {
+            parent_inode_id: InodeId(9),
+            name_key: "report.txt".to_owned(),
+            display_name: "Report.txt".to_owned(),
+            child_inode_id: InodeId(42),
+            bind_seq: ChangeSeq(17),
+            bind_delta_index: 3,
+        };
+
+        assert_eq!(
+            row.row_key_for_family(CheckpointTableFamily::DirentryBinds),
+            "direntry-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
+        );
+        assert_eq!(
+            row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds),
+            "direntry-child-00000000000000000042-00000000000000000017-0000000003-00000000000000000009-7265706f72742e747874"
+        );
+    }
+
+    #[test]
+    fn row_keys_hex_encode_dash_containing_variable_components() {
+        let row = super::CheckpointRow::DirentryBind {
+            parent_inode_id: InodeId(9),
+            name_key: "report-2024".to_owned(),
+            display_name: "report-2024".to_owned(),
+            child_inode_id: InodeId(42),
+            bind_seq: ChangeSeq(17),
+            bind_delta_index: 3,
+        };
+
+        assert_eq!(
+            row.row_key_for_family(CheckpointTableFamily::DirentryBinds),
+            "direntry-00000000000000000009-7265706f72742d32303234-00000000000000000017-0000000003"
+        );
     }
 
     fn table_manifest(object_key: &str, table_seq: ChangeSeq) -> CheckpointTableManifest {

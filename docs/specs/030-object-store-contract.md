@@ -78,6 +78,8 @@ The content model has four rules.
 
 In v0, file content is stored as one whole-file object whose `content_ref.kind` is `whole_file_v0`. The digest remains serialized as `sha256:<64hex>`, while the object key partitions the hex as `sha256/ab/cd/<hex>`.
 
+Checkpoint materialization tables include canonical metadata families and validated secondary indexes. The canonical families are `inodes`, `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and `commit-receipts`. The `direntry-child-binds` family is a secondary index over the same direntry bind rows, keyed by child inode, and must be present and verified before a checkpoint is trusted.
+
 ETags remain opaque compare tokens. They may be used for object freshness or compare-and-swap, but they are not content digests unless a provider-specific behavior is separately exposed and verified through this contract.
 
 A reader or writer resolves content through the namespace descriptor: `namespace_id -> content_store_id -> content-stores/{content_store_id}/...`. File revisions and change-feed payloads store only `content_ref`; they do not store content-store ids or object-store paths.
