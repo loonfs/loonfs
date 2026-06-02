@@ -45,7 +45,7 @@ pub enum CheckpointSegmentKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointSegmentDescriptor {
     pub object_key: String,
-    pub table_seq: ChangeSeq,
+    pub segment_seq: ChangeSeq,
     pub segment_index: u32,
     pub segment_key: CheckpointSegmentKey,
     pub row_count: u64,
@@ -228,7 +228,7 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointSegmentPayload {
     pub namespace_id: NamespaceId,
-    pub checkpoint_seq: ChangeSeq,
+    pub segment_seq: ChangeSeq,
     pub family: CheckpointTableFamily,
     pub segment_index: u32,
     pub segment_key: CheckpointSegmentKey,
@@ -556,12 +556,12 @@ mod tests {
         );
     }
 
-    fn table_manifest(object_key: &str, table_seq: ChangeSeq) -> CheckpointTableManifest {
+    fn table_manifest(object_key: &str, segment_seq: ChangeSeq) -> CheckpointTableManifest {
         CheckpointTableManifest {
             family: CheckpointTableFamily::Inodes,
             segments: vec![CheckpointSegmentDescriptor {
                 object_key: object_key.to_owned(),
-                table_seq,
+                segment_seq,
                 segment_index: 0,
                 segment_key: CheckpointSegmentKey::Full,
                 row_count: 0,
