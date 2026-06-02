@@ -14,7 +14,9 @@ use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::wal::{
     load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadRequest,
 };
-use loon_api::wire::checkpoint::{CheckpointRow, CheckpointTableFamily};
+use loon_api::wire::checkpoint::{
+    hex_encode_row_key_component, CheckpointRow, CheckpointTableFamily,
+};
 use loon_api::wire::control::HeadState;
 use loon_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, DisplayName,
@@ -647,7 +649,8 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        let prefix = format!("direntry-{:020}-{name_key}-", parent_inode_id.0);
+        let encoded_name_key = hex_encode_row_key_component(name_key);
+        let prefix = format!("direntry-{:020}-{encoded_name_key}-", parent_inode_id.0);
         Ok(self
             .tables
             .scan_prefix(CheckpointTableFamily::DirentryBinds, &prefix)
@@ -675,10 +678,11 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         &self,
         direntry: &DirentryBindRecord,
     ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
+        let encoded_name_key = hex_encode_row_key_component(&direntry.name_key);
         let prefix = format!(
             "direntry-unbind-{:020}-{}-{:020}-{:010}-",
             direntry.parent_inode_id.0,
-            direntry.name_key,
+            encoded_name_key,
             direntry.bind_seq.0,
             direntry.bind_delta_index
         );

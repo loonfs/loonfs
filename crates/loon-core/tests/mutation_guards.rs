@@ -1070,6 +1070,47 @@ fn query_driven_stat_and_list_match_full_basis_with_delta_and_wal_overlay() {
 }
 
 #[test]
+fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/report",
+        b"short",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-report"),
+    )
+    .expect("put report");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/report-2024",
+        b"newer-longer",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-report-2024"),
+    )
+    .expect("put report-2024");
+    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+    let expected = resolve_path_from_basis(&basis, "/docs/report").expect("basis stat");
+    let actual = resolve_path_with_read_source(&store, &namespace_id, "/docs/report")
+        .expect("materialized stat");
+
+    assert_eq!(actual.source, MetadataReadSource::MaterializedTables);
+    assert_eq!(actual.value, expected);
+    assert_eq!(actual.value.absolute_path, "/docs/report");
+    assert_eq!(actual.value.size_bytes, Some(5));
+}
+
+#[test]
 fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");

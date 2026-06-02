@@ -140,12 +140,14 @@ impl CheckpointRow {
                 ..
             } => match family {
                 CheckpointTableFamily::DirentryChildBinds => {
+                    let name_key = hex_encode_row_key_component(name_key);
                     format!(
                         "direntry-child-{:020}-{:020}-{:010}-{:020}-{name_key}",
                         child_inode_id.0, bind_seq.0, bind_delta_index, parent_inode_id.0
                     )
                 }
                 _ => {
+                    let name_key = hex_encode_row_key_component(name_key);
                     format!(
                         "direntry-{:020}-{name_key}-{:020}-{:010}",
                         parent_inode_id.0, bind_seq.0, bind_delta_index
@@ -161,6 +163,7 @@ impl CheckpointRow {
                 unbind_delta_index,
                 ..
             } => {
+                let name_key = hex_encode_row_key_component(name_key);
                 format!(
                     "direntry-unbind-{:020}-{name_key}-{:020}-{:010}-{:020}-{:010}",
                     parent_inode_id.0,
@@ -195,9 +198,22 @@ impl CheckpointRow {
                 committed_seq,
                 commit_id,
                 ..
-            } => format!("commit-receipt-{commit_id}-{:020}", committed_seq.0),
+            } => {
+                let commit_id = hex_encode_row_key_component(commit_id.as_str());
+                format!("commit-receipt-{commit_id}-{:020}", committed_seq.0)
+            }
         }
     }
+}
+
+pub fn hex_encode_row_key_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(char::from(HEX[(byte >> 4) as usize]));
+        encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    encoded
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -504,11 +520,28 @@ mod tests {
 
         assert_eq!(
             row.row_key_for_family(CheckpointTableFamily::DirentryBinds),
-            "direntry-00000000000000000009-report.txt-00000000000000000017-0000000003"
+            "direntry-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
         );
         assert_eq!(
             row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds),
-            "direntry-child-00000000000000000042-00000000000000000017-0000000003-00000000000000000009-report.txt"
+            "direntry-child-00000000000000000042-00000000000000000017-0000000003-00000000000000000009-7265706f72742e747874"
+        );
+    }
+
+    #[test]
+    fn row_keys_hex_encode_dash_containing_variable_components() {
+        let row = super::CheckpointRow::DirentryBind {
+            parent_inode_id: InodeId(9),
+            name_key: "report-2024".to_owned(),
+            display_name: "report-2024".to_owned(),
+            child_inode_id: InodeId(42),
+            bind_seq: ChangeSeq(17),
+            bind_delta_index: 3,
+        };
+
+        assert_eq!(
+            row.row_key_for_family(CheckpointTableFamily::DirentryBinds),
+            "direntry-00000000000000000009-7265706f72742d32303234-00000000000000000017-0000000003"
         );
     }
 
