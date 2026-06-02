@@ -285,7 +285,7 @@ fn build_client(config: S3CompatibleConfig) -> Client {
         config.secret_access_key,
         config.session_token,
         None,
-        "loondb-objectstore",
+        "loonfs-objectstore",
     );
     let mut builder = aws_sdk_s3::config::Builder::new()
         .region(Region::new(config.region))

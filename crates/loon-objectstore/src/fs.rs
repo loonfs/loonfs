@@ -399,7 +399,7 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "loondb-local-fs-{label}-{}-{stamp}",
+                "loonfs-local-fs-{label}-{}-{stamp}",
                 std::process::id()
             ));
             fs::create_dir_all(&path).expect("create temp dir");

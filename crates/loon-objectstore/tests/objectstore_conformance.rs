@@ -551,7 +551,7 @@ impl TestDir {
             .unwrap_or_default()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "loondb-objectstore-{label}-{}-{stamp}",
+            "loonfs-objectstore-{label}-{}-{stamp}",
             std::process::id()
         ));
         fs::create_dir_all(&path).expect("create temp dir");

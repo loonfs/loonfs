@@ -226,7 +226,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("loondb-objectstore-{label}-{stamp}"));
+        let path = std::env::temp_dir().join(format!("loonfs-objectstore-{label}-{stamp}"));
         fs::create_dir_all(&path).expect("create temp dir");
         path
     }
