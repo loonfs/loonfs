@@ -7,8 +7,8 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 2;
-pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 2;
+pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 3;
+pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,11 +34,20 @@ pub enum CheckpointTableFamily {
     CommitReceipts,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckpointSegmentKey {
+    Full,
+    DirentryParent { parent_inode_id: InodeId },
+    RowKeyRange { shard: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointSegmentDescriptor {
     pub object_key: String,
     pub table_seq: ChangeSeq,
     pub segment_index: u32,
+    pub segment_key: CheckpointSegmentKey,
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
@@ -222,6 +231,7 @@ pub struct CheckpointSegmentPayload {
     pub checkpoint_seq: ChangeSeq,
     pub family: CheckpointTableFamily,
     pub segment_index: u32,
+    pub segment_key: CheckpointSegmentKey,
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
@@ -446,7 +456,8 @@ mod tests {
     use super::{
         decode_checkpoint_manifest_json, encode_checkpoint_manifest_json,
         CheckpointDeltaRunManifest, CheckpointManifestEnvelope, CheckpointManifestPayload,
-        CheckpointSegmentDescriptor, CheckpointTableFamily, CheckpointTableManifest,
+        CheckpointSegmentDescriptor, CheckpointSegmentKey, CheckpointTableFamily,
+        CheckpointTableManifest,
     };
     use crate::{ChangeSeq, FenceToken, InodeId, NamespaceId};
 
@@ -552,6 +563,7 @@ mod tests {
                 object_key: object_key.to_owned(),
                 table_seq,
                 segment_index: 0,
+                segment_key: CheckpointSegmentKey::Full,
                 row_count: 0,
                 min_key: String::new(),
                 max_key: String::new(),

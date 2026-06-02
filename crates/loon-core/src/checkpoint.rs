@@ -14,7 +14,7 @@ use loon_api::wire::checkpoint::{
     encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
     CheckpointDeltaRunManifest, CheckpointManifestEnvelope, CheckpointManifestPayload,
     CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-    CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest,
+    CheckpointSegmentKey, CheckpointSegmentPayload, CheckpointTableFamily, CheckpointTableManifest,
 };
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, ProgressStateEnvelope,
@@ -30,7 +30,9 @@ use loon_objectstore::keys::{
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use thiserror::Error;
 
 const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
@@ -39,6 +41,8 @@ const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
 // can add progress requirements without restructuring the flow.
 const REQUIRED_RETENTION_PROGRESS_CLASSES: &[DerivedWorkClass] = &[];
 const DEFAULT_MAX_CHECKPOINT_DELTA_RUNS: usize = 8;
+const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 4096;
+const SMALL_SCAN_CACHE_SEGMENT_LIMIT: usize = 4;
 #[cfg(test)]
 const MAX_CHECKPOINT_DELTA_RUNS: usize = DEFAULT_MAX_CHECKPOINT_DELTA_RUNS;
 const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 7] = [
@@ -56,6 +60,154 @@ pub struct MetadataLsmPolicy {
     pub max_delta_runs: usize,
     pub max_delta_rows: Option<u64>,
     pub max_delta_bytes: Option<u64>,
+    pub max_rows_per_segment: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataTableCacheConfig {
+    pub enabled: bool,
+    pub max_blocks: usize,
+    pub max_bytes: Option<usize>,
+}
+
+impl Default for MetadataTableCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_blocks: 256,
+            max_bytes: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetadataTableCacheStats {
+    pub hits: usize,
+    pub misses: usize,
+    pub inserts: usize,
+    pub evictions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MetadataTableBlockKind {
+    SegmentPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MetadataTableCacheKey {
+    table_digest: String,
+    block_kind: MetadataTableBlockKind,
+    block_offset: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DecodedMetadataTableBlock {
+    rows: Vec<CheckpointRow>,
+    checkpoint_seq: ChangeSeq,
+    family: CheckpointTableFamily,
+    segment_index: u32,
+    segment_key: CheckpointSegmentKey,
+    row_count: u64,
+    min_key: String,
+    max_key: String,
+    page_checksums_sha256: Vec<String>,
+    byte_len: usize,
+}
+
+#[derive(Debug)]
+pub struct MetadataTableCache {
+    config: MetadataTableCacheConfig,
+    inner: Mutex<MetadataTableCacheInner>,
+    stats: MetadataTableCacheStatsInner,
+}
+
+#[derive(Debug, Default)]
+struct MetadataTableCacheInner {
+    entries: HashMap<MetadataTableCacheKey, DecodedMetadataTableBlock>,
+    order: VecDeque<MetadataTableCacheKey>,
+    byte_len: usize,
+}
+
+#[derive(Debug, Default)]
+struct MetadataTableCacheStatsInner {
+    hits: AtomicUsize,
+    misses: AtomicUsize,
+    inserts: AtomicUsize,
+    evictions: AtomicUsize,
+}
+
+impl MetadataTableCache {
+    pub fn new(config: MetadataTableCacheConfig) -> Self {
+        Self {
+            config,
+            inner: Mutex::new(MetadataTableCacheInner::default()),
+            stats: MetadataTableCacheStatsInner::default(),
+        }
+    }
+
+    pub fn stats(&self) -> MetadataTableCacheStats {
+        MetadataTableCacheStats {
+            hits: self.stats.hits.load(Ordering::SeqCst),
+            misses: self.stats.misses.load(Ordering::SeqCst),
+            inserts: self.stats.inserts.load(Ordering::SeqCst),
+            evictions: self.stats.evictions.load(Ordering::SeqCst),
+        }
+    }
+
+    fn get(&self, key: &MetadataTableCacheKey) -> Option<DecodedMetadataTableBlock> {
+        if !self.config.enabled || self.config.max_blocks == 0 {
+            return None;
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("metadata table cache lock poisoned");
+        let Some(block) = inner.entries.get(key).cloned() else {
+            self.stats.misses.fetch_add(1, Ordering::SeqCst);
+            return None;
+        };
+        inner.touch(key);
+        self.stats.hits.fetch_add(1, Ordering::SeqCst);
+        Some(block)
+    }
+
+    fn insert(&self, key: MetadataTableCacheKey, block: DecodedMetadataTableBlock) {
+        if !self.config.enabled || self.config.max_blocks == 0 {
+            return;
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("metadata table cache lock poisoned");
+        if let Some(previous) = inner.entries.insert(key.clone(), block.clone()) {
+            inner.byte_len = inner.byte_len.saturating_sub(previous.byte_len);
+        }
+        inner.byte_len = inner.byte_len.saturating_add(block.byte_len);
+        inner.touch(&key);
+        self.stats.inserts.fetch_add(1, Ordering::SeqCst);
+        while inner.entries.len() > self.config.max_blocks
+            || self
+                .config
+                .max_bytes
+                .map(|max_bytes| inner.byte_len > max_bytes)
+                .unwrap_or(false)
+        {
+            let Some(evicted) = inner.order.pop_front() else {
+                break;
+            };
+            if let Some(block) = inner.entries.remove(&evicted) {
+                inner.byte_len = inner.byte_len.saturating_sub(block.byte_len);
+                self.stats.evictions.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+impl MetadataTableCacheInner {
+    fn touch(&mut self, key: &MetadataTableCacheKey) {
+        self.order.retain(|candidate| candidate != key);
+        self.order.push_back(key.clone());
+    }
 }
 
 impl Default for MetadataLsmPolicy {
@@ -64,6 +216,7 @@ impl Default for MetadataLsmPolicy {
             max_delta_runs: DEFAULT_MAX_CHECKPOINT_DELTA_RUNS,
             max_delta_rows: None,
             max_delta_bytes: None,
+            max_rows_per_segment: DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT,
         }
     }
 }
@@ -76,6 +229,7 @@ pub(crate) struct LoadedCheckpointMaterialization {
 
 pub(crate) struct VerifiedCheckpointTables<'a, S: ObjectStore + ?Sized> {
     store: &'a S,
+    table_cache: Option<&'a MetadataTableCache>,
     namespace_id: NamespaceId,
     manifest_object_key: String,
     manifest: CheckpointManifestEnvelope,
@@ -87,13 +241,29 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
         &self.manifest
     }
 
+    fn validate_secondary_indexes(&self) -> Result<(), CheckpointLoadError> {
+        validate_direntry_child_bind_index(
+            &self.manifest_object_key,
+            self.scan_prefix_with_cache_mode(
+                CheckpointTableFamily::DirentryBinds,
+                "",
+                MetadataTableCacheMode::Bypass,
+            )?,
+            self.scan_prefix_with_cache_mode(
+                CheckpointTableFamily::DirentryChildBinds,
+                "",
+                MetadataTableCacheMode::Bypass,
+            )?,
+        )
+    }
+
     pub(crate) fn get(
         &self,
         family: CheckpointTableFamily,
         key: &str,
     ) -> Result<Option<CheckpointRow>, CheckpointLoadError> {
         Ok(self
-            .scan_prefix(family, key)?
+            .scan_prefix_with_cache_mode(family, key, MetadataTableCacheMode::Populate)?
             .into_iter()
             .find(|row| row.row_key_for_family(family) == key))
     }
@@ -103,26 +273,44 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
         family: CheckpointTableFamily,
         prefix: &str,
     ) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
+        let matching_segment_count = self.matching_segment_count(family, prefix)?;
+        let cache_mode = if matching_segment_count <= SMALL_SCAN_CACHE_SEGMENT_LIMIT {
+            MetadataTableCacheMode::Populate
+        } else {
+            MetadataTableCacheMode::ReadOnly
+        };
+        self.scan_prefix_with_cache_mode(family, prefix, cache_mode)
+    }
+
+    fn scan_prefix_with_cache_mode(
+        &self,
+        family: CheckpointTableFamily,
+        prefix: &str,
+        cache_mode: MetadataTableCacheMode,
+    ) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
         let mut rows = Vec::new();
         self.scan_manifest_tables(
             family,
             prefix,
             CheckpointTableLoadContext {
                 manifest_object_key: &self.manifest_object_key,
-                expected_table_seq: self.manifest.payload.base_seq,
+                table_seq_expectation: CheckpointTableSeqExpectation::Descriptor,
                 row_seq_min: None,
                 row_seq_max: self.manifest.payload.base_seq,
             },
             &self.manifest.payload.base_tables,
-            |family, segment_index| {
+            |family, table_seq, segment_index| {
                 checkpoint_table(
                     self.namespace_id.as_str(),
-                    self.manifest.payload.base_seq.0,
+                    table_seq.0,
                     checkpoint_table_family(family),
                     segment_index,
                 )
             },
-            &mut rows,
+            CheckpointTableScanOutput {
+                rows: &mut rows,
+                cache_mode,
+            },
         )?;
 
         for delta_run in &self.manifest.payload.delta_runs {
@@ -131,24 +319,49 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
                 prefix,
                 CheckpointTableLoadContext {
                     manifest_object_key: &self.manifest_object_key,
-                    expected_table_seq: delta_run.seq_max,
+                    table_seq_expectation: CheckpointTableSeqExpectation::Exact(delta_run.seq_max),
                     row_seq_min: Some(delta_run.seq_min),
                     row_seq_max: delta_run.seq_max,
                 },
                 &delta_run.tables,
-                |family, segment_index| {
+                |family, table_seq, segment_index| {
                     checkpoint_delta_run_table(
                         self.namespace_id.as_str(),
-                        delta_run.seq_max.0,
+                        table_seq.0,
                         &delta_run.delta_run_id,
                         checkpoint_table_family(family),
                         segment_index,
                     )
                 },
-                &mut rows,
+                CheckpointTableScanOutput {
+                    rows: &mut rows,
+                    cache_mode,
+                },
             )?;
         }
         Ok(rows)
+    }
+
+    fn matching_segment_count(
+        &self,
+        family: CheckpointTableFamily,
+        prefix: &str,
+    ) -> Result<usize, CheckpointLoadError> {
+        let mut count = count_matching_segments(
+            &self.manifest_object_key,
+            &self.manifest.payload.base_tables,
+            family,
+            prefix,
+        )?;
+        for delta_run in &self.manifest.payload.delta_runs {
+            count += count_matching_segments(
+                &self.manifest_object_key,
+                &delta_run.tables,
+                family,
+                prefix,
+            )?;
+        }
+        Ok(count)
     }
 
     fn scan_manifest_tables<ExpectedObjectKey>(
@@ -158,21 +371,16 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
         context: CheckpointTableLoadContext<'_>,
         tables: &[CheckpointTableManifest],
         mut expected_object_key: ExpectedObjectKey,
-        rows: &mut Vec<CheckpointRow>,
+        output: CheckpointTableScanOutput<'_>,
     ) -> Result<(), CheckpointLoadError>
     where
-        ExpectedObjectKey: FnMut(CheckpointTableFamily, u32) -> String,
+        ExpectedObjectKey: FnMut(CheckpointTableFamily, ChangeSeq, u32) -> String,
     {
         let table = checkpoint_table_for_family(context.manifest_object_key, tables, family)?;
         for descriptor in &table.segments {
-            if descriptor.table_seq != context.expected_table_seq {
-                return Err(CheckpointLoadError::SegmentSeqMismatch {
-                    object_key: descriptor.object_key.clone(),
-                    expected: context.expected_table_seq,
-                    actual: descriptor.table_seq,
-                });
-            }
-            let expected_key = expected_object_key(family, descriptor.segment_index);
+            let expected_table_seq = context.expected_table_seq(descriptor)?;
+            let expected_key =
+                expected_object_key(family, expected_table_seq, descriptor.segment_index);
             if descriptor.object_key != expected_key {
                 return Err(CheckpointLoadError::SegmentObjectKeyMismatch {
                     object_key: descriptor.object_key.clone(),
@@ -182,8 +390,8 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
             if !descriptor_may_contain_prefix(descriptor, prefix) {
                 continue;
             }
-            let segment_rows = self.segment_rows(context, family, descriptor)?;
-            rows.extend(
+            let segment_rows = self.segment_rows(context, family, descriptor, output.cache_mode)?;
+            output.rows.extend(
                 segment_rows
                     .into_iter()
                     .filter(|row| row.row_key_for_family(family).starts_with(prefix)),
@@ -197,22 +405,30 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
         context: CheckpointTableLoadContext<'_>,
         family: CheckpointTableFamily,
         descriptor: &CheckpointSegmentDescriptor,
+        cache_mode: MetadataTableCacheMode,
     ) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
         if let Some(rows) = self.segment_cache.borrow().get(&descriptor.object_key) {
             return Ok(rows.clone());
         }
-        let rows = load_checkpoint_segment_rows(
+        let rows = load_checkpoint_segment_rows_with_cache(
             self.store,
+            self.table_cache,
             &self.namespace_id,
             context,
             family,
             descriptor,
+            cache_mode,
         )?;
         self.segment_cache
             .borrow_mut()
             .insert(descriptor.object_key.clone(), rows.clone());
         Ok(rows)
     }
+}
+
+struct CheckpointTableScanOutput<'a> {
+    rows: &'a mut Vec<CheckpointRow>,
+    cache_mode: MetadataTableCacheMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +512,14 @@ pub enum CheckpointLoadError {
         object_key: String,
         expected: u32,
         actual: u32,
+    },
+    #[error(
+        "checkpoint segment key mismatch for `{object_key}`: expected `{expected:?}`, actual `{actual:?}`"
+    )]
+    SegmentKeyMismatch {
+        object_key: String,
+        expected: CheckpointSegmentKey,
+        actual: CheckpointSegmentKey,
     },
     #[error("checkpoint segment key mismatch for `{object_key}`: expected `{expected}`")]
     SegmentObjectKeyMismatch {
@@ -429,6 +653,7 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
         request.checkpoint_seq,
         request.metadata_state,
         request.writer_version,
+        MetadataLsmPolicy::default().max_rows_per_segment,
     )?;
     let materialized = load_checkpoint_materialization_from_tables(
         store,
@@ -503,6 +728,19 @@ fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
                 delta_runs,
             )
         }
+        Some(previous) => (
+            checkpoint_seq,
+            build_compacted_checkpoint_tables(
+                store,
+                namespace_id,
+                checkpoint_seq,
+                &previous.manifest,
+                &basis.metadata_state,
+                writer_version,
+                policy.max_rows_per_segment,
+            )?,
+            Vec::new(),
+        ),
         _ => (
             checkpoint_seq,
             build_checkpoint_tables(
@@ -511,6 +749,7 @@ fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
                 checkpoint_seq,
                 &basis.metadata_state,
                 writer_version,
+                policy.max_rows_per_segment,
             )?,
             Vec::new(),
         ),
@@ -531,6 +770,184 @@ fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))
+}
+
+fn build_compacted_checkpoint_tables<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_seq: ChangeSeq,
+    previous_manifest: &CheckpointManifestEnvelope,
+    metadata_state: &MetadataState,
+    writer_version: &str,
+    max_rows_per_segment: usize,
+) -> Result<Vec<CheckpointTableManifest>, CoreError> {
+    let previous_manifest_key = checkpoint_manifest(
+        previous_manifest.payload.namespace_id.as_str(),
+        previous_manifest.payload.checkpoint_seq.0,
+    );
+    let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
+    for family in CHECKPOINT_TABLE_FAMILIES {
+        let previous_table = checkpoint_table_for_family(
+            &previous_manifest_key,
+            &previous_manifest.payload.base_tables,
+            family,
+        )
+        .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
+        let current_rows = checkpoint_rows_for_family(metadata_state, family);
+        if current_rows.is_empty() {
+            tables.push(CheckpointTableManifest {
+                family,
+                segments: Vec::new(),
+            });
+            continue;
+        }
+
+        let delta_rows = checkpoint_rows_for_family_after_seq(
+            metadata_state,
+            family,
+            previous_manifest.payload.base_seq,
+        );
+        let affected_segments = affected_base_segment_indexes(family, previous_table, &delta_rows);
+        let mut descriptors = Vec::new();
+        let mut covered_current_row_indexes = BTreeSet::new();
+        let mut next_segment_index = previous_table
+            .segments
+            .iter()
+            .map(|descriptor| descriptor.segment_index)
+            .max()
+            .and_then(|index| index.checked_add(1))
+            .unwrap_or(0);
+
+        for descriptor in &previous_table.segments {
+            let mut segment_rows = Vec::new();
+            for (row_index, row) in current_rows.iter().enumerate() {
+                if row_matches_segment_coverage(family, row, descriptor) {
+                    covered_current_row_indexes.insert(row_index);
+                    segment_rows.push(row.clone());
+                }
+            }
+
+            if !affected_segments.contains(&descriptor.segment_index) {
+                descriptors.push(descriptor.clone());
+                continue;
+            }
+
+            if segment_rows.is_empty() {
+                continue;
+            }
+
+            let object_key = checkpoint_table(
+                namespace_id.as_str(),
+                checkpoint_seq.0,
+                checkpoint_table_family(family),
+                descriptor.segment_index,
+            );
+            descriptors.push(write_checkpoint_segment(
+                store,
+                CheckpointSegmentWriteRequest {
+                    namespace_id,
+                    table_seq: checkpoint_seq,
+                    family,
+                    segment_index: descriptor.segment_index,
+                    segment_key: descriptor.segment_key.clone(),
+                    rows: segment_rows,
+                    object_key,
+                    writer_version,
+                },
+            )?);
+        }
+
+        let outside_rows = current_rows
+            .into_iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| {
+                (!covered_current_row_indexes.contains(&row_index)).then_some(row)
+            })
+            .collect::<Vec<_>>();
+        for segment_rows in segment_checkpoint_rows(
+            family,
+            outside_rows,
+            CheckpointTableSegmentation::Base {
+                max_rows_per_segment,
+            },
+        ) {
+            let segment_index = next_segment_index;
+            next_segment_index = next_segment_index
+                .checked_add(1)
+                .ok_or_else(|| CoreError::Store("checkpoint segment index overflow".to_owned()))?;
+            let segment_key = match segment_rows.segment_key {
+                CheckpointSegmentKey::RowKeyRange { .. } => CheckpointSegmentKey::RowKeyRange {
+                    shard: segment_index,
+                },
+                other => other,
+            };
+            let object_key = checkpoint_table(
+                namespace_id.as_str(),
+                checkpoint_seq.0,
+                checkpoint_table_family(family),
+                segment_index,
+            );
+            descriptors.push(write_checkpoint_segment(
+                store,
+                CheckpointSegmentWriteRequest {
+                    namespace_id,
+                    table_seq: checkpoint_seq,
+                    family,
+                    segment_index,
+                    segment_key,
+                    rows: segment_rows.rows,
+                    object_key,
+                    writer_version,
+                },
+            )?);
+        }
+
+        descriptors.sort_by(|left, right| {
+            left.min_key
+                .cmp(&right.min_key)
+                .then(left.segment_index.cmp(&right.segment_index))
+        });
+        tables.push(CheckpointTableManifest {
+            family,
+            segments: descriptors,
+        });
+    }
+    Ok(tables)
+}
+
+fn affected_base_segment_indexes(
+    family: CheckpointTableFamily,
+    table: &CheckpointTableManifest,
+    delta_rows: &[CheckpointRow],
+) -> BTreeSet<u32> {
+    table
+        .segments
+        .iter()
+        .filter(|descriptor| {
+            delta_rows
+                .iter()
+                .any(|row| row_matches_segment_coverage(family, row, descriptor))
+        })
+        .map(|descriptor| descriptor.segment_index)
+        .collect()
+}
+
+fn row_matches_segment_coverage(
+    family: CheckpointTableFamily,
+    row: &CheckpointRow,
+    descriptor: &CheckpointSegmentDescriptor,
+) -> bool {
+    match &descriptor.segment_key {
+        CheckpointSegmentKey::Full => true,
+        CheckpointSegmentKey::DirentryParent { parent_inode_id } => {
+            checkpoint_row_parent_inode_id(row) == Some(*parent_inode_id)
+        }
+        CheckpointSegmentKey::RowKeyRange { .. } => {
+            let row_key = row.row_key_for_family(family);
+            descriptor.min_key.as_str() <= row_key.as_str()
+                && row_key.as_str() <= descriptor.max_key.as_str()
+        }
+    }
 }
 
 pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
@@ -603,8 +1020,18 @@ pub(crate) fn load_verified_checkpoint_materialization<S: ObjectStore + ?Sized>(
         })
 }
 
+#[allow(dead_code)]
 pub(crate) fn load_verified_checkpoint_tables<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
+    namespace_id: &NamespaceId,
+    checkpoint_seq: ChangeSeq,
+) -> Result<VerifiedCheckpointTables<'a, S>, CheckpointLoadError> {
+    load_verified_checkpoint_tables_with_cache(store, None, namespace_id, checkpoint_seq)
+}
+
+pub(crate) fn load_verified_checkpoint_tables_with_cache<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
     checkpoint_seq: ChangeSeq,
 ) -> Result<VerifiedCheckpointTables<'a, S>, CheckpointLoadError> {
@@ -639,11 +1066,14 @@ pub(crate) fn load_verified_checkpoint_tables<'a, S: ObjectStore + ?Sized>(
     }
     let tables = VerifiedCheckpointTables {
         store,
+        table_cache,
         namespace_id: namespace_id.clone(),
         manifest_object_key: manifest_key,
         manifest,
         segment_cache: RefCell::new(HashMap::new()),
     };
+    tables.validate_secondary_indexes()?;
+    tables.segment_cache.borrow_mut().clear();
     Ok(tables)
 }
 
@@ -706,6 +1136,7 @@ fn build_checkpoint_tables<S: ObjectStore + ?Sized>(
     checkpoint_seq: ChangeSeq,
     metadata_state: &MetadataState,
     writer_version: &str,
+    max_rows_per_segment: usize,
 ) -> Result<Vec<CheckpointTableManifest>, CoreError> {
     build_checkpoint_tables_from_rows(
         store,
@@ -713,12 +1144,15 @@ fn build_checkpoint_tables<S: ObjectStore + ?Sized>(
         checkpoint_seq,
         writer_version,
         |family| checkpoint_rows_for_family(metadata_state, family),
-        |family| {
+        CheckpointTableSegmentation::Base {
+            max_rows_per_segment,
+        },
+        |family, segment_index| {
             checkpoint_table(
                 namespace_id.as_str(),
                 checkpoint_seq.0,
                 checkpoint_table_family(family),
-                0,
+                segment_index,
             )
         },
     )
@@ -739,30 +1173,43 @@ fn build_checkpoint_delta_run_tables<S: ObjectStore + ?Sized>(
         checkpoint_seq,
         writer_version,
         |family| checkpoint_rows_for_family_after_seq(metadata_state, family, after_seq),
-        |family| {
+        CheckpointTableSegmentation::Full,
+        |family, segment_index| {
             checkpoint_delta_run_table(
                 namespace_id.as_str(),
                 checkpoint_seq.0,
                 delta_run_id,
                 checkpoint_table_family(family),
-                0,
+                segment_index,
             )
         },
     )
 }
 
-fn build_checkpoint_tables_from_rows<S, RowsForFamily, ObjectKeyForFamily>(
+#[derive(Debug, Clone, Copy)]
+enum CheckpointTableSegmentation {
+    Base { max_rows_per_segment: usize },
+    Full,
+}
+
+struct CheckpointSegmentRows {
+    segment_key: CheckpointSegmentKey,
+    rows: Vec<CheckpointRow>,
+}
+
+fn build_checkpoint_tables_from_rows<S, RowsForFamily, ObjectKeyForSegment>(
     store: &S,
     namespace_id: &NamespaceId,
     table_seq: ChangeSeq,
     writer_version: &str,
     mut rows_for_family: RowsForFamily,
-    mut object_key_for_family: ObjectKeyForFamily,
+    segmentation: CheckpointTableSegmentation,
+    mut object_key_for_segment: ObjectKeyForSegment,
 ) -> Result<Vec<CheckpointTableManifest>, CoreError>
 where
     S: ObjectStore + ?Sized,
     RowsForFamily: FnMut(CheckpointTableFamily) -> Vec<CheckpointRow>,
-    ObjectKeyForFamily: FnMut(CheckpointTableFamily) -> String,
+    ObjectKeyForSegment: FnMut(CheckpointTableFamily, u32) -> String,
 {
     let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
     for family in CHECKPOINT_TABLE_FAMILIES {
@@ -775,53 +1222,162 @@ where
             continue;
         }
 
-        let row_keys = rows
-            .iter()
-            .map(|row| row.row_key_for_family(family))
-            .collect::<Vec<_>>();
-        let page = CheckpointPage {
-            page_index: 0,
-            min_key: row_keys.first().cloned().unwrap_or_default(),
-            max_key: row_keys.last().cloned().unwrap_or_default(),
-            row_keys,
-            rows,
-        };
-        let payload = CheckpointSegmentPayload {
-            namespace_id: namespace_id.clone(),
-            checkpoint_seq: table_seq,
-            family,
-            segment_index: 0,
-            row_count: page.rows.len() as u64,
-            min_key: page.min_key.clone(),
-            max_key: page.max_key.clone(),
-            pages: vec![page],
-        };
-        let envelope = CheckpointSegmentEnvelope::from_payload(writer_version, payload)
-            .map_err(|err| CoreError::Store(err.to_string()))?;
-        let encoded = encode_checkpoint_segment_envelope_zstd(&envelope)
-            .map_err(|err| CoreError::Store(err.to_string()))?;
-        let object_key = object_key_for_family(family);
-        write_immutable_object(store, &object_key, &encoded)?;
+        let segments = segment_checkpoint_rows(family, rows, segmentation);
+        let mut descriptors = Vec::with_capacity(segments.len());
+        for (segment_index, segment_rows) in segments.into_iter().enumerate() {
+            let segment_index = u32::try_from(segment_index)
+                .map_err(|_| CoreError::Store("checkpoint segment index overflow".to_owned()))?;
+            let object_key = object_key_for_segment(family, segment_index);
+            descriptors.push(write_checkpoint_segment(
+                store,
+                CheckpointSegmentWriteRequest {
+                    namespace_id,
+                    table_seq,
+                    family,
+                    segment_index,
+                    segment_key: segment_rows.segment_key,
+                    rows: segment_rows.rows,
+                    object_key,
+                    writer_version,
+                },
+            )?);
+        }
         tables.push(CheckpointTableManifest {
             family,
-            segments: vec![CheckpointSegmentDescriptor {
-                object_key,
-                table_seq,
-                segment_index: 0,
-                row_count: envelope.payload.row_count,
-                min_key: envelope.payload.min_key.clone(),
-                max_key: envelope.payload.max_key.clone(),
-                payload_checksum_sha256: checkpoint_segment_payload_checksum_sha256(
-                    &envelope.payload,
-                )
-                .map_err(|err| CoreError::Store(err.to_string()))?,
-                page_checksums_sha256: envelope
-                    .page_checksums_sha256()
-                    .map_err(|err| CoreError::Store(err.to_string()))?,
-            }],
+            segments: descriptors,
         });
     }
     Ok(tables)
+}
+
+struct CheckpointSegmentWriteRequest<'a> {
+    namespace_id: &'a NamespaceId,
+    table_seq: ChangeSeq,
+    family: CheckpointTableFamily,
+    segment_index: u32,
+    segment_key: CheckpointSegmentKey,
+    rows: Vec<CheckpointRow>,
+    object_key: String,
+    writer_version: &'a str,
+}
+
+fn write_checkpoint_segment<S: ObjectStore + ?Sized>(
+    store: &S,
+    request: CheckpointSegmentWriteRequest<'_>,
+) -> Result<CheckpointSegmentDescriptor, CoreError> {
+    let row_keys = request
+        .rows
+        .iter()
+        .map(|row| row.row_key_for_family(request.family))
+        .collect::<Vec<_>>();
+    let page = CheckpointPage {
+        page_index: 0,
+        min_key: row_keys.first().cloned().unwrap_or_default(),
+        max_key: row_keys.last().cloned().unwrap_or_default(),
+        row_keys,
+        rows: request.rows,
+    };
+    let payload = CheckpointSegmentPayload {
+        namespace_id: request.namespace_id.clone(),
+        checkpoint_seq: request.table_seq,
+        family: request.family,
+        segment_index: request.segment_index,
+        segment_key: request.segment_key,
+        row_count: page.rows.len() as u64,
+        min_key: page.min_key.clone(),
+        max_key: page.max_key.clone(),
+        pages: vec![page],
+    };
+    let envelope = CheckpointSegmentEnvelope::from_payload(request.writer_version, payload)
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+    let encoded = encode_checkpoint_segment_envelope_zstd(&envelope)
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+    write_immutable_object(store, &request.object_key, &encoded)?;
+    Ok(CheckpointSegmentDescriptor {
+        object_key: request.object_key,
+        table_seq: request.table_seq,
+        segment_index: request.segment_index,
+        segment_key: envelope.payload.segment_key.clone(),
+        row_count: envelope.payload.row_count,
+        min_key: envelope.payload.min_key.clone(),
+        max_key: envelope.payload.max_key.clone(),
+        payload_checksum_sha256: checkpoint_segment_payload_checksum_sha256(&envelope.payload)
+            .map_err(|err| CoreError::Store(err.to_string()))?,
+        page_checksums_sha256: envelope
+            .page_checksums_sha256()
+            .map_err(|err| CoreError::Store(err.to_string()))?,
+    })
+}
+
+fn segment_checkpoint_rows(
+    family: CheckpointTableFamily,
+    rows: Vec<CheckpointRow>,
+    segmentation: CheckpointTableSegmentation,
+) -> Vec<CheckpointSegmentRows> {
+    match segmentation {
+        CheckpointTableSegmentation::Full => vec![CheckpointSegmentRows {
+            segment_key: CheckpointSegmentKey::Full,
+            rows,
+        }],
+        CheckpointTableSegmentation::Base {
+            max_rows_per_segment,
+        } => match family {
+            CheckpointTableFamily::DirentryBinds | CheckpointTableFamily::DirentryUnbinds => {
+                segment_rows_by_parent(rows)
+            }
+            CheckpointTableFamily::Inodes
+            | CheckpointTableFamily::DirentryChildBinds
+            | CheckpointTableFamily::Revisions
+            | CheckpointTableFamily::Tombstones
+            | CheckpointTableFamily::CommitReceipts => {
+                segment_rows_by_row_key_range(rows, max_rows_per_segment.max(1))
+            }
+        },
+    }
+}
+
+fn segment_rows_by_parent(rows: Vec<CheckpointRow>) -> Vec<CheckpointSegmentRows> {
+    let mut grouped: BTreeMap<InodeId, Vec<CheckpointRow>> = BTreeMap::new();
+    for row in rows {
+        if let Some(parent_inode_id) = checkpoint_row_parent_inode_id(&row) {
+            grouped.entry(parent_inode_id).or_default().push(row);
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(parent_inode_id, rows)| CheckpointSegmentRows {
+            segment_key: CheckpointSegmentKey::DirentryParent { parent_inode_id },
+            rows,
+        })
+        .collect()
+}
+
+fn segment_rows_by_row_key_range(
+    rows: Vec<CheckpointRow>,
+    max_rows_per_segment: usize,
+) -> Vec<CheckpointSegmentRows> {
+    rows.chunks(max_rows_per_segment)
+        .enumerate()
+        .map(|(shard, rows)| CheckpointSegmentRows {
+            segment_key: CheckpointSegmentKey::RowKeyRange {
+                shard: u32::try_from(shard).unwrap_or(u32::MAX),
+            },
+            rows: rows.to_vec(),
+        })
+        .collect()
+}
+
+fn checkpoint_row_parent_inode_id(row: &CheckpointRow) -> Option<InodeId> {
+    match row {
+        CheckpointRow::DirentryBind {
+            parent_inode_id, ..
+        }
+        | CheckpointRow::DirentryUnbind {
+            parent_inode_id, ..
+        } => Some(*parent_inode_id),
+        _ => None,
+    }
 }
 
 fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
@@ -1087,16 +1643,16 @@ fn load_checkpoint_materialization_from_manifest<S: ObjectStore + ?Sized>(
         namespace_id,
         CheckpointTableLoadContext {
             manifest_object_key,
-            expected_table_seq: manifest.payload.base_seq,
+            table_seq_expectation: CheckpointTableSeqExpectation::Descriptor,
             row_seq_min: None,
             row_seq_max: manifest.payload.base_seq,
         },
         &manifest.payload.base_tables,
         &mut metadata_state,
-        |family, segment_index| {
+        |family, table_seq, segment_index| {
             checkpoint_table(
                 namespace_id.as_str(),
-                manifest.payload.base_seq.0,
+                table_seq.0,
                 checkpoint_table_family(family),
                 segment_index,
             )
@@ -1114,16 +1670,16 @@ fn load_checkpoint_materialization_from_manifest<S: ObjectStore + ?Sized>(
             namespace_id,
             CheckpointTableLoadContext {
                 manifest_object_key,
-                expected_table_seq: delta_run.seq_max,
+                table_seq_expectation: CheckpointTableSeqExpectation::Exact(delta_run.seq_max),
                 row_seq_min: Some(delta_run.seq_min),
                 row_seq_max: delta_run.seq_max,
             },
             &delta_run.tables,
             &mut metadata_state,
-            |family, segment_index| {
+            |family, table_seq, segment_index| {
                 checkpoint_delta_run_table(
                     namespace_id.as_str(),
-                    delta_run.seq_max.0,
+                    table_seq.0,
                     &delta_run.delta_run_id,
                     checkpoint_table_family(family),
                     segment_index,
@@ -1148,13 +1704,13 @@ fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
         namespace_id,
         CheckpointTableLoadContext {
             manifest_object_key,
-            expected_table_seq: table_seq,
+            table_seq_expectation: CheckpointTableSeqExpectation::Exact(table_seq),
             row_seq_min: None,
             row_seq_max: table_seq,
         },
         tables,
         &mut metadata_state,
-        |family, segment_index| {
+        |family, table_seq, segment_index| {
             checkpoint_table(
                 namespace_id.as_str(),
                 table_seq.0,
@@ -1169,9 +1725,59 @@ fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
 #[derive(Clone, Copy)]
 struct CheckpointTableLoadContext<'a> {
     manifest_object_key: &'a str,
-    expected_table_seq: ChangeSeq,
+    table_seq_expectation: CheckpointTableSeqExpectation,
     row_seq_min: Option<ChangeSeq>,
     row_seq_max: ChangeSeq,
+}
+
+#[derive(Clone, Copy)]
+enum CheckpointTableSeqExpectation {
+    Exact(ChangeSeq),
+    Descriptor,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetadataTableCacheMode {
+    Bypass,
+    Populate,
+    ReadOnly,
+}
+
+impl CheckpointTableLoadContext<'_> {
+    fn expected_table_seq(
+        &self,
+        descriptor: &CheckpointSegmentDescriptor,
+    ) -> Result<ChangeSeq, CheckpointLoadError> {
+        match self.table_seq_expectation {
+            CheckpointTableSeqExpectation::Exact(expected) => {
+                if descriptor.table_seq != expected {
+                    return Err(CheckpointLoadError::SegmentSeqMismatch {
+                        object_key: descriptor.object_key.clone(),
+                        expected,
+                        actual: descriptor.table_seq,
+                    });
+                }
+                Ok(expected)
+            }
+            CheckpointTableSeqExpectation::Descriptor => {
+                if descriptor.table_seq > self.row_seq_max {
+                    return Err(CheckpointLoadError::SegmentSeqMismatch {
+                        object_key: descriptor.object_key.clone(),
+                        expected: self.row_seq_max,
+                        actual: descriptor.table_seq,
+                    });
+                }
+                Ok(descriptor.table_seq)
+            }
+        }
+    }
+
+    fn row_seq_max(&self, descriptor: &CheckpointSegmentDescriptor) -> ChangeSeq {
+        match self.table_seq_expectation {
+            CheckpointTableSeqExpectation::Exact(_) => self.row_seq_max,
+            CheckpointTableSeqExpectation::Descriptor => descriptor.table_seq,
+        }
+    }
 }
 
 fn append_checkpoint_tables_to_metadata<S, ExpectedObjectKey>(
@@ -1184,21 +1790,16 @@ fn append_checkpoint_tables_to_metadata<S, ExpectedObjectKey>(
 ) -> Result<(), CheckpointLoadError>
 where
     S: ObjectStore + ?Sized,
-    ExpectedObjectKey: FnMut(CheckpointTableFamily, u32) -> String,
+    ExpectedObjectKey: FnMut(CheckpointTableFamily, ChangeSeq, u32) -> String,
 {
     let ordered_tables = ordered_checkpoint_tables(context.manifest_object_key, tables)?;
     let mut direntry_bind_rows = Vec::new();
     let mut direntry_child_bind_rows = Vec::new();
     for table in ordered_tables {
         for descriptor in &table.segments {
-            if descriptor.table_seq != context.expected_table_seq {
-                return Err(CheckpointLoadError::SegmentSeqMismatch {
-                    object_key: descriptor.object_key.clone(),
-                    expected: context.expected_table_seq,
-                    actual: descriptor.table_seq,
-                });
-            }
-            let expected_key = expected_object_key(table.family, descriptor.segment_index);
+            let expected_table_seq = context.expected_table_seq(descriptor)?;
+            let expected_key =
+                expected_object_key(table.family, expected_table_seq, descriptor.segment_index);
             if descriptor.object_key != expected_key {
                 return Err(CheckpointLoadError::SegmentObjectKeyMismatch {
                     object_key: descriptor.object_key.clone(),
@@ -1239,6 +1840,45 @@ fn load_checkpoint_segment_rows<S: ObjectStore + ?Sized>(
     family: CheckpointTableFamily,
     descriptor: &CheckpointSegmentDescriptor,
 ) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
+    load_checkpoint_segment_rows_with_cache(
+        store,
+        None,
+        namespace_id,
+        context,
+        family,
+        descriptor,
+        MetadataTableCacheMode::Bypass,
+    )
+}
+
+fn load_checkpoint_segment_rows_with_cache<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
+    namespace_id: &NamespaceId,
+    context: CheckpointTableLoadContext<'_>,
+    family: CheckpointTableFamily,
+    descriptor: &CheckpointSegmentDescriptor,
+    cache_mode: MetadataTableCacheMode,
+) -> Result<Vec<CheckpointRow>, CheckpointLoadError> {
+    let expected_table_seq = context.expected_table_seq(descriptor)?;
+    let cache_key = MetadataTableCacheKey {
+        table_digest: descriptor.payload_checksum_sha256.clone(),
+        block_kind: MetadataTableBlockKind::SegmentPayload,
+        block_offset: 0,
+    };
+    if cache_mode != MetadataTableCacheMode::Bypass {
+        if let Some(block) = table_cache.and_then(|cache| cache.get(&cache_key)) {
+            validate_cached_checkpoint_block(family, expected_table_seq, descriptor, &block)?;
+            validate_checkpoint_row_seq_range(
+                &descriptor.object_key,
+                &block.rows,
+                context.row_seq_min,
+                context.row_seq_max(descriptor),
+            )?;
+            return Ok(block.rows);
+        }
+    }
+
     let Some(bytes) = store.get(&descriptor.object_key, None).map_err(|err| {
         CheckpointLoadError::ReadSegment {
             object_key: descriptor.object_key.clone(),
@@ -1258,7 +1898,7 @@ fn load_checkpoint_segment_rows<S: ObjectStore + ?Sized>(
     })?;
     let rows = validate_checkpoint_segment(
         namespace_id,
-        context.expected_table_seq,
+        expected_table_seq,
         family,
         descriptor,
         &segment,
@@ -1267,9 +1907,75 @@ fn load_checkpoint_segment_rows<S: ObjectStore + ?Sized>(
         &descriptor.object_key,
         &rows,
         context.row_seq_min,
-        context.row_seq_max,
+        context.row_seq_max(descriptor),
     )?;
+    if cache_mode == MetadataTableCacheMode::Populate {
+        if let Some(cache) = table_cache {
+            cache.insert(
+                cache_key,
+                DecodedMetadataTableBlock {
+                    rows: rows.clone(),
+                    checkpoint_seq: expected_table_seq,
+                    family,
+                    segment_index: descriptor.segment_index,
+                    segment_key: descriptor.segment_key.clone(),
+                    row_count: descriptor.row_count,
+                    min_key: descriptor.min_key.clone(),
+                    max_key: descriptor.max_key.clone(),
+                    page_checksums_sha256: descriptor.page_checksums_sha256.clone(),
+                    byte_len: bytes.len(),
+                },
+            );
+        }
+    }
     Ok(rows)
+}
+
+fn validate_cached_checkpoint_block(
+    family: CheckpointTableFamily,
+    expected_table_seq: ChangeSeq,
+    descriptor: &CheckpointSegmentDescriptor,
+    block: &DecodedMetadataTableBlock,
+) -> Result<(), CheckpointLoadError> {
+    if block.checkpoint_seq != expected_table_seq {
+        return Err(CheckpointLoadError::SegmentSeqMismatch {
+            object_key: descriptor.object_key.clone(),
+            expected: expected_table_seq,
+            actual: block.checkpoint_seq,
+        });
+    }
+    if block.family != family {
+        return Err(CheckpointLoadError::SegmentFamilyMismatch {
+            object_key: descriptor.object_key.clone(),
+            expected: family,
+            actual: block.family,
+        });
+    }
+    if block.segment_index != descriptor.segment_index {
+        return Err(CheckpointLoadError::SegmentIndexMismatch {
+            object_key: descriptor.object_key.clone(),
+            expected: descriptor.segment_index,
+            actual: block.segment_index,
+        });
+    }
+    if block.segment_key != descriptor.segment_key {
+        return Err(CheckpointLoadError::SegmentKeyMismatch {
+            object_key: descriptor.object_key.clone(),
+            expected: descriptor.segment_key.clone(),
+            actual: block.segment_key.clone(),
+        });
+    }
+    if descriptor.row_count != block.row_count
+        || descriptor.min_key != block.min_key
+        || descriptor.max_key != block.max_key
+        || descriptor.page_checksums_sha256 != block.page_checksums_sha256
+    {
+        return Err(CheckpointLoadError::SegmentDescriptorMismatch {
+            object_key: descriptor.object_key.clone(),
+            message: "cached segment descriptor mismatch".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn ordered_checkpoint_tables<'a>(
@@ -1308,6 +2014,20 @@ fn checkpoint_table_for_family<'a>(
             object_key: manifest_object_key.to_owned(),
             family,
         })
+}
+
+fn count_matching_segments(
+    manifest_object_key: &str,
+    tables: &[CheckpointTableManifest],
+    family: CheckpointTableFamily,
+    prefix: &str,
+) -> Result<usize, CheckpointLoadError> {
+    let table = checkpoint_table_for_family(manifest_object_key, tables, family)?;
+    Ok(table
+        .segments
+        .iter()
+        .filter(|descriptor| descriptor_may_contain_prefix(descriptor, prefix))
+        .count())
 }
 
 fn descriptor_may_contain_prefix(descriptor: &CheckpointSegmentDescriptor, prefix: &str) -> bool {
@@ -1373,6 +2093,13 @@ fn validate_checkpoint_segment(
             object_key: descriptor.object_key.clone(),
             expected: descriptor.segment_index,
             actual: segment.payload.segment_index,
+        });
+    }
+    if segment.payload.segment_key != descriptor.segment_key {
+        return Err(CheckpointLoadError::SegmentKeyMismatch {
+            object_key: descriptor.object_key.clone(),
+            expected: descriptor.segment_key.clone(),
+            actual: segment.payload.segment_key.clone(),
         });
     }
 
@@ -1853,7 +2580,8 @@ mod tests {
         checkpoint_table_family, create_checkpoint, create_checkpoint_with_policy,
         load_checkpoint_materialization_from_manifest, load_verified_checkpoint_materialization,
         metadata_states_equivalent, publish_checkpoint_hint_seq, write_checkpoint_manifest,
-        CheckpointLoadError, MetadataLsmPolicy, MAX_CHECKPOINT_DELTA_RUNS,
+        CheckpointLoadError, CheckpointTableSegmentation, MetadataLsmPolicy,
+        MAX_CHECKPOINT_DELTA_RUNS,
     };
     use crate::{
         bootstrap_namespace, load_verified_namespace_basis, move_path, put_file_bytes,
@@ -1864,7 +2592,8 @@ mod tests {
         encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
         CheckpointDeltaRunManifest, CheckpointManifestEnvelope, CheckpointManifestPayload,
         CheckpointPage, CheckpointRow, CheckpointSegmentDescriptor, CheckpointSegmentEnvelope,
-        CheckpointSegmentPayload, CheckpointTableFamily as ApiCheckpointTableFamily,
+        CheckpointSegmentKey, CheckpointSegmentPayload,
+        CheckpointTableFamily as ApiCheckpointTableFamily,
     };
     use loon_api::{ChangeSeq, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
@@ -2325,13 +3054,14 @@ mod tests {
             basis.head.seq,
             &context.writer_version,
             |family| checkpoint_rows_for_family(&first_materialized.metadata_state, family),
-            |family| {
+            CheckpointTableSegmentation::Full,
+            |family, segment_index| {
                 checkpoint_delta_run_table(
                     namespace_id.as_str(),
                     basis.head.seq.0,
                     delta_run_id,
                     checkpoint_table_family(family),
-                    0,
+                    segment_index,
                 )
             },
         )
@@ -2412,8 +3142,7 @@ mod tests {
         let context = test_context();
         let policy = MetadataLsmPolicy {
             max_delta_runs: 2,
-            max_delta_rows: None,
-            max_delta_bytes: None,
+            ..MetadataLsmPolicy::default()
         };
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
@@ -2435,6 +3164,266 @@ mod tests {
         assert!(metadata_states_equivalent(
             &basis_after.metadata_state,
             &compacted.metadata_state
+        ));
+    }
+
+    #[test]
+    fn checkpoint_rejects_segment_descriptor_payload_key_mismatch() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+
+        let checkpoint = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let materialized = load_verified_checkpoint_materialization(
+            &store,
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+        )
+        .expect("load checkpoint");
+        let mut manifest = materialized.manifest;
+        let revisions = manifest
+            .payload
+            .base_tables
+            .iter_mut()
+            .find(|table| table.family == ApiCheckpointTableFamily::Revisions)
+            .expect("revision table");
+        let descriptor = revisions.segments.first_mut().expect("revision segment");
+        descriptor.segment_key = CheckpointSegmentKey::Full;
+
+        let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint.checkpoint_seq.0);
+        let writer_version = manifest.writer_version.clone();
+        let updated_manifest =
+            CheckpointManifestEnvelope::from_payload(writer_version, manifest.payload)
+                .expect("updated manifest");
+        let manifest_bytes =
+            encode_checkpoint_manifest_json(&updated_manifest).expect("encode manifest");
+        store
+            .put_overwrite(&manifest_key, &manifest_bytes)
+            .expect("overwrite manifest");
+
+        match load_verified_checkpoint_materialization(
+            &store,
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+        ) {
+            Err(CheckpointLoadError::SegmentKeyMismatch { .. }) => {}
+            other => panic!("expected segment key mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn checkpoint_base_tables_have_sorted_segment_coverage() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        for index in 0..6 {
+            let path = format!("/docs/file-{index}.txt");
+            write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+                .expect("write file");
+        }
+        let policy = MetadataLsmPolicy {
+            max_rows_per_segment: 2,
+            ..MetadataLsmPolicy::default()
+        };
+
+        let checkpoint = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .expect("checkpoint");
+        let materialized = load_verified_checkpoint_materialization(
+            &store,
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+        )
+        .expect("load checkpoint");
+
+        let revisions = materialized
+            .manifest
+            .payload
+            .base_tables
+            .iter()
+            .find(|table| table.family == ApiCheckpointTableFamily::Revisions)
+            .expect("revision table");
+        assert!(revisions.segments.len() >= 3);
+        assert!(revisions.segments.iter().all(|descriptor| {
+            matches!(
+                descriptor.segment_key,
+                CheckpointSegmentKey::RowKeyRange { .. }
+            )
+        }));
+
+        let direntries = materialized
+            .manifest
+            .payload
+            .base_tables
+            .iter()
+            .find(|table| table.family == ApiCheckpointTableFamily::DirentryBinds)
+            .expect("direntry table");
+        assert!(direntries.segments.iter().all(|descriptor| {
+            matches!(
+                descriptor.segment_key,
+                CheckpointSegmentKey::DirentryParent { .. }
+            )
+        }));
+
+        for table in &materialized.manifest.payload.base_tables {
+            let mut previous_max_key: Option<&str> = None;
+            for descriptor in &table.segments {
+                assert!(descriptor.min_key.as_str() <= descriptor.max_key.as_str());
+                if let Some(previous) = previous_max_key {
+                    assert!(previous < descriptor.min_key.as_str());
+                }
+                previous_max_key = Some(descriptor.max_key.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn large_table_scan_does_not_insert_metadata_cache_blocks() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        for index in 0..8 {
+            let path = format!("/docs/file-{index}.txt");
+            write_file_bytes(&store, &namespace_id, &path, b"file\n", &context, None)
+                .expect("write file");
+        }
+        let policy = MetadataLsmPolicy {
+            max_rows_per_segment: 1,
+            ..MetadataLsmPolicy::default()
+        };
+        let checkpoint = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .expect("checkpoint");
+        let cache = super::MetadataTableCache::new(Default::default());
+        let tables = super::load_verified_checkpoint_tables_with_cache(
+            &store,
+            Some(&cache),
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+        )
+        .expect("load tables");
+
+        let before = cache.stats();
+        let revisions = tables
+            .scan_prefix(ApiCheckpointTableFamily::Revisions, "revision-")
+            .expect("scan revisions");
+        let after = cache.stats();
+
+        assert!(revisions.len() >= 8);
+        assert_eq!(after.inserts, before.inserts);
+        assert!(after.misses > before.misses);
+    }
+
+    #[test]
+    fn segment_aware_compaction_reuses_unaffected_parent_segments() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        let policy = MetadataLsmPolicy {
+            max_delta_runs: 1,
+            max_rows_per_segment: 2,
+            ..MetadataLsmPolicy::default()
+        };
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/hot/original.txt",
+            b"hot\n",
+            &context,
+            None,
+        )
+        .expect("write hot");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/cold/original.txt",
+            b"cold\n",
+            &context,
+            None,
+        )
+        .expect("write cold");
+
+        let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .expect("first checkpoint");
+        let first_materialized =
+            load_verified_checkpoint_materialization(&store, &namespace_id, first.checkpoint_seq)
+                .expect("load first checkpoint");
+        let first_basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let cold_inode_id = crate::resolve_path_from_basis(&first_basis, "/cold")
+            .expect("resolve cold")
+            .inode_id;
+        let cold_key = CheckpointSegmentKey::DirentryParent {
+            parent_inode_id: cold_inode_id,
+        };
+        let reused_before = segment_object_key_for_key(
+            &first_materialized.manifest,
+            ApiCheckpointTableFamily::DirentryBinds,
+            &cold_key,
+        );
+
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/hot/after-delta.txt",
+            b"hot 2\n",
+            &context,
+            None,
+        )
+        .expect("write hot delta");
+        create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .expect("delta checkpoint");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/hot/after-compact.txt",
+            b"hot 3\n",
+            &context,
+            None,
+        )
+        .expect("write hot compact");
+        let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
+            .expect("compacted checkpoint");
+        let compacted_materialized = load_verified_checkpoint_materialization(
+            &store,
+            &namespace_id,
+            compacted.checkpoint_seq,
+        )
+        .expect("load compacted checkpoint");
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let reused_after = segment_object_key_for_key(
+            &compacted_materialized.manifest,
+            ApiCheckpointTableFamily::DirentryBinds,
+            &cold_key,
+        );
+
+        assert_eq!(
+            compacted_materialized.manifest.payload.base_seq,
+            compacted.checkpoint_seq
+        );
+        assert!(compacted_materialized
+            .manifest
+            .payload
+            .delta_runs
+            .is_empty());
+        assert_eq!(reused_after, reused_before);
+        assert!(metadata_states_equivalent(
+            &basis_after.metadata_state,
+            &compacted_materialized.metadata_state
         ));
     }
 
@@ -2600,6 +3589,7 @@ mod tests {
             checkpoint_seq,
             family,
             segment_index: descriptor.segment_index,
+            segment_key: descriptor.segment_key.clone(),
             row_count: page.rows.len() as u64,
             min_key,
             max_key,
@@ -2630,6 +3620,25 @@ mod tests {
             Err(other) => panic!("expected child index mismatch, got {other:?}"),
             Ok(_) => panic!("expected child index mismatch"),
         }
+    }
+
+    fn segment_object_key_for_key(
+        manifest: &CheckpointManifestEnvelope,
+        family: ApiCheckpointTableFamily,
+        segment_key: &CheckpointSegmentKey,
+    ) -> String {
+        manifest
+            .payload
+            .base_tables
+            .iter()
+            .find(|table| table.family == family)
+            .expect("table")
+            .segments
+            .iter()
+            .find(|descriptor| &descriptor.segment_key == segment_key)
+            .expect("segment")
+            .object_key
+            .clone()
     }
 
     #[test]
@@ -2733,6 +3742,7 @@ mod tests {
             basis_before.head.seq,
             &basis_before.metadata_state,
             &context.writer_version,
+            MetadataLsmPolicy::default().max_rows_per_segment,
         )
         .expect("build checkpoint tables");
         let manifest = CheckpointManifestEnvelope::from_payload(
