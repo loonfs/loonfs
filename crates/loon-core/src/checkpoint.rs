@@ -1495,6 +1495,13 @@ fn validate_checkpoint_page(
     }
 
     for (index, row) in page.rows.iter().enumerate() {
+        if !checkpoint_row_matches_family(row, family) {
+            return Err(CheckpointLoadError::TableRowKindMismatch {
+                object_key: descriptor.object_key.clone(),
+                family,
+                row_kind: checkpoint_row_kind(row).to_owned(),
+            });
+        }
         let actual = row.row_key_for_family(family);
         let expected = page.row_keys.get(index).cloned().unwrap_or_default();
         if actual != expected {
@@ -1669,64 +1676,19 @@ fn validate_direntry_child_bind_index(
     mut direntry_bind_rows: Vec<CheckpointRow>,
     mut direntry_child_bind_rows: Vec<CheckpointRow>,
 ) -> Result<(), CheckpointLoadError> {
-    ensure_direntry_bind_rows(
-        object_key,
-        CheckpointTableFamily::DirentryBinds,
-        &direntry_bind_rows,
-    )?;
-    ensure_direntry_bind_rows(
-        object_key,
-        CheckpointTableFamily::DirentryChildBinds,
-        &direntry_child_bind_rows,
-    )?;
-
     direntry_bind_rows
         .sort_by_key(|row| row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds));
     direntry_child_bind_rows
         .sort_by_key(|row| row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds));
 
     if direntry_bind_rows != direntry_child_bind_rows {
-        let first_mismatch = direntry_bind_rows
-            .iter()
-            .zip(direntry_child_bind_rows.iter())
-            .position(|(expected, actual)| expected != actual);
-        let message = match first_mismatch {
-            Some(index) => format!(
-                "direntry-child-binds index mismatch at row {index}: expected `{}`, actual `{}`",
-                direntry_bind_rows[index]
-                    .row_key_for_family(CheckpointTableFamily::DirentryChildBinds),
-                direntry_child_bind_rows[index]
-                    .row_key_for_family(CheckpointTableFamily::DirentryChildBinds)
-            ),
-            None => format!(
-                "direntry-child-binds index row count mismatch: expected {}, actual {}",
-                direntry_bind_rows.len(),
-                direntry_child_bind_rows.len()
-            ),
-        };
         return Err(CheckpointLoadError::SegmentDescriptorMismatch {
             object_key: object_key.to_owned(),
-            message,
+            message: "direntry-child-binds index does not match canonical direntry-binds"
+                .to_owned(),
         });
     }
 
-    Ok(())
-}
-
-fn ensure_direntry_bind_rows(
-    object_key: &str,
-    family: CheckpointTableFamily,
-    rows: &[CheckpointRow],
-) -> Result<(), CheckpointLoadError> {
-    for row in rows {
-        if !matches!(row, CheckpointRow::DirentryBind { .. }) {
-            return Err(CheckpointLoadError::TableRowKindMismatch {
-                object_key: object_key.to_owned(),
-                family,
-                row_kind: checkpoint_row_kind(row).to_owned(),
-            });
-        }
-    }
     Ok(())
 }
 
@@ -1859,6 +1821,37 @@ fn checkpoint_row_kind(row: &CheckpointRow) -> &'static str {
         CheckpointRow::Tombstone { .. } => "tombstone",
         CheckpointRow::CommitReceipt { .. } => "commit_receipt",
     }
+}
+
+fn checkpoint_row_matches_family(row: &CheckpointRow, family: CheckpointTableFamily) -> bool {
+    matches!(
+        (family, row),
+        (CheckpointTableFamily::Inodes, CheckpointRow::Inode { .. })
+            | (
+                CheckpointTableFamily::DirentryBinds,
+                CheckpointRow::DirentryBind { .. }
+            )
+            | (
+                CheckpointTableFamily::DirentryChildBinds,
+                CheckpointRow::DirentryBind { .. }
+            )
+            | (
+                CheckpointTableFamily::DirentryUnbinds,
+                CheckpointRow::DirentryUnbind { .. }
+            )
+            | (
+                CheckpointTableFamily::Revisions,
+                CheckpointRow::Revision { .. }
+            )
+            | (
+                CheckpointTableFamily::Tombstones,
+                CheckpointRow::Tombstone { .. }
+            )
+            | (
+                CheckpointTableFamily::CommitReceipts,
+                CheckpointRow::CommitReceipt { .. }
+            )
+    )
 }
 
 #[cfg(test)]
