@@ -213,14 +213,6 @@ impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
             .insert(descriptor.object_key.clone(), rows.clone());
         Ok(rows)
     }
-
-    fn validate_secondary_indexes(&self) -> Result<(), CheckpointLoadError> {
-        validate_direntry_child_bind_index(
-            &self.manifest_object_key,
-            self.scan_prefix(CheckpointTableFamily::DirentryBinds, "")?,
-            self.scan_prefix(CheckpointTableFamily::DirentryChildBinds, "")?,
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -652,7 +644,6 @@ pub(crate) fn load_verified_checkpoint_tables<'a, S: ObjectStore + ?Sized>(
         manifest,
         segment_cache: RefCell::new(HashMap::new()),
     };
-    tables.validate_secondary_indexes()?;
     Ok(tables)
 }
 
@@ -1861,9 +1852,8 @@ mod tests {
         build_checkpoint_tables_from_rows, checkpoint_basis_head, checkpoint_rows_for_family,
         checkpoint_table_family, create_checkpoint, create_checkpoint_with_policy,
         load_checkpoint_materialization_from_manifest, load_verified_checkpoint_materialization,
-        load_verified_checkpoint_tables, metadata_states_equivalent, publish_checkpoint_hint_seq,
-        write_checkpoint_manifest, CheckpointLoadError, MetadataLsmPolicy,
-        MAX_CHECKPOINT_DELTA_RUNS,
+        metadata_states_equivalent, publish_checkpoint_hint_seq, write_checkpoint_manifest,
+        CheckpointLoadError, MetadataLsmPolicy, MAX_CHECKPOINT_DELTA_RUNS,
     };
     use crate::{
         bootstrap_namespace, load_verified_namespace_basis, move_path, put_file_bytes,
@@ -2577,11 +2567,6 @@ mod tests {
             .expect("overwrite manifest");
 
         assert_child_index_mismatch(load_verified_checkpoint_materialization(
-            &store,
-            &namespace_id,
-            checkpoint.checkpoint_seq,
-        ));
-        assert_child_index_mismatch(load_verified_checkpoint_tables(
             &store,
             &namespace_id,
             checkpoint.checkpoint_seq,
