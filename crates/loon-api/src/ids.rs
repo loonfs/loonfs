@@ -142,8 +142,8 @@ pub fn generate_wal_segment_id() -> String {
     generated_id("seg")
 }
 
-pub fn generate_checkpoint_delta_run_id() -> String {
-    generated_id("dr")
+pub fn generate_checkpoint_run_id() -> String {
+    generated_id("run")
 }
 
 pub fn validate_upload_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
@@ -154,10 +154,10 @@ pub fn validate_wal_segment_id(value: impl AsRef<str>) -> Result<(), GeneratedId
     validate_generated_id("seg", value.as_ref())
 }
 
-pub fn validate_checkpoint_delta_run_id(
+pub fn validate_checkpoint_run_id(
     value: impl AsRef<str>,
 ) -> Result<(), GeneratedIdValidationError> {
-    validate_generated_id("dr", value.as_ref())
+    validate_generated_id("run", value.as_ref())
 }
 
 pub fn validate_generated_id(
@@ -562,8 +562,8 @@ impl fmt::Display for InodeId {
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_checkpoint_delta_run_id, generate_upload_id, generate_wal_segment_id,
-        validate_checkpoint_delta_run_id, validate_upload_id, validate_wal_segment_id, CommitId,
+        generate_checkpoint_run_id, generate_upload_id, generate_wal_segment_id,
+        validate_checkpoint_run_id, validate_upload_id, validate_wal_segment_id, CommitId,
         ContentStoreId, NameKey, NamespaceId,
     };
     use std::collections::BTreeSet;
@@ -682,27 +682,27 @@ mod tests {
     }
 
     #[test]
-    fn generated_upload_and_wal_segment_validators_reject_hyphenated_ids() {
+    fn generated_upload_wal_segment_and_checkpoint_run_validators_reject_hyphenated_ids() {
         assert!(validate_upload_id("upl_00000000000000000000000000000001").is_ok());
         assert!(validate_wal_segment_id("seg_00000000000000000000000000000001").is_ok());
-        assert!(validate_checkpoint_delta_run_id("dr_00000000000000000000000000000001").is_ok());
+        assert!(validate_checkpoint_run_id("run_00000000000000000000000000000001").is_ok());
         assert!(validate_upload_id(["upl", "123"].join("-")).is_err());
         assert!(validate_wal_segment_id(["seg", "123"].join("-")).is_err());
-        assert!(validate_checkpoint_delta_run_id(["dr", "123"].join("-")).is_err());
+        assert!(validate_checkpoint_run_id(["run", "123"].join("-")).is_err());
     }
 
     #[test]
     fn generated_runtime_ids_use_lower_hex_uuid_bodies() {
         let upload_id = generate_upload_id();
         let wal_segment_id = generate_wal_segment_id();
-        let delta_run_id = generate_checkpoint_delta_run_id();
+        let checkpoint_run_id = generate_checkpoint_run_id();
 
         assert_generated_id_shape(&upload_id, "upl");
         assert_generated_id_shape(&wal_segment_id, "seg");
-        assert_generated_id_shape(&delta_run_id, "dr");
+        assert_generated_id_shape(&checkpoint_run_id, "run");
         assert!(validate_upload_id(&upload_id).is_ok());
         assert!(validate_wal_segment_id(&wal_segment_id).is_ok());
-        assert!(validate_checkpoint_delta_run_id(&delta_run_id).is_ok());
+        assert!(validate_checkpoint_run_id(&checkpoint_run_id).is_ok());
     }
 
     #[test]

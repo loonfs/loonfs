@@ -953,7 +953,7 @@ fn query_driven_reads_fallback_without_checkpoint() {
 }
 
 #[test]
-fn query_driven_stat_and_list_match_full_basis_with_delta_and_wal_overlay() {
+fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
@@ -1019,7 +1019,7 @@ fn query_driven_stat_and_list_match_full_basis_with_delta_and_wal_overlay() {
         Some("delete-dead"),
     )
     .expect("delete dead");
-    create_checkpoint(&store, &namespace_id, &context).expect("delta checkpoint");
+    create_checkpoint(&store, &namespace_id, &context).expect("l0 run checkpoint");
 
     put_file_bytes(
         &store,

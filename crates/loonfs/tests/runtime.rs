@@ -1318,9 +1318,9 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
 }
 
 #[test]
-fn maintenance_tick_after_existing_checkpoint_publishes_delta_checkpoint() {
+fn maintenance_tick_after_existing_checkpoint_publishes_l0_run_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "tick-delta-publish-test");
+    let fs = runtime(temp_dir.path(), "tick-l0-run-publish-test");
     let namespace_id = namespace();
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1364,7 +1364,7 @@ fn maintenance_tick_after_existing_checkpoint_publishes_delta_checkpoint() {
 
     let status = fs
         .namespace_status(&namespace_id)
-        .expect("status after delta checkpoint");
+        .expect("status after l0 run checkpoint");
     assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(2)));
     assert_eq!(status.wal_tail_segments, 0);
 
@@ -1376,9 +1376,14 @@ fn maintenance_tick_after_existing_checkpoint_publishes_delta_checkpoint() {
         .expect("checkpoint manifest exists");
     let manifest = decode_checkpoint_manifest_json(&manifest_bytes).expect("decode manifest");
     assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
-    assert_eq!(manifest.payload.delta_runs.len(), 1);
-    assert_eq!(manifest.payload.delta_runs[0].seq_min, ChangeSeq(2));
-    assert_eq!(manifest.payload.delta_runs[0].seq_max, ChangeSeq(2));
+    let l0_runs = manifest
+        .payload
+        .runs
+        .iter()
+        .filter(|run| run.level == 0)
+        .collect::<Vec<_>>();
+    assert_eq!(l0_runs.len(), 1);
+    assert_eq!(l0_runs[0].run_seq, ChangeSeq(2));
 }
 
 #[test]

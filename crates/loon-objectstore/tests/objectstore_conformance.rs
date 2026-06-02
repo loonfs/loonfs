@@ -2,7 +2,7 @@ mod provider_env;
 
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    checkpoint_manifest, checkpoint_table, content_blob, content_store_descriptor,
+    checkpoint_manifest, checkpoint_run_table, content_blob, content_store_descriptor,
     derived_progress, namespace_descriptor, namespace_head, namespace_lease, queue_shard,
     wal_segment, CheckpointTableFamily, DerivedWorkClass,
 };
@@ -154,16 +154,34 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/checkpoints/00000000000000000420/manifest.json"
     );
     assert_eq!(
-        checkpoint_table("ns-1", 420, CheckpointTableFamily::Inodes, 3),
-        "namespaces/ns-1/checkpoints/00000000000000000420/tables/inodes-00003.sst.zst"
+        checkpoint_run_table(
+            "ns-1",
+            420,
+            "run_00000000000000000000000000000001",
+            CheckpointTableFamily::Inodes,
+            3
+        ),
+        "namespaces/ns-1/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/inodes-00003.sst.zst"
     );
     assert_eq!(
-        checkpoint_table("ns-1", 420, CheckpointTableFamily::DirentryChildBinds, 4),
-        "namespaces/ns-1/checkpoints/00000000000000000420/tables/direntry-child-binds-00004.sst.zst"
+        checkpoint_run_table(
+            "ns-1",
+            420,
+            "run_00000000000000000000000000000001",
+            CheckpointTableFamily::DirentryChildBinds,
+            4
+        ),
+        "namespaces/ns-1/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/direntry-child-binds-00004.sst.zst"
     );
     assert_eq!(
-        checkpoint_table("ns-1", 420, CheckpointTableFamily::CommitReceipts, 0),
-        "namespaces/ns-1/checkpoints/00000000000000000420/tables/commit-receipts-00000.sst.zst"
+        checkpoint_run_table(
+            "ns-1",
+            420,
+            "run_00000000000000000000000000000001",
+            CheckpointTableFamily::CommitReceipts,
+            0
+        ),
+        "namespaces/ns-1/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/commit-receipts-00000.sst.zst"
     );
     assert_eq!(
         derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder),
