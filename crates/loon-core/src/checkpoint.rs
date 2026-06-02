@@ -67,7 +67,7 @@ pub struct MetadataLsmPolicy {
 pub struct MetadataTableCacheConfig {
     pub enabled: bool,
     pub max_blocks: usize,
-    pub max_bytes: Option<usize>,
+    pub max_decoded_bytes: Option<usize>,
 }
 
 impl Default for MetadataTableCacheConfig {
@@ -75,7 +75,7 @@ impl Default for MetadataTableCacheConfig {
         Self {
             enabled: true,
             max_blocks: 256,
-            max_bytes: None,
+            max_decoded_bytes: None,
         }
     }
 }
@@ -111,7 +111,7 @@ struct DecodedMetadataTableBlock {
     min_key: String,
     max_key: String,
     page_checksums_sha256: Vec<String>,
-    byte_len: usize,
+    decoded_byte_len: usize,
 }
 
 #[derive(Debug)]
@@ -125,7 +125,7 @@ pub struct MetadataTableCache {
 struct MetadataTableCacheInner {
     entries: HashMap<MetadataTableCacheKey, DecodedMetadataTableBlock>,
     order: VecDeque<MetadataTableCacheKey>,
-    byte_len: usize,
+    decoded_byte_len: usize,
 }
 
 #[derive(Debug, Default)]
@@ -180,23 +180,29 @@ impl MetadataTableCache {
             .lock()
             .expect("metadata table cache lock poisoned");
         if let Some(previous) = inner.entries.insert(key.clone(), block.clone()) {
-            inner.byte_len = inner.byte_len.saturating_sub(previous.byte_len);
+            inner.decoded_byte_len = inner
+                .decoded_byte_len
+                .saturating_sub(previous.decoded_byte_len);
         }
-        inner.byte_len = inner.byte_len.saturating_add(block.byte_len);
+        inner.decoded_byte_len = inner
+            .decoded_byte_len
+            .saturating_add(block.decoded_byte_len);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
         while inner.entries.len() > self.config.max_blocks
             || self
                 .config
-                .max_bytes
-                .map(|max_bytes| inner.byte_len > max_bytes)
+                .max_decoded_bytes
+                .map(|max_decoded_bytes| inner.decoded_byte_len > max_decoded_bytes)
                 .unwrap_or(false)
         {
             let Some(evicted) = inner.order.pop_front() else {
                 break;
             };
             if let Some(block) = inner.entries.remove(&evicted) {
-                inner.byte_len = inner.byte_len.saturating_sub(block.byte_len);
+                inner.decoded_byte_len = inner
+                    .decoded_byte_len
+                    .saturating_sub(block.decoded_byte_len);
                 self.stats.evictions.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -239,22 +245,6 @@ pub(crate) struct VerifiedCheckpointTables<'a, S: ObjectStore + ?Sized> {
 impl<S: ObjectStore + ?Sized> VerifiedCheckpointTables<'_, S> {
     pub(crate) fn manifest(&self) -> &CheckpointManifestEnvelope {
         &self.manifest
-    }
-
-    fn validate_secondary_indexes(&self) -> Result<(), CheckpointLoadError> {
-        validate_direntry_child_bind_index(
-            &self.manifest_object_key,
-            self.scan_prefix_with_cache_mode(
-                CheckpointTableFamily::DirentryBinds,
-                "",
-                MetadataTableCacheMode::Bypass,
-            )?,
-            self.scan_prefix_with_cache_mode(
-                CheckpointTableFamily::DirentryChildBinds,
-                "",
-                MetadataTableCacheMode::Bypass,
-            )?,
-        )
     }
 
     pub(crate) fn get(
@@ -1072,8 +1062,6 @@ pub(crate) fn load_verified_checkpoint_tables_with_cache<'a, S: ObjectStore + ?S
         manifest,
         segment_cache: RefCell::new(HashMap::new()),
     };
-    tables.validate_secondary_indexes()?;
-    tables.segment_cache.borrow_mut().clear();
     Ok(tables)
 }
 
@@ -1923,7 +1911,7 @@ fn load_checkpoint_segment_rows_with_cache<S: ObjectStore + ?Sized>(
                     min_key: descriptor.min_key.clone(),
                     max_key: descriptor.max_key.clone(),
                     page_checksums_sha256: descriptor.page_checksums_sha256.clone(),
-                    byte_len: bytes.len(),
+                    decoded_byte_len: decoded_checkpoint_block_weight(family, &rows),
                 },
             );
         }
@@ -1976,6 +1964,38 @@ fn validate_cached_checkpoint_block(
         });
     }
     Ok(())
+}
+
+fn decoded_checkpoint_block_weight(family: CheckpointTableFamily, rows: &[CheckpointRow]) -> usize {
+    let row_weight = rows
+        .iter()
+        .map(|row| 64 + row.row_key_for_family(family).len() + decoded_checkpoint_row_weight(row))
+        .sum::<usize>();
+    row_weight.saturating_add(128)
+}
+
+fn decoded_checkpoint_row_weight(row: &CheckpointRow) -> usize {
+    match row {
+        CheckpointRow::Inode { .. } => 32,
+        CheckpointRow::DirentryBind {
+            name_key,
+            display_name,
+            ..
+        } => 96 + name_key.len() + display_name.len(),
+        CheckpointRow::DirentryUnbind { name_key, .. } => 96 + name_key.len(),
+        CheckpointRow::Revision { content_ref, .. } => 96 + content_ref.digest.len(),
+        CheckpointRow::Tombstone { .. } => 32,
+        CheckpointRow::CommitReceipt {
+            commit_id,
+            semantic_commit_fingerprint_sha256,
+            results,
+            ..
+        } => {
+            96 + commit_id.as_str().len()
+                + semantic_commit_fingerprint_sha256.len()
+                + results.len().saturating_mul(64)
+        }
+    }
 }
 
 fn ordered_checkpoint_tables<'a>(
@@ -2580,8 +2600,8 @@ mod tests {
         checkpoint_table_family, create_checkpoint, create_checkpoint_with_policy,
         load_checkpoint_materialization_from_manifest, load_verified_checkpoint_materialization,
         metadata_states_equivalent, publish_checkpoint_hint_seq, write_checkpoint_manifest,
-        CheckpointLoadError, CheckpointTableSegmentation, MetadataLsmPolicy,
-        MAX_CHECKPOINT_DELTA_RUNS,
+        CheckpointLoadError, CheckpointTableSegmentation, MetadataLsmPolicy, MetadataTableCache,
+        MetadataTableCacheConfig, MAX_CHECKPOINT_DELTA_RUNS,
     };
     use crate::{
         bootstrap_namespace, load_verified_namespace_basis, move_path, put_file_bytes,
@@ -3325,6 +3345,47 @@ mod tests {
         assert!(revisions.len() >= 8);
         assert_eq!(after.inserts, before.inserts);
         assert!(after.misses > before.misses);
+    }
+
+    #[test]
+    fn metadata_cache_budget_counts_decoded_blocks() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/file.txt",
+            b"file\n",
+            &context,
+            None,
+        )
+        .expect("write file");
+        let checkpoint = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+        let cache = MetadataTableCache::new(MetadataTableCacheConfig {
+            enabled: true,
+            max_blocks: 256,
+            max_decoded_bytes: Some(1),
+        });
+        let tables = super::load_verified_checkpoint_tables_with_cache(
+            &store,
+            Some(&cache),
+            &namespace_id,
+            checkpoint.checkpoint_seq,
+        )
+        .expect("load tables");
+
+        let key = "inode-00000000000000000001";
+        assert!(tables
+            .get(ApiCheckpointTableFamily::Inodes, key)
+            .expect("get inode")
+            .is_some());
+
+        let stats = cache.stats();
+        assert!(stats.inserts > 0);
+        assert!(stats.evictions > 0);
     }
 
     #[test]
