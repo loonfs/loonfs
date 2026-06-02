@@ -88,27 +88,15 @@ pub fn checkpoint_manifest(namespace: &str, seq: u64) -> String {
     format!("namespaces/{namespace}/checkpoints/{seq:020}/manifest.json")
 }
 
-pub fn checkpoint_table(
+pub fn checkpoint_run_table(
     namespace: &str,
-    seq: u64,
+    run_seq: u64,
+    run_id: &str,
     family: CheckpointTableFamily,
     segment_index: u32,
 ) -> String {
     format!(
-        "namespaces/{namespace}/checkpoints/{seq:020}/tables/{}-{segment_index:05}.sst.zst",
-        family.as_str()
-    )
-}
-
-pub fn checkpoint_delta_run_table(
-    namespace: &str,
-    checkpoint_seq: u64,
-    delta_run_id: &str,
-    family: CheckpointTableFamily,
-    segment_index: u32,
-) -> String {
-    format!(
-        "namespaces/{namespace}/checkpoints/{checkpoint_seq:020}/delta-runs/{delta_run_id}/tables/{}-{segment_index:05}.sst.zst",
+        "namespaces/{namespace}/checkpoints/{run_seq:020}/runs/{run_id}/tables/{}-{segment_index:05}.sst.zst",
         family.as_str()
     )
 }
@@ -141,11 +129,10 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_delta_run_table, checkpoint_manifest, checkpoint_table, conflict_artifact,
-        conflict_artifact_prefix, content_blob, content_store_descriptor, derived_progress,
-        namespace_descriptor, namespace_head, namespace_lease, queue_shard, sha256_hex_from_digest,
-        upload_session, upload_session_prefix, wal_segment, CheckpointTableFamily,
-        DerivedWorkClass,
+        checkpoint_manifest, checkpoint_run_table, conflict_artifact, conflict_artifact_prefix,
+        content_blob, content_store_descriptor, derived_progress, namespace_descriptor,
+        namespace_head, namespace_lease, queue_shard, sha256_hex_from_digest, upload_session,
+        upload_session_prefix, wal_segment, CheckpointTableFamily, DerivedWorkClass,
     };
 
     #[test]
@@ -169,26 +156,14 @@ mod tests {
             "namespaces/ns-1/checkpoints/00000000000000000400/manifest.json"
         );
         assert_eq!(
-            checkpoint_table("ns-1", 400, CheckpointTableFamily::DirentryBinds, 7),
-            "namespaces/ns-1/checkpoints/00000000000000000400/tables/direntry-binds-00007.sst.zst"
-        );
-        assert_eq!(
-            checkpoint_table("ns-1", 400, CheckpointTableFamily::DirentryChildBinds, 8),
-            "namespaces/ns-1/checkpoints/00000000000000000400/tables/direntry-child-binds-00008.sst.zst"
-        );
-        assert_eq!(
-            checkpoint_table("ns-1", 400, CheckpointTableFamily::CommitReceipts, 0),
-            "namespaces/ns-1/checkpoints/00000000000000000400/tables/commit-receipts-00000.sst.zst"
-        );
-        assert_eq!(
-            checkpoint_delta_run_table(
+            checkpoint_run_table(
                 "ns-1",
-                432,
-                "dr_00000000000000000000000000000001",
-                CheckpointTableFamily::Revisions,
-                3
+                400,
+                "run_00000000000000000000000000000001",
+                CheckpointTableFamily::DirentryBinds,
+                7
             ),
-            "namespaces/ns-1/checkpoints/00000000000000000432/delta-runs/dr_00000000000000000000000000000001/tables/revisions-00003.sst.zst"
+            "namespaces/ns-1/checkpoints/00000000000000000400/runs/run_00000000000000000000000000000001/tables/direntry-binds-00007.sst.zst"
         );
         assert_eq!(
             derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder),

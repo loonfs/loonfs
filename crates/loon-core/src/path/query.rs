@@ -1,7 +1,8 @@
 use super::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::checkpoint::{
-    checkpoint_basis_head, load_verified_checkpoint_tables, VerifiedCheckpointTables,
+    checkpoint_basis_head, load_verified_checkpoint_tables_with_cache, MetadataTableCache,
+    VerifiedCheckpointTables,
 };
 use crate::content::read_durable_content_bytes;
 use crate::error::CoreError;
@@ -184,6 +185,25 @@ pub fn resolve_path_from_materialized_tables_at_head<S: ObjectStore + ?Sized>(
     Ok(Some(view.resolve_path(absolute_path)?))
 }
 
+pub fn resolve_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    absolute_path: &str,
+    table_cache: Option<&MetadataTableCache>,
+) -> Result<Option<AuthoritativePathEntry>, CoreError> {
+    let Some(view) = MaterializedLatestView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        table_cache,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(view.resolve_path(absolute_path)?))
+}
+
 pub fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -202,6 +222,25 @@ pub fn list_path_from_materialized_tables_at_head<S: ObjectStore + ?Sized>(
     absolute_path: &str,
 ) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
     let Some(view) = MaterializedLatestView::load_at_head(store, namespace_id, head.clone())?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(view.list_path(absolute_path)?))
+}
+
+pub fn list_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    head: &HeadState,
+    absolute_path: &str,
+    table_cache: Option<&MetadataTableCache>,
+) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
+    let Some(view) = MaterializedLatestView::load_at_head_with_cache(
+        store,
+        namespace_id,
+        head.clone(),
+        table_cache,
+    )?
     else {
         return Ok(None);
     };
@@ -227,6 +266,15 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         namespace_id: &NamespaceId,
         head: HeadState,
     ) -> Result<Option<Self>, CoreError> {
+        Self::load_at_head_with_cache(store, namespace_id, head, None)
+    }
+
+    fn load_at_head_with_cache(
+        store: &'a S,
+        namespace_id: &NamespaceId,
+        head: HeadState,
+        table_cache: Option<&'a MetadataTableCache>,
+    ) -> Result<Option<Self>, CoreError> {
         if &head.namespace_id != namespace_id {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "head namespace `{}` does not match requested namespace `{}`",
@@ -238,8 +286,13 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         };
         let _catalog_entry =
             load_namespace_catalog_entry(store, namespace_id).map_err(BasisLoadError::from)?;
-        let tables = load_verified_checkpoint_tables(store, namespace_id, checkpoint_seq)
-            .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
+        let tables = load_verified_checkpoint_tables_with_cache(
+            store,
+            table_cache,
+            namespace_id,
+            checkpoint_seq,
+        )
+        .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
         let checkpoint_head = checkpoint_basis_head(&head, tables.manifest());
         let wal_chain = load_validated_wal_chain(
             store,

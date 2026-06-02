@@ -7,8 +7,8 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 2;
-pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 2;
+pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 4;
+pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,11 +34,20 @@ pub enum CheckpointTableFamily {
     CommitReceipts,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckpointSegmentKey {
+    Full,
+    DirentryParent { parent_inode_id: InodeId },
+    RowKeyRange { shard: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointSegmentDescriptor {
     pub object_key: String,
-    pub table_seq: ChangeSeq,
+    pub segment_seq: ChangeSeq,
     pub segment_index: u32,
+    pub segment_key: CheckpointSegmentKey,
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
@@ -53,10 +62,10 @@ pub struct CheckpointTableManifest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointDeltaRunManifest {
-    pub delta_run_id: String,
-    pub seq_min: ChangeSeq,
-    pub seq_max: ChangeSeq,
+pub struct CheckpointRunManifest {
+    pub run_id: String,
+    pub run_seq: ChangeSeq,
+    pub level: u32,
     pub tables: Vec<CheckpointTableManifest>,
 }
 
@@ -219,9 +228,10 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointSegmentPayload {
     pub namespace_id: NamespaceId,
-    pub checkpoint_seq: ChangeSeq,
+    pub segment_seq: ChangeSeq,
     pub family: CheckpointTableFamily,
     pub segment_index: u32,
+    pub segment_key: CheckpointSegmentKey,
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
@@ -279,8 +289,7 @@ pub struct CheckpointManifestPayload {
     pub next_inode_id: InodeId,
     pub retention_floor_seq: ChangeSeq,
     pub verified: bool,
-    pub base_tables: Vec<CheckpointTableManifest>,
-    pub delta_runs: Vec<CheckpointDeltaRunManifest>,
+    pub runs: Vec<CheckpointRunManifest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,8 +454,9 @@ pub fn decode_checkpoint_segment_envelope_zstd(
 mod tests {
     use super::{
         decode_checkpoint_manifest_json, encode_checkpoint_manifest_json,
-        CheckpointDeltaRunManifest, CheckpointManifestEnvelope, CheckpointManifestPayload,
-        CheckpointSegmentDescriptor, CheckpointTableFamily, CheckpointTableManifest,
+        CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointRunManifest,
+        CheckpointSegmentDescriptor, CheckpointSegmentKey, CheckpointTableFamily,
+        CheckpointTableManifest,
     };
     use crate::{ChangeSeq, FenceToken, InodeId, NamespaceId};
 
@@ -462,8 +472,12 @@ mod tests {
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
                 verified: true,
-                base_tables: vec![table_manifest("base/inodes.sst.zst", ChangeSeq(10))],
-                delta_runs: Vec::new(),
+                runs: vec![CheckpointRunManifest {
+                    run_id: "run_00000000000000000000000000000001".to_owned(),
+                    run_seq: ChangeSeq(10),
+                    level: 1,
+                    tables: vec![table_manifest("run/inodes.sst.zst", ChangeSeq(10))],
+                }],
             },
         )
         .expect("manifest");
@@ -473,11 +487,12 @@ mod tests {
 
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.base_seq, ChangeSeq(10));
-        assert!(decoded.payload.delta_runs.is_empty());
+        assert_eq!(decoded.payload.runs.len(), 1);
+        assert_eq!(decoded.payload.runs[0].run_seq, ChangeSeq(10));
     }
 
     #[test]
-    fn checkpoint_manifest_codec_round_trips_delta_run_materialization() {
+    fn checkpoint_manifest_codec_round_trips_multi_run_materialization() {
         let envelope = CheckpointManifestEnvelope::from_payload(
             "test-writer",
             CheckpointManifestPayload {
@@ -488,13 +503,20 @@ mod tests {
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
                 verified: true,
-                base_tables: vec![table_manifest("base/inodes.sst.zst", ChangeSeq(10))],
-                delta_runs: vec![CheckpointDeltaRunManifest {
-                    delta_run_id: "dr_00000000000000000000000000000001".to_owned(),
-                    seq_min: ChangeSeq(11),
-                    seq_max: ChangeSeq(12),
-                    tables: vec![table_manifest("delta/inodes.sst.zst", ChangeSeq(12))],
-                }],
+                runs: vec![
+                    CheckpointRunManifest {
+                        run_id: "run_00000000000000000000000000000001".to_owned(),
+                        run_seq: ChangeSeq(10),
+                        level: 1,
+                        tables: vec![table_manifest("base/inodes.sst.zst", ChangeSeq(10))],
+                    },
+                    CheckpointRunManifest {
+                        run_id: "run_00000000000000000000000000000002".to_owned(),
+                        run_seq: ChangeSeq(12),
+                        level: 0,
+                        tables: vec![table_manifest("l0/inodes.sst.zst", ChangeSeq(12))],
+                    },
+                ],
             },
         )
         .expect("manifest");
@@ -503,8 +525,9 @@ mod tests {
         let decoded = decode_checkpoint_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.delta_runs[0].seq_min, ChangeSeq(11));
-        assert_eq!(decoded.payload.delta_runs[0].seq_max, ChangeSeq(12));
+        assert_eq!(decoded.payload.runs[0].level, 1);
+        assert_eq!(decoded.payload.runs[1].level, 0);
+        assert_eq!(decoded.payload.runs[1].run_seq, ChangeSeq(12));
     }
 
     #[test]
@@ -545,13 +568,14 @@ mod tests {
         );
     }
 
-    fn table_manifest(object_key: &str, table_seq: ChangeSeq) -> CheckpointTableManifest {
+    fn table_manifest(object_key: &str, segment_seq: ChangeSeq) -> CheckpointTableManifest {
         CheckpointTableManifest {
             family: CheckpointTableFamily::Inodes,
             segments: vec![CheckpointSegmentDescriptor {
                 object_key: object_key.to_owned(),
-                table_seq,
+                segment_seq,
                 segment_index: 0,
+                segment_key: CheckpointSegmentKey::Full,
                 row_count: 0,
                 min_key: String::new(),
                 max_key: String::new(),

@@ -817,6 +817,36 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
 }
 
 #[test]
+fn repeated_materialized_stat_uses_metadata_table_cache() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let fs = runtime(temp_dir.path(), "metadata-table-cache-test");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+    fs.create_checkpoint(&namespace_id).expect("checkpoint");
+
+    fs.stat_path(&namespace_id, "/docs/file.txt")
+        .expect("first materialized stat");
+    let after_first = fs.runtime_cache_stats();
+    fs.stat_path(&namespace_id, "/docs/file.txt")
+        .expect("second materialized stat");
+    let after_second = fs.runtime_cache_stats();
+
+    assert!(after_first.metadata_table_cache_inserts > 0);
+    assert!(after_second.metadata_table_cache_hits > after_first.metadata_table_cache_hits);
+    assert_eq!(after_second.read_materialized_table_hits, 2);
+    assert_eq!(after_second.read_full_basis_fallbacks, 0);
+}
+
+#[test]
 fn put_file_bytes_uses_memory_proof_without_blob_validation_call() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
@@ -933,6 +963,7 @@ fn control_cache_eviction_reloads_head_for_basis_validation() {
             basis_cache_enabled: true,
             control_cache_enabled: true,
             max_cached_namespaces: 1,
+            metadata_table_cache: Default::default(),
         })
         .build()
         .expect("build runtime");
@@ -1287,9 +1318,9 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
 }
 
 #[test]
-fn maintenance_tick_after_existing_checkpoint_publishes_delta_checkpoint() {
+fn maintenance_tick_after_existing_checkpoint_publishes_l0_run_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "tick-delta-publish-test");
+    let fs = runtime(temp_dir.path(), "tick-l0-run-publish-test");
     let namespace_id = namespace();
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1333,7 +1364,7 @@ fn maintenance_tick_after_existing_checkpoint_publishes_delta_checkpoint() {
 
     let status = fs
         .namespace_status(&namespace_id)
-        .expect("status after delta checkpoint");
+        .expect("status after l0 run checkpoint");
     assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(2)));
     assert_eq!(status.wal_tail_segments, 0);
 
@@ -1345,9 +1376,14 @@ fn maintenance_tick_after_existing_checkpoint_publishes_delta_checkpoint() {
         .expect("checkpoint manifest exists");
     let manifest = decode_checkpoint_manifest_json(&manifest_bytes).expect("decode manifest");
     assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
-    assert_eq!(manifest.payload.delta_runs.len(), 1);
-    assert_eq!(manifest.payload.delta_runs[0].seq_min, ChangeSeq(2));
-    assert_eq!(manifest.payload.delta_runs[0].seq_max, ChangeSeq(2));
+    let l0_runs = manifest
+        .payload
+        .runs
+        .iter()
+        .filter(|run| run.level == 0)
+        .collect::<Vec<_>>();
+    assert_eq!(l0_runs.len(), 1);
+    assert_eq!(l0_runs[0].run_seq, ChangeSeq(2));
 }
 
 #[test]

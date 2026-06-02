@@ -84,12 +84,12 @@ The reader builds an in-memory metadata state from two kinds of durable object:
 
 1. Read the namespace descriptor and content-store descriptor to learn the namespace's immutable content-store relationship.
 2. Read the namespace **head** object to learn the current `seq`, `checkpoint_hint_seq`, and visible WAL tip.
-3. If `checkpoint_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint manifest references materialized metadata tables through that `seq`: full base tables plus any delta-run tables containing WAL-derived rows after the base.
+3. If `checkpoint_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint manifest references one or more materialized metadata runs through that `seq`. A run may be a full materialization or a WAL-derived run, and each run is internally segmented without overlapping segment key ranges.
 4. Use the visible WAL tip named by the head to identify the visible segment chain after the checkpoint `seq` (or from genesis, if no checkpoint exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends normalized rows to the same metadata tables.
 
 The result is a complete metadata state pinned to one `seq`.
 
-For latest path `stat` and directory `list`, an implementation may avoid hydrating the complete metadata state when `checkpoint_hint_seq` is present. The reader may query verified checkpoint base tables, verified delta-run tables, and the visible WAL tail overlay directly, provided it applies the same visibility rules and treats missing or corrupt checkpoint/WAL objects as hard errors. If no checkpoint is published, latest stat/list falls back to full basis reconstruction.
+For latest path `stat` and directory `list`, an implementation may avoid hydrating the complete metadata state when `checkpoint_hint_seq` is present. The reader may query verified checkpoint run tables and the visible WAL tail overlay directly, provided it applies the same visibility rules and treats missing or corrupt checkpoint/WAL objects as hard errors. If no checkpoint is published, latest stat/list falls back to full basis reconstruction.
 
 ### 2.2 Visibility rules
 

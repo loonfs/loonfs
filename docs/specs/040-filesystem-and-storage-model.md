@@ -234,6 +234,6 @@ The head summarizes the current visible boundary and replay hints, including at 
 
 A checkpoint is authoritative only when it has been verified against its durable objects and namespace summary. If verification fails, readers must not treat that checkpoint as authoritative.
 
-A checkpoint manifest is the durable pin for one materialized sequence. It may reference full base tables and one or more immutable delta-run tables containing WAL-derived metadata rows after that base. Readers load those referenced tables in manifest order, then replay only the visible WAL chain after the checkpoint sequence.
+A checkpoint manifest is the durable pin for one materialized sequence. It may reference one or more immutable metadata runs. Each run is internally segmented without overlapping segment key ranges; different runs may overlap and readers apply the normal metadata visibility rules across all referenced runs. Readers load the referenced runs, then replay only the visible WAL chain after the checkpoint sequence.
 
 The WAL preserves ordered history even when multiple logical commits are stored in one segment. Each logical commit records semantic results plus normalized metadata deltas such as inode creation, direntry bind/unbind, file revision append, and subtree tombstone rows. Checkpoints keep replay bounded. Together they provide recovery from durable artifacts alone without requiring unbounded WAL replay as history grows.

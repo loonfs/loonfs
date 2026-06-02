@@ -20,8 +20,8 @@ pub use loon_api::{
 };
 use loon_core::publisher::{BasisReuseEvent, NamespaceCommitEnginePublishResult};
 pub use loon_core::{
-    BootstrapNamespaceError, CoreError, CoreErrorKind, NamespaceMutationCandidate,
-    PathMutationIntent, PutFileBehavior,
+    BootstrapNamespaceError, CoreError, CoreErrorKind, MetadataTableCacheConfig,
+    NamespaceMutationCandidate, PathMutationIntent, PutFileBehavior,
 };
 use loon_core::{
     ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MutationContext,
@@ -74,6 +74,7 @@ pub struct RuntimeCacheConfig {
     pub basis_cache_enabled: bool,
     pub control_cache_enabled: bool,
     pub max_cached_namespaces: usize,
+    pub metadata_table_cache: MetadataTableCacheConfig,
 }
 
 impl RuntimeCacheConfig {
@@ -82,6 +83,11 @@ impl RuntimeCacheConfig {
             basis_cache_enabled: false,
             control_cache_enabled: false,
             max_cached_namespaces: 0,
+            metadata_table_cache: MetadataTableCacheConfig {
+                enabled: false,
+                max_blocks: 0,
+                max_decoded_bytes: None,
+            },
         }
     }
 }
@@ -92,6 +98,7 @@ impl Default for RuntimeCacheConfig {
             basis_cache_enabled: true,
             control_cache_enabled: true,
             max_cached_namespaces: 64,
+            metadata_table_cache: MetadataTableCacheConfig::default(),
         }
     }
 }
@@ -107,6 +114,7 @@ struct FsInner {
     basis_cache: Mutex<BasisCache>,
     commit_engines: Mutex<CommitEngineCache>,
     control_cache: Mutex<RuntimeControlCache>,
+    metadata_table_cache: loon_core::MetadataTableCache,
     uploaded_content_proofs: Mutex<UploadedContentProofCache>,
     cache_stats: RuntimeCacheStatsInner,
 }
@@ -438,6 +446,10 @@ pub struct RuntimeCacheStats {
     pub publish_warm_basis_advances: usize,
     pub read_materialized_table_hits: usize,
     pub read_full_basis_fallbacks: usize,
+    pub metadata_table_cache_hits: usize,
+    pub metadata_table_cache_misses: usize,
+    pub metadata_table_cache_inserts: usize,
+    pub metadata_table_cache_evictions: usize,
 }
 
 #[derive(Debug, Default)]
@@ -451,7 +463,10 @@ struct RuntimeCacheStatsInner {
 }
 
 impl RuntimeCacheStatsInner {
-    fn snapshot(&self) -> RuntimeCacheStats {
+    fn snapshot(
+        &self,
+        metadata_table_cache: loon_core::MetadataTableCacheStats,
+    ) -> RuntimeCacheStats {
         RuntimeCacheStats {
             publish_warm_basis_hits: self.publish_warm_basis_hits.load(Ordering::SeqCst),
             publish_warm_basis_misses: self.publish_warm_basis_misses.load(Ordering::SeqCst),
@@ -461,6 +476,10 @@ impl RuntimeCacheStatsInner {
             publish_warm_basis_advances: self.publish_warm_basis_advances.load(Ordering::SeqCst),
             read_materialized_table_hits: self.read_materialized_table_hits.load(Ordering::SeqCst),
             read_full_basis_fallbacks: self.read_full_basis_fallbacks.load(Ordering::SeqCst),
+            metadata_table_cache_hits: metadata_table_cache.hits,
+            metadata_table_cache_misses: metadata_table_cache.misses,
+            metadata_table_cache_inserts: metadata_table_cache.inserts,
+            metadata_table_cache_evictions: metadata_table_cache.evictions,
         }
     }
 
@@ -698,6 +717,8 @@ impl FsBuilder {
 impl Fs {
     pub fn open(store: SharedObjectStore, config: FsConfig) -> Result<Self> {
         validate_config(&config)?;
+        let metadata_table_cache =
+            loon_core::MetadataTableCache::new(config.runtime_cache.metadata_table_cache.clone());
         Ok(Self {
             inner: Arc::new(FsInner {
                 store,
@@ -705,6 +726,7 @@ impl Fs {
                 basis_cache: Mutex::new(BasisCache::default()),
                 commit_engines: Mutex::new(CommitEngineCache::default()),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
+                metadata_table_cache,
                 uploaded_content_proofs: Mutex::new(UploadedContentProofCache::default()),
                 cache_stats: RuntimeCacheStatsInner::default(),
             }),
@@ -831,12 +853,15 @@ impl Fs {
     ) -> Result<AuthoritativePathEntry> {
         let head = self.head_for_metadata_read(namespace_id)?;
         if head.state.checkpoint_hint_seq.is_some() {
-            if let Some(entry) = loon_core::resolve_path_from_materialized_tables_at_head(
-                self.store(),
-                namespace_id,
-                &head.state,
-                absolute_path,
-            )? {
+            if let Some(entry) =
+                loon_core::resolve_path_from_materialized_tables_at_head_with_cache(
+                    self.store(),
+                    namespace_id,
+                    &head.state,
+                    absolute_path,
+                    Some(&self.inner.metadata_table_cache),
+                )?
+            {
                 self.inner
                     .cache_stats
                     .record_metadata_read_source(loon_core::MetadataReadSource::MaterializedTables);
@@ -859,11 +884,12 @@ impl Fs {
     ) -> Result<Vec<AuthoritativePathEntry>> {
         let head = self.head_for_metadata_read(namespace_id)?;
         if head.state.checkpoint_hint_seq.is_some() {
-            if let Some(entries) = loon_core::list_path_from_materialized_tables_at_head(
+            if let Some(entries) = loon_core::list_path_from_materialized_tables_at_head_with_cache(
                 self.store(),
                 namespace_id,
                 &head.state,
                 absolute_path,
+                Some(&self.inner.metadata_table_cache),
             )? {
                 self.inner
                     .cache_stats
@@ -1230,7 +1256,9 @@ impl Fs {
     }
 
     pub fn runtime_cache_stats(&self) -> RuntimeCacheStats {
-        self.inner.cache_stats.snapshot()
+        self.inner
+            .cache_stats
+            .snapshot(self.inner.metadata_table_cache.stats())
     }
 
     pub fn list_changes_after(
