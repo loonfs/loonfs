@@ -20,12 +20,13 @@ use loon_core::{
     begin_upload, bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
     copy_file_path, create_checkpoint, create_dir_path, delete_path, delete_path_non_recursive,
     fork_namespace, list_changes_after, list_file_revisions, list_file_revisions_for_inode,
-    list_namespaces, list_path, load_verified_namespace_basis, move_path,
-    publish_namespace_mutations_batch, put_file_bytes, read_file_bytes, read_file_revision_bytes,
-    read_file_revision_bytes_for_inode, resolve_path, restore_file_revision,
+    list_namespaces, list_path, list_path_from_basis, list_path_with_read_source,
+    load_verified_namespace_basis, move_path, publish_namespace_mutations_batch, put_file_bytes,
+    read_file_bytes, read_file_revision_bytes, read_file_revision_bytes_for_inode, resolve_path,
+    resolve_path_from_basis, resolve_path_with_read_source, restore_file_revision,
     store_bytes_as_content, upload_content, write_file_bytes, CoreError, CoreErrorKind,
-    DirectObjectStorePublisher, MutationContext, NamespaceMutationCandidate, PathMutationIntent,
-    PublishOptions, PutFileBehavior,
+    DirectObjectStorePublisher, MetadataReadSource, MutationContext, NamespaceMutationCandidate,
+    PathMutationIntent, PublishOptions, PutFileBehavior,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -919,6 +920,153 @@ fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let read = read_file_bytes(&store, &namespace_id, "/docs/file-1.txt").expect("read file");
     assert_eq!(read.bytes, b"file-1-bytes");
     assert_eq!(store.content_blob_get_count(), 1);
+}
+
+#[test]
+fn query_driven_reads_fallback_without_checkpoint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-file"),
+    )
+    .expect("put file");
+
+    let stat = resolve_path_with_read_source(&store, &namespace_id, "/docs/file.txt")
+        .expect("stat with fallback");
+    let list =
+        list_path_with_read_source(&store, &namespace_id, "/docs").expect("list with fallback");
+
+    assert_eq!(stat.source, MetadataReadSource::FullBasisFallback);
+    assert_eq!(list.source, MetadataReadSource::FullBasisFallback);
+    assert_eq!(stat.value.size_bytes, Some(4));
+    assert_eq!(list.value.len(), 1);
+}
+
+#[test]
+fn query_driven_stat_and_list_match_full_basis_with_delta_and_wal_overlay() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ContentBlobGetCountingStore::new(temp_dir.path());
+    let context = mutation_context();
+    let namespace_id = namespace_id();
+
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        b"alpha",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-alpha"),
+    )
+    .expect("put alpha");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/b.txt",
+        b"bravo",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-bravo"),
+    )
+    .expect("put bravo");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/dead/leaf.txt",
+        b"dead",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-dead"),
+    )
+    .expect("put dead");
+    create_checkpoint(&store, &namespace_id, &context).expect("base checkpoint");
+
+    move_path(
+        &store,
+        &namespace_id,
+        "/docs/a.txt",
+        "/docs/moved.txt",
+        &context,
+        Some("move-alpha"),
+    )
+    .expect("move alpha");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/b.txt",
+        b"bravo two",
+        PutFileBehavior::ReplaceExisting,
+        &context,
+        Some("replace-bravo"),
+    )
+    .expect("replace bravo");
+    delete_path(
+        &store,
+        &namespace_id,
+        "/dead",
+        &context,
+        Some("delete-dead"),
+    )
+    .expect("delete dead");
+    create_checkpoint(&store, &namespace_id, &context).expect("delta checkpoint");
+
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/wal.txt",
+        b"wal",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("put-wal"),
+    )
+    .expect("put wal tail");
+
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+    let expected_stat = resolve_path_from_basis(&basis, "/docs/moved.txt").expect("basis stat");
+    let expected_list = list_path_from_basis(&basis, "/docs").expect("basis list");
+    let expected_file_list =
+        list_path_from_basis(&basis, "/docs/moved.txt").expect("basis file list");
+
+    store.reset_content_blob_get_count();
+    let actual_stat = resolve_path_with_read_source(&store, &namespace_id, "/docs/moved.txt")
+        .expect("materialized stat");
+    let actual_list =
+        list_path_with_read_source(&store, &namespace_id, "/docs").expect("materialized list");
+    let actual_file_list = list_path_with_read_source(&store, &namespace_id, "/docs/moved.txt")
+        .expect("materialized file list");
+    let actual_casefold_stat =
+        resolve_path_with_read_source(&store, &namespace_id, "/DOCS/MOVED.TXT")
+            .expect("materialized casefold stat");
+
+    assert_eq!(actual_stat.source, MetadataReadSource::MaterializedTables);
+    assert_eq!(actual_list.source, MetadataReadSource::MaterializedTables);
+    assert_eq!(
+        actual_file_list.source,
+        MetadataReadSource::MaterializedTables
+    );
+    assert_eq!(
+        actual_casefold_stat.source,
+        MetadataReadSource::MaterializedTables
+    );
+    assert_eq!(actual_stat.value, expected_stat);
+    assert_eq!(actual_casefold_stat.value, expected_stat);
+    assert_eq!(actual_list.value, expected_list);
+    assert_eq!(actual_file_list.value, expected_file_list);
+    assert_eq!(store.content_blob_get_count(), 0);
+
+    assert!(resolve_path_with_read_source(&store, &namespace_id, "/docs/a.txt").is_err());
+    assert!(resolve_path_with_read_source(&store, &namespace_id, "/dead/leaf.txt").is_err());
 }
 
 #[test]

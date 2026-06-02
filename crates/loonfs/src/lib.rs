@@ -427,7 +427,7 @@ struct NamespaceControlCacheEntry {
 #[derive(Debug, Clone)]
 struct CachedControl<T> {
     identity: ControlObjectIdentity,
-    _marker: std::marker::PhantomData<T>,
+    state: T,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -436,6 +436,8 @@ pub struct RuntimeCacheStats {
     pub publish_warm_basis_misses: usize,
     pub publish_warm_basis_invalidations: usize,
     pub publish_warm_basis_advances: usize,
+    pub read_materialized_table_hits: usize,
+    pub read_full_basis_fallbacks: usize,
 }
 
 #[derive(Debug, Default)]
@@ -444,6 +446,8 @@ struct RuntimeCacheStatsInner {
     publish_warm_basis_misses: AtomicUsize,
     publish_warm_basis_invalidations: AtomicUsize,
     publish_warm_basis_advances: AtomicUsize,
+    read_materialized_table_hits: AtomicUsize,
+    read_full_basis_fallbacks: AtomicUsize,
 }
 
 impl RuntimeCacheStatsInner {
@@ -455,6 +459,8 @@ impl RuntimeCacheStatsInner {
                 .publish_warm_basis_invalidations
                 .load(Ordering::SeqCst),
             publish_warm_basis_advances: self.publish_warm_basis_advances.load(Ordering::SeqCst),
+            read_materialized_table_hits: self.read_materialized_table_hits.load(Ordering::SeqCst),
+            read_full_basis_fallbacks: self.read_full_basis_fallbacks.load(Ordering::SeqCst),
         }
     }
 
@@ -478,6 +484,19 @@ impl RuntimeCacheStatsInner {
         if result.verified_basis_cache_update.is_advanced() {
             self.publish_warm_basis_advances
                 .fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn record_metadata_read_source(&self, source: loon_core::MetadataReadSource) {
+        match source {
+            loon_core::MetadataReadSource::MaterializedTables => {
+                self.read_materialized_table_hits
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            loon_core::MetadataReadSource::FullBasisFallback => {
+                self.read_full_basis_fallbacks
+                    .fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 }
@@ -810,11 +829,27 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry> {
-        let basis = self.basis_for_read(namespace_id)?;
-        Ok(loon_core::resolve_path_from_basis(
-            basis.as_ref(),
-            absolute_path,
-        )?)
+        let head = self.head_for_metadata_read(namespace_id)?;
+        if head.state.checkpoint_hint_seq.is_some() {
+            if let Some(entry) = loon_core::resolve_path_from_materialized_tables_at_head(
+                self.store(),
+                namespace_id,
+                &head.state,
+                absolute_path,
+            )? {
+                self.inner
+                    .cache_stats
+                    .record_metadata_read_source(loon_core::MetadataReadSource::MaterializedTables);
+                return Ok(entry);
+            }
+        }
+
+        let basis = self.basis_for_read_at_head(namespace_id, &head)?;
+        let entry = loon_core::resolve_path_from_basis(&basis, absolute_path)?;
+        self.inner
+            .cache_stats
+            .record_metadata_read_source(loon_core::MetadataReadSource::FullBasisFallback);
+        Ok(entry)
     }
 
     pub fn list_path(
@@ -822,11 +857,27 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<Vec<AuthoritativePathEntry>> {
-        let basis = self.basis_for_read(namespace_id)?;
-        Ok(loon_core::list_path_from_basis(
-            basis.as_ref(),
-            absolute_path,
-        )?)
+        let head = self.head_for_metadata_read(namespace_id)?;
+        if head.state.checkpoint_hint_seq.is_some() {
+            if let Some(entries) = loon_core::list_path_from_materialized_tables_at_head(
+                self.store(),
+                namespace_id,
+                &head.state,
+                absolute_path,
+            )? {
+                self.inner
+                    .cache_stats
+                    .record_metadata_read_source(loon_core::MetadataReadSource::MaterializedTables);
+                return Ok(entries);
+            }
+        }
+
+        let basis = self.basis_for_read_at_head(namespace_id, &head)?;
+        let entries = loon_core::list_path_from_basis(&basis, absolute_path)?;
+        self.inner
+            .cache_stats
+            .record_metadata_read_source(loon_core::MetadataReadSource::FullBasisFallback);
+        Ok(entries)
     }
 
     pub fn read_file_bytes(
@@ -1280,6 +1331,33 @@ impl Fs {
         Ok(head)
     }
 
+    fn head_for_metadata_read(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<CachedControl<HeadState>> {
+        match self.load_namespace_head_cached(namespace_id) {
+            Ok(head) => Ok(head),
+            Err(
+                ControlObjectLoadError::MissingObject { .. }
+                | ControlObjectLoadError::MissingObjectAfterHead { .. },
+            ) => {
+                let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
+                    .map_err(CoreError::from)?;
+                let head = CachedControl {
+                    identity: ControlObjectIdentity {
+                        etag: basis.head_etag.clone(),
+                    },
+                    state: basis.head.clone(),
+                };
+                self.cache_basis(Arc::new(basis));
+                Ok(head)
+            }
+            Err(error) => Err(RuntimeError::Core(CoreError::Basis(
+                loon_core::BasisLoadError::LoadHead(error),
+            ))),
+        }
+    }
+
     fn cached_control_identity_matches(
         &self,
         object_key: &str,
@@ -1369,6 +1447,39 @@ impl Fs {
         Ok(basis)
     }
 
+    fn basis_for_read_at_head(
+        &self,
+        namespace_id: &NamespaceId,
+        head: &CachedControl<HeadState>,
+    ) -> Result<Arc<VerifiedNamespaceBasis>> {
+        let cache_config = &self.inner.config.runtime_cache;
+        if cache_config.basis_cache_enabled && cache_config.max_cached_namespaces > 0 {
+            let cached = self
+                .inner
+                .basis_cache
+                .lock()
+                .expect("basis cache lock poisoned")
+                .get(namespace_id);
+            if let Some(basis) = cached {
+                if basis.matches_head_etag(&head.identity.etag) {
+                    return Ok(basis.basis_arc());
+                }
+                self.invalidate_namespace_cache(namespace_id);
+            }
+        }
+
+        let basis = loon_core::load_verified_namespace_basis_at_head(
+            self.store(),
+            namespace_id,
+            head.state.clone(),
+            head.identity.etag.clone(),
+        )
+        .map_err(CoreError::from)?;
+        let basis = Arc::new(basis);
+        self.cache_basis(Arc::clone(&basis));
+        Ok(basis)
+    }
+
     fn cache_basis(&self, basis: Arc<VerifiedNamespaceBasis>) {
         let cache_config = &self.inner.config.runtime_cache;
         if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
@@ -1448,7 +1559,7 @@ impl Fs {
 fn cached_head(loaded: LoadedHeadControl) -> CachedControl<HeadState> {
     CachedControl {
         identity: loaded.identity,
-        _marker: std::marker::PhantomData,
+        state: loaded.state,
     }
 }
 

@@ -158,6 +158,10 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/checkpoints/00000000000000000420/tables/inodes-00003.sst.zst"
     );
     assert_eq!(
+        checkpoint_table("ns-1", 420, CheckpointTableFamily::DirentryChildBinds, 4),
+        "namespaces/ns-1/checkpoints/00000000000000000420/tables/direntry-child-binds-00004.sst.zst"
+    );
+    assert_eq!(
         checkpoint_table("ns-1", 420, CheckpointTableFamily::CommitReceipts, 0),
         "namespaces/ns-1/checkpoints/00000000000000000420/tables/commit-receipts-00000.sst.zst"
     );

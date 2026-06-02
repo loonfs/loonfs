@@ -7,7 +7,7 @@ use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError
 use crate::metadata::MetadataState;
 use crate::namespace::catalog::{
     load_namespace_catalog_entry, namespace_initialization_state, NamespaceCatalogLoadError,
-    NamespaceInitializationError, NamespaceInitializationState,
+    NamespaceInitializationError, NamespaceInitializationState, VerifiedNamespaceCatalogEntry,
 };
 use crate::wal::{
     load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadError,
@@ -91,10 +91,7 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
     expected_namespace: &NamespaceId,
 ) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
     let catalog_entry = load_namespace_catalog_entry(store, expected_namespace)?;
-
     let loaded_head = read_head_object(store, expected_namespace)?;
-    let loaded_lease =
-        read_lease_object(store, expected_namespace).map_err(BasisLoadError::LoadLease)?;
     let head_etag =
         loaded_head
             .metadata
@@ -103,14 +100,57 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
             .ok_or_else(|| BasisLoadError::MissingHeadEtag {
                 object_key: loaded_head.object_key.clone(),
             })?;
+    load_verified_namespace_basis_at_head_with_catalog(
+        store,
+        expected_namespace,
+        catalog_entry,
+        loaded_head.envelope.state,
+        head_etag,
+    )
+}
+
+pub fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    head: HeadState,
+    head_etag: String,
+) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
+    if &head.namespace_id != expected_namespace {
+        return Err(BasisLoadError::LoadHead(
+            ControlObjectLoadError::NamespaceMismatch {
+                object_key: namespace_head(expected_namespace.as_str()),
+                expected: expected_namespace.clone(),
+                actual: head.namespace_id.clone(),
+            },
+        ));
+    }
+    let catalog_entry = load_namespace_catalog_entry(store, expected_namespace)?;
+    load_verified_namespace_basis_at_head_with_catalog(
+        store,
+        expected_namespace,
+        catalog_entry,
+        head,
+        head_etag,
+    )
+}
+
+fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace: &NamespaceId,
+    catalog_entry: VerifiedNamespaceCatalogEntry,
+    head: HeadState,
+    head_etag: String,
+) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
+    let loaded_lease =
+        read_lease_object(store, expected_namespace).map_err(BasisLoadError::LoadLease)?;
 
     let (initial_head, initial_metadata_state) = if let Some(checkpoint_seq) =
-        loaded_head.envelope.state.checkpoint_hint_seq
+        head.checkpoint_hint_seq
     {
         let materialized =
             load_verified_checkpoint_materialization(store, expected_namespace, checkpoint_seq)?;
         (
-            checkpoint_basis_head(&loaded_head.envelope.state, &materialized.manifest),
+            checkpoint_basis_head(&head, &materialized.manifest),
             materialized.metadata_state,
         )
     } else {
@@ -124,8 +164,8 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
         WalChainLoadRequest {
             namespace_id: expected_namespace,
             chain_base_seq: initial_head.seq,
-            head_seq: loaded_head.envelope.state.seq,
-            visible_tip: loaded_head.envelope.state.visible_wal_tip.clone(),
+            head_seq: head.seq,
+            visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
         },
     )?;
@@ -135,12 +175,12 @@ pub fn load_verified_namespace_basis<S: ObjectStore + ?Sized>(
         wal_chain.segments(),
     )
     .map_err(BasisLoadError::WalReplay)?;
-    ensure_reconstructed_head_matches(&loaded_head.envelope.state, &replayed.resulting_head)?;
+    ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
 
     Ok(VerifiedNamespaceBasis {
         namespace_descriptor: catalog_entry.namespace_descriptor,
         content_store_id: catalog_entry.content_store_id,
-        head: loaded_head.envelope.state,
+        head,
         head_etag,
         lease: loaded_lease.envelope.state,
         metadata_state: replayed.resulting_metadata_state,

@@ -763,6 +763,60 @@ fn disabled_runtime_cache_still_uses_memory_proof_without_blob_validation_call()
 }
 
 #[test]
+fn stat_and_list_record_full_basis_fallback_without_checkpoint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let fs = runtime(temp_dir.path(), "read-fallback-test");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.create_dir(&namespace_id, "/docs", CreateDirOptions::default())
+        .expect("create docs");
+
+    fs.stat_path(&namespace_id, "/docs").expect("stat docs");
+    fs.list_path(&namespace_id, "/").expect("list root");
+
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.read_full_basis_fallbacks, 2);
+    assert_eq!(stats.read_materialized_table_hits, 0);
+}
+
+#[test]
+fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace();
+    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
+    let object_store: SharedObjectStore = raw_store.clone();
+    let fs = Fs::builder(object_store)
+        .writer_id("read-materialized-test")
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes(
+        &namespace_id,
+        "/docs/file.txt",
+        b"file",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+    fs.create_checkpoint(&namespace_id).expect("checkpoint");
+
+    raw_store.reset_content_blob_counters();
+    fs.stat_path(&namespace_id, "/docs/file.txt")
+        .expect("stat materialized file");
+    fs.list_path(&namespace_id, "/docs")
+        .expect("list materialized docs");
+
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.read_materialized_table_hits, 2);
+    assert_eq!(stats.read_full_basis_fallbacks, 0);
+    assert_eq!(raw_store.content_blob_get_count(), 0);
+    assert_eq!(raw_store.content_blob_checksum_head_count(), 0);
+}
+
+#[test]
 fn put_file_bytes_uses_memory_proof_without_blob_validation_call() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
@@ -856,11 +910,11 @@ fn runtime_control_cache_reuses_head_for_basis_validation() {
 
     raw_store.reset_control_get_counts();
     fs.stat_path(&namespace_id, "/docs")
-        .expect("first cached basis validation loads head body");
+        .expect("first cached basis validation reuses cached head state");
     fs.stat_path(&namespace_id, "/docs")
-        .expect("second cached basis validation reuses head body");
+        .expect("second cached basis validation reuses cached head state");
 
-    assert_eq!(raw_store.head_get_count(), 1);
+    assert_eq!(raw_store.head_get_count(), 0);
 }
 
 #[test]
@@ -940,7 +994,7 @@ fn runtime_control_cache_reloads_head_after_external_change() {
     reader
         .stat_path(&namespace_id, "/docs")
         .expect("reuse unchanged control cache");
-    assert_eq!(raw_store.head_get_count(), 1);
+    assert_eq!(raw_store.head_get_count(), 0);
 
     writer
         .create_dir(&namespace_id, "/docs/new", CreateDirOptions::default())
