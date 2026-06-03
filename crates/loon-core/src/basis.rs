@@ -134,6 +134,13 @@ pub fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
     )
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "reconstruct_basis")
+)]
 fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
@@ -169,12 +176,15 @@ fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
             stop_after_seq: None,
         },
     )?;
-    let replayed = replay_validated_wal_tail_with_metadata(
-        &initial_head,
-        &initial_metadata_state,
-        wal_chain.segments(),
-    )
-    .map_err(BasisLoadError::WalReplay)?;
+    let replayed = {
+        let _span = tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
+        replay_validated_wal_tail_with_metadata(
+            &initial_head,
+            &initial_metadata_state,
+            wal_chain.segments(),
+        )
+        .map_err(BasisLoadError::WalReplay)
+    }?;
     ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
 
     Ok(VerifiedNamespaceBasis {
@@ -234,6 +244,13 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     })
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "probe_namespace_head_etag", key_class = "namespace_head")
+)]
 pub fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,

@@ -64,6 +64,13 @@ pub fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
     })
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "walk_path")
+)]
 pub fn resolve_path_from_basis(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
@@ -108,6 +115,13 @@ pub fn list_path_with_read_source<S: ObjectStore + ?Sized>(
     })
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "walk_path")
+)]
 pub fn list_path_from_basis(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
@@ -305,12 +319,16 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             },
         )
         .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
-        let replayed = replay_validated_wal_tail_with_metadata(
-            &checkpoint_head,
-            &MetadataState::default(),
-            wal_chain.segments(),
-        )
-        .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))?;
+        let replayed = {
+            let _span =
+                tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
+            replay_validated_wal_tail_with_metadata(
+                &checkpoint_head,
+                &MetadataState::default(),
+                wal_chain.segments(),
+            )
+            .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))
+        }?;
         Ok(Some(Self {
             namespace_id: namespace_id.clone(),
             head,
@@ -319,12 +337,26 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         }))
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.phase",
+        err,
+        skip_all,
+        fields(phase = "walk_path")
+    )]
     fn resolve_path(&self, absolute_path: &str) -> Result<AuthoritativePathEntry, CoreError> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let resolved = self.resolve_visible_path(&absolute_path)?;
         self.build_authoritative_path_entry(&resolved)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.phase",
+        err,
+        skip_all,
+        fields(phase = "walk_path")
+    )]
     fn list_path(&self, absolute_path: &str) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let resolved = self.resolve_visible_path(&absolute_path)?;

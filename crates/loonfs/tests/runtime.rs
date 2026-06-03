@@ -9,7 +9,7 @@ use loonfs::{
     CoreErrorKind, CreateDirOptions, CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, InodeId,
     MaintenanceTickOptions, MaintenanceTickOutcome, MoveOptions, NamespaceId,
     NamespaceMutationCandidate, PathMutationIntent, PutFileBehavior, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -88,6 +88,8 @@ fn open_validates_runtime_config() {
                 writer_version: "runtime-test/0.1.0".to_owned(),
                 lease_duration_ms: 5_000,
                 runtime_cache: RuntimeCacheConfig::default(),
+                trace_mode: TraceMode::Embedded,
+                trace_store_kind: TraceStoreKind::LocalFs,
             },
         ),
         "writer_id",
@@ -100,6 +102,8 @@ fn open_validates_runtime_config() {
                 writer_version: "   ".to_owned(),
                 lease_duration_ms: 5_000,
                 runtime_cache: RuntimeCacheConfig::default(),
+                trace_mode: TraceMode::Embedded,
+                trace_store_kind: TraceStoreKind::LocalFs,
             },
         ),
         "writer_version",
@@ -112,6 +116,8 @@ fn open_validates_runtime_config() {
                 writer_version: "runtime-test/0.1.0".to_owned(),
                 lease_duration_ms: 0,
                 runtime_cache: RuntimeCacheConfig::default(),
+                trace_mode: TraceMode::Embedded,
+                trace_store_kind: TraceStoreKind::LocalFs,
             },
         ),
         "lease_duration_ms",

@@ -269,6 +269,13 @@ pub fn prepare_wal_segment(
     })
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "load_validated_wal_chain", key_class = "wal_segment")
+)]
 pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: WalChainLoadRequest<'_>,

@@ -55,6 +55,15 @@ Embedded mode is production-capable when backed by an object store that satisfie
 
 **Both modes are multi-player by default.**
 
+## Performance tracing
+
+Server tracing is opt-in. Set `LOONFS_TRACE=json` to emit JSON `tracing` span close events, and use `RUST_LOG` to control filters. When `LOONFS_TRACE=json` is set without `RUST_LOG`, the server defaults to `loon_server=info,loonfs=info,loon_core=info`.
+
+```bash
+LOONFS_TRACE=json RUST_LOG=loon_server=info,loonfs=info,loon_core=info \
+  cargo run -p loon-server -- --config configs/loon-server.local-fs.example.toml
+```
+
 ## Core concepts
 
 - Namespaces: a Loon namespace is the core unit of filesystem visibility and history. You can think of each namespace as a separate filesystem.

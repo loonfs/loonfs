@@ -354,6 +354,7 @@ mod tests {
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
     use loonfs::{
         CreateNamespaceOptions, Fs, FsConfig, RuntimeCacheConfig, SharedObjectStore as SharedStore,
+        TraceMode, TraceStoreKind,
     };
     use std::path::Path;
     use std::sync::Condvar;
@@ -489,6 +490,8 @@ mod tests {
                     writer_version: config.writer_version.clone(),
                     lease_duration_ms: config.lease_duration_ms,
                     runtime_cache: RuntimeCacheConfig::default(),
+                    trace_mode: TraceMode::Remote,
+                    trace_store_kind: TraceStoreKind::LocalFs,
                 },
             )
             .expect("open runtime"),

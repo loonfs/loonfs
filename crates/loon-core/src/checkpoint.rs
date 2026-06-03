@@ -575,7 +575,10 @@ pub fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> Result<CreateCheckpointResponse, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let basis = {
+        let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
+        load_verified_namespace_basis(store, namespace_id)
+    }?;
     let checkpoint_seq = basis.head.seq;
 
     match load_verified_checkpoint_materialization_if_present(store, namespace_id, checkpoint_seq) {
@@ -682,6 +685,13 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
     Ok(manifest)
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "project_checkpoint")
+)]
 fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -856,24 +866,32 @@ pub(crate) fn load_verified_checkpoint_tables_with_cache<'a, S: ObjectStore + ?S
     checkpoint_seq: ChangeSeq,
 ) -> Result<VerifiedCheckpointTables<'a, S>, CheckpointLoadError> {
     let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
-    let Some(manifest_bytes) =
-        store
-            .get(&manifest_key, None)
-            .map_err(|err| CheckpointLoadError::ReadManifest {
+    let manifest = {
+        let _span = tracing::info_span!(
+            "loon.phase",
+            phase = "load_checkpoint_manifest",
+            key_class = "checkpoint_table"
+        )
+        .entered();
+        let Some(manifest_bytes) =
+            store
+                .get(&manifest_key, None)
+                .map_err(|err| CheckpointLoadError::ReadManifest {
+                    object_key: manifest_key.clone(),
+                    message: err.to_string(),
+                })?
+        else {
+            return Err(CheckpointLoadError::MissingManifest {
+                object_key: manifest_key.clone(),
+            });
+        };
+        decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
+            CheckpointLoadError::ManifestCodec {
                 object_key: manifest_key.clone(),
                 message: err.to_string(),
-            })?
-    else {
-        return Err(CheckpointLoadError::MissingManifest {
-            object_key: manifest_key,
-        });
-    };
-    let manifest = decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
-        CheckpointLoadError::ManifestCodec {
-            object_key: manifest_key.clone(),
-            message: err.to_string(),
-        }
-    })?;
+            }
+        })
+    }?;
     validate_checkpoint_manifest(namespace_id, checkpoint_seq, &manifest_key, &manifest)?;
     validate_checkpoint_materialization_ranges(&manifest_key, &manifest.payload)?;
     for run in &manifest.payload.runs {
@@ -919,22 +937,34 @@ fn load_verified_checkpoint_materialization_if_present<S: ObjectStore + ?Sized>(
     checkpoint_seq: ChangeSeq,
 ) -> Result<Option<LoadedCheckpointMaterialization>, CheckpointLoadError> {
     let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
-    let Some(manifest_bytes) =
-        store
-            .get(&manifest_key, None)
-            .map_err(|err| CheckpointLoadError::ReadManifest {
+    let manifest = {
+        let _span = tracing::info_span!(
+            "loon.phase",
+            phase = "load_checkpoint_manifest",
+            key_class = "checkpoint_table"
+        )
+        .entered();
+        let Some(manifest_bytes) =
+            store
+                .get(&manifest_key, None)
+                .map_err(|err| CheckpointLoadError::ReadManifest {
+                    object_key: manifest_key.clone(),
+                    message: err.to_string(),
+                })?
+        else {
+            return Ok(None);
+        };
+        let manifest = decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
+            CheckpointLoadError::ManifestCodec {
                 object_key: manifest_key.clone(),
                 message: err.to_string(),
-            })?
-    else {
+            }
+        })?;
+        Ok(Some(manifest))
+    }?;
+    let Some(manifest) = manifest else {
         return Ok(None);
     };
-    let manifest = decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
-        CheckpointLoadError::ManifestCodec {
-            object_key: manifest_key.clone(),
-            message: err.to_string(),
-        }
-    })?;
     validate_checkpoint_manifest(namespace_id, checkpoint_seq, &manifest_key, &manifest)?;
     let metadata_state = load_checkpoint_materialization_from_manifest(
         store,
@@ -1034,6 +1064,13 @@ struct CheckpointSegmentRows {
     rows: Vec<CheckpointRow>,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "write_checkpoint_tables", key_class = "checkpoint_table")
+)]
 fn build_checkpoint_tables_from_rows<S, RowsForFamily, ObjectKeyForSegment>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1217,6 +1254,13 @@ fn checkpoint_row_parent_inode_id(row: &CheckpointRow) -> Option<InodeId> {
     }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "write_checkpoint_manifest", key_class = "checkpoint_table")
+)]
 fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &CheckpointManifestEnvelope,
@@ -1268,6 +1312,13 @@ fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
     }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "publish_compacted_head", key_class = "namespace_head")
+)]
 fn publish_checkpoint_hint_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1462,6 +1513,13 @@ fn validate_checkpoint_materialization_ranges(
     Ok(())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "load_checkpoint_tables", key_class = "checkpoint_table")
+)]
 fn load_checkpoint_materialization_from_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1497,6 +1555,13 @@ fn load_checkpoint_materialization_from_manifest<S: ObjectStore + ?Sized>(
     Ok(metadata_state.finish())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    err,
+    skip_all,
+    fields(phase = "load_checkpoint_tables", key_class = "checkpoint_table")
+)]
 fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

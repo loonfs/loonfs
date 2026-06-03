@@ -1,0 +1,91 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceMode {
+    Embedded,
+    Remote,
+}
+
+impl TraceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Embedded => "embedded",
+            Self::Remote => "remote",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceStoreKind {
+    LocalFs,
+    S3,
+    R2,
+    Unknown,
+}
+
+impl TraceStoreKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalFs => "local_fs",
+            Self::S3 => "s3",
+            Self::R2 => "r2",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CachePath {
+    WarmReuse,
+    EtagProbe,
+    ColdReconstruct,
+    MaterializedTables,
+}
+
+impl CachePath {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::WarmReuse => "warm_reuse",
+            Self::EtagProbe => "etag_probe",
+            Self::ColdReconstruct => "cold_reconstruct",
+            Self::MaterializedTables => "materialized_tables",
+        }
+    }
+}
+
+pub fn payload_class(size_bytes: usize) -> &'static str {
+    match size_bytes {
+        0..=16_383 => "small",
+        16_384..=1_048_575 => "medium",
+        _ => "large",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{payload_class, CachePath, TraceMode, TraceStoreKind};
+
+    #[test]
+    fn trace_labels_are_low_cardinality() {
+        assert_eq!(TraceMode::Embedded.as_str(), "embedded");
+        assert_eq!(TraceMode::Remote.as_str(), "remote");
+        assert_eq!(TraceStoreKind::LocalFs.as_str(), "local_fs");
+        assert_eq!(TraceStoreKind::S3.as_str(), "s3");
+        assert_eq!(TraceStoreKind::R2.as_str(), "r2");
+        assert_eq!(TraceStoreKind::Unknown.as_str(), "unknown");
+        assert_eq!(CachePath::WarmReuse.as_str(), "warm_reuse");
+        assert_eq!(CachePath::EtagProbe.as_str(), "etag_probe");
+        assert_eq!(CachePath::ColdReconstruct.as_str(), "cold_reconstruct");
+        assert_eq!(
+            CachePath::MaterializedTables.as_str(),
+            "materialized_tables"
+        );
+    }
+
+    #[test]
+    fn trace_helpers_classify_payloads_and_results() {
+        assert_eq!(payload_class(0), "small");
+        assert_eq!(payload_class(16_383), "small");
+        assert_eq!(payload_class(16_384), "medium");
+        assert_eq!(payload_class(1_048_575), "medium");
+        assert_eq!(payload_class(1_048_576), "large");
+    }
+}

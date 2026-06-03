@@ -391,7 +391,11 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             .map(|_| Err(CoreError::Lease(error.clone())))
             .collect();
     }
-    let basis = match load_verified_namespace_basis(store, namespace_id) {
+    let basis_result = {
+        let _span = tracing::info_span!("loon.phase", phase = "load_basis_for_publish").entered();
+        load_verified_namespace_basis(store, namespace_id)
+    };
+    let basis = match basis_result {
         Ok(basis) => basis,
         Err(error) => {
             return (0..candidates.len())
@@ -440,19 +444,23 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     let mut content_validation = ContentValidationTracker::default();
 
     for (index, candidate) in candidates.iter().enumerate() {
-        let Some(candidate_request) = prepare_candidate_request(
-            store,
-            namespace_id,
-            basis,
-            &current_head,
-            &current_metadata_state,
-            candidate,
-            context,
-            index,
-            &mut outcomes,
-            &mut in_batch_requests,
-            &mut aliases,
-        ) else {
+        let candidate_request = {
+            let _span = tracing::info_span!("loon.phase", phase = "prepare_commit").entered();
+            prepare_candidate_request(
+                store,
+                namespace_id,
+                basis,
+                &current_head,
+                &current_metadata_state,
+                candidate,
+                context,
+                index,
+                &mut outcomes,
+                &mut in_batch_requests,
+                &mut aliases,
+            )
+        };
+        let Some(candidate_request) = candidate_request else {
             continue;
         };
         let validation = CommitValidationContext {
@@ -528,34 +536,37 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         .iter()
         .map(|(_, record)| record.clone())
         .collect::<Vec<_>>();
-    let wal = match prepare_wal_segment(
-        namespace_id.clone(),
-        basis.head.visible_wal_tip.clone(),
-        &records,
-        &context.writer_version,
-    ) {
+    let wal_result: Result<_, CoreError> = {
+        let _span = tracing::info_span!(
+            "loon.phase",
+            phase = "write_wal_segment",
+            key_class = "wal_segment"
+        )
+        .entered();
+        match prepare_wal_segment(
+            namespace_id.clone(),
+            basis.head.visible_wal_tip.clone(),
+            &records,
+            &context.writer_version,
+        ) {
+            Ok(wal) => match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
+                Ok(_) => Ok(wal),
+                Err(error) => Err(CoreError::WalWrite(error.to_string())),
+            },
+            Err(error) => Err(CoreError::Store(format!("wal build failed: {error:?}"))),
+        }
+    };
+    let wal = match wal_result {
         Ok(wal) => wal,
         Err(error) => {
-            let message = format!("wal build failed: {error:?}");
-            for (index, _) in accepted {
-                outcomes[index] = Some(Err(CoreError::Store(message.clone())));
+            for (index, _) in &accepted {
+                outcomes[*index] = Some(Err(error.clone()));
             }
             return PublishBatchAgainstBasisResult::not_cacheable(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),
             );
         }
     };
-    match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
-        Ok(_) => {}
-        Err(err) => {
-            for (index, _) in accepted {
-                outcomes[index] = Some(Err(CoreError::WalWrite(err.to_string())));
-            }
-            return PublishBatchAgainstBasisResult::not_cacheable(
-                finish_batch_outcomes_with_aliases(outcomes, &aliases),
-            );
-        }
-    }
 
     let last_plan = &records
         .last()
@@ -576,11 +587,20 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             );
         }
     };
-    let head_metadata = match publish_commit_head(store, &basis.head_etag, &head_publish) {
+    let head_metadata_result = {
+        let _span = tracing::info_span!(
+            "loon.phase",
+            phase = "cas_namespace_head",
+            key_class = "namespace_head"
+        )
+        .entered();
+        publish_commit_head(store, &basis.head_etag, &head_publish)
+    };
+    let head_metadata = match head_metadata_result {
         Ok(metadata) => metadata,
         Err(error) => {
-            for (index, _) in accepted {
-                outcomes[index] = Some(Err(error.clone().into()));
+            for (index, _) in &accepted {
+                outcomes[*index] = Some(Err(error.clone().into()));
             }
             return PublishBatchAgainstBasisResult::not_cacheable(
                 finish_batch_outcomes_with_aliases(outcomes, &aliases),

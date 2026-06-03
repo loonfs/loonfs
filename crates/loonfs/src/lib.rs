@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod trace;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,6 +33,7 @@ use loon_objectstore::keys::namespace_head;
 use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
+pub use trace::{payload_class, TraceMode, TraceStoreKind};
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
@@ -56,6 +59,8 @@ pub struct FsConfig {
     pub writer_version: String,
     pub lease_duration_ms: u64,
     pub runtime_cache: RuntimeCacheConfig,
+    pub trace_mode: TraceMode,
+    pub trace_store_kind: TraceStoreKind,
 }
 
 impl FsConfig {
@@ -65,6 +70,8 @@ impl FsConfig {
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             runtime_cache: RuntimeCacheConfig::default(),
+            trace_mode: TraceMode::Embedded,
+            trace_store_kind: TraceStoreKind::Unknown,
         }
     }
 }
@@ -125,6 +132,7 @@ pub struct FsBuilder {
     writer_version: String,
     lease_duration_ms: u64,
     runtime_cache: RuntimeCacheConfig,
+    trace_store_kind: TraceStoreKind,
 }
 
 #[derive(Debug, Default)]
@@ -675,6 +683,7 @@ impl FsBuilder {
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             runtime_cache: RuntimeCacheConfig::default(),
+            trace_store_kind: TraceStoreKind::Unknown,
         }
     }
 
@@ -698,6 +707,11 @@ impl FsBuilder {
         self
     }
 
+    pub fn trace_store_kind(mut self, trace_store_kind: TraceStoreKind) -> Self {
+        self.trace_store_kind = trace_store_kind;
+        self
+    }
+
     pub fn build(self) -> Result<Fs> {
         let writer_id = self
             .writer_id
@@ -709,6 +723,8 @@ impl FsBuilder {
                 writer_version: self.writer_version,
                 lease_duration_ms: self.lease_duration_ms,
                 runtime_cache: self.runtime_cache,
+                trace_mode: TraceMode::Embedded,
+                trace_store_kind: self.trace_store_kind,
             },
         )
     }
@@ -739,6 +755,11 @@ impl Fs {
 
     pub fn config(&self) -> &FsConfig {
         &self.inner.config
+    }
+
+    fn record_trace_context(&self, span: &tracing::Span) {
+        span.record("mode", self.inner.config.trace_mode.as_str());
+        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
     }
 
     pub fn create_namespace(
@@ -788,11 +809,24 @@ impl Fs {
         })
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.compaction",
+        err,
+        skip_all,
+        fields(
+            operation = "compaction",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub fn maintenance_tick_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
     ) -> Result<MaintenanceTickResult> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
         if options.max_wal_tail_segments == 0 {
             return Err(RuntimeError::Config(
                 "max_wal_tail_segments must be greater than zero".to_owned(),
@@ -846,11 +880,25 @@ impl Fs {
         })
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.stat",
+        err,
+        skip_all,
+        fields(
+            operation = "stat",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            cache_path = tracing::field::Empty,
+        )
+    )]
     pub fn stat_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
         let head = self.head_for_metadata_read(namespace_id)?;
         if head.state.checkpoint_hint_seq.is_some() {
             if let Some(entry) =
@@ -862,6 +910,7 @@ impl Fs {
                     Some(&self.inner.metadata_table_cache),
                 )?
             {
+                span.record("cache_path", trace::CachePath::MaterializedTables.as_str());
                 self.inner
                     .cache_stats
                     .record_metadata_read_source(loon_core::MetadataReadSource::MaterializedTables);
@@ -973,6 +1022,18 @@ impl Fs {
         )?)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.put",
+        err,
+        skip_all,
+        fields(
+            operation = "put",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
     pub fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -980,6 +1041,9 @@ impl Fs {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> Result<MutationResult> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
+        span.record("payload_class", trace::payload_class(bytes.len()));
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_bytes(
             &store,
@@ -994,6 +1058,18 @@ impl Fs {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.put",
+        err,
+        skip_all,
+        fields(
+            operation = "put",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
     pub fn put_file_content_ref(
         &self,
         namespace_id: &NamespaceId,
@@ -1001,6 +1077,12 @@ impl Fs {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> Result<MutationResult> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
+        span.record(
+            "payload_class",
+            trace::payload_class(usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX)),
+        );
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_content_ref(
             &store,
@@ -1273,10 +1355,23 @@ impl Fs {
         )?)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.compaction",
+        err,
+        skip_all,
+        fields(
+            operation = "compaction",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+        )
+    )]
     pub fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
         let result =
             loon_core::create_checkpoint(self.store(), namespace_id, &self.mutation_context())
                 .map_err(RuntimeError::from);
@@ -1447,6 +1542,8 @@ impl Fs {
                         // A matching ETag only proves the durable head object is
                         // unchanged since this basis was reconstructed and
                         // verified; the cache itself is not authoritative.
+                        tracing::Span::current()
+                            .record("cache_path", trace::CachePath::WarmReuse.as_str());
                         return Ok(basis.basis_arc());
                     }
                     Ok(_) | Err(_) => {
@@ -1459,6 +1556,8 @@ impl Fs {
                         // A matching ETag only proves the durable head object is
                         // unchanged since this basis was reconstructed and
                         // verified; the cache itself is not authoritative.
+                        tracing::Span::current()
+                            .record("cache_path", trace::CachePath::EtagProbe.as_str());
                         return Ok(basis.basis_arc());
                     }
                     Ok(_) | Err(_) => {
@@ -1470,6 +1569,7 @@ impl Fs {
 
         let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
             .map_err(CoreError::from)?;
+        tracing::Span::current().record("cache_path", trace::CachePath::ColdReconstruct.as_str());
         let basis = Arc::new(basis);
         self.cache_basis(Arc::clone(&basis));
         Ok(basis)
@@ -1490,6 +1590,8 @@ impl Fs {
                 .get(namespace_id);
             if let Some(basis) = cached {
                 if basis.matches_head_etag(&head.identity.etag) {
+                    tracing::Span::current()
+                        .record("cache_path", trace::CachePath::WarmReuse.as_str());
                     return Ok(basis.basis_arc());
                 }
                 self.invalidate_namespace_cache(namespace_id);
@@ -1503,11 +1605,18 @@ impl Fs {
             head.identity.etag.clone(),
         )
         .map_err(CoreError::from)?;
+        tracing::Span::current().record("cache_path", trace::CachePath::ColdReconstruct.as_str());
         let basis = Arc::new(basis);
         self.cache_basis(Arc::clone(&basis));
         Ok(basis)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.phase",
+        skip_all,
+        fields(phase = "update_cache")
+    )]
     fn cache_basis(&self, basis: Arc<VerifiedNamespaceBasis>) {
         let cache_config = &self.inner.config.runtime_cache;
         if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
@@ -1520,6 +1629,12 @@ impl Fs {
             .insert(basis, cache_config.max_cached_namespaces);
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.phase",
+        skip_all,
+        fields(phase = "update_cache")
+    )]
     fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
         self.inner
             .basis_cache
