@@ -5,6 +5,7 @@ mod configured;
 pub mod fs;
 pub mod keys;
 mod keyspace;
+pub mod perf;
 pub mod probes;
 pub mod provider;
 pub mod r2;
