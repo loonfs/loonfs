@@ -51,14 +51,6 @@ impl CachePath {
     }
 }
 
-pub(crate) fn result_label<T, E>(result: &Result<T, E>) -> &'static str {
-    if result.is_ok() {
-        "ok"
-    } else {
-        "error"
-    }
-}
-
 pub(crate) fn payload_class(size_bytes: usize) -> &'static str {
     match size_bytes {
         0..=16_383 => "small",
@@ -69,7 +61,7 @@ pub(crate) fn payload_class(size_bytes: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{payload_class, result_label, CachePath, TraceMode, TraceStoreKind};
+    use super::{payload_class, CachePath, TraceMode, TraceStoreKind};
 
     #[test]
     fn trace_labels_are_low_cardinality() {
@@ -95,7 +87,5 @@ mod tests {
         assert_eq!(payload_class(16_384), "medium");
         assert_eq!(payload_class(1_048_575), "medium");
         assert_eq!(payload_class(1_048_576), "large");
-        assert_eq!(result_label(&Ok::<_, ()>(())), "ok");
-        assert_eq!(result_label(&Err::<(), _>(())), "error");
     }
 }

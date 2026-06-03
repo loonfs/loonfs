@@ -67,6 +67,7 @@ pub fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "walk_path")
 )]
@@ -117,6 +118,7 @@ pub fn list_path_with_read_source<S: ObjectStore + ?Sized>(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "walk_path")
 )]
@@ -338,6 +340,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
     #[tracing::instrument(
         level = "info",
         name = "loon.phase",
+        err,
         skip_all,
         fields(phase = "walk_path")
     )]
@@ -350,6 +353,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
     #[tracing::instrument(
         level = "info",
         name = "loon.phase",
+        err,
         skip_all,
         fields(phase = "walk_path")
     )]

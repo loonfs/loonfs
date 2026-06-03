@@ -224,6 +224,7 @@ fn validate_content_metadata<S: ObjectStore + ?Sized>(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "write_content_blob", key_class = "content_blob")
 )]

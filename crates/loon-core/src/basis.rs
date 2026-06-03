@@ -137,6 +137,7 @@ pub fn load_verified_namespace_basis_at_head<S: ObjectStore + ?Sized>(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "reconstruct_basis")
 )]
@@ -246,6 +247,7 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "probe_namespace_head_etag", key_class = "namespace_head")
 )]

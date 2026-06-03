@@ -757,6 +757,11 @@ impl Fs {
         &self.inner.config
     }
 
+    fn record_trace_context(&self, span: &tracing::Span) {
+        span.record("mode", self.inner.config.trace_mode.as_str());
+        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
+    }
+
     pub fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -807,12 +812,12 @@ impl Fs {
     #[tracing::instrument(
         level = "info",
         name = "loon.compaction",
+        err,
         skip_all,
         fields(
             operation = "compaction",
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
-            result = tracing::field::Empty,
         )
     )]
     pub fn maintenance_tick_namespace(
@@ -821,75 +826,70 @@ impl Fs {
         options: MaintenanceTickOptions,
     ) -> Result<MaintenanceTickResult> {
         let span = tracing::Span::current();
-        span.record("mode", self.inner.config.trace_mode.as_str());
-        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
-        let result = (|| {
-            if options.max_wal_tail_segments == 0 {
-                return Err(RuntimeError::Config(
-                    "max_wal_tail_segments must be greater than zero".to_owned(),
-                ));
-            }
+        self.record_trace_context(&span);
+        if options.max_wal_tail_segments == 0 {
+            return Err(RuntimeError::Config(
+                "max_wal_tail_segments must be greater than zero".to_owned(),
+            ));
+        }
 
-            let status_before = self.namespace_status(namespace_id)?;
-            let observed_head_seq = status_before.head_seq;
-            if status_before.wal_tail_segments < options.max_wal_tail_segments {
+        let status_before = self.namespace_status(namespace_id)?;
+        let observed_head_seq = status_before.head_seq;
+        if status_before.wal_tail_segments < options.max_wal_tail_segments {
+            return Ok(MaintenanceTickResult {
+                namespace_id: namespace_id.clone(),
+                status_before,
+                outcome: MaintenanceTickOutcome::NotNeeded,
+            });
+        }
+
+        let checkpoint = match self.create_checkpoint(namespace_id) {
+            Ok(checkpoint) => checkpoint,
+            Err(RuntimeError::Core(error)) if error.kind() == CoreErrorKind::StaleHead => {
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
                     status_before,
-                    outcome: MaintenanceTickOutcome::NotNeeded,
+                    outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
+                        observed_head_seq,
+                    },
                 });
             }
+            Err(error) => return Err(error),
+        };
 
-            let checkpoint = match self.create_checkpoint(namespace_id) {
-                Ok(checkpoint) => checkpoint,
-                Err(RuntimeError::Core(error)) if error.kind() == CoreErrorKind::StaleHead => {
-                    return Ok(MaintenanceTickResult {
-                        namespace_id: namespace_id.clone(),
-                        status_before,
-                        outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
-                            observed_head_seq,
-                        },
-                    });
-                }
-                Err(error) => return Err(error),
+        let outcome = if checkpoint.checkpoint_hint_points_at_checkpoint {
+            MaintenanceTickOutcome::CheckpointPublished {
+                checkpoint_seq: checkpoint.checkpoint_seq,
+            }
+        } else {
+            let Some(checkpoint_hint_seq) = checkpoint.checkpoint_hint_seq else {
+                return Err(RuntimeError::Core(CoreError::Store(
+                    "checkpoint hint publication returned no checkpoint hint".to_owned(),
+                )));
             };
+            MaintenanceTickOutcome::CheckpointSuperseded {
+                attempted_seq: checkpoint.checkpoint_seq,
+                checkpoint_hint_seq,
+            }
+        };
 
-            let outcome = if checkpoint.checkpoint_hint_points_at_checkpoint {
-                MaintenanceTickOutcome::CheckpointPublished {
-                    checkpoint_seq: checkpoint.checkpoint_seq,
-                }
-            } else {
-                let Some(checkpoint_hint_seq) = checkpoint.checkpoint_hint_seq else {
-                    return Err(RuntimeError::Core(CoreError::Store(
-                        "checkpoint hint publication returned no checkpoint hint".to_owned(),
-                    )));
-                };
-                MaintenanceTickOutcome::CheckpointSuperseded {
-                    attempted_seq: checkpoint.checkpoint_seq,
-                    checkpoint_hint_seq,
-                }
-            };
-
-            Ok(MaintenanceTickResult {
-                namespace_id: namespace_id.clone(),
-                status_before,
-                outcome,
-            })
-        })();
-        span.record("result", trace::result_label(&result));
-        result
+        Ok(MaintenanceTickResult {
+            namespace_id: namespace_id.clone(),
+            status_before,
+            outcome,
+        })
     }
 
     #[tracing::instrument(
         level = "info",
         name = "loon.stat",
+        err,
         skip_all,
         fields(
             operation = "stat",
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             cache_path = tracing::field::Empty,
-            result = tracing::field::Empty,
         )
     )]
     pub fn stat_path(
@@ -898,37 +898,32 @@ impl Fs {
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry> {
         let span = tracing::Span::current();
-        span.record("mode", self.inner.config.trace_mode.as_str());
-        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
-        let result = (|| {
-            let head = self.head_for_metadata_read(namespace_id)?;
-            if head.state.checkpoint_hint_seq.is_some() {
-                if let Some(entry) =
-                    loon_core::resolve_path_from_materialized_tables_at_head_with_cache(
-                        self.store(),
-                        namespace_id,
-                        &head.state,
-                        absolute_path,
-                        Some(&self.inner.metadata_table_cache),
-                    )?
-                {
-                    span.record("cache_path", trace::CachePath::MaterializedTables.as_str());
-                    self.inner.cache_stats.record_metadata_read_source(
-                        loon_core::MetadataReadSource::MaterializedTables,
-                    );
-                    return Ok(entry);
-                }
+        self.record_trace_context(&span);
+        let head = self.head_for_metadata_read(namespace_id)?;
+        if head.state.checkpoint_hint_seq.is_some() {
+            if let Some(entry) =
+                loon_core::resolve_path_from_materialized_tables_at_head_with_cache(
+                    self.store(),
+                    namespace_id,
+                    &head.state,
+                    absolute_path,
+                    Some(&self.inner.metadata_table_cache),
+                )?
+            {
+                span.record("cache_path", trace::CachePath::MaterializedTables.as_str());
+                self.inner
+                    .cache_stats
+                    .record_metadata_read_source(loon_core::MetadataReadSource::MaterializedTables);
+                return Ok(entry);
             }
+        }
 
-            let basis = self.basis_for_read_at_head(namespace_id, &head)?;
-            let entry = loon_core::resolve_path_from_basis(&basis, absolute_path)?;
-            self.inner
-                .cache_stats
-                .record_metadata_read_source(loon_core::MetadataReadSource::FullBasisFallback);
-            Ok(entry)
-        })();
-        span.record("result", trace::result_label(&result));
-        result
+        let basis = self.basis_for_read_at_head(namespace_id, &head)?;
+        let entry = loon_core::resolve_path_from_basis(&basis, absolute_path)?;
+        self.inner
+            .cache_stats
+            .record_metadata_read_source(loon_core::MetadataReadSource::FullBasisFallback);
+        Ok(entry)
     }
 
     pub fn list_path(
@@ -1030,13 +1025,13 @@ impl Fs {
     #[tracing::instrument(
         level = "info",
         name = "loon.put",
+        err,
         skip_all,
         fields(
             operation = "put",
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
-            result = tracing::field::Empty,
         )
     )]
     pub fn put_file_bytes(
@@ -1047,8 +1042,7 @@ impl Fs {
         options: PutFileOptions,
     ) -> Result<MutationResult> {
         let span = tracing::Span::current();
-        span.record("mode", self.inner.config.trace_mode.as_str());
-        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
+        self.record_trace_context(&span);
         span.record("payload_class", trace::payload_class(bytes.len()));
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_bytes(
@@ -1061,21 +1055,19 @@ impl Fs {
             options.commit_id.as_ref().map(CommitId::as_str),
         )
         .map_err(RuntimeError::from);
-        let result = self.finish_namespace_mutation(namespace_id, result);
-        span.record("result", trace::result_label(&result));
-        result
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     #[tracing::instrument(
         level = "info",
         name = "loon.put",
+        err,
         skip_all,
         fields(
             operation = "put",
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
             payload_class = tracing::field::Empty,
-            result = tracing::field::Empty,
         )
     )]
     pub fn put_file_content_ref(
@@ -1086,8 +1078,7 @@ impl Fs {
         options: PutFileOptions,
     ) -> Result<MutationResult> {
         let span = tracing::Span::current();
-        span.record("mode", self.inner.config.trace_mode.as_str());
-        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
+        self.record_trace_context(&span);
         span.record(
             "payload_class",
             trace::payload_class(usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX)),
@@ -1103,9 +1094,7 @@ impl Fs {
             options.commit_id.as_ref().map(CommitId::as_str),
         )
         .map_err(RuntimeError::from);
-        let result = self.finish_namespace_mutation(namespace_id, result);
-        span.record("result", trace::result_label(&result));
-        result
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn create_dir(
@@ -1369,12 +1358,12 @@ impl Fs {
     #[tracing::instrument(
         level = "info",
         name = "loon.compaction",
+        err,
         skip_all,
         fields(
             operation = "compaction",
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
-            result = tracing::field::Empty,
         )
     )]
     pub fn create_checkpoint(
@@ -1382,14 +1371,11 @@ impl Fs {
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
         let span = tracing::Span::current();
-        span.record("mode", self.inner.config.trace_mode.as_str());
-        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
+        self.record_trace_context(&span);
         let result =
             loon_core::create_checkpoint(self.store(), namespace_id, &self.mutation_context())
                 .map_err(RuntimeError::from);
-        let result = self.finish_namespace_mutation(namespace_id, result);
-        span.record("result", trace::result_label(&result));
-        result
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     pub fn advance_retention_floor(

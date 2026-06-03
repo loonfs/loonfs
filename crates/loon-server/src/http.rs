@@ -26,7 +26,7 @@ use loonfs::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::task;
-use tracing::{field, Instrument};
+use tracing::Instrument;
 
 type SharedStore = SharedObjectStore;
 
@@ -180,14 +180,6 @@ fn trace_payload_class(size_bytes: u64) -> &'static str {
         0..=16_383 => "small",
         16_384..=1_048_575 => "medium",
         _ => "large",
-    }
-}
-
-fn trace_result_label<T, E>(result: &Result<T, E>) -> &'static str {
-    if result.is_ok() {
-        "ok"
-    } else {
-        "error"
     }
 }
 
@@ -470,15 +462,12 @@ async fn filesystem_operation(
             mode = "remote",
             store_kind = trace_store_kind_label(&state.config.store),
             payload_class,
-            result = field::Empty
         );
-        let result = state
+        state
             .publisher
             .submit_path_intent(namespace_id.clone(), intent)
-            .instrument(span.clone())
-            .await;
-        span.record("result", trace_result_label(&result));
-        result
+            .instrument(span)
+            .await
     } else {
         state
             .publisher

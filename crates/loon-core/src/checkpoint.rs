@@ -688,6 +688,7 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "project_checkpoint")
 )]
@@ -1066,6 +1067,7 @@ struct CheckpointSegmentRows {
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "write_checkpoint_tables", key_class = "checkpoint_table")
 )]
@@ -1255,6 +1257,7 @@ fn checkpoint_row_parent_inode_id(row: &CheckpointRow) -> Option<InodeId> {
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "write_checkpoint_manifest", key_class = "checkpoint_table")
 )]
@@ -1312,6 +1315,7 @@ fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "publish_compacted_head", key_class = "namespace_head")
 )]
@@ -1512,6 +1516,7 @@ fn validate_checkpoint_materialization_ranges(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "load_checkpoint_tables", key_class = "checkpoint_table")
 )]
@@ -1553,6 +1558,7 @@ fn load_checkpoint_materialization_from_manifest<S: ObjectStore + ?Sized>(
 #[tracing::instrument(
     level = "info",
     name = "loon.phase",
+    err,
     skip_all,
     fields(phase = "load_checkpoint_tables", key_class = "checkpoint_table")
 )]
