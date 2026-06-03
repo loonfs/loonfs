@@ -68,20 +68,20 @@ pub fn resolve_path_from_basis(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
-    let span = tracing::info_span!("walk_path");
-    let _guard = span.enter();
-    let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-    let resolved = basis.metadata_state.resolve_visible_path(
-        &absolute_path,
-        basis.head.name_policy,
-        basis.head.seq,
-    )?;
-    build_authoritative_path_entry(
-        &basis.head.namespace_id,
-        basis.head.seq,
-        &basis.metadata_state,
-        &resolved,
-    )
+    crate::trace::sync_phase("walk_path", || {
+        let absolute_path = parse_absolute_path_for_core(absolute_path)?;
+        let resolved = basis.metadata_state.resolve_visible_path(
+            &absolute_path,
+            basis.head.name_policy,
+            basis.head.seq,
+        )?;
+        build_authoritative_path_entry(
+            &basis.head.namespace_id,
+            basis.head.seq,
+            &basis.metadata_state,
+            &resolved,
+        )
+    })
 }
 
 pub fn list_path<S: ObjectStore + ?Sized>(
@@ -114,55 +114,58 @@ pub fn list_path_from_basis(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
-    let span = tracing::info_span!("walk_path");
-    let _guard = span.enter();
-    let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-    let resolved = basis.metadata_state.resolve_visible_path(
-        &absolute_path,
-        basis.head.name_policy,
-        basis.head.seq,
-    )?;
-    if resolved.inode_kind == InodeKind::File {
-        return Ok(vec![build_authoritative_path_entry(
-            &basis.head.namespace_id,
+    crate::trace::sync_phase("walk_path", || {
+        let absolute_path = parse_absolute_path_for_core(absolute_path)?;
+        let resolved = basis.metadata_state.resolve_visible_path(
+            &absolute_path,
+            basis.head.name_policy,
             basis.head.seq,
-            &basis.metadata_state,
-            &resolved,
-        )?]);
-    }
-    if resolved.inode_kind != InodeKind::Dir {
-        return Err(CoreError::ExpectedDirectory {
-            path: resolved.absolute_path,
-            kind: resolved.inode_kind,
-        });
-    }
-
-    basis
-        .metadata_state
-        .visible_children(resolved.inode_id, basis.head.seq)
-        .into_iter()
-        .map(|direntry| {
-            let child = basis
-                .metadata_state
-                .visible_inode(direntry.child_inode_id, basis.head.seq)
-                .expect("visible child listing should resolve inode");
-            let child_path = AbsolutePath::parse(&resolved.absolute_path)
-                .map_err(map_path_error_to_core)?
-                .join(&DisplayName::parse(&direntry.display_name).map_err(map_path_error_to_core)?);
-            build_authoritative_path_entry(
+        )?;
+        if resolved.inode_kind == InodeKind::File {
+            return Ok(vec![build_authoritative_path_entry(
                 &basis.head.namespace_id,
                 basis.head.seq,
                 &basis.metadata_state,
-                &ResolvedVisiblePath {
-                    absolute_path: child_path.as_str().to_owned(),
-                    inode_id: direntry.child_inode_id,
-                    inode_kind: child.inode_kind,
-                    parent_inode_id: Some(direntry.parent_inode_id),
-                    display_name: direntry.display_name,
-                },
-            )
-        })
-        .collect()
+                &resolved,
+            )?]);
+        }
+        if resolved.inode_kind != InodeKind::Dir {
+            return Err(CoreError::ExpectedDirectory {
+                path: resolved.absolute_path,
+                kind: resolved.inode_kind,
+            });
+        }
+
+        basis
+            .metadata_state
+            .visible_children(resolved.inode_id, basis.head.seq)
+            .into_iter()
+            .map(|direntry| {
+                let child = basis
+                    .metadata_state
+                    .visible_inode(direntry.child_inode_id, basis.head.seq)
+                    .expect("visible child listing should resolve inode");
+                let child_path = AbsolutePath::parse(&resolved.absolute_path)
+                    .map_err(map_path_error_to_core)?
+                    .join(
+                        &DisplayName::parse(&direntry.display_name)
+                            .map_err(map_path_error_to_core)?,
+                    );
+                build_authoritative_path_entry(
+                    &basis.head.namespace_id,
+                    basis.head.seq,
+                    &basis.metadata_state,
+                    &ResolvedVisiblePath {
+                        absolute_path: child_path.as_str().to_owned(),
+                        inode_id: direntry.child_inode_id,
+                        inode_kind: child.inode_kind,
+                        parent_inode_id: Some(direntry.parent_inode_id),
+                        display_name: direntry.display_name,
+                    },
+                )
+            })
+            .collect()
+    })
 }
 
 pub fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
@@ -309,16 +312,14 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             },
         )
         .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
-        let replayed = {
-            let span = tracing::info_span!("project_metadata_state");
-            let _guard = span.enter();
+        let replayed = crate::trace::sync_phase("project_metadata_state", || {
             replay_validated_wal_tail_with_metadata(
                 &checkpoint_head,
                 &MetadataState::default(),
                 wal_chain.segments(),
             )
-            .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))?
-        };
+            .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))
+        })?;
         Ok(Some(Self {
             namespace_id: namespace_id.clone(),
             head,
@@ -328,49 +329,49 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
     }
 
     fn resolve_path(&self, absolute_path: &str) -> Result<AuthoritativePathEntry, CoreError> {
-        let span = tracing::info_span!("walk_path");
-        let _guard = span.enter();
-        let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-        let resolved = self.resolve_visible_path(&absolute_path)?;
-        self.build_authoritative_path_entry(&resolved)
+        crate::trace::sync_phase("walk_path", || {
+            let absolute_path = parse_absolute_path_for_core(absolute_path)?;
+            let resolved = self.resolve_visible_path(&absolute_path)?;
+            self.build_authoritative_path_entry(&resolved)
+        })
     }
 
     fn list_path(&self, absolute_path: &str) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
-        let span = tracing::info_span!("walk_path");
-        let _guard = span.enter();
-        let absolute_path = parse_absolute_path_for_core(absolute_path)?;
-        let resolved = self.resolve_visible_path(&absolute_path)?;
-        if resolved.inode_kind == InodeKind::File {
-            return Ok(vec![self.build_authoritative_path_entry(&resolved)?]);
-        }
-        if resolved.inode_kind != InodeKind::Dir {
-            return Err(CoreError::ExpectedDirectory {
-                path: resolved.absolute_path,
-                kind: resolved.inode_kind,
-            });
-        }
+        crate::trace::sync_phase("walk_path", || {
+            let absolute_path = parse_absolute_path_for_core(absolute_path)?;
+            let resolved = self.resolve_visible_path(&absolute_path)?;
+            if resolved.inode_kind == InodeKind::File {
+                return Ok(vec![self.build_authoritative_path_entry(&resolved)?]);
+            }
+            if resolved.inode_kind != InodeKind::Dir {
+                return Err(CoreError::ExpectedDirectory {
+                    path: resolved.absolute_path,
+                    kind: resolved.inode_kind,
+                });
+            }
 
-        self.visible_children(resolved.inode_id)?
-            .into_iter()
-            .map(|direntry| {
-                let child = self
-                    .visible_inode(direntry.child_inode_id)?
-                    .expect("visible child listing should resolve inode");
-                let child_path = AbsolutePath::parse(&resolved.absolute_path)
-                    .map_err(map_path_error_to_core)?
-                    .join(
-                        &DisplayName::parse(&direntry.display_name)
-                            .map_err(map_path_error_to_core)?,
-                    );
-                self.build_authoritative_path_entry(&ResolvedVisiblePath {
-                    absolute_path: child_path.as_str().to_owned(),
-                    inode_id: direntry.child_inode_id,
-                    inode_kind: child.inode_kind,
-                    parent_inode_id: Some(direntry.parent_inode_id),
-                    display_name: direntry.display_name,
+            self.visible_children(resolved.inode_id)?
+                .into_iter()
+                .map(|direntry| {
+                    let child = self
+                        .visible_inode(direntry.child_inode_id)?
+                        .expect("visible child listing should resolve inode");
+                    let child_path = AbsolutePath::parse(&resolved.absolute_path)
+                        .map_err(map_path_error_to_core)?
+                        .join(
+                            &DisplayName::parse(&direntry.display_name)
+                                .map_err(map_path_error_to_core)?,
+                        );
+                    self.build_authoritative_path_entry(&ResolvedVisiblePath {
+                        absolute_path: child_path.as_str().to_owned(),
+                        inode_id: direntry.child_inode_id,
+                        inode_kind: child.inode_kind,
+                        parent_inode_id: Some(direntry.parent_inode_id),
+                        display_name: direntry.display_name,
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        })
     }
 
     fn resolve_visible_path(

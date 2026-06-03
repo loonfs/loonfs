@@ -391,16 +391,15 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             .map(|_| Err(CoreError::Lease(error.clone())))
             .collect();
     }
-    let basis = {
-        let span = tracing::info_span!("load_basis_for_publish");
-        let _guard = span.enter();
-        match load_verified_namespace_basis(store, namespace_id) {
-            Ok(basis) => basis,
-            Err(error) => {
-                return (0..candidates.len())
-                    .map(|_| Err(CoreError::Basis(error.clone())))
-                    .collect()
-            }
+    let basis_result = crate::trace::sync_phase("load_basis_for_publish", || {
+        load_verified_namespace_basis(store, namespace_id)
+    });
+    let basis = match basis_result {
+        Ok(basis) => basis,
+        Err(error) => {
+            return (0..candidates.len())
+                .map(|_| Err(CoreError::Basis(error.clone())))
+                .collect()
         }
     };
     publish_namespace_mutations_batch_against_basis(
@@ -444,21 +443,21 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     let mut content_validation = ContentValidationTracker::default();
 
     for (index, candidate) in candidates.iter().enumerate() {
-        let prepare_span = tracing::info_span!("prepare_commit");
-        let _prepare_guard = prepare_span.enter();
-        let Some(candidate_request) = prepare_candidate_request(
-            store,
-            namespace_id,
-            basis,
-            &current_head,
-            &current_metadata_state,
-            candidate,
-            context,
-            index,
-            &mut outcomes,
-            &mut in_batch_requests,
-            &mut aliases,
-        ) else {
+        let Some(candidate_request) = crate::trace::sync_phase("prepare_commit", || {
+            prepare_candidate_request(
+                store,
+                namespace_id,
+                basis,
+                &current_head,
+                &current_metadata_state,
+                candidate,
+                context,
+                index,
+                &mut outcomes,
+                &mut in_batch_requests,
+                &mut aliases,
+            )
+        }) else {
             continue;
         };
         let validation = CommitValidationContext {
@@ -534,38 +533,30 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         .iter()
         .map(|(_, record)| record.clone())
         .collect::<Vec<_>>();
-    let wal = {
-        let span = tracing::info_span!("write_wal_segment", key_class = "wal_segment");
-        let _guard = span.enter();
-        let wal = match prepare_wal_segment(
-            namespace_id.clone(),
-            basis.head.visible_wal_tip.clone(),
-            &records,
-            &context.writer_version,
-        ) {
-            Ok(wal) => wal,
-            Err(error) => {
-                let message = format!("wal build failed: {error:?}");
-                for (index, _) in accepted {
-                    outcomes[index] = Some(Err(CoreError::Store(message.clone())));
-                }
-                return PublishBatchAgainstBasisResult::not_cacheable(
-                    finish_batch_outcomes_with_aliases(outcomes, &aliases),
-                );
+    let wal_result: Result<_, CoreError> =
+        crate::trace::sync_phase_with_key_class("write_wal_segment", "wal_segment", || {
+            let wal = prepare_wal_segment(
+                namespace_id.clone(),
+                basis.head.visible_wal_tip.clone(),
+                &records,
+                &context.writer_version,
+            )
+            .map_err(|error| CoreError::Store(format!("wal build failed: {error:?}")))?;
+            store
+                .put_if_absent(&wal.object_key, &wal.encoded_bytes)
+                .map_err(|err| CoreError::WalWrite(err.to_string()))?;
+            Ok(wal)
+        });
+    let wal = match wal_result {
+        Ok(wal) => wal,
+        Err(error) => {
+            for (index, _) in &accepted {
+                outcomes[*index] = Some(Err(error.clone()));
             }
-        };
-        match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
-            Ok(_) => {}
-            Err(err) => {
-                for (index, _) in accepted {
-                    outcomes[index] = Some(Err(CoreError::WalWrite(err.to_string())));
-                }
-                return PublishBatchAgainstBasisResult::not_cacheable(
-                    finish_batch_outcomes_with_aliases(outcomes, &aliases),
-                );
-            }
+            return PublishBatchAgainstBasisResult::not_cacheable(
+                finish_batch_outcomes_with_aliases(outcomes, &aliases),
+            );
         }
-        wal
     };
 
     let last_plan = &records
@@ -587,19 +578,19 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             );
         }
     };
-    let head_metadata = {
-        let span = tracing::info_span!("cas_namespace_head", key_class = "namespace_head");
-        let _guard = span.enter();
-        match publish_commit_head(store, &basis.head_etag, &head_publish) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                for (index, _) in accepted {
-                    outcomes[index] = Some(Err(error.clone().into()));
-                }
-                return PublishBatchAgainstBasisResult::not_cacheable(
-                    finish_batch_outcomes_with_aliases(outcomes, &aliases),
-                );
+    let head_metadata_result =
+        crate::trace::sync_phase_with_key_class("cas_namespace_head", "namespace_head", || {
+            publish_commit_head(store, &basis.head_etag, &head_publish)
+        });
+    let head_metadata = match head_metadata_result {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            for (index, _) in &accepted {
+                outcomes[*index] = Some(Err(error.clone().into()));
             }
+            return PublishBatchAgainstBasisResult::not_cacheable(
+                finish_batch_outcomes_with_aliases(outcomes, &aliases),
+            );
         }
     };
 

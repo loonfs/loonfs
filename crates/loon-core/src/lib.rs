@@ -16,6 +16,7 @@ mod path;
 mod protocol;
 pub mod publisher;
 pub mod services;
+mod trace;
 pub mod wal;
 
 pub use basis::{

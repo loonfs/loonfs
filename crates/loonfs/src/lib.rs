@@ -34,7 +34,6 @@ use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 pub use trace::{TraceMode, TraceStoreKind};
-use tracing::field;
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
@@ -805,19 +804,25 @@ impl Fs {
         })
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.compaction",
+        skip_all,
+        fields(
+            operation = "compaction",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            result = tracing::field::Empty,
+        )
+    )]
     pub fn maintenance_tick_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
     ) -> Result<MaintenanceTickResult> {
-        let span = tracing::info_span!(
-            "loon.compaction",
-            operation = "compaction",
-            mode = self.inner.config.trace_mode.as_str(),
-            store_kind = self.inner.config.trace_store_kind.as_str(),
-            result = field::Empty
-        );
-        let _guard = span.enter();
+        let span = tracing::Span::current();
+        span.record("mode", self.inner.config.trace_mode.as_str());
+        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
         let result = (|| {
             if options.max_wal_tail_segments == 0 {
                 return Err(RuntimeError::Config(
@@ -875,20 +880,26 @@ impl Fs {
         result
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.stat",
+        skip_all,
+        fields(
+            operation = "stat",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            cache_path = tracing::field::Empty,
+            result = tracing::field::Empty,
+        )
+    )]
     pub fn stat_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry> {
-        let span = tracing::info_span!(
-            "loon.stat",
-            operation = "stat",
-            mode = self.inner.config.trace_mode.as_str(),
-            store_kind = self.inner.config.trace_store_kind.as_str(),
-            cache_path = field::Empty,
-            result = field::Empty
-        );
-        let _guard = span.enter();
+        let span = tracing::Span::current();
+        span.record("mode", self.inner.config.trace_mode.as_str());
+        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
         let result = (|| {
             let head = self.head_for_metadata_read(namespace_id)?;
             if head.state.checkpoint_hint_seq.is_some() {
@@ -1016,6 +1027,18 @@ impl Fs {
         )?)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.put",
+        skip_all,
+        fields(
+            operation = "put",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+            result = tracing::field::Empty,
+        )
+    )]
     pub fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -1023,15 +1046,10 @@ impl Fs {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> Result<MutationResult> {
-        let span = tracing::info_span!(
-            "loon.put",
-            operation = "put",
-            mode = self.inner.config.trace_mode.as_str(),
-            store_kind = self.inner.config.trace_store_kind.as_str(),
-            payload_class = trace::payload_class(bytes.len()),
-            result = field::Empty
-        );
-        let _guard = span.enter();
+        let span = tracing::Span::current();
+        span.record("mode", self.inner.config.trace_mode.as_str());
+        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
+        span.record("payload_class", trace::payload_class(bytes.len()));
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_bytes(
             &store,
@@ -1048,6 +1066,18 @@ impl Fs {
         result
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.put",
+        skip_all,
+        fields(
+            operation = "put",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+            result = tracing::field::Empty,
+        )
+    )]
     pub fn put_file_content_ref(
         &self,
         namespace_id: &NamespaceId,
@@ -1055,16 +1085,13 @@ impl Fs {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> Result<MutationResult> {
-        let span = tracing::info_span!(
-            "loon.put",
-            operation = "put",
-            mode = self.inner.config.trace_mode.as_str(),
-            store_kind = self.inner.config.trace_store_kind.as_str(),
-            payload_class =
-                trace::payload_class(usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX)),
-            result = field::Empty
+        let span = tracing::Span::current();
+        span.record("mode", self.inner.config.trace_mode.as_str());
+        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
+        span.record(
+            "payload_class",
+            trace::payload_class(usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX)),
         );
-        let _guard = span.enter();
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_content_ref(
             &store,
@@ -1339,18 +1366,24 @@ impl Fs {
         )?)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.compaction",
+        skip_all,
+        fields(
+            operation = "compaction",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            result = tracing::field::Empty,
+        )
+    )]
     pub fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
-        let span = tracing::info_span!(
-            "loon.compaction",
-            operation = "compaction",
-            mode = self.inner.config.trace_mode.as_str(),
-            store_kind = self.inner.config.trace_store_kind.as_str(),
-            result = field::Empty
-        );
-        let _guard = span.enter();
+        let span = tracing::Span::current();
+        span.record("mode", self.inner.config.trace_mode.as_str());
+        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
         let result =
             loon_core::create_checkpoint(self.store(), namespace_id, &self.mutation_context())
                 .map_err(RuntimeError::from);
@@ -1593,37 +1626,37 @@ impl Fs {
     }
 
     fn cache_basis(&self, basis: Arc<VerifiedNamespaceBasis>) {
-        let span = tracing::info_span!("update_cache");
-        let _guard = span.enter();
-        let cache_config = &self.inner.config.runtime_cache;
-        if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
-            return;
-        }
-        self.inner
-            .basis_cache
-            .lock()
-            .expect("basis cache lock poisoned")
-            .insert(basis, cache_config.max_cached_namespaces);
+        trace::sync_phase("update_cache", || {
+            let cache_config = &self.inner.config.runtime_cache;
+            if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
+                return;
+            }
+            self.inner
+                .basis_cache
+                .lock()
+                .expect("basis cache lock poisoned")
+                .insert(basis, cache_config.max_cached_namespaces);
+        });
     }
 
     fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
-        let span = tracing::info_span!("update_cache");
-        let _guard = span.enter();
-        self.inner
-            .basis_cache
-            .lock()
-            .expect("basis cache lock poisoned")
-            .invalidate(namespace_id);
-        self.inner
-            .control_cache
-            .lock()
-            .expect("control cache lock poisoned")
-            .invalidate_namespace(namespace_id);
-        self.inner
-            .commit_engines
-            .lock()
-            .expect("commit engine cache lock poisoned")
-            .invalidate(namespace_id);
+        trace::sync_phase("update_cache", || {
+            self.inner
+                .basis_cache
+                .lock()
+                .expect("basis cache lock poisoned")
+                .invalidate(namespace_id);
+            self.inner
+                .control_cache
+                .lock()
+                .expect("control cache lock poisoned")
+                .invalidate_namespace(namespace_id);
+            self.inner
+                .commit_engines
+                .lock()
+                .expect("commit engine cache lock poisoned")
+                .invalidate(namespace_id);
+        });
     }
 
     fn finish_namespace_mutation<T>(

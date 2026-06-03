@@ -67,6 +67,10 @@ pub(crate) fn payload_class(size_bytes: usize) -> &'static str {
     }
 }
 
+pub(crate) fn sync_phase<T>(phase: &'static str, f: impl FnOnce() -> T) -> T {
+    tracing::info_span!("loon.phase", phase).in_scope(f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{payload_class, result_label, CachePath, TraceMode, TraceStoreKind};

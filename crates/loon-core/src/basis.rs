@@ -141,55 +141,55 @@ fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
     head: HeadState,
     head_etag: String,
 ) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
-    let span = tracing::info_span!("reconstruct_basis");
-    let _guard = span.enter();
-    let loaded_lease =
-        read_lease_object(store, expected_namespace).map_err(BasisLoadError::LoadLease)?;
+    crate::trace::sync_phase("reconstruct_basis", || {
+        let loaded_lease =
+            read_lease_object(store, expected_namespace).map_err(BasisLoadError::LoadLease)?;
 
-    let (initial_head, initial_metadata_state) = if let Some(checkpoint_seq) =
-        head.checkpoint_hint_seq
-    {
-        let materialized =
-            load_verified_checkpoint_materialization(store, expected_namespace, checkpoint_seq)?;
-        (
-            checkpoint_basis_head(&head, &materialized.manifest),
-            materialized.metadata_state,
-        )
-    } else {
-        (
-            HeadState::initial(expected_namespace.clone()),
-            bootstrap_basis_metadata_state(),
-        )
-    };
-    let wal_chain = load_validated_wal_chain(
-        store,
-        WalChainLoadRequest {
-            namespace_id: expected_namespace,
-            chain_base_seq: initial_head.seq,
-            head_seq: head.seq,
-            visible_tip: head.visible_wal_tip.clone(),
-            stop_after_seq: None,
-        },
-    )?;
-    let replayed = {
-        let span = tracing::info_span!("project_metadata_state");
-        let _guard = span.enter();
-        replay_validated_wal_tail_with_metadata(
-            &initial_head,
-            &initial_metadata_state,
-            wal_chain.segments(),
-        )
-        .map_err(BasisLoadError::WalReplay)?
-    };
-    ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
+        let (initial_head, initial_metadata_state) =
+            if let Some(checkpoint_seq) = head.checkpoint_hint_seq {
+                let materialized = load_verified_checkpoint_materialization(
+                    store,
+                    expected_namespace,
+                    checkpoint_seq,
+                )?;
+                (
+                    checkpoint_basis_head(&head, &materialized.manifest),
+                    materialized.metadata_state,
+                )
+            } else {
+                (
+                    HeadState::initial(expected_namespace.clone()),
+                    bootstrap_basis_metadata_state(),
+                )
+            };
+        let wal_chain = load_validated_wal_chain(
+            store,
+            WalChainLoadRequest {
+                namespace_id: expected_namespace,
+                chain_base_seq: initial_head.seq,
+                head_seq: head.seq,
+                visible_tip: head.visible_wal_tip.clone(),
+                stop_after_seq: None,
+            },
+        )?;
+        let replayed = crate::trace::sync_phase("project_metadata_state", || {
+            replay_validated_wal_tail_with_metadata(
+                &initial_head,
+                &initial_metadata_state,
+                wal_chain.segments(),
+            )
+            .map_err(BasisLoadError::WalReplay)
+        })?;
+        ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
 
-    Ok(VerifiedNamespaceBasis {
-        namespace_descriptor: catalog_entry.namespace_descriptor,
-        content_store_id: catalog_entry.content_store_id,
-        head,
-        head_etag,
-        lease: loaded_lease.envelope.state,
-        metadata_state: replayed.resulting_metadata_state,
+        Ok(VerifiedNamespaceBasis {
+            namespace_descriptor: catalog_entry.namespace_descriptor,
+            content_store_id: catalog_entry.content_store_id,
+            head,
+            head_etag,
+            lease: loaded_lease.envelope.state,
+            metadata_state: replayed.resulting_metadata_state,
+        })
     })
 }
 
@@ -244,30 +244,30 @@ pub fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<NamespaceHeadEtagProbe, CoreError> {
-    let span = tracing::info_span!("probe_namespace_head_etag", key_class = "namespace_head");
-    let _guard = span.enter();
-    NamespaceId::parse(expected_namespace.as_str())?;
-    let object_key = namespace_head(expected_namespace.as_str());
-    let metadata = store
-        .head(&object_key)
-        .map_err(|err| {
-            CoreError::Basis(BasisLoadError::LoadHead(ControlObjectLoadError::Store(
-                err.to_string(),
-            )))
-        })?
-        .ok_or_else(|| {
-            CoreError::Basis(BasisLoadError::LoadHead(
-                ControlObjectLoadError::MissingObject {
-                    object_key: object_key.clone(),
-                },
-            ))
-        })?;
-    let head_etag = metadata
-        .etag
-        .ok_or(CoreError::Basis(BasisLoadError::MissingHeadEtag {
-            object_key,
-        }))?;
-    Ok(NamespaceHeadEtagProbe { head_etag })
+    crate::trace::sync_phase_with_key_class("probe_namespace_head_etag", "namespace_head", || {
+        NamespaceId::parse(expected_namespace.as_str())?;
+        let object_key = namespace_head(expected_namespace.as_str());
+        let metadata = store
+            .head(&object_key)
+            .map_err(|err| {
+                CoreError::Basis(BasisLoadError::LoadHead(ControlObjectLoadError::Store(
+                    err.to_string(),
+                )))
+            })?
+            .ok_or_else(|| {
+                CoreError::Basis(BasisLoadError::LoadHead(
+                    ControlObjectLoadError::MissingObject {
+                        object_key: object_key.clone(),
+                    },
+                ))
+            })?;
+        let head_etag = metadata
+            .etag
+            .ok_or(CoreError::Basis(BasisLoadError::MissingHeadEtag {
+                object_key,
+            }))?;
+        Ok(NamespaceHeadEtagProbe { head_etag })
+    })
 }
 
 fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {
