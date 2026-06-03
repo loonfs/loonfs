@@ -250,6 +250,8 @@ fn execute_perf_iteration(
     let payload_class = payload_class(payload_size as u64);
     let remote_root = format!("/xtask-perf/{run_id}/{payload_class}/{iteration}");
     let source_path = format!("{remote_root}/payload.bin");
+    let copy_path = format!("{remote_root}/copy.bin");
+    let moved_path = format!("{remote_root}/moved.bin");
     let upload_file = workspace
         .root
         .join(format!("{payload_class}-{iteration}-upload.bin"));
@@ -380,6 +382,95 @@ fn execute_perf_iteration(
         },
     )?;
 
+    measure_perf_operation(
+        context,
+        crate::STEP_CP,
+        Some(payload_size as u64),
+        iteration,
+        || {
+            let envelope = expect_success_kind_classified(
+                crate::run_json_command(
+                    runner,
+                    session,
+                    crate::filesystem_cp_args(session, namespace, &source_path, &copy_path),
+                )?,
+                "filesystem_cp",
+            )?;
+            let data = crate::require_data_type(&envelope, "path_move")?;
+            let expected_source = format!("{namespace}:{source_path}");
+            let actual_source = crate::string_field(data, "from")?;
+            if actual_source != expected_source {
+                return Err(classified_error(
+                    "unexpected_result",
+                    format!("copy source `{actual_source}` did not match expected source"),
+                ));
+            }
+            let expected_dest = format!("{namespace}:{copy_path}");
+            let actual_dest = crate::string_field(data, "to")?;
+            if actual_dest != expected_dest {
+                return Err(classified_error(
+                    "unexpected_result",
+                    format!("copy destination `{actual_dest}` did not match expected destination"),
+                ));
+            }
+            Ok(Measured::ok(()))
+        },
+    )?;
+
+    measure_perf_operation(
+        context,
+        crate::STEP_MOVE,
+        Some(payload_size as u64),
+        iteration,
+        || {
+            let envelope = expect_success_kind_classified(
+                crate::run_json_command(
+                    runner,
+                    session,
+                    crate::filesystem_mv_args(session, namespace, &copy_path, &moved_path),
+                )?,
+                "filesystem_mv",
+            )?;
+            let data = crate::require_data_type(&envelope, "path_move")?;
+            let expected_dest = format!("{namespace}:{moved_path}");
+            let actual_dest = crate::string_field(data, "to")?;
+            if actual_dest != expected_dest {
+                return Err(classified_error(
+                    "unexpected_result",
+                    format!("move destination `{actual_dest}` did not match expected destination"),
+                ));
+            }
+            Ok(Measured::ok(()))
+        },
+    )?;
+
+    measure_perf_operation(
+        context,
+        crate::STEP_RM,
+        Some(payload_size as u64),
+        iteration,
+        || {
+            let envelope = expect_success_kind_classified(
+                crate::run_json_command(
+                    runner,
+                    session,
+                    crate::filesystem_rm_args(session, namespace, &moved_path),
+                )?,
+                "filesystem_rm",
+            )?;
+            let data = crate::require_data_type(&envelope, "file_mutation")?;
+            let expected_target = format!("{namespace}:{moved_path}");
+            let actual_target = crate::string_field(data, "target")?;
+            if actual_target != expected_target {
+                return Err(classified_error(
+                    "unexpected_result",
+                    format!("rm target `{actual_target}` did not match expected target"),
+                ));
+            }
+            Ok(Measured::ok(()))
+        },
+    )?;
+
     Ok(())
 }
 
@@ -397,6 +488,9 @@ fn render_report(report: &PerfReport) -> String {
         crate::STEP_CAT,
         crate::STEP_GET,
         crate::STEP_LS,
+        crate::STEP_CP,
+        crate::STEP_MOVE,
+        crate::STEP_RM,
     ] {
         let values = report
             .samples
@@ -779,7 +873,7 @@ mod tests {
 
         let report = run_remote_perf_with_id(&args, &runner, "seed").expect("remote perf");
 
-        assert_eq!(report.measured_events, 6);
+        assert_eq!(report.measured_events, 9);
         let calls = runner.calls();
         assert_command_suffix(
             &calls[0],
@@ -882,6 +976,8 @@ mod tests {
         ));
         let payload_class = payload_class(payload_size as u64);
         let source_path = format!("/xtask-perf/{run_id}/{payload_class}/{iteration}/payload.bin");
+        let copy_path = format!("/xtask-perf/{run_id}/{payload_class}/{iteration}/copy.bin");
+        let moved_path = format!("/xtask-perf/{run_id}/{payload_class}/{iteration}/moved.bin");
         outputs.push(json_success(
             "filesystem_put",
             json!({"type":"file_mutation","target":format!("{namespace}:{source_path}"),"committed_seq":1}),
@@ -902,6 +998,18 @@ mod tests {
         outputs.push(json_success(
             "filesystem_ls",
             json!({"type":"path_entries","entries":[{"absolute_path":source_path,"inode_id":"inode-1","inode_kind":"file","size_bytes":payload_size,"authoritative_head_seq":1,"display_name":"payload.bin","namespace_id":namespace,"parent_inode_id":"inode-0","revision_no":1,"content_manifest_digest":"digest"}]}),
+        ));
+        outputs.push(json_success(
+            "filesystem_cp",
+            json!({"type":"path_move","from":format!("{namespace}:{source_path}"),"to":format!("{namespace}:{copy_path}"),"committed_seq":2}),
+        ));
+        outputs.push(json_success(
+            "filesystem_mv",
+            json!({"type":"path_move","from":format!("{namespace}:{copy_path}"),"to":format!("{namespace}:{moved_path}"),"committed_seq":3}),
+        ));
+        outputs.push(json_success(
+            "filesystem_rm",
+            json!({"type":"file_mutation","target":format!("{namespace}:{moved_path}"),"committed_seq":4}),
         ));
         outputs
     }
