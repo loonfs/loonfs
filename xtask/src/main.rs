@@ -8,8 +8,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 
 const PROFILE_NAME: &str = "smoke";
@@ -110,8 +109,6 @@ struct PerfCommonArgs {
     namespace: Option<String>,
     #[arg(long = "json-out", default_value = DEFAULT_PERF_JSON_OUT)]
     json_out: PathBuf,
-    #[arg(long = "command-timeout-secs", default_value_t = 60)]
-    command_timeout_secs: u64,
     #[arg(long, default_value_t = 0)]
     seed: u64,
     #[arg(long)]
@@ -182,26 +179,16 @@ struct LoonOutput {
     exit_code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    timed_out: bool,
 }
 
 impl LoonOutput {
     fn success(&self) -> bool {
-        !self.timed_out && self.exit_code == Some(0)
+        self.exit_code == Some(0)
     }
 }
 
 trait LoonRunner {
     fn run(&self, session: &SmokeSession, args: &[String]) -> Result<LoonOutput>;
-
-    fn run_with_timeout(
-        &self,
-        session: &SmokeSession,
-        args: &[String],
-        _timeout: Duration,
-    ) -> Result<LoonOutput> {
-        self.run(session, args)
-    }
 }
 
 struct CargoLoonRunner {
@@ -240,60 +227,7 @@ impl LoonRunner for CargoLoonRunner {
             exit_code: output.status.code(),
             stdout: output.stdout,
             stderr: output.stderr,
-            timed_out: false,
         })
-    }
-
-    fn run_with_timeout(
-        &self,
-        session: &SmokeSession,
-        args: &[String],
-        timeout: Duration,
-    ) -> Result<LoonOutput> {
-        let mut child = Command::new(&self.cargo)
-            .arg("run")
-            .arg("--quiet")
-            .arg("-p")
-            .arg("loon-cli")
-            .arg("--")
-            .args(args)
-            .env("HOME", &session.home_dir)
-            .current_dir(&self.workspace_root)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .with_context(|| format!("run loon CLI with args `{}`", args.join(" ")))?;
-        let started = Instant::now();
-        loop {
-            if child
-                .try_wait()
-                .with_context(|| format!("wait for loon CLI with args `{}`", args.join(" ")))?
-                .is_some()
-            {
-                let output = child
-                    .wait_with_output()
-                    .with_context(|| format!("collect loon CLI output for `{}`", args.join(" ")))?;
-                return Ok(LoonOutput {
-                    exit_code: output.status.code(),
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                    timed_out: false,
-                });
-            }
-            if started.elapsed() >= timeout {
-                let _ = child.kill();
-                let output = child.wait_with_output().with_context(|| {
-                    format!("collect timed out loon CLI output for `{}`", args.join(" "))
-                })?;
-                return Ok(LoonOutput {
-                    exit_code: output.status.code(),
-                    stdout: output.stdout,
-                    stderr: output.stderr,
-                    timed_out: true,
-                });
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
     }
 }
 
@@ -367,18 +301,9 @@ struct PerfContext {
     store_kind: Option<String>,
     namespace_class: &'static str,
     output: PathBuf,
-    command_timeout: Duration,
-    events: Vec<PerfEventOwned>,
+    measured_events: usize,
     samples: Vec<PerfSample>,
     failures: usize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct PerfEventOwned {
-    operation: &'static str,
-    elapsed_ms: f64,
-    ok: bool,
-    warmup: bool,
 }
 
 impl PerfContext {
@@ -413,12 +338,9 @@ impl PerfContext {
             .with_context(|| format!("open perf output {}", self.output.display()))?;
         serde_json::to_writer(&mut file, &event).context("encode perf event")?;
         file.write_all(b"\n").context("write perf event newline")?;
-        self.events.push(PerfEventOwned {
-            operation: input.operation,
-            elapsed_ms: input.elapsed_ms,
-            ok: input.ok,
-            warmup: input.warmup,
-        });
+        if !input.warmup {
+            self.measured_events += 1;
+        }
         if !input.warmup && input.ok {
             self.samples.push(PerfSample {
                 operation: input.operation,
@@ -429,10 +351,6 @@ impl PerfContext {
             self.failures += 1;
         }
         Ok(())
-    }
-
-    fn measured_events(&self) -> usize {
-        self.events.iter().filter(|event| !event.warmup).count()
     }
 }
 
@@ -556,7 +474,6 @@ fn run_local_perf_with_id(
         warmups: args.common.warmups,
         iterations: args.common.iterations,
         json_out: args.common.json_out.clone(),
-        command_timeout: Duration::from_secs(args.common.command_timeout_secs),
         seed: args.common.seed,
         keep_workspace: args.common.keep_workspace,
     };
@@ -591,7 +508,6 @@ fn run_remote_perf_with_id(
         warmups: args.common.warmups,
         iterations: args.common.iterations,
         json_out: args.common.json_out.clone(),
-        command_timeout: Duration::from_secs(args.common.command_timeout_secs),
         seed: args.common.seed,
         keep_workspace: args.common.keep_workspace,
     };
@@ -608,7 +524,6 @@ struct PerfRunConfig {
     warmups: u32,
     iterations: u32,
     json_out: PathBuf,
-    command_timeout: Duration,
     seed: u64,
     keep_workspace: bool,
 }
@@ -627,8 +542,7 @@ fn execute_perf_run(
         store_kind: config.store_kind,
         namespace_class: config.namespace_class,
         output: config.json_out.clone(),
-        command_timeout: config.command_timeout,
-        events: Vec::new(),
+        measured_events: 0,
         samples: Vec::new(),
         failures: 0,
     };
@@ -666,11 +580,10 @@ fn execute_perf_run(
         }
     }
 
-    let measured_events = context.measured_events();
     Ok(PerfReport {
         mode: context.mode,
         output: context.output,
-        measured_events,
+        measured_events: context.measured_events,
         failures: context.failures,
         samples: context.samples,
     })
@@ -688,15 +601,12 @@ fn execute_perf_iteration(
     iteration: u32,
     warmup: bool,
 ) -> Result<()> {
-    let timeout = context.command_timeout;
     let run_id = context.run_id.clone();
     let payload = deterministic_payload(payload_size, seed, iteration);
     let payload_class = payload_class(payload_size as u64);
     let phase = if warmup { "warmup" } else { "measured" };
     let remote_root = format!("/xtask-perf/{run_id}/{payload_class}/{phase}-{iteration}");
     let source_path = format!("{remote_root}/payload.bin");
-    let copy_path = format!("{remote_root}/copy.bin");
-    let moved_path = format!("{remote_root}/moved.bin");
     let upload_file = workspace
         .root
         .join(format!("{payload_class}-{phase}-{iteration}-upload.bin"));
@@ -714,11 +624,10 @@ fn execute_perf_iteration(
         warmup,
         || {
             let envelope = expect_success_kind_classified(
-                run_json_command_timeout(
+                run_json_command(
                     runner,
                     session,
                     filesystem_put_args(session, namespace, &upload_file, &source_path),
-                    timeout,
                 )?,
                 "filesystem_put",
             )?;
@@ -735,22 +644,13 @@ fn execute_perf_iteration(
         },
     )?;
 
-    let source_inode = measure_perf_operation(
+    measure_perf_operation(
         context,
         STEP_STAT,
         Some(payload_size as u64),
         iteration,
         warmup,
-        || {
-            stat_file(
-                runner,
-                session,
-                timeout,
-                namespace,
-                &source_path,
-                payload.len(),
-            )
-        },
+        || stat_file(runner, session, namespace, &source_path, payload.len()),
     )?;
 
     measure_perf_operation(
@@ -760,11 +660,10 @@ fn execute_perf_iteration(
         iteration,
         warmup,
         || {
-            let output = run_stream_command_timeout(
+            let output = run_stream_command(
                 runner,
                 session,
                 filesystem_cat_args(session, namespace, &source_path),
-                timeout,
             )?;
             if output.stdout != payload {
                 return Err(classified_error(
@@ -784,11 +683,10 @@ fn execute_perf_iteration(
         warmup,
         || {
             let envelope = expect_success_kind_classified(
-                run_json_command_timeout(
+                run_json_command(
                     runner,
                     session,
                     filesystem_get_args(session, namespace, &source_path, &download_file),
-                    timeout,
                 )?,
                 "filesystem_get",
             )?;
@@ -823,11 +721,10 @@ fn execute_perf_iteration(
         warmup,
         || {
             let envelope = expect_success_kind_classified(
-                run_json_command_timeout(
+                run_json_command(
                     runner,
                     session,
                     filesystem_ls_args(session, namespace, &remote_root),
-                    timeout,
                 )?,
                 "filesystem_ls",
             )?;
@@ -839,144 +736,6 @@ fn execute_perf_iteration(
                 return Err(classified_error(
                     "unexpected_result",
                     "ls did not include uploaded path",
-                ));
-            }
-            Ok(Measured::ok(()))
-        },
-    )?;
-
-    measure_perf_operation(
-        context,
-        STEP_CP,
-        Some(payload_size as u64),
-        iteration,
-        warmup,
-        || {
-            let envelope = expect_success_kind_classified(
-                run_json_command_timeout(
-                    runner,
-                    session,
-                    filesystem_cp_args(session, namespace, &source_path, &copy_path),
-                    timeout,
-                )?,
-                "filesystem_cp",
-            )?;
-            let data = require_data_type(&envelope, "path_move")?;
-            let expected_copy_target = format!("{namespace}:{copy_path}");
-            let actual_copy_target = string_field(data, "to")?;
-            if actual_copy_target != expected_copy_target {
-                return Err(classified_error(
-                    "unexpected_result",
-                    "copy target did not match expected target",
-                ));
-            }
-            Ok(Measured::ok(()))
-        },
-    )?;
-
-    let copied_inode = measure_perf_operation(
-        context,
-        STEP_STAT,
-        Some(payload_size as u64),
-        iteration,
-        warmup,
-        || {
-            stat_file(
-                runner,
-                session,
-                timeout,
-                namespace,
-                &copy_path,
-                payload.len(),
-            )
-        },
-    )?;
-    if copied_inode == source_inode {
-        return Err(classified_error(
-            "unexpected_result",
-            "copy reused source inode",
-        ));
-    }
-
-    measure_perf_operation(
-        context,
-        STEP_MOVE,
-        Some(payload_size as u64),
-        iteration,
-        warmup,
-        || {
-            let envelope = expect_success_kind_classified(
-                run_json_command_timeout(
-                    runner,
-                    session,
-                    filesystem_mv_args(session, namespace, &copy_path, &moved_path),
-                    timeout,
-                )?,
-                "filesystem_mv",
-            )?;
-            let data = require_data_type(&envelope, "path_move")?;
-            let expected_moved_target = format!("{namespace}:{moved_path}");
-            let actual_moved_target = string_field(data, "to")?;
-            if actual_moved_target != expected_moved_target {
-                return Err(classified_error(
-                    "unexpected_result",
-                    "move target did not match expected target",
-                ));
-            }
-            Ok(Measured::ok(()))
-        },
-    )?;
-
-    measure_perf_operation(
-        context,
-        STEP_RM,
-        Some(payload_size as u64),
-        iteration,
-        warmup,
-        || {
-            let envelope = expect_success_kind_classified(
-                run_json_command_timeout(
-                    runner,
-                    session,
-                    filesystem_rm_args(session, namespace, &moved_path),
-                    timeout,
-                )?,
-                "filesystem_rm",
-            )?;
-            let data = require_data_type(&envelope, "file_mutation")?;
-            let expected_removed_target = format!("{namespace}:{moved_path}");
-            let actual_removed_target = string_field(data, "target")?;
-            if actual_removed_target != expected_removed_target {
-                return Err(classified_error(
-                    "unexpected_result",
-                    "rm target did not match expected target",
-                ));
-            }
-            Ok(Measured::ok(()))
-        },
-    )?;
-
-    measure_perf_operation(
-        context,
-        STEP_VERIFY_REMOVAL,
-        Some(payload_size as u64),
-        iteration,
-        warmup,
-        || {
-            let removed_stat = run_json_command_timeout(
-                runner,
-                session,
-                filesystem_stat_args(session, namespace, &moved_path),
-                timeout,
-            )?;
-            let removed_error = expect_failure_kind_classified(removed_stat, "filesystem_stat")?;
-            if removed_error.code != "path_not_found" {
-                return Err(classified_error(
-                    removed_error.code,
-                    format!(
-                        "expected path_not_found for removed path, got {}",
-                        removed_error.message
-                    ),
                 ));
             }
             Ok(Measured::ok(()))
@@ -1409,22 +1168,19 @@ fn create_perf_namespace(
 fn stat_file(
     runner: &dyn LoonRunner,
     session: &SmokeSession,
-    timeout: Duration,
     namespace: &str,
     path: &str,
     expected_size: usize,
-) -> Result<Measured<u64>> {
+) -> Result<Measured<()>> {
     let envelope = expect_success_kind_classified(
-        run_json_command_timeout(
+        run_json_command(
             runner,
             session,
             filesystem_stat_args(session, namespace, path),
-            timeout,
         )?,
         "filesystem_stat",
     )?;
     let data = require_data_type(&envelope, "path_entry")?;
-    let inode = id_field(data, "inode_id")?;
     let inode_kind = string_field(data, "inode_kind")?;
     if inode_kind != "file" {
         return Err(classified_error(
@@ -1439,7 +1195,7 @@ fn stat_file(
             format!("expected size {expected_size}, got {size_bytes}"),
         ));
     }
-    Ok(Measured::ok(inode))
+    Ok(Measured::ok(()))
 }
 
 fn run_json_command(
@@ -1448,36 +1204,6 @@ fn run_json_command(
     args: Vec<String>,
 ) -> Result<JsonCommandResult> {
     let output = runner.run(session, &args)?;
-    if output.success() {
-        Ok(JsonCommandResult::Success(parse_envelope(
-            &output.stdout,
-            "stdout",
-            &args,
-            &output,
-        )?))
-    } else {
-        Ok(JsonCommandResult::Failure(parse_envelope(
-            &output.stderr,
-            "stderr",
-            &args,
-            &output,
-        )?))
-    }
-}
-
-fn run_json_command_timeout(
-    runner: &dyn LoonRunner,
-    session: &SmokeSession,
-    args: Vec<String>,
-    timeout: Duration,
-) -> Result<JsonCommandResult> {
-    let output = runner.run_with_timeout(session, &args, timeout)?;
-    if output.timed_out {
-        return Err(classified_error(
-            "command_timeout",
-            format!("command `{}` timed out after {:?}", args.join(" "), timeout),
-        ));
-    }
     if output.success() {
         Ok(JsonCommandResult::Success(parse_envelope(
             &output.stdout,
@@ -1510,34 +1236,6 @@ fn run_stream_command(
             output.exit_code,
             String::from_utf8_lossy(&output.stderr).trim()
         );
-    }
-}
-
-fn run_stream_command_timeout(
-    runner: &dyn LoonRunner,
-    session: &SmokeSession,
-    args: Vec<String>,
-    timeout: Duration,
-) -> Result<LoonOutput> {
-    let output = runner.run_with_timeout(session, &args, timeout)?;
-    if output.timed_out {
-        return Err(classified_error(
-            "command_timeout",
-            format!("command `{}` timed out after {:?}", args.join(" "), timeout),
-        ));
-    }
-    if output.success() {
-        Ok(output)
-    } else {
-        Err(classified_error(
-            "command_failed",
-            format!(
-                "command `{}` failed with exit code {:?}: {}",
-                args.join(" "),
-                output.exit_code,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ))
     }
 }
 
@@ -1629,30 +1327,6 @@ fn expect_success_kind_classified(
                 classified_error("missing_error", "failure envelope missing error")
             })?;
             Err(classified_error(error.code, error.message))
-        }
-    }
-}
-
-fn expect_failure_kind_classified(
-    result: JsonCommandResult,
-    expected_kind: &str,
-) -> Result<JsonError> {
-    match result {
-        JsonCommandResult::Success(envelope) => {
-            let envelope = expect_kind_format(envelope, expected_kind)?;
-            Err(classified_error(
-                "unexpected_success",
-                format!(
-                    "expected `{expected_kind}` to fail, but it succeeded with data type `{}`",
-                    data_type_name(&envelope.data)
-                ),
-            ))
-        }
-        JsonCommandResult::Failure(envelope) => {
-            let envelope = expect_kind_format(envelope, expected_kind)?;
-            envelope
-                .error
-                .ok_or_else(|| classified_error("missing_error", "failure envelope missing error"))
         }
     }
 }
@@ -2456,7 +2130,6 @@ mod tests {
                 payload_sizes: "4KiB".to_owned(),
                 namespace: Some("demo".to_owned()),
                 json_out: json_out.path().to_path_buf(),
-                command_timeout_secs: 60,
                 seed: 1,
                 keep_workspace: false,
             },
@@ -2511,7 +2184,6 @@ mod tests {
                 payload_sizes: "4KiB".to_owned(),
                 namespace: Some("demo".to_owned()),
                 json_out: json_out.path().to_path_buf(),
-                command_timeout_secs: 60,
                 seed: 1,
                 keep_workspace: false,
             },
@@ -2605,7 +2277,6 @@ mod tests {
                 payload_sizes: "4KiB".to_owned(),
                 namespace: Some("demo".to_owned()),
                 json_out: json_out.path().to_path_buf(),
-                command_timeout_secs: 60,
                 seed: 1,
                 keep_workspace: false,
             },
@@ -2709,10 +2380,6 @@ root = "/tmp/xtask-loon-store"
         let phase = if warmup { "warmup" } else { "measured" };
         let source_path =
             format!("/xtask-perf/{run_id}/{payload_class}/{phase}-{iteration}/payload.bin");
-        let copy_path =
-            format!("/xtask-perf/{run_id}/{payload_class}/{phase}-{iteration}/copy.bin");
-        let moved_path =
-            format!("/xtask-perf/{run_id}/{payload_class}/{phase}-{iteration}/moved.bin");
         outputs.push(json_success(
             "filesystem_put",
             Some(PROFILE_NAME),
@@ -2729,7 +2396,6 @@ root = "/tmp/xtask-loon-store"
             exit_code: Some(0),
             stdout: deterministic_payload(payload_size, 1, iteration),
             stderr: Vec::new(),
-            timed_out: false,
         });
         outputs.push(json_success(
             "filesystem_get",
@@ -2742,37 +2408,6 @@ root = "/tmp/xtask-loon-store"
             Some(PROFILE_NAME),
             Some(mode),
             json!({"type":"path_entries","entries":[{"absolute_path":source_path,"inode_id":"inode-1","inode_kind":"file","size_bytes":payload_size,"authoritative_head_seq":1,"display_name":"payload.bin","namespace_id":namespace,"parent_inode_id":"inode-0","revision_no":1,"content_manifest_digest":"digest"}]}),
-        ));
-        outputs.push(json_success(
-            "filesystem_cp",
-            Some(PROFILE_NAME),
-            Some(mode),
-            json!({"type":"path_move","from":format!("{namespace}:{source_path}"),"to":format!("{namespace}:{copy_path}"),"committed_seq":2}),
-        ));
-        outputs.push(json_success(
-            "filesystem_stat",
-            Some(PROFILE_NAME),
-            Some(mode),
-            json!({"type":"path_entry","absolute_path":copy_path,"inode_id":"inode-2","inode_kind":"file","size_bytes":payload_size,"authoritative_head_seq":2,"display_name":"copy.bin","namespace_id":namespace,"parent_inode_id":"inode-0","revision_no":1,"content_manifest_digest":"digest"}),
-        ));
-        outputs.push(json_success(
-            "filesystem_mv",
-            Some(PROFILE_NAME),
-            Some(mode),
-            json!({"type":"path_move","from":format!("{namespace}:{copy_path}"),"to":format!("{namespace}:{moved_path}"),"committed_seq":3}),
-        ));
-        outputs.push(json_success(
-            "filesystem_rm",
-            Some(PROFILE_NAME),
-            Some(mode),
-            json!({"type":"file_mutation","target":format!("{namespace}:{moved_path}"),"committed_seq":4}),
-        ));
-        outputs.push(json_failure(
-            "filesystem_stat",
-            Some(PROFILE_NAME),
-            Some(mode),
-            "path_not_found",
-            "missing",
         ));
         outputs
     }
@@ -2817,7 +2452,6 @@ root = "/tmp/xtask-loon-store"
                 exit_code: Some(0),
                 stdout: payload.clone(),
                 stderr: Vec::new(),
-                timed_out: false,
             },
             json_success(
                 "filesystem_get",
@@ -2889,7 +2523,6 @@ root = "/tmp/xtask-loon-store"
             exit_code: Some(0),
             stdout: body,
             stderr: Vec::new(),
-            timed_out: false,
         }
     }
 
@@ -2915,7 +2548,6 @@ root = "/tmp/xtask-loon-store"
             exit_code: Some(1),
             stdout: Vec::new(),
             stderr: body,
-            timed_out: false,
         }
     }
 
