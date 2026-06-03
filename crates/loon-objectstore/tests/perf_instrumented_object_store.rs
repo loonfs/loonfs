@@ -1,6 +1,6 @@
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::perf::{
-    DefaultKeyClassifier, JsonlPerfRecorder, KeyClass, KeyClassifier, MeasuredStore,
+    DefaultKeyClassifier, InstrumentedObjectStore, JsonlPerfRecorder, KeyClass, KeyClassifier,
     ObjectStoreOperation, ObjectStoreResultClass, PerfRecorder, PutModeClass, RangeClass,
     VecPerfRecorder,
 };
@@ -12,7 +12,7 @@ use tempfile::{tempdir, NamedTempFile};
 fn records_put_success() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecPerfRecorder::default());
-    let store = measured_store(temp_dir.path(), recorder.clone());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
         .put(
@@ -38,7 +38,7 @@ fn records_put_success() {
 fn records_get_success_bytes_out() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecPerfRecorder::default());
-    let store = measured_store(temp_dir.path(), recorder.clone());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
         .put_overwrite("content-stores/cs_abc/blobs/sha256/ab/cd/abcdef", b"abcdef")
@@ -68,7 +68,7 @@ fn records_get_success_bytes_out() {
 fn records_head_and_head_with_checksum_as_distinct_operations() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecPerfRecorder::default());
-    let store = measured_store(temp_dir.path(), recorder.clone());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
         .put_overwrite("namespaces/ns-1/lease.json", b"lease")
@@ -89,7 +89,7 @@ fn records_head_and_head_with_checksum_as_distinct_operations() {
 fn records_not_found_without_key_leak() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecPerfRecorder::default());
-    let store = measured_store(temp_dir.path(), recorder.clone());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let raw_key = "namespaces/ns-1/wal/secret-segment.cbor.zst";
 
     assert!(store.get(raw_key, None).expect("get missing").is_none());
@@ -106,7 +106,7 @@ fn records_not_found_without_key_leak() {
 fn records_invalid_key_without_error_text() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecPerfRecorder::default());
-    let store = measured_store(temp_dir.path(), recorder.clone());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let raw_key = "../escape";
 
     store
@@ -125,7 +125,7 @@ fn records_invalid_key_without_error_text() {
 fn records_list_count() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecPerfRecorder::default());
-    let store = measured_store(temp_dir.path(), recorder.clone());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
         .put_overwrite("namespaces/ns-1/descriptor.json", b"descriptor")
@@ -184,7 +184,7 @@ fn jsonl_recorder_writes_valid_events_without_raw_keys() {
     let temp_dir = tempdir().expect("tempdir");
     let jsonl = NamedTempFile::new().expect("jsonl tempfile");
     let recorder = Arc::new(JsonlPerfRecorder::create(jsonl.path()).expect("jsonl recorder"));
-    let store = measured_store(temp_dir.path(), recorder);
+    let store = instrumented_object_store(temp_dir.path(), recorder);
     let raw_key = "namespaces/ns-1/head.json";
 
     store.put_overwrite(raw_key, b"head").expect("put object");
@@ -200,14 +200,14 @@ fn jsonl_recorder_writes_valid_events_without_raw_keys() {
     assert!(!line.contains("ns-1"));
 }
 
-fn measured_store<R>(
+fn instrumented_object_store<R>(
     root: &std::path::Path,
     recorder: Arc<R>,
-) -> MeasuredStore<LocalFsStore, R, DefaultKeyClassifier>
+) -> InstrumentedObjectStore<LocalFsStore, R, DefaultKeyClassifier>
 where
     R: PerfRecorder,
 {
-    MeasuredStore::new(
+    InstrumentedObjectStore::new(
         LocalFsStore::new(root).expect("local fs store"),
         recorder,
         Arc::new(DefaultKeyClassifier),

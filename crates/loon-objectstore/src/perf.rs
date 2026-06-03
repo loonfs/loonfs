@@ -163,14 +163,14 @@ impl KeyClassifier for DefaultKeyClassifier {
     }
 }
 
-pub struct MeasuredStore<S, R = NoopPerfRecorder, K = DefaultKeyClassifier> {
+pub struct InstrumentedObjectStore<S, R = NoopPerfRecorder, K = DefaultKeyClassifier> {
     inner: S,
     recorder: Arc<R>,
     key_classifier: Arc<K>,
     store_kind: Option<String>,
 }
 
-impl<S> MeasuredStore<S, NoopPerfRecorder, DefaultKeyClassifier> {
+impl<S> InstrumentedObjectStore<S, NoopPerfRecorder, DefaultKeyClassifier> {
     pub fn noop(inner: S) -> Self {
         Self {
             inner,
@@ -181,7 +181,7 @@ impl<S> MeasuredStore<S, NoopPerfRecorder, DefaultKeyClassifier> {
     }
 }
 
-impl<S, R, K> MeasuredStore<S, R, K>
+impl<S, R, K> InstrumentedObjectStore<S, R, K>
 where
     R: PerfRecorder,
     K: KeyClassifier,
@@ -205,7 +205,7 @@ where
     }
 }
 
-impl<S, R, K> ObjectStore for MeasuredStore<S, R, K>
+impl<S, R, K> ObjectStore for InstrumentedObjectStore<S, R, K>
 where
     S: ObjectStore,
     R: PerfRecorder,
@@ -268,7 +268,7 @@ where
     }
 }
 
-impl<S, R, K> MeasuredStore<S, R, K>
+impl<S, R, K> InstrumentedObjectStore<S, R, K>
 where
     R: PerfRecorder,
     K: KeyClassifier,
