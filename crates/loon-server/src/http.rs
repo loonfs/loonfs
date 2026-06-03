@@ -19,9 +19,9 @@ use loon_api::{
     RevisionNo,
 };
 use loonfs::{
-    BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs, FsConfig,
-    PathMutationIntent, PutFileBehavior, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
-    TraceMode, TraceStoreKind,
+    payload_class, BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs,
+    FsConfig, PathMutationIntent, PutFileBehavior, RuntimeCacheConfig, RuntimeError,
+    SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -164,22 +164,6 @@ fn trace_store_kind(store: &StoreConfig) -> TraceStoreKind {
         StoreConfig::LocalFs { .. } => TraceStoreKind::LocalFs,
         StoreConfig::AwsS3 { .. } => TraceStoreKind::S3,
         StoreConfig::CloudflareR2 { .. } => TraceStoreKind::R2,
-    }
-}
-
-fn trace_store_kind_label(store: &StoreConfig) -> &'static str {
-    match store {
-        StoreConfig::LocalFs { .. } => "local_fs",
-        StoreConfig::AwsS3 { .. } => "s3",
-        StoreConfig::CloudflareR2 { .. } => "r2",
-    }
-}
-
-fn trace_payload_class(size_bytes: u64) -> &'static str {
-    match size_bytes {
-        0..=16_383 => "small",
-        16_384..=1_048_575 => "medium",
-        _ => "large",
     }
 }
 
@@ -406,9 +390,9 @@ async fn filesystem_operation(
         operation,
     } = request;
     let put_payload_class = match &operation {
-        FilesystemOperation::PutFile { content_ref, .. } => {
-            Some(trace_payload_class(content_ref.size_bytes))
-        }
+        FilesystemOperation::PutFile { content_ref, .. } => Some(payload_class(
+            usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
+        )),
         _ => None,
     };
     let intent = match operation {
@@ -460,7 +444,7 @@ async fn filesystem_operation(
             "loon.put",
             operation = "put",
             mode = "remote",
-            store_kind = trace_store_kind_label(&state.config.store),
+            store_kind = trace_store_kind(&state.config.store).as_str(),
             payload_class,
         );
         state

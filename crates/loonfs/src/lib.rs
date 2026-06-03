@@ -33,7 +33,7 @@ use loon_objectstore::keys::namespace_head;
 use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
-pub use trace::{TraceMode, TraceStoreKind};
+pub use trace::{payload_class, TraceMode, TraceStoreKind};
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;

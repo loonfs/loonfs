@@ -5,7 +5,7 @@ pub enum TraceMode {
 }
 
 impl TraceMode {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Embedded => "embedded",
             Self::Remote => "remote",
@@ -22,7 +22,7 @@ pub enum TraceStoreKind {
 }
 
 impl TraceStoreKind {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::LocalFs => "local_fs",
             Self::S3 => "s3",
@@ -51,7 +51,7 @@ impl CachePath {
     }
 }
 
-pub(crate) fn payload_class(size_bytes: usize) -> &'static str {
+pub fn payload_class(size_bytes: usize) -> &'static str {
     match size_bytes {
         0..=16_383 => "small",
         16_384..=1_048_575 => "medium",
