@@ -136,9 +136,10 @@ impl PerfRecorder for JsonlPerfRecorder {
         let Ok(mut writer) = self.writer.lock() else {
             return;
         };
-        if serde_json::to_writer(&mut *writer, &event).is_ok() && writer.write_all(b"\n").is_ok() {
-            let _ = writer.flush();
+        if serde_json::to_writer(&mut *writer, &event).is_err() {
+            return;
         }
+        let _ = writer.write_all(b"\n");
     }
 }
 
@@ -249,6 +250,47 @@ where
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let start = Instant::now();
         let result = self.inner.put(key, bytes, mode.clone());
+        self.record_put(key, bytes.len() as u64, &mode, start.elapsed(), &result);
+        result
+    }
+
+    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        let start = Instant::now();
+        let result = self.inner.put_overwrite(key, bytes);
+        self.record_put(
+            key,
+            bytes.len() as u64,
+            &PutMode::Overwrite,
+            start.elapsed(),
+            &result,
+        );
+        result
+    }
+
+    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        let start = Instant::now();
+        let result = self.inner.put_if_absent(key, bytes);
+        self.record_put(
+            key,
+            bytes.len() as u64,
+            &PutMode::CreateIfAbsent,
+            start.elapsed(),
+            &result,
+        );
+        result
+    }
+
+    fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: &[u8],
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let start = Instant::now();
+        let mode = PutMode::CompareAndSwap {
+            expected_etag: expected_etag.to_owned(),
+        };
+        let result = self.inner.compare_and_swap(key, expected_etag, bytes);
         self.record_put(key, bytes.len() as u64, &mode, start.elapsed(), &result);
         result
     }

@@ -4,8 +4,8 @@ use loon_objectstore::perf::{
     ObjectStoreOperation, ObjectStoreResultClass, PerfRecorder, PutModeClass, RangeClass,
     VecPerfRecorder,
 };
-use loon_objectstore::{ByteRange, ObjectStore, PutMode};
-use std::sync::Arc;
+use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use std::sync::{Arc, Mutex};
 use tempfile::{tempdir, NamedTempFile};
 
 #[test]
@@ -32,6 +32,38 @@ fn records_put_success() {
     assert_eq!(event.put_mode, Some(PutModeClass::CreateIfAbsent));
     assert_eq!(event.key_class, KeyClass::NamespaceHead);
     assert_eq!(event.store_kind.as_deref(), Some("local-fs"));
+}
+
+#[test]
+fn delegates_convenience_writes_to_inner_store() {
+    let recorder = Arc::new(VecPerfRecorder::default());
+    let store = InstrumentedObjectStore::new(
+        DelegatingWriteStore::default(),
+        recorder.clone(),
+        Arc::new(DefaultKeyClassifier),
+    );
+
+    store
+        .put_overwrite("namespaces/ns-1/head.json", b"overwrite")
+        .expect("put overwrite");
+    store
+        .put_if_absent("namespaces/ns-1/head.json", b"create")
+        .expect("put if absent");
+    store
+        .compare_and_swap("namespaces/ns-1/head.json", "etag-old", b"swap")
+        .expect("compare and swap");
+
+    let inner = store.into_inner();
+    assert_eq!(
+        inner.calls(),
+        vec!["put_overwrite", "put_if_absent", "compare_and_swap"]
+    );
+
+    let events = recorder.events();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].put_mode, Some(PutModeClass::Overwrite));
+    assert_eq!(events[1].put_mode, Some(PutModeClass::CreateIfAbsent));
+    assert_eq!(events[2].put_mode, Some(PutModeClass::CompareAndSwap));
 }
 
 #[test]
@@ -188,6 +220,7 @@ fn jsonl_recorder_writes_valid_events_without_raw_keys() {
     let raw_key = "namespaces/ns-1/head.json";
 
     store.put_overwrite(raw_key, b"head").expect("put object");
+    drop(store);
 
     let lines = std::fs::read_to_string(jsonl.path()).expect("read jsonl");
     let mut lines = lines.lines();
@@ -213,4 +246,78 @@ where
         Arc::new(DefaultKeyClassifier),
     )
     .with_store_kind("local-fs")
+}
+
+#[derive(Default)]
+struct DelegatingWriteStore {
+    calls: Mutex<Vec<&'static str>>,
+}
+
+impl DelegatingWriteStore {
+    fn calls(&self) -> Vec<&'static str> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn record_call(&self, call: &'static str) -> ObjectMetadata {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(call);
+        ObjectMetadata {
+            etag: Some(format!("{call}-etag")),
+            size_bytes: 0,
+            checksum_sha256: None,
+        }
+    }
+}
+
+impl ObjectStore for DelegatingWriteStore {
+    fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        Ok(None)
+    }
+
+    fn get(
+        &self,
+        _key: &str,
+        _range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        Ok(None)
+    }
+
+    fn put(
+        &self,
+        _key: &str,
+        _bytes: &[u8],
+        _mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        Ok(self.record_call("put"))
+    }
+
+    fn put_overwrite(&self, _key: &str, _bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        Ok(self.record_call("put_overwrite"))
+    }
+
+    fn put_if_absent(&self, _key: &str, _bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        Ok(self.record_call("put_if_absent"))
+    }
+
+    fn compare_and_swap(
+        &self,
+        _key: &str,
+        _expected_etag: &str,
+        _bytes: &[u8],
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        Ok(self.record_call("compare_and_swap"))
+    }
+
+    fn delete(&self, _key: &str) -> Result<(), ObjectStoreError> {
+        Ok(())
+    }
+
+    fn list_prefix(&self, _prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        Ok(Vec::new())
+    }
 }
