@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod trace;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,6 +33,8 @@ use loon_objectstore::keys::namespace_head;
 use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
+pub use trace::{TraceMode, TraceStoreKind};
+use tracing::field;
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
@@ -56,6 +60,8 @@ pub struct FsConfig {
     pub writer_version: String,
     pub lease_duration_ms: u64,
     pub runtime_cache: RuntimeCacheConfig,
+    pub trace_mode: TraceMode,
+    pub trace_store_kind: TraceStoreKind,
 }
 
 impl FsConfig {
@@ -65,6 +71,8 @@ impl FsConfig {
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             runtime_cache: RuntimeCacheConfig::default(),
+            trace_mode: TraceMode::Embedded,
+            trace_store_kind: TraceStoreKind::Unknown,
         }
     }
 }
@@ -125,6 +133,7 @@ pub struct FsBuilder {
     writer_version: String,
     lease_duration_ms: u64,
     runtime_cache: RuntimeCacheConfig,
+    trace_store_kind: TraceStoreKind,
 }
 
 #[derive(Debug, Default)]
@@ -675,6 +684,7 @@ impl FsBuilder {
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             runtime_cache: RuntimeCacheConfig::default(),
+            trace_store_kind: TraceStoreKind::Unknown,
         }
     }
 
@@ -698,6 +708,11 @@ impl FsBuilder {
         self
     }
 
+    pub fn trace_store_kind(mut self, trace_store_kind: TraceStoreKind) -> Self {
+        self.trace_store_kind = trace_store_kind;
+        self
+    }
+
     pub fn build(self) -> Result<Fs> {
         let writer_id = self
             .writer_id
@@ -709,6 +724,8 @@ impl FsBuilder {
                 writer_version: self.writer_version,
                 lease_duration_ms: self.lease_duration_ms,
                 runtime_cache: self.runtime_cache,
+                trace_mode: TraceMode::Embedded,
+                trace_store_kind: self.trace_store_kind,
             },
         )
     }
@@ -793,57 +810,69 @@ impl Fs {
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
     ) -> Result<MaintenanceTickResult> {
-        if options.max_wal_tail_segments == 0 {
-            return Err(RuntimeError::Config(
-                "max_wal_tail_segments must be greater than zero".to_owned(),
-            ));
-        }
+        let span = tracing::info_span!(
+            "loon.compaction",
+            operation = "compaction",
+            mode = self.inner.config.trace_mode.as_str(),
+            store_kind = self.inner.config.trace_store_kind.as_str(),
+            result = field::Empty
+        );
+        let _guard = span.enter();
+        let result = (|| {
+            if options.max_wal_tail_segments == 0 {
+                return Err(RuntimeError::Config(
+                    "max_wal_tail_segments must be greater than zero".to_owned(),
+                ));
+            }
 
-        let status_before = self.namespace_status(namespace_id)?;
-        let observed_head_seq = status_before.head_seq;
-        if status_before.wal_tail_segments < options.max_wal_tail_segments {
-            return Ok(MaintenanceTickResult {
-                namespace_id: namespace_id.clone(),
-                status_before,
-                outcome: MaintenanceTickOutcome::NotNeeded,
-            });
-        }
-
-        let checkpoint = match self.create_checkpoint(namespace_id) {
-            Ok(checkpoint) => checkpoint,
-            Err(RuntimeError::Core(error)) if error.kind() == CoreErrorKind::StaleHead => {
+            let status_before = self.namespace_status(namespace_id)?;
+            let observed_head_seq = status_before.head_seq;
+            if status_before.wal_tail_segments < options.max_wal_tail_segments {
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
                     status_before,
-                    outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
-                        observed_head_seq,
-                    },
+                    outcome: MaintenanceTickOutcome::NotNeeded,
                 });
             }
-            Err(error) => return Err(error),
-        };
 
-        let outcome = if checkpoint.checkpoint_hint_points_at_checkpoint {
-            MaintenanceTickOutcome::CheckpointPublished {
-                checkpoint_seq: checkpoint.checkpoint_seq,
-            }
-        } else {
-            let Some(checkpoint_hint_seq) = checkpoint.checkpoint_hint_seq else {
-                return Err(RuntimeError::Core(CoreError::Store(
-                    "checkpoint hint publication returned no checkpoint hint".to_owned(),
-                )));
+            let checkpoint = match self.create_checkpoint(namespace_id) {
+                Ok(checkpoint) => checkpoint,
+                Err(RuntimeError::Core(error)) if error.kind() == CoreErrorKind::StaleHead => {
+                    return Ok(MaintenanceTickResult {
+                        namespace_id: namespace_id.clone(),
+                        status_before,
+                        outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
+                            observed_head_seq,
+                        },
+                    });
+                }
+                Err(error) => return Err(error),
             };
-            MaintenanceTickOutcome::CheckpointSuperseded {
-                attempted_seq: checkpoint.checkpoint_seq,
-                checkpoint_hint_seq,
-            }
-        };
 
-        Ok(MaintenanceTickResult {
-            namespace_id: namespace_id.clone(),
-            status_before,
-            outcome,
-        })
+            let outcome = if checkpoint.checkpoint_hint_points_at_checkpoint {
+                MaintenanceTickOutcome::CheckpointPublished {
+                    checkpoint_seq: checkpoint.checkpoint_seq,
+                }
+            } else {
+                let Some(checkpoint_hint_seq) = checkpoint.checkpoint_hint_seq else {
+                    return Err(RuntimeError::Core(CoreError::Store(
+                        "checkpoint hint publication returned no checkpoint hint".to_owned(),
+                    )));
+                };
+                MaintenanceTickOutcome::CheckpointSuperseded {
+                    attempted_seq: checkpoint.checkpoint_seq,
+                    checkpoint_hint_seq,
+                }
+            };
+
+            Ok(MaintenanceTickResult {
+                namespace_id: namespace_id.clone(),
+                status_before,
+                outcome,
+            })
+        })();
+        span.record("result", trace::result_label(&result));
+        result
     }
 
     pub fn stat_path(
@@ -851,30 +880,44 @@ impl Fs {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry> {
-        let head = self.head_for_metadata_read(namespace_id)?;
-        if head.state.checkpoint_hint_seq.is_some() {
-            if let Some(entry) =
-                loon_core::resolve_path_from_materialized_tables_at_head_with_cache(
-                    self.store(),
-                    namespace_id,
-                    &head.state,
-                    absolute_path,
-                    Some(&self.inner.metadata_table_cache),
-                )?
-            {
-                self.inner
-                    .cache_stats
-                    .record_metadata_read_source(loon_core::MetadataReadSource::MaterializedTables);
-                return Ok(entry);
+        let span = tracing::info_span!(
+            "loon.stat",
+            operation = "stat",
+            mode = self.inner.config.trace_mode.as_str(),
+            store_kind = self.inner.config.trace_store_kind.as_str(),
+            cache_path = field::Empty,
+            result = field::Empty
+        );
+        let _guard = span.enter();
+        let result = (|| {
+            let head = self.head_for_metadata_read(namespace_id)?;
+            if head.state.checkpoint_hint_seq.is_some() {
+                if let Some(entry) =
+                    loon_core::resolve_path_from_materialized_tables_at_head_with_cache(
+                        self.store(),
+                        namespace_id,
+                        &head.state,
+                        absolute_path,
+                        Some(&self.inner.metadata_table_cache),
+                    )?
+                {
+                    span.record("cache_path", trace::CachePath::MaterializedTables.as_str());
+                    self.inner.cache_stats.record_metadata_read_source(
+                        loon_core::MetadataReadSource::MaterializedTables,
+                    );
+                    return Ok(entry);
+                }
             }
-        }
 
-        let basis = self.basis_for_read_at_head(namespace_id, &head)?;
-        let entry = loon_core::resolve_path_from_basis(&basis, absolute_path)?;
-        self.inner
-            .cache_stats
-            .record_metadata_read_source(loon_core::MetadataReadSource::FullBasisFallback);
-        Ok(entry)
+            let basis = self.basis_for_read_at_head(namespace_id, &head)?;
+            let entry = loon_core::resolve_path_from_basis(&basis, absolute_path)?;
+            self.inner
+                .cache_stats
+                .record_metadata_read_source(loon_core::MetadataReadSource::FullBasisFallback);
+            Ok(entry)
+        })();
+        span.record("result", trace::result_label(&result));
+        result
     }
 
     pub fn list_path(
@@ -980,6 +1023,15 @@ impl Fs {
         bytes: &[u8],
         options: PutFileOptions,
     ) -> Result<MutationResult> {
+        let span = tracing::info_span!(
+            "loon.put",
+            operation = "put",
+            mode = self.inner.config.trace_mode.as_str(),
+            store_kind = self.inner.config.trace_store_kind.as_str(),
+            payload_class = trace::payload_class(bytes.len()),
+            result = field::Empty
+        );
+        let _guard = span.enter();
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_bytes(
             &store,
@@ -991,7 +1043,9 @@ impl Fs {
             options.commit_id.as_ref().map(CommitId::as_str),
         )
         .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        let result = self.finish_namespace_mutation(namespace_id, result);
+        span.record("result", trace::result_label(&result));
+        result
     }
 
     pub fn put_file_content_ref(
@@ -1001,6 +1055,16 @@ impl Fs {
         content_ref: ContentRef,
         options: PutFileOptions,
     ) -> Result<MutationResult> {
+        let span = tracing::info_span!(
+            "loon.put",
+            operation = "put",
+            mode = self.inner.config.trace_mode.as_str(),
+            store_kind = self.inner.config.trace_store_kind.as_str(),
+            payload_class =
+                trace::payload_class(usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX)),
+            result = field::Empty
+        );
+        let _guard = span.enter();
         let store = self.uploaded_content_proof_store(namespace_id);
         let result = loon_core::put_file_content_ref(
             &store,
@@ -1012,7 +1076,9 @@ impl Fs {
             options.commit_id.as_ref().map(CommitId::as_str),
         )
         .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        let result = self.finish_namespace_mutation(namespace_id, result);
+        span.record("result", trace::result_label(&result));
+        result
     }
 
     pub fn create_dir(
@@ -1277,10 +1343,20 @@ impl Fs {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CreateCheckpointResponse> {
+        let span = tracing::info_span!(
+            "loon.compaction",
+            operation = "compaction",
+            mode = self.inner.config.trace_mode.as_str(),
+            store_kind = self.inner.config.trace_store_kind.as_str(),
+            result = field::Empty
+        );
+        let _guard = span.enter();
         let result =
             loon_core::create_checkpoint(self.store(), namespace_id, &self.mutation_context())
                 .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        let result = self.finish_namespace_mutation(namespace_id, result);
+        span.record("result", trace::result_label(&result));
+        result
     }
 
     pub fn advance_retention_floor(
@@ -1447,6 +1523,8 @@ impl Fs {
                         // A matching ETag only proves the durable head object is
                         // unchanged since this basis was reconstructed and
                         // verified; the cache itself is not authoritative.
+                        tracing::Span::current()
+                            .record("cache_path", trace::CachePath::WarmReuse.as_str());
                         return Ok(basis.basis_arc());
                     }
                     Ok(_) | Err(_) => {
@@ -1459,6 +1537,8 @@ impl Fs {
                         // A matching ETag only proves the durable head object is
                         // unchanged since this basis was reconstructed and
                         // verified; the cache itself is not authoritative.
+                        tracing::Span::current()
+                            .record("cache_path", trace::CachePath::EtagProbe.as_str());
                         return Ok(basis.basis_arc());
                     }
                     Ok(_) | Err(_) => {
@@ -1470,6 +1550,7 @@ impl Fs {
 
         let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
             .map_err(CoreError::from)?;
+        tracing::Span::current().record("cache_path", trace::CachePath::ColdReconstruct.as_str());
         let basis = Arc::new(basis);
         self.cache_basis(Arc::clone(&basis));
         Ok(basis)
@@ -1490,6 +1571,8 @@ impl Fs {
                 .get(namespace_id);
             if let Some(basis) = cached {
                 if basis.matches_head_etag(&head.identity.etag) {
+                    tracing::Span::current()
+                        .record("cache_path", trace::CachePath::WarmReuse.as_str());
                     return Ok(basis.basis_arc());
                 }
                 self.invalidate_namespace_cache(namespace_id);
@@ -1503,12 +1586,15 @@ impl Fs {
             head.identity.etag.clone(),
         )
         .map_err(CoreError::from)?;
+        tracing::Span::current().record("cache_path", trace::CachePath::ColdReconstruct.as_str());
         let basis = Arc::new(basis);
         self.cache_basis(Arc::clone(&basis));
         Ok(basis)
     }
 
     fn cache_basis(&self, basis: Arc<VerifiedNamespaceBasis>) {
+        let span = tracing::info_span!("update_cache");
+        let _guard = span.enter();
         let cache_config = &self.inner.config.runtime_cache;
         if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
             return;
@@ -1521,6 +1607,8 @@ impl Fs {
     }
 
     fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
+        let span = tracing::info_span!("update_cache");
+        let _guard = span.enter();
         self.inner
             .basis_cache
             .lock()

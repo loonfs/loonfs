@@ -141,6 +141,8 @@ fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
     head: HeadState,
     head_etag: String,
 ) -> Result<VerifiedNamespaceBasis, BasisLoadError> {
+    let span = tracing::info_span!("reconstruct_basis");
+    let _guard = span.enter();
     let loaded_lease =
         read_lease_object(store, expected_namespace).map_err(BasisLoadError::LoadLease)?;
 
@@ -169,12 +171,16 @@ fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
             stop_after_seq: None,
         },
     )?;
-    let replayed = replay_validated_wal_tail_with_metadata(
-        &initial_head,
-        &initial_metadata_state,
-        wal_chain.segments(),
-    )
-    .map_err(BasisLoadError::WalReplay)?;
+    let replayed = {
+        let span = tracing::info_span!("project_metadata_state");
+        let _guard = span.enter();
+        replay_validated_wal_tail_with_metadata(
+            &initial_head,
+            &initial_metadata_state,
+            wal_chain.segments(),
+        )
+        .map_err(BasisLoadError::WalReplay)?
+    };
     ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
 
     Ok(VerifiedNamespaceBasis {
@@ -238,6 +244,8 @@ pub fn probe_namespace_head_etag<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace: &NamespaceId,
 ) -> Result<NamespaceHeadEtagProbe, CoreError> {
+    let span = tracing::info_span!("probe_namespace_head_etag", key_class = "namespace_head");
+    let _guard = span.enter();
     NamespaceId::parse(expected_namespace.as_str())?;
     let object_key = namespace_head(expected_namespace.as_str());
     let metadata = store

@@ -575,7 +575,11 @@ pub fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> Result<CreateCheckpointResponse, CoreError> {
-    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    let basis = {
+        let span = tracing::info_span!("scan_namespace_state");
+        let _guard = span.enter();
+        load_verified_namespace_basis(store, namespace_id)?
+    };
     let checkpoint_seq = basis.head.seq;
 
     match load_verified_checkpoint_materialization_if_present(store, namespace_id, checkpoint_seq) {
@@ -689,6 +693,8 @@ fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
     writer_version: &str,
     policy: MetadataLsmPolicy,
 ) -> Result<CheckpointManifestEnvelope, CoreError> {
+    let span = tracing::info_span!("project_checkpoint");
+    let _guard = span.enter();
     let checkpoint_seq = basis.head.seq;
     let previous_checkpoint = match basis.head.checkpoint_hint_seq {
         Some(previous_seq) if previous_seq < checkpoint_seq => Some(
@@ -856,24 +862,28 @@ pub(crate) fn load_verified_checkpoint_tables_with_cache<'a, S: ObjectStore + ?S
     checkpoint_seq: ChangeSeq,
 ) -> Result<VerifiedCheckpointTables<'a, S>, CheckpointLoadError> {
     let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
-    let Some(manifest_bytes) =
-        store
-            .get(&manifest_key, None)
-            .map_err(|err| CheckpointLoadError::ReadManifest {
+    let manifest = {
+        let span = tracing::info_span!("load_checkpoint_manifest", key_class = "checkpoint_table");
+        let _guard = span.enter();
+        let Some(manifest_bytes) =
+            store
+                .get(&manifest_key, None)
+                .map_err(|err| CheckpointLoadError::ReadManifest {
+                    object_key: manifest_key.clone(),
+                    message: err.to_string(),
+                })?
+        else {
+            return Err(CheckpointLoadError::MissingManifest {
+                object_key: manifest_key,
+            });
+        };
+        decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
+            CheckpointLoadError::ManifestCodec {
                 object_key: manifest_key.clone(),
                 message: err.to_string(),
-            })?
-    else {
-        return Err(CheckpointLoadError::MissingManifest {
-            object_key: manifest_key,
-        });
+            }
+        })?
     };
-    let manifest = decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
-        CheckpointLoadError::ManifestCodec {
-            object_key: manifest_key.clone(),
-            message: err.to_string(),
-        }
-    })?;
     validate_checkpoint_manifest(namespace_id, checkpoint_seq, &manifest_key, &manifest)?;
     validate_checkpoint_materialization_ranges(&manifest_key, &manifest.payload)?;
     for run in &manifest.payload.runs {
@@ -919,22 +929,26 @@ fn load_verified_checkpoint_materialization_if_present<S: ObjectStore + ?Sized>(
     checkpoint_seq: ChangeSeq,
 ) -> Result<Option<LoadedCheckpointMaterialization>, CheckpointLoadError> {
     let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
-    let Some(manifest_bytes) =
-        store
-            .get(&manifest_key, None)
-            .map_err(|err| CheckpointLoadError::ReadManifest {
+    let manifest = {
+        let span = tracing::info_span!("load_checkpoint_manifest", key_class = "checkpoint_table");
+        let _guard = span.enter();
+        let Some(manifest_bytes) =
+            store
+                .get(&manifest_key, None)
+                .map_err(|err| CheckpointLoadError::ReadManifest {
+                    object_key: manifest_key.clone(),
+                    message: err.to_string(),
+                })?
+        else {
+            return Ok(None);
+        };
+        decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
+            CheckpointLoadError::ManifestCodec {
                 object_key: manifest_key.clone(),
                 message: err.to_string(),
-            })?
-    else {
-        return Ok(None);
+            }
+        })?
     };
-    let manifest = decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
-        CheckpointLoadError::ManifestCodec {
-            object_key: manifest_key.clone(),
-            message: err.to_string(),
-        }
-    })?;
     validate_checkpoint_manifest(namespace_id, checkpoint_seq, &manifest_key, &manifest)?;
     let metadata_state = load_checkpoint_materialization_from_manifest(
         store,
@@ -1048,6 +1062,8 @@ where
     RowsForFamily: FnMut(CheckpointTableFamily) -> Vec<CheckpointRow>,
     ObjectKeyForSegment: FnMut(CheckpointTableFamily, u32) -> String,
 {
+    let span = tracing::info_span!("write_checkpoint_tables", key_class = "checkpoint_table");
+    let _guard = span.enter();
     let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
     for family in CHECKPOINT_TABLE_FAMILIES {
         let rows = rows_for_family(family);
@@ -1221,6 +1237,8 @@ fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &CheckpointManifestEnvelope,
 ) -> Result<(), BasisLoadError> {
+    let span = tracing::info_span!("write_checkpoint_manifest", key_class = "checkpoint_table");
+    let _guard = span.enter();
     let manifest_key = checkpoint_manifest(
         manifest.payload.namespace_id.as_str(),
         manifest.payload.checkpoint_seq.0,
@@ -1274,6 +1292,8 @@ fn publish_checkpoint_hint_seq<S: ObjectStore + ?Sized>(
     checkpoint_seq: ChangeSeq,
     writer_version: &str,
 ) -> Result<HeadState, CoreError> {
+    let span = tracing::info_span!("publish_compacted_head", key_class = "namespace_head");
+    let _guard = span.enter();
     for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
@@ -1468,6 +1488,8 @@ fn load_checkpoint_materialization_from_manifest<S: ObjectStore + ?Sized>(
     manifest_object_key: &str,
     manifest: &CheckpointManifestEnvelope,
 ) -> Result<MetadataState, CheckpointLoadError> {
+    let span = tracing::info_span!("load_checkpoint_tables", key_class = "checkpoint_table");
+    let _guard = span.enter();
     let mut metadata_state = MetadataStateBuilder::default();
     validate_checkpoint_materialization_ranges(manifest_object_key, &manifest.payload)?;
     for run in runs_in_materialization_order(&manifest.payload) {
@@ -1505,6 +1527,8 @@ fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
     segment_seq: ChangeSeq,
     tables: &[CheckpointTableManifest],
 ) -> Result<MetadataState, CheckpointLoadError> {
+    let span = tracing::info_span!("load_checkpoint_tables", key_class = "checkpoint_table");
+    let _guard = span.enter();
     let mut metadata_state = MetadataStateBuilder::default();
     append_checkpoint_tables_to_metadata(
         store,

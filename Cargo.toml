@@ -40,6 +40,8 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 ureq = { version = "2.10", features = ["json"] }
 urlencoding = "2"
 unicode-casefold = "0.2"

@@ -9,6 +9,7 @@ use loonfs::{
     BootstrapNamespaceError, CopyOptions, CoreError, CoreErrorKind, CreateDirOptions,
     CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, MoveOptions, PutFileBehavior,
     PutFileOptions, RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -551,11 +552,21 @@ impl EmbeddedTarget {
                     .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION"))),
                 lease_duration_ms: lease_duration_ms.unwrap_or(DEFAULT_LEASE_DURATION_MS),
                 runtime_cache: RuntimeCacheConfig::default(),
+                trace_mode: TraceMode::Embedded,
+                trace_store_kind: trace_store_kind(store_config),
             },
         )
         .map_err(map_runtime_error)?;
         let backend = EmbeddedBackend { fs };
         Ok(Self { backend })
+    }
+}
+
+fn trace_store_kind(store: &StoreConfig) -> TraceStoreKind {
+    match store {
+        StoreConfig::LocalFs { .. } => TraceStoreKind::LocalFs,
+        StoreConfig::AwsS3 { .. } => TraceStoreKind::S3,
+        StoreConfig::CloudflareR2 { .. } => TraceStoreKind::R2,
     }
 }
 

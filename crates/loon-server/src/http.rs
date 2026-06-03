@@ -1,4 +1,4 @@
-use crate::config::{ServerConfig, ServerConfigError};
+use crate::config::{ServerConfig, ServerConfigError, StoreConfig};
 use crate::publisher::PublisherRegistry;
 use axum::body::Bytes;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -21,10 +21,12 @@ use loon_api::{
 use loonfs::{
     BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs, FsConfig,
     PathMutationIntent, PutFileBehavior, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
+    TraceMode, TraceStoreKind,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::task;
+use tracing::{field, Instrument};
 
 type SharedStore = SharedObjectStore;
 
@@ -147,12 +149,46 @@ fn build_fs(config: &ServerConfig, store: SharedStore) -> Result<Fs, ServerConfi
             writer_version: config.writer_version.clone(),
             lease_duration_ms: config.lease_duration_ms,
             runtime_cache: RuntimeCacheConfig::default(),
+            trace_mode: TraceMode::Remote,
+            trace_store_kind: trace_store_kind(&config.store),
         },
     )
     .map_err(|error| ServerConfigError::InvalidField {
         field: "runtime",
         reason: error.to_string(),
     })
+}
+
+fn trace_store_kind(store: &StoreConfig) -> TraceStoreKind {
+    match store {
+        StoreConfig::LocalFs { .. } => TraceStoreKind::LocalFs,
+        StoreConfig::AwsS3 { .. } => TraceStoreKind::S3,
+        StoreConfig::CloudflareR2 { .. } => TraceStoreKind::R2,
+    }
+}
+
+fn trace_store_kind_label(store: &StoreConfig) -> &'static str {
+    match store {
+        StoreConfig::LocalFs { .. } => "local_fs",
+        StoreConfig::AwsS3 { .. } => "s3",
+        StoreConfig::CloudflareR2 { .. } => "r2",
+    }
+}
+
+fn trace_payload_class(size_bytes: u64) -> &'static str {
+    match size_bytes {
+        0..=16_383 => "small",
+        16_384..=1_048_575 => "medium",
+        _ => "large",
+    }
+}
+
+fn trace_result_label<T, E>(result: &Result<T, E>) -> &'static str {
+    if result.is_ok() {
+        "ok"
+    } else {
+        "error"
+    }
 }
 
 pub async fn serve(config: ServerConfig) -> Result<(), String> {
@@ -377,6 +413,12 @@ async fn filesystem_operation(
         commit_id,
         operation,
     } = request;
+    let put_payload_class = match &operation {
+        FilesystemOperation::PutFile { content_ref, .. } => {
+            Some(trace_payload_class(content_ref.size_bytes))
+        }
+        _ => None,
+    };
     let intent = match operation {
         FilesystemOperation::CreateDir { path } => PathMutationIntent::CreateDir {
             commit_id,
@@ -421,10 +463,29 @@ async fn filesystem_operation(
             source_revision_no,
         },
     };
-    let response = state
-        .publisher
-        .submit_path_intent(namespace_id.clone(), intent)
-        .await
+    let response_result = if let Some(payload_class) = put_payload_class {
+        let span = tracing::info_span!(
+            "loon.put",
+            operation = "put",
+            mode = "remote",
+            store_kind = trace_store_kind_label(&state.config.store),
+            payload_class,
+            result = field::Empty
+        );
+        let result = state
+            .publisher
+            .submit_path_intent(namespace_id.clone(), intent)
+            .instrument(span.clone())
+            .await;
+        span.record("result", trace_result_label(&result));
+        result
+    } else {
+        state
+            .publisher
+            .submit_path_intent(namespace_id.clone(), intent)
+            .await
+    };
+    let response = response_result
         .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;
     let result = FilesystemOperationResponse {
         namespace_id: response.namespace_id,
@@ -763,6 +824,7 @@ mod tests {
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
     use loonfs::{
         CreateNamespaceOptions, Fs, FsConfig, PutFileBehavior, PutFileOptions, RuntimeCacheConfig,
+        TraceMode, TraceStoreKind,
     };
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1187,6 +1249,8 @@ mod tests {
                 writer_version: format!("{writer_id}/0.1.0"),
                 lease_duration_ms: 60_000,
                 runtime_cache: RuntimeCacheConfig::default(),
+                trace_mode: TraceMode::Remote,
+                trace_store_kind: TraceStoreKind::LocalFs,
             },
         )
         .expect("open runtime")

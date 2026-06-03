@@ -226,6 +226,8 @@ pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
+    let span = tracing::info_span!("write_content_blob", key_class = "content_blob");
+    let _guard = span.enter();
     let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
     let content_ref = ContentRef::whole_file_v0(bytes);
     let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)

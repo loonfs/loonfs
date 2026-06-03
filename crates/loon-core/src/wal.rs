@@ -273,6 +273,8 @@ pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
     store: &S,
     request: WalChainLoadRequest<'_>,
 ) -> Result<ValidatedWalChain, WalChainLoadError> {
+    let span = tracing::info_span!("load_validated_wal_chain", key_class = "wal_segment");
+    let _guard = span.enter();
     if request.chain_base_seq > request.head_seq {
         return Err(WalChainLoadError::InvalidSeqRange {
             chain_base_seq: request.chain_base_seq,

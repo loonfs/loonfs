@@ -68,6 +68,8 @@ pub fn resolve_path_from_basis(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
+    let span = tracing::info_span!("walk_path");
+    let _guard = span.enter();
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
     let resolved = basis.metadata_state.resolve_visible_path(
         &absolute_path,
@@ -112,6 +114,8 @@ pub fn list_path_from_basis(
     basis: &crate::VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+    let span = tracing::info_span!("walk_path");
+    let _guard = span.enter();
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
     let resolved = basis.metadata_state.resolve_visible_path(
         &absolute_path,
@@ -305,12 +309,16 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             },
         )
         .map_err(|error| CoreError::Basis(BasisLoadError::WalChainLoad(error)))?;
-        let replayed = replay_validated_wal_tail_with_metadata(
-            &checkpoint_head,
-            &MetadataState::default(),
-            wal_chain.segments(),
-        )
-        .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))?;
+        let replayed = {
+            let span = tracing::info_span!("project_metadata_state");
+            let _guard = span.enter();
+            replay_validated_wal_tail_with_metadata(
+                &checkpoint_head,
+                &MetadataState::default(),
+                wal_chain.segments(),
+            )
+            .map_err(|error| CoreError::Basis(BasisLoadError::WalReplay(error)))?
+        };
         Ok(Some(Self {
             namespace_id: namespace_id.clone(),
             head,
@@ -320,12 +328,16 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
     }
 
     fn resolve_path(&self, absolute_path: &str) -> Result<AuthoritativePathEntry, CoreError> {
+        let span = tracing::info_span!("walk_path");
+        let _guard = span.enter();
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let resolved = self.resolve_visible_path(&absolute_path)?;
         self.build_authoritative_path_entry(&resolved)
     }
 
     fn list_path(&self, absolute_path: &str) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+        let span = tracing::info_span!("walk_path");
+        let _guard = span.enter();
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let resolved = self.resolve_visible_path(&absolute_path)?;
         if resolved.inode_kind == InodeKind::File {
