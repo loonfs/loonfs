@@ -575,9 +575,10 @@ pub fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> Result<CreateCheckpointResponse, CoreError> {
-    let basis = crate::trace::sync_phase("scan_namespace_state", || {
+    let basis = {
+        let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
         load_verified_namespace_basis(store, namespace_id)
-    })?;
+    }?;
     let checkpoint_seq = basis.head.seq;
 
     match load_verified_checkpoint_materialization_if_present(store, namespace_id, checkpoint_seq) {
@@ -684,6 +685,12 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
     Ok(manifest)
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    skip_all,
+    fields(phase = "project_checkpoint")
+)]
 fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -691,96 +698,94 @@ fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
     writer_version: &str,
     policy: MetadataLsmPolicy,
 ) -> Result<CheckpointManifestEnvelope, CoreError> {
-    crate::trace::sync_phase("project_checkpoint", || {
-        let checkpoint_seq = basis.head.seq;
-        let previous_checkpoint = match basis.head.checkpoint_hint_seq {
-            Some(previous_seq) if previous_seq < checkpoint_seq => Some(
-                load_verified_checkpoint_materialization(store, namespace_id, previous_seq)
-                    .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?,
-            ),
-            _ => None,
-        };
+    let checkpoint_seq = basis.head.seq;
+    let previous_checkpoint = match basis.head.checkpoint_hint_seq {
+        Some(previous_seq) if previous_seq < checkpoint_seq => Some(
+            load_verified_checkpoint_materialization(store, namespace_id, previous_seq)
+                .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?,
+        ),
+        _ => None,
+    };
 
-        let (base_seq, runs) = match previous_checkpoint {
-            Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
-                let run_id = generate_checkpoint_run_id();
-                let mut runs = previous.manifest.payload.runs.clone();
-                runs.push(CheckpointRunManifest {
-                    run_id: run_id.clone(),
-                    run_seq: checkpoint_seq,
-                    level: CHECKPOINT_L0_RUN_LEVEL,
-                    tables: build_checkpoint_l0_run_tables(
-                        store,
-                        namespace_id,
-                        checkpoint_seq,
-                        &run_id,
-                        previous.manifest.payload.checkpoint_seq,
-                        &basis.metadata_state,
-                        writer_version,
-                    )?,
-                });
-                (previous.manifest.payload.base_seq, runs)
-            }
-            Some(_) => {
-                let run_id = generate_checkpoint_run_id();
-                let run_tables = build_checkpoint_tables(
+    let (base_seq, runs) = match previous_checkpoint {
+        Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
+            let run_id = generate_checkpoint_run_id();
+            let mut runs = previous.manifest.payload.runs.clone();
+            runs.push(CheckpointRunManifest {
+                run_id: run_id.clone(),
+                run_seq: checkpoint_seq,
+                level: CHECKPOINT_L0_RUN_LEVEL,
+                tables: build_checkpoint_l0_run_tables(
                     store,
                     namespace_id,
-                    &run_id,
                     checkpoint_seq,
+                    &run_id,
+                    previous.manifest.payload.checkpoint_seq,
                     &basis.metadata_state,
                     writer_version,
-                    policy.max_rows_per_segment,
-                )?;
-                debug_assert_checkpoint_table_segments_do_not_overlap(&run_tables);
-                (
-                    checkpoint_seq,
-                    vec![CheckpointRunManifest {
-                        run_id,
-                        run_seq: checkpoint_seq,
-                        level: CHECKPOINT_BASE_RUN_LEVEL,
-                        tables: run_tables,
-                    }],
-                )
-            }
-            _ => {
-                let run_id = generate_checkpoint_run_id();
-                let run_tables = build_checkpoint_tables(
-                    store,
-                    namespace_id,
-                    &run_id,
-                    checkpoint_seq,
-                    &basis.metadata_state,
-                    writer_version,
-                    policy.max_rows_per_segment,
-                )?;
-                (
-                    checkpoint_seq,
-                    vec![CheckpointRunManifest {
-                        run_id,
-                        run_seq: checkpoint_seq,
-                        level: CHECKPOINT_BASE_RUN_LEVEL,
-                        tables: run_tables,
-                    }],
-                )
-            }
-        };
-
-        CheckpointManifestEnvelope::from_payload(
-            writer_version,
-            CheckpointManifestPayload {
-                namespace_id: namespace_id.clone(),
+                )?,
+            });
+            (previous.manifest.payload.base_seq, runs)
+        }
+        Some(_) => {
+            let run_id = generate_checkpoint_run_id();
+            let run_tables = build_checkpoint_tables(
+                store,
+                namespace_id,
+                &run_id,
                 checkpoint_seq,
-                base_seq,
-                active_fence_token: basis.head.active_fence_token,
-                next_inode_id: basis.head.next_inode_id,
-                retention_floor_seq: basis.head.retention_floor_seq,
-                verified: true,
-                runs,
-            },
-        )
-        .map_err(|err| CoreError::Store(err.to_string()))
-    })
+                &basis.metadata_state,
+                writer_version,
+                policy.max_rows_per_segment,
+            )?;
+            debug_assert_checkpoint_table_segments_do_not_overlap(&run_tables);
+            (
+                checkpoint_seq,
+                vec![CheckpointRunManifest {
+                    run_id,
+                    run_seq: checkpoint_seq,
+                    level: CHECKPOINT_BASE_RUN_LEVEL,
+                    tables: run_tables,
+                }],
+            )
+        }
+        _ => {
+            let run_id = generate_checkpoint_run_id();
+            let run_tables = build_checkpoint_tables(
+                store,
+                namespace_id,
+                &run_id,
+                checkpoint_seq,
+                &basis.metadata_state,
+                writer_version,
+                policy.max_rows_per_segment,
+            )?;
+            (
+                checkpoint_seq,
+                vec![CheckpointRunManifest {
+                    run_id,
+                    run_seq: checkpoint_seq,
+                    level: CHECKPOINT_BASE_RUN_LEVEL,
+                    tables: run_tables,
+                }],
+            )
+        }
+    };
+
+    CheckpointManifestEnvelope::from_payload(
+        writer_version,
+        CheckpointManifestPayload {
+            namespace_id: namespace_id.clone(),
+            checkpoint_seq,
+            base_seq,
+            active_fence_token: basis.head.active_fence_token,
+            next_inode_id: basis.head.next_inode_id,
+            retention_floor_seq: basis.head.retention_floor_seq,
+            verified: true,
+            runs,
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))
 }
 
 pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
@@ -860,29 +865,32 @@ pub(crate) fn load_verified_checkpoint_tables_with_cache<'a, S: ObjectStore + ?S
     checkpoint_seq: ChangeSeq,
 ) -> Result<VerifiedCheckpointTables<'a, S>, CheckpointLoadError> {
     let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
-    let manifest = crate::trace::sync_phase_with_key_class(
-        "load_checkpoint_manifest",
-        "checkpoint_table",
-        || {
-            let Some(manifest_bytes) = store.get(&manifest_key, None).map_err(|err| {
-                CheckpointLoadError::ReadManifest {
+    let manifest = {
+        let _span = tracing::info_span!(
+            "loon.phase",
+            phase = "load_checkpoint_manifest",
+            key_class = "checkpoint_table"
+        )
+        .entered();
+        let Some(manifest_bytes) =
+            store
+                .get(&manifest_key, None)
+                .map_err(|err| CheckpointLoadError::ReadManifest {
                     object_key: manifest_key.clone(),
                     message: err.to_string(),
-                }
-            })?
-            else {
-                return Err(CheckpointLoadError::MissingManifest {
-                    object_key: manifest_key.clone(),
-                });
-            };
-            decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
-                CheckpointLoadError::ManifestCodec {
-                    object_key: manifest_key.clone(),
-                    message: err.to_string(),
-                }
-            })
-        },
-    )?;
+                })?
+        else {
+            return Err(CheckpointLoadError::MissingManifest {
+                object_key: manifest_key.clone(),
+            });
+        };
+        decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
+            CheckpointLoadError::ManifestCodec {
+                object_key: manifest_key.clone(),
+                message: err.to_string(),
+            }
+        })
+    }?;
     validate_checkpoint_manifest(namespace_id, checkpoint_seq, &manifest_key, &manifest)?;
     validate_checkpoint_materialization_ranges(&manifest_key, &manifest.payload)?;
     for run in &manifest.payload.runs {
@@ -928,29 +936,32 @@ fn load_verified_checkpoint_materialization_if_present<S: ObjectStore + ?Sized>(
     checkpoint_seq: ChangeSeq,
 ) -> Result<Option<LoadedCheckpointMaterialization>, CheckpointLoadError> {
     let manifest_key = checkpoint_manifest(namespace_id.as_str(), checkpoint_seq.0);
-    let Some(manifest) = crate::trace::sync_phase_with_key_class(
-        "load_checkpoint_manifest",
-        "checkpoint_table",
-        || {
-            let Some(manifest_bytes) = store.get(&manifest_key, None).map_err(|err| {
-                CheckpointLoadError::ReadManifest {
+    let manifest = {
+        let _span = tracing::info_span!(
+            "loon.phase",
+            phase = "load_checkpoint_manifest",
+            key_class = "checkpoint_table"
+        )
+        .entered();
+        let Some(manifest_bytes) =
+            store
+                .get(&manifest_key, None)
+                .map_err(|err| CheckpointLoadError::ReadManifest {
                     object_key: manifest_key.clone(),
                     message: err.to_string(),
-                }
-            })?
-            else {
-                return Ok(None);
-            };
-            let manifest = decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
-                CheckpointLoadError::ManifestCodec {
-                    object_key: manifest_key.clone(),
-                    message: err.to_string(),
-                }
-            })?;
-            Ok(Some(manifest))
-        },
-    )?
-    else {
+                })?
+        else {
+            return Ok(None);
+        };
+        let manifest = decode_checkpoint_manifest_json(&manifest_bytes).map_err(|err| {
+            CheckpointLoadError::ManifestCodec {
+                object_key: manifest_key.clone(),
+                message: err.to_string(),
+            }
+        })?;
+        Ok(Some(manifest))
+    }?;
+    let Some(manifest) = manifest else {
         return Ok(None);
     };
     validate_checkpoint_manifest(namespace_id, checkpoint_seq, &manifest_key, &manifest)?;
@@ -1052,6 +1063,12 @@ struct CheckpointSegmentRows {
     rows: Vec<CheckpointRow>,
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    skip_all,
+    fields(phase = "write_checkpoint_tables", key_class = "checkpoint_table")
+)]
 fn build_checkpoint_tables_from_rows<S, RowsForFamily, ObjectKeyForSegment>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1066,46 +1083,43 @@ where
     RowsForFamily: FnMut(CheckpointTableFamily) -> Vec<CheckpointRow>,
     ObjectKeyForSegment: FnMut(CheckpointTableFamily, u32) -> String,
 {
-    crate::trace::sync_phase_with_key_class("write_checkpoint_tables", "checkpoint_table", || {
-        let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
-        for family in CHECKPOINT_TABLE_FAMILIES {
-            let rows = rows_for_family(family);
-            if rows.is_empty() {
-                tables.push(CheckpointTableManifest {
-                    family,
-                    segments: Vec::new(),
-                });
-                continue;
-            }
-
-            let segments = segment_checkpoint_rows(family, rows, segmentation);
-            let mut descriptors = Vec::with_capacity(segments.len());
-            for (segment_index, segment_rows) in segments.into_iter().enumerate() {
-                let segment_index = u32::try_from(segment_index).map_err(|_| {
-                    CoreError::Store("checkpoint segment index overflow".to_owned())
-                })?;
-                let object_key = object_key_for_segment(family, segment_index);
-                descriptors.push(write_checkpoint_segment(
-                    store,
-                    CheckpointSegmentWriteRequest {
-                        namespace_id,
-                        segment_seq,
-                        family,
-                        segment_index,
-                        segment_key: segment_rows.segment_key,
-                        rows: segment_rows.rows,
-                        object_key,
-                        writer_version,
-                    },
-                )?);
-            }
+    let mut tables = Vec::with_capacity(CHECKPOINT_TABLE_FAMILIES.len());
+    for family in CHECKPOINT_TABLE_FAMILIES {
+        let rows = rows_for_family(family);
+        if rows.is_empty() {
             tables.push(CheckpointTableManifest {
                 family,
-                segments: descriptors,
+                segments: Vec::new(),
             });
+            continue;
         }
-        Ok(tables)
-    })
+
+        let segments = segment_checkpoint_rows(family, rows, segmentation);
+        let mut descriptors = Vec::with_capacity(segments.len());
+        for (segment_index, segment_rows) in segments.into_iter().enumerate() {
+            let segment_index = u32::try_from(segment_index)
+                .map_err(|_| CoreError::Store("checkpoint segment index overflow".to_owned()))?;
+            let object_key = object_key_for_segment(family, segment_index);
+            descriptors.push(write_checkpoint_segment(
+                store,
+                CheckpointSegmentWriteRequest {
+                    namespace_id,
+                    segment_seq,
+                    family,
+                    segment_index,
+                    segment_key: segment_rows.segment_key,
+                    rows: segment_rows.rows,
+                    object_key,
+                    writer_version,
+                },
+            )?);
+        }
+        tables.push(CheckpointTableManifest {
+            family,
+            segments: descriptors,
+        });
+    }
+    Ok(tables)
 }
 
 struct CheckpointSegmentWriteRequest<'a> {
@@ -1238,99 +1252,107 @@ fn checkpoint_row_parent_inode_id(row: &CheckpointRow) -> Option<InodeId> {
     }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    skip_all,
+    fields(phase = "write_checkpoint_manifest", key_class = "checkpoint_table")
+)]
 fn write_checkpoint_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &CheckpointManifestEnvelope,
 ) -> Result<(), BasisLoadError> {
-    crate::trace::sync_phase_with_key_class("write_checkpoint_manifest", "checkpoint_table", || {
-        let manifest_key = checkpoint_manifest(
-            manifest.payload.namespace_id.as_str(),
-            manifest.payload.checkpoint_seq.0,
-        );
-        let manifest_bytes = encode_checkpoint_manifest_json(manifest).map_err(|err| {
-            BasisLoadError::CheckpointLoad(CheckpointLoadError::ManifestCodec {
-                object_key: manifest_key.clone(),
-                message: err.to_string(),
-            })
-        })?;
-        match store.put_if_absent(&manifest_key, &manifest_bytes) {
-            Ok(_) => Ok(()),
-            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
-                let Some(existing) = load_verified_checkpoint_materialization_if_present(
-                    store,
-                    &manifest.payload.namespace_id,
-                    manifest.payload.checkpoint_seq,
-                )
-                .map_err(BasisLoadError::CheckpointLoad)?
-                else {
-                    return Err(BasisLoadError::CheckpointLoad(
-                        CheckpointLoadError::MissingManifest {
-                            object_key: manifest_key,
-                        },
-                    ));
-                };
-                if existing.manifest.payload.checkpoint_seq == manifest.payload.checkpoint_seq {
-                    Ok(())
-                } else {
-                    Err(BasisLoadError::CheckpointLoad(
-                        CheckpointLoadError::ManifestSeqMismatch {
-                            object_key: manifest_key,
-                            expected: manifest.payload.checkpoint_seq,
-                            actual: existing.manifest.payload.checkpoint_seq,
-                        },
-                    ))
-                }
+    let manifest_key = checkpoint_manifest(
+        manifest.payload.namespace_id.as_str(),
+        manifest.payload.checkpoint_seq.0,
+    );
+    let manifest_bytes = encode_checkpoint_manifest_json(manifest).map_err(|err| {
+        BasisLoadError::CheckpointLoad(CheckpointLoadError::ManifestCodec {
+            object_key: manifest_key.clone(),
+            message: err.to_string(),
+        })
+    })?;
+    match store.put_if_absent(&manifest_key, &manifest_bytes) {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+            let Some(existing) = load_verified_checkpoint_materialization_if_present(
+                store,
+                &manifest.payload.namespace_id,
+                manifest.payload.checkpoint_seq,
+            )
+            .map_err(BasisLoadError::CheckpointLoad)?
+            else {
+                return Err(BasisLoadError::CheckpointLoad(
+                    CheckpointLoadError::MissingManifest {
+                        object_key: manifest_key,
+                    },
+                ));
+            };
+            if existing.manifest.payload.checkpoint_seq == manifest.payload.checkpoint_seq {
+                Ok(())
+            } else {
+                Err(BasisLoadError::CheckpointLoad(
+                    CheckpointLoadError::ManifestSeqMismatch {
+                        object_key: manifest_key,
+                        expected: manifest.payload.checkpoint_seq,
+                        actual: existing.manifest.payload.checkpoint_seq,
+                    },
+                ))
             }
-            Err(error) => Err(BasisLoadError::CheckpointLoad(
-                CheckpointLoadError::ReadManifest {
-                    object_key: manifest_key,
-                    message: error.to_string(),
-                },
-            )),
         }
-    })
+        Err(error) => Err(BasisLoadError::CheckpointLoad(
+            CheckpointLoadError::ReadManifest {
+                object_key: manifest_key,
+                message: error.to_string(),
+            },
+        )),
+    }
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    skip_all,
+    fields(phase = "publish_compacted_head", key_class = "namespace_head")
+)]
 fn publish_checkpoint_hint_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_seq: ChangeSeq,
     writer_version: &str,
 ) -> Result<HeadState, CoreError> {
-    crate::trace::sync_phase_with_key_class("publish_compacted_head", "namespace_head", || {
-        for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
-            let loaded_head = read_head_object(store, namespace_id)
-                .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
-            let current_head = loaded_head.envelope.state;
-            if current_head.checkpoint_hint_seq >= Some(checkpoint_seq) {
-                return Ok(current_head);
-            }
-
-            let next_head = HeadState {
-                namespace_id: current_head.namespace_id.clone(),
-                seq: current_head.seq,
-                active_fence_token: current_head.active_fence_token,
-                next_inode_id: current_head.next_inode_id,
-                name_policy: current_head.name_policy,
-                checkpoint_hint_seq: Some(checkpoint_seq),
-                retention_floor_seq: current_head.retention_floor_seq,
-                visible_wal_tip: current_head.visible_wal_tip.clone(),
-            };
-            match compare_and_swap_head(
-                store,
-                &loaded_head.object_key,
-                loaded_head.metadata.etag.as_deref(),
-                writer_version,
-                &next_head,
-            ) {
-                Ok(()) => return Ok(next_head),
-                Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
-                Err(error) => return Err(CoreError::Store(error.to_string())),
-            }
+    for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
+        let loaded_head = read_head_object(store, namespace_id)
+            .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
+        let current_head = loaded_head.envelope.state;
+        if current_head.checkpoint_hint_seq >= Some(checkpoint_seq) {
+            return Ok(current_head);
         }
 
-        Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
-    })
+        let next_head = HeadState {
+            namespace_id: current_head.namespace_id.clone(),
+            seq: current_head.seq,
+            active_fence_token: current_head.active_fence_token,
+            next_inode_id: current_head.next_inode_id,
+            name_policy: current_head.name_policy,
+            checkpoint_hint_seq: Some(checkpoint_seq),
+            retention_floor_seq: current_head.retention_floor_seq,
+            visible_wal_tip: current_head.visible_wal_tip.clone(),
+        };
+        match compare_and_swap_head(
+            store,
+            &loaded_head.object_key,
+            loaded_head.metadata.etag.as_deref(),
+            writer_version,
+            &next_head,
+        ) {
+            Ok(()) => return Ok(next_head),
+            Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
+            Err(error) => return Err(CoreError::Store(error.to_string())),
+        }
+    }
+
+    Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
 }
 
 fn compare_and_swap_head<S: ObjectStore + ?Sized>(
@@ -1487,43 +1509,53 @@ fn validate_checkpoint_materialization_ranges(
     Ok(())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    skip_all,
+    fields(phase = "load_checkpoint_tables", key_class = "checkpoint_table")
+)]
 fn load_checkpoint_materialization_from_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     manifest_object_key: &str,
     manifest: &CheckpointManifestEnvelope,
 ) -> Result<MetadataState, CheckpointLoadError> {
-    crate::trace::sync_phase_with_key_class("load_checkpoint_tables", "checkpoint_table", || {
-        let mut metadata_state = MetadataStateBuilder::default();
-        validate_checkpoint_materialization_ranges(manifest_object_key, &manifest.payload)?;
-        for run in runs_in_materialization_order(&manifest.payload) {
-            append_checkpoint_tables_to_metadata(
-                store,
-                namespace_id,
-                CheckpointTableLoadContext {
-                    manifest_object_key,
-                    segment_seq_expectation: CheckpointSegmentSeqExpectation::Descriptor,
-                    row_seq_min: None,
-                    row_seq_max: run.run_seq,
-                },
-                &run.tables,
-                &mut metadata_state,
-                |family, segment_seq, segment_index| {
-                    checkpoint_run_table(
-                        namespace_id.as_str(),
-                        segment_seq.0,
-                        &run.run_id,
-                        checkpoint_table_family(family),
-                        segment_index,
-                    )
-                },
-            )?;
-        }
+    let mut metadata_state = MetadataStateBuilder::default();
+    validate_checkpoint_materialization_ranges(manifest_object_key, &manifest.payload)?;
+    for run in runs_in_materialization_order(&manifest.payload) {
+        append_checkpoint_tables_to_metadata(
+            store,
+            namespace_id,
+            CheckpointTableLoadContext {
+                manifest_object_key,
+                segment_seq_expectation: CheckpointSegmentSeqExpectation::Descriptor,
+                row_seq_min: None,
+                row_seq_max: run.run_seq,
+            },
+            &run.tables,
+            &mut metadata_state,
+            |family, segment_seq, segment_index| {
+                checkpoint_run_table(
+                    namespace_id.as_str(),
+                    segment_seq.0,
+                    &run.run_id,
+                    checkpoint_table_family(family),
+                    segment_index,
+                )
+            },
+        )?;
+    }
 
-        Ok(metadata_state.finish())
-    })
+    Ok(metadata_state.finish())
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    skip_all,
+    fields(phase = "load_checkpoint_tables", key_class = "checkpoint_table")
+)]
 fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -1532,31 +1564,29 @@ fn load_checkpoint_materialization_from_tables<S: ObjectStore + ?Sized>(
     segment_seq: ChangeSeq,
     tables: &[CheckpointTableManifest],
 ) -> Result<MetadataState, CheckpointLoadError> {
-    crate::trace::sync_phase_with_key_class("load_checkpoint_tables", "checkpoint_table", || {
-        let mut metadata_state = MetadataStateBuilder::default();
-        append_checkpoint_tables_to_metadata(
-            store,
-            namespace_id,
-            CheckpointTableLoadContext {
-                manifest_object_key,
-                segment_seq_expectation: CheckpointSegmentSeqExpectation::Exact(segment_seq),
-                row_seq_min: None,
-                row_seq_max: segment_seq,
-            },
-            tables,
-            &mut metadata_state,
-            |family, segment_seq, segment_index| {
-                checkpoint_run_table(
-                    namespace_id.as_str(),
-                    segment_seq.0,
-                    run_id,
-                    checkpoint_table_family(family),
-                    segment_index,
-                )
-            },
-        )?;
-        Ok(metadata_state.finish())
-    })
+    let mut metadata_state = MetadataStateBuilder::default();
+    append_checkpoint_tables_to_metadata(
+        store,
+        namespace_id,
+        CheckpointTableLoadContext {
+            manifest_object_key,
+            segment_seq_expectation: CheckpointSegmentSeqExpectation::Exact(segment_seq),
+            row_seq_min: None,
+            row_seq_max: segment_seq,
+        },
+        tables,
+        &mut metadata_state,
+        |family, segment_seq, segment_index| {
+            checkpoint_run_table(
+                namespace_id.as_str(),
+                segment_seq.0,
+                run_id,
+                checkpoint_table_family(family),
+                segment_index,
+            )
+        },
+    )?;
+    Ok(metadata_state.finish())
 }
 
 #[derive(Clone, Copy)]

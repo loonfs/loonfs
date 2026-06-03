@@ -221,25 +221,29 @@ fn validate_content_metadata<S: ObjectStore + ?Sized>(
     }))
 }
 
+#[tracing::instrument(
+    level = "info",
+    name = "loon.phase",
+    skip_all,
+    fields(phase = "write_content_blob", key_class = "content_blob")
+)]
 pub fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    crate::trace::sync_phase_with_key_class("write_content_blob", "content_blob", || {
-        let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
-        let content_ref = ContentRef::whole_file_v0(bytes);
-        let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
-            .map_err(|err| CoreError::Store(err.to_string()))?;
-        write_immutable_object(store, &object_key, bytes)?;
+    let content_store_id = load_namespace_content_store_id(store, namespace_id)?;
+    let content_ref = ContentRef::whole_file_v0(bytes);
+    let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
+        .map_err(|err| CoreError::Store(err.to_string()))?;
+    write_immutable_object(store, &object_key, bytes)?;
 
-        Ok(StoredContent {
-            content_store_id,
-            object_key,
-            file_digest_sha256: content_ref.digest.clone(),
-            file_size_bytes: content_ref.size_bytes,
-            content_ref,
-        })
+    Ok(StoredContent {
+        content_store_id,
+        object_key,
+        file_digest_sha256: content_ref.digest.clone(),
+        file_size_bytes: content_ref.size_bytes,
+        content_ref,
     })
 }
 

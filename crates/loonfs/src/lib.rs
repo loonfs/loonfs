@@ -1625,38 +1625,46 @@ impl Fs {
         Ok(basis)
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.phase",
+        skip_all,
+        fields(phase = "update_cache")
+    )]
     fn cache_basis(&self, basis: Arc<VerifiedNamespaceBasis>) {
-        trace::sync_phase("update_cache", || {
-            let cache_config = &self.inner.config.runtime_cache;
-            if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
-                return;
-            }
-            self.inner
-                .basis_cache
-                .lock()
-                .expect("basis cache lock poisoned")
-                .insert(basis, cache_config.max_cached_namespaces);
-        });
+        let cache_config = &self.inner.config.runtime_cache;
+        if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
+            return;
+        }
+        self.inner
+            .basis_cache
+            .lock()
+            .expect("basis cache lock poisoned")
+            .insert(basis, cache_config.max_cached_namespaces);
     }
 
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.phase",
+        skip_all,
+        fields(phase = "update_cache")
+    )]
     fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
-        trace::sync_phase("update_cache", || {
-            self.inner
-                .basis_cache
-                .lock()
-                .expect("basis cache lock poisoned")
-                .invalidate(namespace_id);
-            self.inner
-                .control_cache
-                .lock()
-                .expect("control cache lock poisoned")
-                .invalidate_namespace(namespace_id);
-            self.inner
-                .commit_engines
-                .lock()
-                .expect("commit engine cache lock poisoned")
-                .invalidate(namespace_id);
-        });
+        self.inner
+            .basis_cache
+            .lock()
+            .expect("basis cache lock poisoned")
+            .invalidate(namespace_id);
+        self.inner
+            .control_cache
+            .lock()
+            .expect("control cache lock poisoned")
+            .invalidate_namespace(namespace_id);
+        self.inner
+            .commit_engines
+            .lock()
+            .expect("commit engine cache lock poisoned")
+            .invalidate(namespace_id);
     }
 
     fn finish_namespace_mutation<T>(

@@ -391,9 +391,10 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
             .map(|_| Err(CoreError::Lease(error.clone())))
             .collect();
     }
-    let basis_result = crate::trace::sync_phase("load_basis_for_publish", || {
+    let basis_result = {
+        let _span = tracing::info_span!("loon.phase", phase = "load_basis_for_publish").entered();
         load_verified_namespace_basis(store, namespace_id)
-    });
+    };
     let basis = match basis_result {
         Ok(basis) => basis,
         Err(error) => {
@@ -443,7 +444,8 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     let mut content_validation = ContentValidationTracker::default();
 
     for (index, candidate) in candidates.iter().enumerate() {
-        let Some(candidate_request) = crate::trace::sync_phase("prepare_commit", || {
+        let candidate_request = {
+            let _span = tracing::info_span!("loon.phase", phase = "prepare_commit").entered();
             prepare_candidate_request(
                 store,
                 namespace_id,
@@ -457,7 +459,8 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
                 &mut in_batch_requests,
                 &mut aliases,
             )
-        }) else {
+        };
+        let Some(candidate_request) = candidate_request else {
             continue;
         };
         let validation = CommitValidationContext {
@@ -533,20 +536,26 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         .iter()
         .map(|(_, record)| record.clone())
         .collect::<Vec<_>>();
-    let wal_result: Result<_, CoreError> =
-        crate::trace::sync_phase_with_key_class("write_wal_segment", "wal_segment", || {
-            let wal = prepare_wal_segment(
-                namespace_id.clone(),
-                basis.head.visible_wal_tip.clone(),
-                &records,
-                &context.writer_version,
-            )
-            .map_err(|error| CoreError::Store(format!("wal build failed: {error:?}")))?;
-            store
-                .put_if_absent(&wal.object_key, &wal.encoded_bytes)
-                .map_err(|err| CoreError::WalWrite(err.to_string()))?;
-            Ok(wal)
-        });
+    let wal_result: Result<_, CoreError> = {
+        let _span = tracing::info_span!(
+            "loon.phase",
+            phase = "write_wal_segment",
+            key_class = "wal_segment"
+        )
+        .entered();
+        match prepare_wal_segment(
+            namespace_id.clone(),
+            basis.head.visible_wal_tip.clone(),
+            &records,
+            &context.writer_version,
+        ) {
+            Ok(wal) => match store.put_if_absent(&wal.object_key, &wal.encoded_bytes) {
+                Ok(_) => Ok(wal),
+                Err(error) => Err(CoreError::WalWrite(error.to_string())),
+            },
+            Err(error) => Err(CoreError::Store(format!("wal build failed: {error:?}"))),
+        }
+    };
     let wal = match wal_result {
         Ok(wal) => wal,
         Err(error) => {
@@ -578,10 +587,15 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             );
         }
     };
-    let head_metadata_result =
-        crate::trace::sync_phase_with_key_class("cas_namespace_head", "namespace_head", || {
-            publish_commit_head(store, &basis.head_etag, &head_publish)
-        });
+    let head_metadata_result = {
+        let _span = tracing::info_span!(
+            "loon.phase",
+            phase = "cas_namespace_head",
+            key_class = "namespace_head"
+        )
+        .entered();
+        publish_commit_head(store, &basis.head_etag, &head_publish)
+    };
     let head_metadata = match head_metadata_result {
         Ok(metadata) => metadata,
         Err(error) => {
