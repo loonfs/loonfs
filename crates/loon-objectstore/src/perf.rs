@@ -1,8 +1,5 @@
 use crate::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use serde::{Deserialize, Serialize};
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -111,87 +108,25 @@ impl PerfRecorder for VecPerfRecorder {
     }
 }
 
-pub struct JsonlPerfRecorder {
-    writer: Mutex<BufWriter<File>>,
-}
-
-impl JsonlPerfRecorder {
-    pub fn create(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        if let Some(parent) = path
-            .as_ref()
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file = File::create(path)?;
-        Ok(Self {
-            writer: Mutex::new(BufWriter::new(file)),
-        })
-    }
-}
-
-impl PerfRecorder for JsonlPerfRecorder {
-    fn record(&self, event: ObjectStorePerfEvent) {
-        let Ok(mut writer) = self.writer.lock() else {
-            return;
-        };
-        if serde_json::to_writer(&mut *writer, &event).is_err() {
-            return;
-        }
-        let _ = writer.write_all(b"\n");
-    }
-}
-
-pub trait KeyClassifier: Send + Sync + 'static {
-    fn classify_key(&self, key: &str) -> KeyClass;
-}
-
-pub struct DefaultKeyClassifier;
-
-impl KeyClassifier for DefaultKeyClassifier {
-    fn classify_key(&self, key: &str) -> KeyClass {
-        let segments = key.split('/').collect::<Vec<_>>();
-        match segments.as_slice() {
-            ["content-stores", _, "blobs", ..] => KeyClass::Content,
-            ["content-stores", ..] => KeyClass::Metadata,
-            ["namespaces", _, "head.json"] => KeyClass::NamespaceHead,
-            ["namespaces", _, "lease.json"] => KeyClass::Lease,
-            ["namespaces", _, "derived", .., "progress.json"] => KeyClass::DerivedProgress,
-            ["namespaces", ..] | ["queue", ..] => KeyClass::Metadata,
-            _ => KeyClass::Unknown,
-        }
-    }
-}
-
-pub struct InstrumentedObjectStore<S, R = NoopPerfRecorder, K = DefaultKeyClassifier> {
+pub struct InstrumentedObjectStore<S> {
     inner: S,
-    recorder: Arc<R>,
-    key_classifier: Arc<K>,
+    recorder: Arc<dyn PerfRecorder>,
     store_kind: Option<String>,
 }
 
-impl<S> InstrumentedObjectStore<S, NoopPerfRecorder, DefaultKeyClassifier> {
+impl<S> InstrumentedObjectStore<S> {
     pub fn noop(inner: S) -> Self {
         Self {
             inner,
             recorder: Arc::new(NoopPerfRecorder),
-            key_classifier: Arc::new(DefaultKeyClassifier),
             store_kind: None,
         }
     }
-}
 
-impl<S, R, K> InstrumentedObjectStore<S, R, K>
-where
-    R: PerfRecorder,
-    K: KeyClassifier,
-{
-    pub fn new(inner: S, recorder: Arc<R>, key_classifier: Arc<K>) -> Self {
+    pub fn new(inner: S, recorder: Arc<dyn PerfRecorder>) -> Self {
         Self {
             inner,
             recorder,
-            key_classifier,
             store_kind: None,
         }
     }
@@ -206,11 +141,9 @@ where
     }
 }
 
-impl<S, R, K> ObjectStore for InstrumentedObjectStore<S, R, K>
+impl<S> ObjectStore for InstrumentedObjectStore<S>
 where
     S: ObjectStore,
-    R: PerfRecorder,
-    K: KeyClassifier,
 {
     fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let start = Instant::now();
@@ -310,11 +243,7 @@ where
     }
 }
 
-impl<S, R, K> InstrumentedObjectStore<S, R, K>
-where
-    R: PerfRecorder,
-    K: KeyClassifier,
-{
+impl<S> InstrumentedObjectStore<S> {
     fn record_head_like(
         &self,
         operation: ObjectStoreOperation,
@@ -331,7 +260,7 @@ where
             bytes_in: None,
             bytes_out: None,
             item_count: None,
-            key_class: self.key_classifier.classify_key(key),
+            key_class: classify_key(key),
             range_class: None,
             put_mode: None,
             store_kind: self.store_kind.clone(),
@@ -357,7 +286,7 @@ where
                 .ok()
                 .and_then(|bytes| bytes.as_ref().map(|bytes| bytes.len() as u64)),
             item_count: None,
-            key_class: self.key_classifier.classify_key(key),
+            key_class: classify_key(key),
             range_class: Some(classify_range(range)),
             put_mode: None,
             store_kind: self.store_kind.clone(),
@@ -381,7 +310,7 @@ where
             bytes_in: Some(bytes_in),
             bytes_out: None,
             item_count: None,
-            key_class: self.key_classifier.classify_key(key),
+            key_class: classify_key(key),
             range_class: None,
             put_mode: Some(classify_put_mode(mode)),
             store_kind: self.store_kind.clone(),
@@ -404,7 +333,7 @@ where
             bytes_in: None,
             bytes_out: None,
             item_count: None,
-            key_class: self.key_classifier.classify_key(key),
+            key_class: classify_key(key),
             range_class: None,
             put_mode: None,
             store_kind: self.store_kind.clone(),
@@ -426,7 +355,7 @@ where
             bytes_in: None,
             bytes_out: None,
             item_count: result.as_ref().ok().map(|items| items.len() as u64),
-            key_class: self.key_classifier.classify_key(prefix),
+            key_class: classify_key(prefix),
             range_class: Some(RangeClass::Prefix),
             put_mode: None,
             store_kind: self.store_kind.clone(),
@@ -435,6 +364,19 @@ where
 
     fn record(&self, event: ObjectStorePerfEvent) {
         self.recorder.record(event);
+    }
+}
+
+fn classify_key(key: &str) -> KeyClass {
+    let segments = key.split('/').collect::<Vec<_>>();
+    match segments.as_slice() {
+        ["content-stores", _, "blobs", ..] => KeyClass::Content,
+        ["content-stores", ..] => KeyClass::Metadata,
+        ["namespaces", _, "head.json"] => KeyClass::NamespaceHead,
+        ["namespaces", _, "lease.json"] => KeyClass::Lease,
+        ["namespaces", _, "derived", .., "progress.json"] => KeyClass::DerivedProgress,
+        ["namespaces", ..] | ["queue", ..] => KeyClass::Metadata,
+        _ => KeyClass::Unknown,
     }
 }
 

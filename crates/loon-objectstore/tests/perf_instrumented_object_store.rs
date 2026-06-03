@@ -1,12 +1,11 @@
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::perf::{
-    DefaultKeyClassifier, InstrumentedObjectStore, JsonlPerfRecorder, KeyClass, KeyClassifier,
-    ObjectStoreOperation, ObjectStoreResultClass, PerfRecorder, PutModeClass, RangeClass,
-    VecPerfRecorder,
+    InstrumentedObjectStore, KeyClass, ObjectStoreOperation, ObjectStoreResultClass, PerfRecorder,
+    PutModeClass, RangeClass, VecPerfRecorder,
 };
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::sync::{Arc, Mutex};
-use tempfile::{tempdir, NamedTempFile};
+use tempfile::tempdir;
 
 #[test]
 fn records_put_success() {
@@ -37,11 +36,7 @@ fn records_put_success() {
 #[test]
 fn delegates_convenience_writes_to_inner_store() {
     let recorder = Arc::new(VecPerfRecorder::default());
-    let store = InstrumentedObjectStore::new(
-        DelegatingWriteStore::default(),
-        recorder.clone(),
-        Arc::new(DefaultKeyClassifier),
-    );
+    let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
 
     store
         .put_overwrite("namespaces/ns-1/head.json", b"overwrite")
@@ -177,75 +172,15 @@ fn records_list_count() {
     assert_eq!(event.range_class, Some(RangeClass::Prefix));
 }
 
-#[test]
-fn default_key_classifier_maps_known_families_conservatively() {
-    let classifier = DefaultKeyClassifier;
-
-    assert_eq!(
-        classifier.classify_key("content-stores/cs_abc/blobs/sha256/ab/cd/abcdef"),
-        KeyClass::Content
-    );
-    assert_eq!(
-        classifier.classify_key("content-stores/cs_abc/descriptor.json"),
-        KeyClass::Metadata
-    );
-    assert_eq!(
-        classifier.classify_key("namespaces/ns-1/head.json"),
-        KeyClass::NamespaceHead
-    );
-    assert_eq!(
-        classifier.classify_key("namespaces/ns-1/lease.json"),
-        KeyClass::Lease
-    );
-    assert_eq!(
-        classifier.classify_key("namespaces/ns-1/derived/checkpoint-builder/progress.json"),
-        KeyClass::DerivedProgress
-    );
-    assert_eq!(
-        classifier.classify_key("namespaces/ns-1/checkpoints/00000000000000000001/manifest.json"),
-        KeyClass::Metadata
-    );
-    assert_eq!(
-        classifier.classify_key("elsewhere/raw-key"),
-        KeyClass::Unknown
-    );
-}
-
-#[test]
-fn jsonl_recorder_writes_valid_events_without_raw_keys() {
-    let temp_dir = tempdir().expect("tempdir");
-    let jsonl = NamedTempFile::new().expect("jsonl tempfile");
-    let recorder = Arc::new(JsonlPerfRecorder::create(jsonl.path()).expect("jsonl recorder"));
-    let store = instrumented_object_store(temp_dir.path(), recorder);
-    let raw_key = "namespaces/ns-1/head.json";
-
-    store.put_overwrite(raw_key, b"head").expect("put object");
-    drop(store);
-
-    let lines = std::fs::read_to_string(jsonl.path()).expect("read jsonl");
-    let mut lines = lines.lines();
-    let line = lines.next().expect("one event line");
-    assert!(lines.next().is_none());
-    let event: serde_json::Value = serde_json::from_str(line).expect("valid event json");
-    assert_eq!(event["operation"], "put");
-    assert_eq!(event["key_class"], "namespace_head");
-    assert!(!line.contains(raw_key));
-    assert!(!line.contains("ns-1"));
-}
-
 fn instrumented_object_store<R>(
     root: &std::path::Path,
     recorder: Arc<R>,
-) -> InstrumentedObjectStore<LocalFsStore, R, DefaultKeyClassifier>
+) -> InstrumentedObjectStore<LocalFsStore>
 where
     R: PerfRecorder,
 {
-    InstrumentedObjectStore::new(
-        LocalFsStore::new(root).expect("local fs store"),
-        recorder,
-        Arc::new(DefaultKeyClassifier),
-    )
-    .with_store_kind("local-fs")
+    InstrumentedObjectStore::new(LocalFsStore::new(root).expect("local fs store"), recorder)
+        .with_store_kind("local-fs")
 }
 
 #[derive(Default)]
