@@ -30,6 +30,11 @@ use loon_core::{
     NamespaceCommitEngine, VerifiedNamespaceBasis,
 };
 use loon_objectstore::keys::namespace_head;
+use loon_objectstore::metrics::InstrumentedObjectStore;
+pub use loon_objectstore::metrics::{
+    KeyClass, ObjectStoreMetricSample, ObjectStoreMetricsRecorder, ObjectStoreOperation,
+    ObjectStoreResultClass, PutModeClass, RangeClass,
+};
 use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
@@ -133,6 +138,7 @@ pub struct FsBuilder {
     lease_duration_ms: u64,
     runtime_cache: RuntimeCacheConfig,
     trace_store_kind: TraceStoreKind,
+    metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
 }
 
 #[derive(Debug, Default)]
@@ -684,6 +690,7 @@ impl FsBuilder {
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             runtime_cache: RuntimeCacheConfig::default(),
             trace_store_kind: TraceStoreKind::Unknown,
+            metrics_recorder: None,
         }
     }
 
@@ -712,19 +719,36 @@ impl FsBuilder {
         self
     }
 
+    /// Install object-store metrics collection for this runtime.
+    ///
+    /// The runtime wraps the provided object store before opening `Fs`; callers do not need to
+    /// manually construct an instrumented store.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
+        self.metrics_recorder = Some(recorder);
+        self
+    }
+
     pub fn build(self) -> Result<Fs> {
         let writer_id = self
             .writer_id
             .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
+        let trace_store_kind = self.trace_store_kind;
+        let store = match self.metrics_recorder {
+            Some(recorder) => Arc::new(
+                InstrumentedObjectStore::new(self.store, recorder)
+                    .with_store_kind(trace_store_kind.as_str()),
+            ) as SharedObjectStore,
+            None => self.store,
+        };
         Fs::open(
-            self.store,
+            store,
             FsConfig {
                 writer_id,
                 writer_version: self.writer_version,
                 lease_duration_ms: self.lease_duration_ms,
                 runtime_cache: self.runtime_cache,
                 trace_mode: TraceMode::Embedded,
-                trace_store_kind: self.trace_store_kind,
+                trace_store_kind,
             },
         )
     }

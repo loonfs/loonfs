@@ -1,14 +1,14 @@
 use crate::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-const OBJECT_STORE_PERF_SCHEMA_VERSION: u32 = 1;
-
+/// One object-store call sample delivered to an object-store metrics recorder.
+///
+/// Samples intentionally classify keys and errors instead of exposing raw object keys or provider
+/// error strings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObjectStorePerfEvent {
-    pub schema_version: u32,
-    pub timestamp_ms: u128,
+pub struct ObjectStoreMetricSample {
     pub operation: ObjectStoreOperation,
     pub elapsed_micros: u128,
     pub result: ObjectStoreResultClass,
@@ -75,42 +75,46 @@ pub enum PutModeClass {
     CompareAndSwap,
 }
 
-pub trait PerfRecorder: Send + Sync + 'static {
-    fn record(&self, event: ObjectStorePerfEvent);
+/// Receives object-store metrics samples from `InstrumentedObjectStore`.
+///
+/// Implementations should aggregate or export samples without blocking the object-store hot path.
+pub trait ObjectStoreMetricsRecorder: Send + Sync + 'static {
+    fn record(&self, sample: ObjectStoreMetricSample);
 }
 
-pub struct NoopPerfRecorder;
+pub struct NoopObjectStoreMetricsRecorder;
 
-impl PerfRecorder for NoopPerfRecorder {
-    fn record(&self, _event: ObjectStorePerfEvent) {}
+impl ObjectStoreMetricsRecorder for NoopObjectStoreMetricsRecorder {
+    fn record(&self, _sample: ObjectStoreMetricSample) {}
 }
 
+/// In-memory recorder intended for tests and small local diagnostics.
 #[derive(Default)]
-pub struct VecPerfRecorder {
-    events: Mutex<Vec<ObjectStorePerfEvent>>,
+pub struct VecObjectStoreMetricsRecorder {
+    samples: Mutex<Vec<ObjectStoreMetricSample>>,
 }
 
-impl VecPerfRecorder {
-    pub fn events(&self) -> Vec<ObjectStorePerfEvent> {
-        self.events
+impl VecObjectStoreMetricsRecorder {
+    pub fn samples(&self) -> Vec<ObjectStoreMetricSample> {
+        self.samples
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 }
 
-impl PerfRecorder for VecPerfRecorder {
-    fn record(&self, event: ObjectStorePerfEvent) {
-        self.events
+impl ObjectStoreMetricsRecorder for VecObjectStoreMetricsRecorder {
+    fn record(&self, sample: ObjectStoreMetricSample) {
+        self.samples
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(event);
+            .push(sample);
     }
 }
 
 pub struct InstrumentedObjectStore<S> {
     inner: S,
-    recorder: Arc<dyn PerfRecorder>,
+    recorder: Arc<dyn ObjectStoreMetricsRecorder>,
     store_kind: Option<String>,
 }
 
@@ -118,12 +122,12 @@ impl<S> InstrumentedObjectStore<S> {
     pub fn noop(inner: S) -> Self {
         Self {
             inner,
-            recorder: Arc::new(NoopPerfRecorder),
+            recorder: Arc::new(NoopObjectStoreMetricsRecorder),
             store_kind: None,
         }
     }
 
-    pub fn new(inner: S, recorder: Arc<dyn PerfRecorder>) -> Self {
+    pub fn new(inner: S, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
         Self {
             inner,
             recorder,
@@ -251,9 +255,7 @@ impl<S> InstrumentedObjectStore<S> {
         elapsed: Duration,
         result: &Result<Option<ObjectMetadata>, ObjectStoreError>,
     ) {
-        self.record(ObjectStorePerfEvent {
-            schema_version: OBJECT_STORE_PERF_SCHEMA_VERSION,
-            timestamp_ms: now_ms(),
+        self.record(ObjectStoreMetricSample {
             operation,
             elapsed_micros: elapsed.as_micros(),
             result: classify_optional_result(result),
@@ -274,9 +276,7 @@ impl<S> InstrumentedObjectStore<S> {
         elapsed: Duration,
         result: &Result<Option<Vec<u8>>, ObjectStoreError>,
     ) {
-        self.record(ObjectStorePerfEvent {
-            schema_version: OBJECT_STORE_PERF_SCHEMA_VERSION,
-            timestamp_ms: now_ms(),
+        self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::Get,
             elapsed_micros: elapsed.as_micros(),
             result: classify_optional_result(result),
@@ -301,9 +301,7 @@ impl<S> InstrumentedObjectStore<S> {
         elapsed: Duration,
         result: &Result<ObjectMetadata, ObjectStoreError>,
     ) {
-        self.record(ObjectStorePerfEvent {
-            schema_version: OBJECT_STORE_PERF_SCHEMA_VERSION,
-            timestamp_ms: now_ms(),
+        self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::Put,
             elapsed_micros: elapsed.as_micros(),
             result: classify_result(result),
@@ -324,9 +322,7 @@ impl<S> InstrumentedObjectStore<S> {
         elapsed: Duration,
         result: &Result<(), ObjectStoreError>,
     ) {
-        self.record(ObjectStorePerfEvent {
-            schema_version: OBJECT_STORE_PERF_SCHEMA_VERSION,
-            timestamp_ms: now_ms(),
+        self.record(ObjectStoreMetricSample {
             operation,
             elapsed_micros: elapsed.as_micros(),
             result: classify_result(result),
@@ -346,9 +342,7 @@ impl<S> InstrumentedObjectStore<S> {
         elapsed: Duration,
         result: &Result<Vec<String>, ObjectStoreError>,
     ) {
-        self.record(ObjectStorePerfEvent {
-            schema_version: OBJECT_STORE_PERF_SCHEMA_VERSION,
-            timestamp_ms: now_ms(),
+        self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::ListPrefix,
             elapsed_micros: elapsed.as_micros(),
             result: classify_result(result),
@@ -362,8 +356,8 @@ impl<S> InstrumentedObjectStore<S> {
         });
     }
 
-    fn record(&self, event: ObjectStorePerfEvent) {
-        self.recorder.record(event);
+    fn record(&self, sample: ObjectStoreMetricSample) {
+        self.recorder.record(sample);
     }
 }
 
@@ -430,11 +424,4 @@ fn classify_put_mode(mode: &PutMode) -> PutModeClass {
         PutMode::CreateIfAbsent => PutModeClass::CreateIfAbsent,
         PutMode::CompareAndSwap { .. } => PutModeClass::CompareAndSwap,
     }
-}
-
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default()
 }

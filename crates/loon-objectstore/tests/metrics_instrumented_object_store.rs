@@ -1,7 +1,7 @@
 use loon_objectstore::fs::LocalFsStore;
-use loon_objectstore::perf::{
-    InstrumentedObjectStore, KeyClass, ObjectStoreOperation, ObjectStoreResultClass, PerfRecorder,
-    PutModeClass, RangeClass, VecPerfRecorder,
+use loon_objectstore::metrics::{
+    InstrumentedObjectStore, KeyClass, ObjectStoreMetricsRecorder, ObjectStoreOperation,
+    ObjectStoreResultClass, PutModeClass, RangeClass, VecObjectStoreMetricsRecorder,
 };
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::sync::{Arc, Mutex};
@@ -10,7 +10,7 @@ use tempfile::tempdir;
 #[test]
 fn records_put_success() {
     let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecPerfRecorder::default());
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
@@ -21,21 +21,21 @@ fn records_put_success() {
         )
         .expect("put object");
 
-    let events = recorder.events();
-    assert_eq!(events.len(), 1);
-    let event = &events[0];
-    assert_eq!(event.operation, ObjectStoreOperation::Put);
-    assert_eq!(event.result, ObjectStoreResultClass::Ok);
-    assert_eq!(event.bytes_in, Some(4));
-    assert_eq!(event.bytes_out, None);
-    assert_eq!(event.put_mode, Some(PutModeClass::CreateIfAbsent));
-    assert_eq!(event.key_class, KeyClass::NamespaceHead);
-    assert_eq!(event.store_kind.as_deref(), Some("local-fs"));
+    let samples = recorder.samples();
+    assert_eq!(samples.len(), 1);
+    let sample = &samples[0];
+    assert_eq!(sample.operation, ObjectStoreOperation::Put);
+    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.bytes_in, Some(4));
+    assert_eq!(sample.bytes_out, None);
+    assert_eq!(sample.put_mode, Some(PutModeClass::CreateIfAbsent));
+    assert_eq!(sample.key_class, KeyClass::NamespaceHead);
+    assert_eq!(sample.store_kind.as_deref(), Some("local-fs"));
 }
 
 #[test]
 fn delegates_convenience_writes_to_inner_store() {
-    let recorder = Arc::new(VecPerfRecorder::default());
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
 
     store
@@ -54,17 +54,17 @@ fn delegates_convenience_writes_to_inner_store() {
         vec!["put_overwrite", "put_if_absent", "compare_and_swap"]
     );
 
-    let events = recorder.events();
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[0].put_mode, Some(PutModeClass::Overwrite));
-    assert_eq!(events[1].put_mode, Some(PutModeClass::CreateIfAbsent));
-    assert_eq!(events[2].put_mode, Some(PutModeClass::CompareAndSwap));
+    let samples = recorder.samples();
+    assert_eq!(samples.len(), 3);
+    assert_eq!(samples[0].put_mode, Some(PutModeClass::Overwrite));
+    assert_eq!(samples[1].put_mode, Some(PutModeClass::CreateIfAbsent));
+    assert_eq!(samples[2].put_mode, Some(PutModeClass::CompareAndSwap));
 }
 
 #[test]
 fn records_get_success_bytes_out() {
     let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecPerfRecorder::default());
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
@@ -82,19 +82,19 @@ fn records_get_success_bytes_out() {
         .expect("object exists");
 
     assert_eq!(bytes, b"bcd");
-    let events = recorder.events();
-    let event = events.last().expect("get event");
-    assert_eq!(event.operation, ObjectStoreOperation::Get);
-    assert_eq!(event.result, ObjectStoreResultClass::Ok);
-    assert_eq!(event.bytes_out, Some(3));
-    assert_eq!(event.key_class, KeyClass::Content);
-    assert_eq!(event.range_class, Some(RangeClass::Bounded));
+    let samples = recorder.samples();
+    let sample = samples.last().expect("get sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::Get);
+    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.bytes_out, Some(3));
+    assert_eq!(sample.key_class, KeyClass::Content);
+    assert_eq!(sample.range_class, Some(RangeClass::Bounded));
 }
 
 #[test]
 fn records_head_and_head_with_checksum_as_distinct_operations() {
     let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecPerfRecorder::default());
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
@@ -105,26 +105,26 @@ fn records_head_and_head_with_checksum_as_distinct_operations() {
         .head_with_checksum("namespaces/ns-1/lease.json")
         .expect("head with checksum");
 
-    let events = recorder.events();
-    assert_eq!(events[1].operation, ObjectStoreOperation::Head);
-    assert_eq!(events[2].operation, ObjectStoreOperation::HeadWithChecksum);
-    assert_eq!(events[1].key_class, KeyClass::Lease);
-    assert_eq!(events[2].key_class, KeyClass::Lease);
+    let samples = recorder.samples();
+    assert_eq!(samples[1].operation, ObjectStoreOperation::Head);
+    assert_eq!(samples[2].operation, ObjectStoreOperation::HeadWithChecksum);
+    assert_eq!(samples[1].key_class, KeyClass::Lease);
+    assert_eq!(samples[2].key_class, KeyClass::Lease);
 }
 
 #[test]
 fn records_not_found_without_key_leak() {
     let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecPerfRecorder::default());
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let raw_key = "namespaces/ns-1/wal/secret-segment.cbor.zst";
 
     assert!(store.get(raw_key, None).expect("get missing").is_none());
 
-    let event = recorder.events().pop().expect("get event");
-    assert_eq!(event.operation, ObjectStoreOperation::Get);
-    assert_eq!(event.result, ObjectStoreResultClass::NotFound);
-    let encoded = serde_json::to_string(&event).expect("serialize event");
+    let sample = recorder.samples().pop().expect("get sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::Get);
+    assert_eq!(sample.result, ObjectStoreResultClass::NotFound);
+    let encoded = serde_json::to_string(&sample).expect("serialize sample");
     assert!(!encoded.contains(raw_key));
     assert!(!encoded.contains("secret-segment"));
 }
@@ -132,7 +132,7 @@ fn records_not_found_without_key_leak() {
 #[test]
 fn records_invalid_key_without_error_text() {
     let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecPerfRecorder::default());
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
     let raw_key = "../escape";
 
@@ -140,10 +140,10 @@ fn records_invalid_key_without_error_text() {
         .put_overwrite(raw_key, b"bad")
         .expect_err("invalid key should fail");
 
-    let event = recorder.events().pop().expect("put event");
-    assert_eq!(event.operation, ObjectStoreOperation::Put);
-    assert_eq!(event.result, ObjectStoreResultClass::InvalidKey);
-    let encoded = serde_json::to_string(&event).expect("serialize event");
+    let sample = recorder.samples().pop().expect("put sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::Put);
+    assert_eq!(sample.result, ObjectStoreResultClass::InvalidKey);
+    let encoded = serde_json::to_string(&sample).expect("serialize sample");
     assert!(!encoded.contains(raw_key));
     assert!(!encoded.contains("escape"));
 }
@@ -151,7 +151,7 @@ fn records_invalid_key_without_error_text() {
 #[test]
 fn records_list_count() {
     let temp_dir = tempdir().expect("tempdir");
-    let recorder = Arc::new(VecPerfRecorder::default());
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
@@ -165,11 +165,11 @@ fn records_list_count() {
         .expect("list namespace");
 
     assert_eq!(keys.len(), 2);
-    let event = recorder.events().pop().expect("list event");
-    assert_eq!(event.operation, ObjectStoreOperation::ListPrefix);
-    assert_eq!(event.result, ObjectStoreResultClass::Ok);
-    assert_eq!(event.item_count, Some(2));
-    assert_eq!(event.range_class, Some(RangeClass::Prefix));
+    let sample = recorder.samples().pop().expect("list sample");
+    assert_eq!(sample.operation, ObjectStoreOperation::ListPrefix);
+    assert_eq!(sample.result, ObjectStoreResultClass::Ok);
+    assert_eq!(sample.item_count, Some(2));
+    assert_eq!(sample.range_class, Some(RangeClass::Prefix));
 }
 
 fn instrumented_object_store<R>(
@@ -177,7 +177,7 @@ fn instrumented_object_store<R>(
     recorder: Arc<R>,
 ) -> InstrumentedObjectStore<LocalFsStore>
 where
-    R: PerfRecorder,
+    R: ObjectStoreMetricsRecorder,
 {
     InstrumentedObjectStore::new(LocalFsStore::new(root).expect("local fs store"), recorder)
         .with_store_kind("local-fs")
