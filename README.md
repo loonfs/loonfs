@@ -24,15 +24,31 @@ cp ./target/debug/loon ~/.local/bin/loon    # copy it to somewhere in your $PATH
 
 ## Quickstart
 
-You will need access to an object storage bucket in the form of keys in order to set up Loon. Once installed, you can get started by running the following commands. 
-```bash
-loon init                   # creates your first Loon profile and sets it as the default. We recommend using embedded mode to start, with an object storage store.
+For a durable, shared workspace you will eventually want an object storage bucket (S3 or Cloudflare R2). To just try Loon on this machine without any credentials, use the zero-config trial:
 
+```bash
+loon init default --no-input --mode embedded --store-kind local-fs --root ~/.loonfs/data
 loon namespace create {namespace_id}
-loon use {namespace_id}   # sets the newly created namespace as the default.
+loon use {namespace_id}
 ```
 
-You can add a `SKILL` to your agent of choice so that they know to use Loon when appropriate. See our [example `SKILL.md`](https://github.com.loonfs/loonfs/tree/main/examples/SKILL.md).
+When you are ready to make the workspace shareable across machines or teammates, switch to S3 / R2 by running `loon profile create <name> --mode embedded --store-kind aws-s3 ...` (or `--store-kind cloudflare-r2 ...`). For the interactive walkthrough, run `loon init` without flags.
+
+## Use Loon with your agent
+
+Loon ships first-class skills for the major agent CLIs — used here for **whole-file artifacts** like GTM plans, design docs, RFCs, customer proposals, exec briefs, and ops handoffs. Loon is not the right tool for editing source code (use git for that); it shines on documents that get read, drafted, branched, reviewed, and revised by both agents and humans.
+
+Each command installs the `loon` binary **and** registers the Loon skill at the path that agent auto-discovers, so the agent picks it up after a restart with no manual file editing.
+
+| Agent          | One-liner                                                                          |
+| -------------- | ---------------------------------------------------------------------------------- |
+| Claude Code    | `curl -fsSL https://install.loonfs.com \| sh -s -- --with-skill claude-code`       |
+| Codex          | `curl -fsSL https://install.loonfs.com \| sh -s -- --with-skill codex`             |
+| Anything else  | `curl -fsSL https://install.loonfs.com \| sh -s -- --with-skill agents-md`         |
+
+The `agents-md` variant writes a project-scope `AGENTS.md` and works with Aider, OpenHands, GitHub Copilot, Gemini CLI, Devin, Windsurf, Zed, and any other tool that follows the [agents.md](https://agents.md) convention. The `agents-md` variant is project-scope: run it from the directory you want the file in. After install, restart the agent (or start a new thread).
+
+If your agent cannot run shell commands, use the [paste-in install prompt](https://github.com/loonfs/loonfs/blob/main/examples/agents/install-prompt.md) instead. The per-agent skill files live under [`examples/agents/`](https://github.com/loonfs/loonfs/tree/main/examples/agents) and the canonical reference skill is [`examples/SKILL.md`](https://github.com/loonfs/loonfs/blob/main/examples/SKILL.md).
 
 ## Sample usage
 

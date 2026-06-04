@@ -1,77 +1,149 @@
 ---
 name: loon
-description: Read and write team-wide documents via the `loon` CLI (LoonFS) for content that should be persisted, or shared with teammates or other agents. Use when (1) the user asks to read/write/list/move docs stored in loon, (2) the user mentions "team docs", "shared docs", or docs that "other agents" should see, (3) the user references a file path that isn't in the local filesystem but sounds like a shared workspace. Handles picking the correct namespace for the task.
+description: Use the `loon` CLI (LoonFS) for durable, multiplayer, versioned agent workspaces. Use when the user asks to read, write, list, move, copy, fork, restore, or hand off files stored in Loon; mentions Loon namespaces, shared agent state, durable handoffs, persisted project docs, artifacts that future agents should read, rolling back an agent's changes, branching a workspace for an experiment, or files that are not in the local filesystem but sound like a shared or persistent workspace.
 ---
 
 # loon
 
-`loon` is a CLI for LoonFS, an object-storage-backed filesystem for documents that are shared across teammates and agents. Treat everything in `loon` as **shared team state**: writes and deletes are immediately visible to other people and other agents.
+Use `loon` to give an agent task a durable, versioned, multiplayer workspace. Treat Loon state as shared team and agent state: writes, deletes, restores, and moves are immediately visible to other users and agents with access to the same namespace.
 
-Binary: `loon` (on `PATH`). Run `loon help` or `loon <subcommand> --help` if anything below is unclear.
+Binary: `loon` on `PATH`. Run `loon help` or `loon <subcommand> --help` if the exact CLI shape is unclear.
 
-## Namespaces
+## When to reach for Loon
 
-Pick the namespace to use based on the **subject of the task**, not on the current working directory — the user may be in one repo while asking about the other project.
+Reach for Loon, not the local filesystem, when any of the following is true:
 
-- **`{SAMPLE_NAMESPACE}`** — {add description of what this namespace ought to be used for}.
+- The user wants a file that future sessions, future agents, or teammates can read: a GTM plan, a design doc / RFC, an exec brief, a customer proposal, an incident postmortem, an ops handoff.
+- The user is running, or about to run, multiple agents in parallel and wants them to coordinate without stepping on each other.
+- The work involves a risky change where a rollback should be cheap (iterating on a plan, drafting an RFC, generating a brief, exploring an alternate framing).
+- The user mentions branching, forking, restoring, "checkpointing the workspace", or "rolling back what the agent did".
+- The user references a Loon namespace name (or a path inside one) without a local filesystem path.
 
-If the task's subject is ambiguous (e.g. the user just says "read `/notes/foo.md`" with no project signal), **ask the user which namespace before running any command**. Do not guess, and do not fall back to the current active namespace.
+Loon is **not** the right tool for editing source code — source-code workflows need partial-file/patch primitives that Loon does not provide. For code edits, use the local filesystem and git. For whole-file artifacts (docs, plans, briefs, RFCs, proposals, postmortems), prefer Loon.
 
-## Always pass `--namespace` explicitly
+For one-shot scratch work the user does not need later, use the local filesystem.
 
-Every data subcommand (`ls`, `stat`, `cat`, `get`, `put`, `rm`, `mv`, `cp`) accepts `--namespace <NAMESPACE>`. Always pass it. Reasons:
+## Before using Loon
 
-- The active namespace (`loon current`) is global state shared with other terminals and agents. Relying on it is a race.
-- Explicit `--namespace` makes every tool call self-documenting in the transcript.
-- It removes any dependency on what another process may have done with `loon use`.
+Check the CLI is installed with `loon version`. If `loon current --json` reports no configured profile, Loon is not yet set up. Two paths:
 
-**Do not run `loon use <ns>` from inside this skill.** That mutates the shared default and can break a parallel session. If the user explicitly asks to change the default, then (and only then) run `loon use`.
+1. **Zero-config trial** (no credentials). For evaluating Loon or working durably on this machine only:
 
-At the very start of a loon task, you may run `loon current --json` once just to record the active default for context — but every subsequent data command still passes `--namespace` explicitly.
+   ```bash
+   loon init default --no-input --mode embedded --store-kind local-fs --root ~/.loonfs/data
+   ```
 
-## Reading
+   Tell the user: data lives at `~/.loonfs/data`; durable on this machine but not shareable across machines until they switch to an S3/R2 profile or hosted Loon.
+
+2. **Durable / shared setup**. Ask the user for S3/R2 credentials (provider, bucket, region, access key, secret) or a hosted Loon server URL + auth token, then run `loon profile create <name> --mode embedded --store-kind aws-s3 ...` (or `--store-kind cloudflare-r2 ...`, or `--mode remote --server-url ... --auth-token ...`). Do not invent credentials.
+
+After init, list or create a namespace: `loon namespace list`, `loon namespace create <namespace_id>`.
+
+## Two canonical patterns
+
+Reach for these first when a user describes an agent-workspace task. Use them before falling back to standard read/write operations.
+
+### Pattern A — Branch your work
+
+Before a risky, exploratory, alternate-framing, or parallel edit, give the work an isolated branch. Loon offers two branching primitives — pick the lighter one when it fits.
+
+**Decision rule:**
+- **Single artifact, single agent iterating** → write the alternate to a different filename in the same namespace (A.1).
+- **Multiple files that must stay consistent**, OR **multiple agents writing to overlapping paths**, OR **a coherent alternative tree that should be reviewable as one unit** → fork the namespace (A.2).
+
+#### A.1 — Sibling filename in the same namespace (lightweight)
+
+Use when one agent is iterating on one artifact. The original stays at its current path; the alternate goes to a clearly-named sibling.
+
+Examples:
+- Iterating on a Q3 GTM plan → `/plans/gtm-q3.md` stays; write the alternate to `/plans/gtm-q3-marketing-led.md`.
+- Re-pitching a customer proposal → `/proposals/acme-rev3.md` alongside `/proposals/acme-rev2.md`.
+- Alternate framing of an exec brief → `/briefs/q3-positioning.md` alongside `/briefs/q3-positioning-v2.md`.
 
 ```bash
-loon ls [PATH] --namespace <ns> --json      # list a directory; PATH defaults to /
-loon stat <PATH> --namespace <ns> --json    # size, revision, content digest
-loon cat  <PATH> --namespace <ns>           # print file contents (omit --json for raw text)
-loon get  <REMOTE> <LOCAL> --namespace <ns> # download to a local path
+loon get /plans/gtm-q3.md ./gtm-q3.md --namespace <ns>
+# revise ./gtm-q3.md locally into the alternate
+loon put ./gtm-q3.md /plans/gtm-q3-marketing-led.md --namespace <ns>
 ```
 
-Prefer `--json` for `ls` / `stat` when you need to parse the result. Prefer plain `cat` (no `--json`) when the user wants to read the document.
+At session end, surface both paths so the user can compare. To promote the alternate to canonical, `loon mv` it over the original after the user confirms — revision history is preserved. For "I wrote v2 into the original and want to undo," use Pattern B (restore), not a fork.
 
-## Writing
+#### A.2 — Fork the namespace (heavyweight)
+
+Use when the work spans multiple files that cross-reference each other (a plan plus its appendices, a design doc plus diagrams, a brief composed of multiple section files), or when multiple agents are running in parallel and would otherwise collide on overlapping paths.
 
 ```bash
-loon put <LOCAL> <REMOTE> --namespace <ns>           # upload
-loon put <LOCAL> <REMOTE> --namespace <ns> --force   # overwrite an existing file
-loon mv  <SRC>  <DST>    --namespace <ns>
-loon cp  <SRC>  <DST>    --namespace <ns>
-loon rm  <PATH>          --namespace <ns>
+loon namespace fork <source_namespace> <source_namespace>-<task_or_agent_id>
 ```
 
-Rules:
+`fork` is O(1) and does not copy bytes — the child shares the source's content store and diverges in metadata only. Good child names: `gtm-q3-marketing-led`, `rfc-billing-event-sourced`, `acme-proposal-rev3`, `brief-2026-06-04-agent-a`.
 
-1. **Before every `put`**, run `loon stat <REMOTE> --namespace <ns> --json` to check whether the remote path already exists.
-   - If it does not exist, `put` without `--force`.
-   - If it exists, tell the user the current size/revision and ask whether to overwrite. Only pass `--force` after explicit confirmation.
-2. **Before `rm`**, show the target (path, size, revision from `stat`) and confirm with the user. Deletion affects teammates and other agents immediately.
-3. **Before `mv` / `cp` over an existing destination**, stat the destination first and confirm with the user if it would overwrite.
-4. **Never put secrets, credentials, customer data, or `.env` files** into loon. If a user asks you to, stop and flag it.
+After forking, **operate exclusively in the child namespace** — pass `--namespace <child>` on every data command. When the work is done: promote the child (leave it canonical), merge selected files back into the source by `cat` + `put`, or abandon the fork (no cleanup needed; abandoned forks cost nothing in content storage).
 
-## Handing off to another agent
+For agent fleets where work cannot be cleanly partitioned by path (several agents trying alternate framings of the same artifact): one child namespace per agent. If the fleet's work *can* be partitioned by path (one agent per section of a brief, each writing to its own file), keep them in the same namespace and skip the fork — Loon's multiplayer-by-default model handles non-overlapping concurrent writes.
 
-When the goal is to produce a document that another agent (or a future Claude session) should read, prefer writing it via `loon put` instead of leaving it in the local filesystem. After the upload, tell the user the **full** reference, including namespace, e.g.:
+### Pattern B — Restore on failure
 
-> Wrote to `loon://customer-success/handoffs/2026-04-10-support-notes.md` (namespace `customer-success`).
+Use when a write produced wrong output or an agent's earlier action needs to be undone.
 
-Downstream agents need both the path and the namespace to retrieve it.
+```bash
+loon revisions <path> --namespace <ns> --json
+loon restore   <path> --namespace <ns> --revision <revision_number>
+```
 
-## Quick checklist
+Show the user the candidate revisions (number, timestamp, size). Pick the revision that predates the bad write. Confirm with the user before running `restore` — `--revision` is required. Restoring writes a new revision whose contents equal the chosen prior revision; earlier revisions remain restorable.
 
-Before running any loon command:
+For multi-file rollbacks: repeat per path. If the scope is large (more than ~5 files), surface that and ask whether to proceed file-by-file or to fork from a known-good revision and continue forward from there.
 
-1. Did I identify which namespace this task belongs to?
-2. If ambiguous, did I ask the user?
-3. Am I passing `--namespace <ns>` explicitly on this command?
-4. If this is a write or delete, did I `stat` first and (for overwrite/delete) get explicit user confirmation?
+## Namespace discipline
+
+Pick the namespace from the task subject, not from the current working directory — the user may be in one repo while asking about a different workspace. If the namespace is ambiguous, run `loon namespace list --json` to surface options or ask the user. Do not fall back to the active default.
+
+Always pass `--namespace <ns>` explicitly on every data command. The active default (`loon current`) is shared local profile state that another terminal or agent can change. Do not run `loon use <ns>` from this skill unless the user explicitly asks to change the default.
+
+When reporting results to the user, always state both the namespace and the path so the reference is unambiguous — for example, `Wrote /plans/gtm-q3.md in namespace gtm-2026`.
+
+## Standard operations
+
+All data commands require `--namespace <ns>`. Use `--json` only for commands you need to parse; raw streaming output (`cat`, `get -`) cannot use `--json`.
+
+```bash
+# read
+loon ls        [path]   --namespace <ns> --json
+loon stat      <path>   --namespace <ns> --json
+loon revisions <path>   --namespace <ns> --json
+loon cat       <path>   --namespace <ns> [--revision <n>]
+loon get       <remote> <local> --namespace <ns> [--revision <n>]
+
+# write
+loon put       <local>  <remote> --namespace <ns> [--force]
+loon mkdir     <dir>    --namespace <ns>
+loon mv        <src>    <dst>    --namespace <ns>
+loon cp        <src>    <dst>    --namespace <ns>
+loon rm        <path>   --namespace <ns>
+```
+
+**Before any destructive operation** (`put` over an existing path, `mv`, `cp`, `rm`, `restore`): run `loon stat` first, show the user the current size and revision, and ask before proceeding. `--force` on `put` requires explicit user confirmation. Revisions survive `rm`, so accidental deletes can be recovered via Pattern B.
+
+For generated artifacts, prefer clear paths:
+
+```text
+/plans/<topic>-<date>.md          # GTM plans, project plans, migration plans
+/rfcs/<topic>-<date>.md           # design docs, RFCs, ADRs, implementation plans
+/briefs/<topic>-<date>.md         # exec briefs, customer briefs, account briefs
+/proposals/<customer>-<date>.md   # customer-facing proposals or pitches
+/handoffs/<date>-<topic>.md       # cross-agent or cross-session handoffs
+/decisions/<date>-<topic>.md      # decision logs, postmortem notes
+/artifacts/<task>/<filename>      # anything else generated by a task
+```
+
+After writing, report both the path and the namespace — for example, `Wrote /plans/gtm-q3.md in namespace gtm-2026`.
+
+## Safety rules
+
+- Never upload secrets, private keys, tokens, credentials, `.env` files, or similarly sensitive material to Loon.
+- Ask before uploading customer data, personal data, or confidential documents unless the namespace is already approved for that data.
+- Do not rely on local files as durable handoffs when the user asks for future agents or teammates to see the result. Write the handoff to Loon instead.
+- Do not hide failed writes. If a Loon command fails, report the command intent, namespace, path, and error summary.
+- For risky changes (>5 file writes, bulk edits, deletes), branch first (sibling filename or fork, per the Pattern A decision rule) rather than editing in place.
+- Do not use Loon for source-code edits. Use the local filesystem and git for code; use Loon for docs, plans, briefs, RFCs, proposals, postmortems.
