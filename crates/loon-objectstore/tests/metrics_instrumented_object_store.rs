@@ -1,4 +1,7 @@
 use loon_objectstore::fs::LocalFsStore;
+use loon_objectstore::keys::{
+    checkpoint_manifest, checkpoint_run_table, wal_segment, CheckpointTableFamily,
+};
 use loon_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
@@ -171,6 +174,40 @@ fn records_list_count() {
     assert_eq!(sample.result, ObjectStoreResultClass::Ok);
     assert_eq!(sample.item_count, Some(2));
     assert_eq!(sample.range_class, Some(RangeClass::Prefix));
+}
+
+#[test]
+fn classifies_wal_and_checkpoint_key_families() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
+
+    store
+        .put_overwrite(
+            &wal_segment("ns-1", 1, 2, "seg_00000000000000000000000000000001"),
+            b"wal",
+        )
+        .expect("put wal");
+    store
+        .put_overwrite(&checkpoint_manifest("ns-1", 2), b"manifest")
+        .expect("put manifest");
+    store
+        .put_overwrite(
+            &checkpoint_run_table(
+                "ns-1",
+                2,
+                "run_00000000000000000000000000000001",
+                CheckpointTableFamily::DirentryBinds,
+                0,
+            ),
+            b"table",
+        )
+        .expect("put table");
+
+    let samples = recorder.samples();
+    assert_eq!(samples[0].key_class, KeyClass::WalSegment);
+    assert_eq!(samples[1].key_class, KeyClass::CheckpointManifest);
+    assert_eq!(samples[2].key_class, KeyClass::CheckpointTable);
 }
 
 #[test]
