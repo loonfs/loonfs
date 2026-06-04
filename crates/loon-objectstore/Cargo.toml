@@ -11,10 +11,10 @@ base64.workspace = true
 http.workspace = true
 loon-api = { path = "../loon-api" }
 serde.workspace = true
-serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
