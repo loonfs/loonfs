@@ -1,4 +1,7 @@
+mod indexes;
+
 use crate::invariants::InvariantId;
+use indexes::MetadataIndexes;
 use loon_api::wire::wal::{WalCommitPayload, WalDelta};
 use loon_api::{
     v0::CommitOpResult, AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey,
@@ -8,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MetadataState {
     #[serde(default)]
     inodes: Vec<InodeRecord>,
@@ -22,6 +25,54 @@ pub struct MetadataState {
     subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
     commit_receipts: Vec<CommitReceiptRecord>,
+    #[serde(skip)]
+    indexes: MetadataIndexes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+struct MetadataStateRows {
+    #[serde(default)]
+    inodes: Vec<InodeRecord>,
+    #[serde(default)]
+    direntry_binds: Vec<DirentryBindRecord>,
+    #[serde(default)]
+    direntry_unbinds: Vec<DirentryUnbindRecord>,
+    #[serde(default)]
+    revisions: Vec<RevisionRecord>,
+    #[serde(default)]
+    subtree_tombstones: Vec<SubtreeTombstoneRecord>,
+    #[serde(default)]
+    commit_receipts: Vec<CommitReceiptRecord>,
+}
+
+impl Default for MetadataState {
+    fn default() -> Self {
+        Self::from_rows(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for MetadataState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let rows = MetadataStateRows::deserialize(deserializer)?;
+        Ok(Self::from_rows(
+            rows.inodes,
+            rows.direntry_binds,
+            rows.direntry_unbinds,
+            rows.revisions,
+            rows.subtree_tombstones,
+            rows.commit_receipts,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,14 +177,21 @@ impl MetadataState {
         subtree_tombstones: Vec<SubtreeTombstoneRecord>,
         commit_receipts: Vec<CommitReceiptRecord>,
     ) -> Self {
-        Self {
+        let mut state = Self {
             inodes,
             direntry_binds,
             direntry_unbinds,
             revisions,
             subtree_tombstones,
             commit_receipts,
-        }
+            indexes: MetadataIndexes::default(),
+        };
+        state.rebuild_indexes();
+        state
+    }
+
+    pub fn indexed_seq(&self) -> ChangeSeq {
+        self.indexes.indexed_seq()
     }
 
     pub fn inodes(&self) -> &[InodeRecord] {
@@ -167,6 +225,47 @@ impl MetadataState {
             .max_by_key(|record| record.committed_seq)
     }
 
+    fn rebuild_indexes(&mut self) {
+        self.indexes = MetadataIndexes::rebuild(
+            &self.inodes,
+            &self.direntry_binds,
+            &self.direntry_unbinds,
+            &self.revisions,
+            &self.subtree_tombstones,
+            &self.commit_receipts,
+        );
+    }
+
+    fn push_inode_record(&mut self, record: InodeRecord) {
+        self.indexes.record_inode(&record);
+        self.inodes.push(record);
+    }
+
+    fn push_direntry_bind_record(&mut self, record: DirentryBindRecord) {
+        self.indexes.record_bind(&record);
+        self.direntry_binds.push(record);
+    }
+
+    fn push_direntry_unbind_record(&mut self, record: DirentryUnbindRecord) {
+        self.indexes.record_unbind(&record);
+        self.direntry_unbinds.push(record);
+    }
+
+    fn push_revision_record(&mut self, record: RevisionRecord) {
+        self.indexes.record_revision(&record);
+        self.revisions.push(record);
+    }
+
+    fn push_subtree_tombstone_record(&mut self, record: SubtreeTombstoneRecord) {
+        self.indexes.record_tombstone(&record);
+        self.subtree_tombstones.push(record);
+    }
+
+    fn push_commit_receipt_record(&mut self, record: CommitReceiptRecord) {
+        self.indexes.record_commit_receipt(&record);
+        self.commit_receipts.push(record);
+    }
+
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
@@ -196,7 +295,7 @@ impl MetadataState {
                     inode_id,
                     inode_kind,
                 } => {
-                    self.inodes.push(InodeRecord {
+                    self.push_inode_record(InodeRecord {
                         inode_id: *inode_id,
                         inode_kind: inode_kind.clone(),
                         created_seq: committed_seq,
@@ -213,7 +312,7 @@ impl MetadataState {
                     display_name,
                     child_inode,
                 } => {
-                    self.direntry_binds.push(DirentryBindRecord {
+                    self.push_direntry_bind_record(DirentryBindRecord {
                         parent_inode_id: *parent_inode,
                         name_key: name_key.clone(),
                         display_name: display_name.clone(),
@@ -234,7 +333,7 @@ impl MetadataState {
                     bind_seq,
                     bind_delta_index,
                 } => {
-                    self.direntry_unbinds.push(DirentryUnbindRecord {
+                    self.push_direntry_unbind_record(DirentryUnbindRecord {
                         parent_inode_id: *parent_inode,
                         name_key: name_key.clone(),
                         child_inode_id: *child_inode,
@@ -254,7 +353,7 @@ impl MetadataState {
                     revision_no,
                     content_ref,
                 } => {
-                    self.revisions.push(RevisionRecord {
+                    self.push_revision_record(RevisionRecord {
                         inode_id: *inode_id,
                         revision_no: *revision_no,
                         committed_seq,
@@ -270,7 +369,7 @@ impl MetadataState {
                     delta_index,
                     root_inode,
                 } => {
-                    self.subtree_tombstones.push(SubtreeTombstoneRecord {
+                    self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                         root_inode_id: *root_inode,
                         tombstone_seq: committed_seq,
                         tombstone_delta_index: *delta_index,
@@ -309,7 +408,7 @@ impl MetadataState {
             .map(|delta| delta.delta.clone())
             .collect::<Vec<_>>();
         let mut checked_invariants = self.apply_committed_wal_deltas_mut(record.seq, &deltas)?;
-        self.commit_receipts.push(CommitReceiptRecord {
+        self.push_commit_receipt_record(CommitReceiptRecord {
             commit_id: record.commit_id.clone(),
             semantic_commit_fingerprint_sha256: record.semantic_commit_fingerprint_sha256.clone(),
             committed_seq: record.seq,
@@ -323,6 +422,17 @@ impl MetadataState {
     }
 
     pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.inode_at_head(inode_id);
+        }
+        self.inode_at_seq_scan(inode_id, base_seq)
+    }
+
+    pub fn inode_at_head(&self, inode_id: InodeId) -> Option<InodeRecord> {
+        self.indexes.inode(inode_id)
+    }
+
+    fn inode_at_seq_scan(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
         self.inodes
             .iter()
             .find(|inode| inode.inode_id == inode_id && inode.created_seq <= base_seq)
@@ -370,6 +480,15 @@ impl MetadataState {
         name_key: &str,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
+        self.bound_child_at_seq_scan(parent_inode_id, name_key, base_seq)
+    }
+
+    fn bound_child_at_seq_scan(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryBindRecord> {
         self.direntry_binds
             .iter()
             .filter(|direntry| {
@@ -386,6 +505,9 @@ impl MetadataState {
         child_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.current_parent_binding_for_child_at_head(child_inode_id);
+        }
         let direntry = self.latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)?;
         if self.is_direntry_unbound_at_seq(&direntry, base_seq) {
             return None;
@@ -393,7 +515,32 @@ impl MetadataState {
         Some(direntry)
     }
 
+    pub fn current_parent_binding_for_child_at_head(
+        &self,
+        child_inode_id: InodeId,
+    ) -> Option<DirentryBindRecord> {
+        self.indexes.active_parent_for_child(child_inode_id)
+    }
+
     pub fn active_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<SubtreeTombstoneRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.active_subtree_tombstone_at_head(root_inode_id);
+        }
+        self.active_subtree_tombstone_scan(root_inode_id, base_seq)
+    }
+
+    pub fn active_subtree_tombstone_at_head(
+        &self,
+        root_inode_id: InodeId,
+    ) -> Option<SubtreeTombstoneRecord> {
+        self.indexes.active_tombstone(root_inode_id)
+    }
+
+    fn active_subtree_tombstone_scan(
         &self,
         root_inode_id: InodeId,
         base_seq: ChangeSeq,
@@ -412,6 +559,10 @@ impl MetadataState {
         inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<SubtreeTombstoneRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.covering_subtree_tombstone_at_head(inode_id);
+        }
+
         let mut current = Some(inode_id);
         let mut visited = BTreeSet::new();
 
@@ -432,12 +583,49 @@ impl MetadataState {
         None
     }
 
+    pub fn covering_subtree_tombstone_at_head(
+        &self,
+        inode_id: InodeId,
+    ) -> Option<SubtreeTombstoneRecord> {
+        let mut current = Some(inode_id);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+
+            if let Some(tombstone) = self.active_subtree_tombstone_at_head(candidate_inode_id) {
+                return Some(tombstone);
+            }
+
+            current = self
+                .current_parent_binding_for_child_at_head(candidate_inode_id)
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        None
+    }
+
     pub fn visible_inode(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.visible_inode_at_head(inode_id);
+        }
+
         let inode = self.inode_at_seq(inode_id, base_seq)?;
         if self
             .covering_subtree_tombstone(inode_id, base_seq)
             .is_some()
         {
+            return None;
+        }
+
+        Some(inode)
+    }
+
+    pub fn visible_inode_at_head(&self, inode_id: InodeId) -> Option<InodeRecord> {
+        let inode = self.inode_at_head(inode_id)?;
+        if self.covering_subtree_tombstone_at_head(inode_id).is_some() {
             return None;
         }
 
@@ -459,6 +647,10 @@ impl MetadataState {
         name_key: &str,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.visible_child_at_head(parent_inode_id, name_key);
+        }
+
         let parent = self.visible_inode(parent_inode_id, base_seq)?;
         if parent.inode_kind != InodeKind::Dir {
             return None;
@@ -469,11 +661,30 @@ impl MetadataState {
         Some(direntry)
     }
 
+    pub fn visible_child_at_head(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+    ) -> Option<DirentryBindRecord> {
+        let parent = self.visible_inode_at_head(parent_inode_id)?;
+        if parent.inode_kind != InodeKind::Dir {
+            return None;
+        }
+
+        let direntry = self.indexes.active_child(parent_inode_id, name_key)?;
+        self.visible_inode_at_head(direntry.child_inode_id)?;
+        Some(direntry)
+    }
+
     pub fn visible_children(
         &self,
         parent_inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Vec<DirentryBindRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.visible_children_at_head(parent_inode_id);
+        }
+
         let Some(parent) = self.visible_inode(parent_inode_id, base_seq) else {
             return Vec::new();
         };
@@ -501,6 +712,31 @@ impl MetadataState {
                     .is_some()
             })
             .cloned()
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then(left.child_inode_id.0.cmp(&right.child_inode_id.0))
+        });
+        children
+    }
+
+    pub fn visible_children_at_head(&self, parent_inode_id: InodeId) -> Vec<DirentryBindRecord> {
+        let Some(parent) = self.visible_inode_at_head(parent_inode_id) else {
+            return Vec::new();
+        };
+        if parent.inode_kind != InodeKind::Dir {
+            return Vec::new();
+        }
+
+        let mut children = self
+            .indexes
+            .active_children(parent_inode_id)
+            .into_iter()
+            .filter(|direntry| {
+                self.visible_inode_at_head(direntry.child_inode_id)
+                    .is_some()
+            })
             .collect::<Vec<_>>();
         children.sort_by(|left, right| {
             left.display_name
@@ -585,6 +821,10 @@ impl MetadataState {
         name_key: &str,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.indexes.active_child(parent_inode_id, name_key);
+        }
+
         let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
         if self.is_direntry_unbound_at_seq(&direntry, base_seq) {
             return None;
@@ -622,6 +862,21 @@ impl MetadataState {
         direntry: &DirentryBindRecord,
         base_seq: ChangeSeq,
     ) -> bool {
+        if base_seq == self.indexed_seq() {
+            return self.is_direntry_unbound_at_head(direntry);
+        }
+        self.is_direntry_unbound_at_seq_scan(direntry, base_seq)
+    }
+
+    pub(crate) fn is_direntry_unbound_at_head(&self, direntry: &DirentryBindRecord) -> bool {
+        self.indexes.is_unbound(direntry)
+    }
+
+    fn is_direntry_unbound_at_seq_scan(
+        &self,
+        direntry: &DirentryBindRecord,
+        base_seq: ChangeSeq,
+    ) -> bool {
         self.direntry_unbinds.iter().any(|unbind| {
             unbind.unbind_seq <= base_seq
                 && unbind.parent_inode_id == direntry.parent_inode_id
@@ -638,6 +893,10 @@ impl MetadataState {
         new_parent_inode: InodeId,
         base_seq: ChangeSeq,
     ) -> bool {
+        if base_seq == self.indexed_seq() {
+            return self.would_create_directory_cycle_at_head(inode_id, new_parent_inode);
+        }
+
         let mut current = Some(new_parent_inode);
         let mut visited = BTreeSet::new();
 
@@ -655,6 +914,29 @@ impl MetadataState {
 
         false
     }
+
+    pub fn would_create_directory_cycle_at_head(
+        &self,
+        inode_id: InodeId,
+        new_parent_inode: InodeId,
+    ) -> bool {
+        let mut current = Some(new_parent_inode);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+            if candidate_inode_id == inode_id {
+                return true;
+            }
+            current = self
+                .current_parent_binding_for_child_at_head(candidate_inode_id)
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        false
+    }
 }
 
 #[derive(Debug, Default)]
@@ -664,30 +946,31 @@ pub(crate) struct MetadataStateBuilder {
 
 impl MetadataStateBuilder {
     pub(crate) fn push_inode(&mut self, record: InodeRecord) {
-        self.state.inodes.push(record);
+        self.state.push_inode_record(record);
     }
 
     pub(crate) fn push_direntry_bind(&mut self, record: DirentryBindRecord) {
-        self.state.direntry_binds.push(record);
+        self.state.push_direntry_bind_record(record);
     }
 
     pub(crate) fn push_direntry_unbind(&mut self, record: DirentryUnbindRecord) {
-        self.state.direntry_unbinds.push(record);
+        self.state.push_direntry_unbind_record(record);
     }
 
     pub(crate) fn push_revision(&mut self, record: RevisionRecord) {
-        self.state.revisions.push(record);
+        self.state.push_revision_record(record);
     }
 
     pub(crate) fn push_subtree_tombstone(&mut self, record: SubtreeTombstoneRecord) {
-        self.state.subtree_tombstones.push(record);
+        self.state.push_subtree_tombstone_record(record);
     }
 
     pub(crate) fn push_commit_receipt(&mut self, record: CommitReceiptRecord) {
-        self.state.commit_receipts.push(record);
+        self.state.push_commit_receipt_record(record);
     }
 
-    pub(crate) fn finish(self) -> MetadataState {
+    pub(crate) fn finish(mut self) -> MetadataState {
+        self.state.rebuild_indexes();
         self.state
     }
 }
@@ -766,6 +1049,233 @@ mod tests {
             .is_some());
         assert!(metadata_state
             .visible_child(InodeId(1), "Report.TXT", ChangeSeq(1))
+            .is_none());
+    }
+
+    #[test]
+    fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
+        let metadata_state = MetadataState::from_rows(
+            vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(0),
+                },
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(3),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(2),
+                },
+            ],
+            vec![
+                DirentryBindRecord {
+                    parent_inode_id: InodeId(1),
+                    name_key: "docs".to_owned(),
+                    display_name: "docs".to_owned(),
+                    child_inode_id: InodeId(2),
+                    bind_seq: ChangeSeq(1),
+                    bind_delta_index: 0,
+                },
+                DirentryBindRecord {
+                    parent_inode_id: InodeId(2),
+                    name_key: "report.txt".to_owned(),
+                    display_name: "report.txt".to_owned(),
+                    child_inode_id: InodeId(3),
+                    bind_seq: ChangeSeq(2),
+                    bind_delta_index: 0,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(metadata_state.indexed_seq(), ChangeSeq(2));
+        assert!(metadata_state.inode_at_head(InodeId(2)).is_some());
+        assert_eq!(
+            metadata_state
+                .visible_child_at_head(InodeId(1), "docs")
+                .expect("docs visible")
+                .child_inode_id,
+            InodeId(2)
+        );
+        assert_eq!(
+            metadata_state
+                .current_parent_binding_for_child_at_head(InodeId(2))
+                .expect("parent binding")
+                .parent_inode_id,
+            InodeId(1)
+        );
+
+        let metadata_state = metadata_state
+            .apply_committed_wal_deltas(
+                ChangeSeq(3),
+                &[WalDelta::UnbindDirentry {
+                    delta_index: 0,
+                    parent_inode: InodeId(1),
+                    name_key: "docs".to_owned(),
+                    child_inode: InodeId(2),
+                    bind_seq: ChangeSeq(1),
+                    bind_delta_index: 0,
+                }],
+            )
+            .expect("unbind")
+            .metadata_state;
+        assert!(metadata_state
+            .visible_child_at_head(InodeId(1), "docs")
+            .is_none());
+        assert!(metadata_state
+            .current_parent_binding_for_child_at_head(InodeId(2))
+            .is_none());
+
+        let metadata_state = metadata_state
+            .apply_committed_wal_deltas(
+                ChangeSeq(4),
+                &[WalDelta::BindDirentry {
+                    delta_index: 0,
+                    parent_inode: InodeId(1),
+                    name_key: "renamed".to_owned(),
+                    display_name: "renamed".to_owned(),
+                    child_inode: InodeId(2),
+                }],
+            )
+            .expect("rebind")
+            .metadata_state;
+        assert!(metadata_state
+            .visible_child_at_head(InodeId(1), "docs")
+            .is_none());
+        assert_eq!(
+            metadata_state
+                .visible_child_at_head(InodeId(1), "renamed")
+                .expect("renamed visible")
+                .child_inode_id,
+            InodeId(2)
+        );
+
+        let metadata_state = metadata_state
+            .apply_committed_wal_deltas(
+                ChangeSeq(5),
+                &[WalDelta::TombstoneSubtree {
+                    delta_index: 0,
+                    root_inode: InodeId(2),
+                }],
+            )
+            .expect("tombstone")
+            .metadata_state;
+        assert!(metadata_state
+            .visible_child_at_head(InodeId(1), "renamed")
+            .is_none());
+        assert_eq!(
+            metadata_state
+                .covering_subtree_tombstone_at_head(InodeId(3))
+                .expect("descendant tombstone")
+                .root_inode_id,
+            InodeId(2)
+        );
+    }
+
+    #[test]
+    fn rebuilt_indexes_answer_current_head_queries_after_deserialize() {
+        let metadata_state = MetadataState::from_rows(
+            vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(0),
+                },
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+            ],
+            vec![DirentryBindRecord {
+                parent_inode_id: InodeId(1),
+                name_key: "file.txt".to_owned(),
+                display_name: "file.txt".to_owned(),
+                child_inode_id: InodeId(2),
+                bind_seq: ChangeSeq(1),
+                bind_delta_index: 0,
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let encoded = serde_json::to_string(&metadata_state).expect("encode metadata");
+        assert!(!encoded.contains("indexes"));
+        let decoded: MetadataState = serde_json::from_str(&encoded).expect("decode metadata");
+
+        assert_eq!(decoded.indexed_seq(), ChangeSeq(1));
+        assert_eq!(
+            decoded
+                .visible_child_at_head(InodeId(1), "file.txt")
+                .expect("indexed child")
+                .child_inode_id,
+            InodeId(2)
+        );
+    }
+
+    #[test]
+    fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
+        let metadata_state = MetadataState::from_rows(
+            vec![
+                InodeRecord {
+                    inode_id: InodeId(1),
+                    inode_kind: InodeKind::Dir,
+                    created_seq: ChangeSeq(0),
+                },
+                InodeRecord {
+                    inode_id: InodeId(2),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(1),
+                },
+                InodeRecord {
+                    inode_id: InodeId(3),
+                    inode_kind: InodeKind::File,
+                    created_seq: ChangeSeq(2),
+                },
+            ],
+            vec![
+                DirentryBindRecord {
+                    parent_inode_id: InodeId(1),
+                    name_key: "report".to_owned(),
+                    display_name: "report".to_owned(),
+                    child_inode_id: InodeId(2),
+                    bind_seq: ChangeSeq(1),
+                    bind_delta_index: 0,
+                },
+                DirentryBindRecord {
+                    parent_inode_id: InodeId(1),
+                    name_key: "report".to_owned(),
+                    display_name: "report".to_owned(),
+                    child_inode_id: InodeId(3),
+                    bind_seq: ChangeSeq(2),
+                    bind_delta_index: 0,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            metadata_state
+                .visible_child_at_head(InodeId(1), "report")
+                .expect("latest child")
+                .child_inode_id,
+            InodeId(3)
+        );
+        assert!(metadata_state
+            .current_parent_binding_for_child_at_head(InodeId(2))
             .is_none());
     }
 

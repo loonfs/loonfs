@@ -35,11 +35,8 @@ impl<'a> MetadataPreview<'a> {
         base_seq: ChangeSeq,
     ) -> Option<InodeRecord> {
         self.rows
-            .inodes()
-            .iter()
-            .chain(self.base.inodes().iter())
-            .find(|inode| inode.inode_id == inode_id && inode.created_seq <= base_seq)
-            .cloned()
+            .inode_at_seq(inode_id, base_seq)
+            .or_else(|| self.base_inode_at_seq(inode_id, base_seq))
     }
 
     pub(super) fn latest_revision_head_at_seq(
@@ -166,10 +163,11 @@ impl<'a> MetadataPreview<'a> {
             .rows
             .direntry_binds()
             .iter()
-            .chain(self.base.direntry_binds().iter())
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id && direntry.bind_seq <= base_seq
             })
+            .cloned()
+            .chain(self.base_visible_children(parent_inode_id, base_seq))
             .filter(|direntry| {
                 self.active_child_binding_at_seq(parent_inode_id, &direntry.name_key, base_seq)
                     .map(|active| {
@@ -183,7 +181,6 @@ impl<'a> MetadataPreview<'a> {
                 self.visible_inode(direntry.child_inode_id, base_seq)
                     .is_some()
             })
-            .cloned()
             .collect::<Vec<_>>();
         children.sort_by(|left, right| {
             left.display_name
@@ -226,7 +223,6 @@ impl<'a> MetadataPreview<'a> {
         self.rows
             .direntry_binds()
             .iter()
-            .chain(self.base.direntry_binds().iter())
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
                     && direntry.name_key == name_key
@@ -234,6 +230,9 @@ impl<'a> MetadataPreview<'a> {
             })
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
             .cloned()
+            .into_iter()
+            .chain(self.base_bound_child_at_seq(parent_inode_id, name_key, base_seq))
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
     }
 
     fn active_subtree_tombstone(
@@ -244,12 +243,14 @@ impl<'a> MetadataPreview<'a> {
         self.rows
             .subtree_tombstones()
             .iter()
-            .chain(self.base.subtree_tombstones().iter())
             .filter(|tombstone| {
                 tombstone.root_inode_id == root_inode_id && tombstone.tombstone_seq <= base_seq
             })
             .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
             .cloned()
+            .into_iter()
+            .chain(self.base_active_subtree_tombstone(root_inode_id, base_seq))
+            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
     }
 
     fn active_child_binding_at_seq(
@@ -284,12 +285,14 @@ impl<'a> MetadataPreview<'a> {
         self.rows
             .direntry_binds()
             .iter()
-            .chain(self.base.direntry_binds().iter())
             .filter(|direntry| {
                 direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
             })
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
             .cloned()
+            .into_iter()
+            .chain(self.base_current_parent_binding_for_child(child_inode_id, base_seq))
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
     }
 
     fn is_direntry_unbound_at_seq(
@@ -297,17 +300,84 @@ impl<'a> MetadataPreview<'a> {
         direntry: &DirentryBindRecord,
         base_seq: ChangeSeq,
     ) -> bool {
-        self.rows
-            .direntry_unbinds()
-            .iter()
-            .chain(self.base.direntry_unbinds().iter())
-            .any(|unbind| {
-                unbind.unbind_seq <= base_seq
-                    && unbind.parent_inode_id == direntry.parent_inode_id
-                    && unbind.name_key == direntry.name_key
-                    && unbind.child_inode_id == direntry.child_inode_id
-                    && unbind.bind_seq == direntry.bind_seq
-                    && unbind.bind_delta_index == direntry.bind_delta_index
-            })
+        self.rows.direntry_unbinds().iter().any(|unbind| {
+            unbind.unbind_seq <= base_seq
+                && unbind.parent_inode_id == direntry.parent_inode_id
+                && unbind.name_key == direntry.name_key
+                && unbind.child_inode_id == direntry.child_inode_id
+                && unbind.bind_seq == direntry.bind_seq
+                && unbind.bind_delta_index == direntry.bind_delta_index
+        }) || self.base_is_direntry_unbound_at_seq(direntry, base_seq)
+    }
+
+    fn base_inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
+        if base_seq >= self.base.indexed_seq() {
+            self.base.inode_at_head(inode_id)
+        } else {
+            self.base.inode_at_seq(inode_id, base_seq)
+        }
+    }
+
+    fn base_bound_child_at_seq(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryBindRecord> {
+        if base_seq >= self.base.indexed_seq() {
+            self.base.visible_child_at_head(parent_inode_id, name_key)
+        } else {
+            self.base.visible_child(parent_inode_id, name_key, base_seq)
+        }
+    }
+
+    fn base_visible_children(
+        &self,
+        parent_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Vec<DirentryBindRecord> {
+        if base_seq >= self.base.indexed_seq() {
+            self.base.visible_children_at_head(parent_inode_id)
+        } else {
+            self.base.visible_children(parent_inode_id, base_seq)
+        }
+    }
+
+    fn base_current_parent_binding_for_child(
+        &self,
+        child_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryBindRecord> {
+        if base_seq >= self.base.indexed_seq() {
+            self.base
+                .current_parent_binding_for_child_at_head(child_inode_id)
+        } else {
+            self.base
+                .current_parent_binding_for_child(child_inode_id, base_seq)
+        }
+    }
+
+    fn base_active_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<SubtreeTombstoneRecord> {
+        if base_seq >= self.base.indexed_seq() {
+            self.base.active_subtree_tombstone_at_head(root_inode_id)
+        } else {
+            self.base.active_subtree_tombstone(root_inode_id, base_seq)
+        }
+    }
+
+    fn base_is_direntry_unbound_at_seq(
+        &self,
+        direntry: &DirentryBindRecord,
+        base_seq: ChangeSeq,
+    ) -> bool {
+        if base_seq >= self.base.indexed_seq() {
+            self.base.is_direntry_unbound_at_head(direntry)
+        } else {
+            self.base.is_direntry_unbound_at_seq(direntry, base_seq)
+        }
     }
 }
