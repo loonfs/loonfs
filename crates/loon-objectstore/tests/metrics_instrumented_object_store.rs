@@ -1,7 +1,8 @@
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::metrics::{
-    InstrumentedObjectStore, KeyClass, ObjectStoreMetricsRecorder, ObjectStoreOperation,
-    ObjectStoreResultClass, PutModeClass, RangeClass, VecObjectStoreMetricsRecorder,
+    InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
+    ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
+    VecObjectStoreMetricsRecorder,
 };
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::sync::{Arc, Mutex};
@@ -170,6 +171,35 @@ fn records_list_count() {
     assert_eq!(sample.result, ObjectStoreResultClass::Ok);
     assert_eq!(sample.item_count, Some(2));
     assert_eq!(sample.range_class, Some(RangeClass::Prefix));
+}
+
+#[test]
+fn jsonl_recorder_writes_privacy_safe_samples() {
+    let temp_dir = tempdir().expect("tempdir");
+    let metrics_path = temp_dir.path().join("metrics/object-store.ndjson");
+    let recorder =
+        Arc::new(JsonlObjectStoreMetricsRecorder::create(&metrics_path).expect("recorder"));
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
+    let raw_key = "namespaces/ns-1/wal/secret-segment.cbor.zst";
+
+    store
+        .put_overwrite("namespaces/ns-1/head.json", b"head")
+        .expect("put object");
+    assert!(store.get(raw_key, None).expect("get missing").is_none());
+    recorder.flush().expect("flush metrics");
+
+    let jsonl = std::fs::read_to_string(metrics_path).expect("read metrics");
+    let lines = jsonl.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert!(!jsonl.contains(raw_key));
+    assert!(!jsonl.contains("secret-segment"));
+
+    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("first sample");
+    assert_eq!(first["operation"], "put");
+    assert_eq!(first["result"], "ok");
+    let second: serde_json::Value = serde_json::from_str(lines[1]).expect("second sample");
+    assert_eq!(second["operation"], "get");
+    assert_eq!(second["result"], "not_found");
 }
 
 fn instrumented_object_store<R>(

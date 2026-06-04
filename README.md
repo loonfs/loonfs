@@ -64,6 +64,8 @@ LOONFS_TRACE=json RUST_LOG=loon_server=info,loonfs=info,loon_core=info \
   cargo run -p loon-server -- --config configs/loon-server.local-fs.example.toml
 ```
 
+Server object-store metrics are separately opt-in. Set `LOONFS_OBJECT_STORE_METRICS_JSONL=target/loonfs-perf/object-store.ndjson` to write privacy-safe per-call samples for object-store operations.
+
 ## Core concepts
 
 - Namespaces: a Loon namespace is the core unit of filesystem visibility and history. You can think of each namespace as a separate filesystem.

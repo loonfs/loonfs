@@ -32,8 +32,8 @@ use loon_core::{
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::metrics::InstrumentedObjectStore;
 pub use loon_objectstore::metrics::{
-    KeyClass, ObjectStoreMetricSample, ObjectStoreMetricsRecorder, ObjectStoreOperation,
-    ObjectStoreResultClass, PutModeClass, RangeClass,
+    JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricSample, ObjectStoreMetricsRecorder,
+    ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
 };
 use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
@@ -137,6 +137,7 @@ pub struct FsBuilder {
     writer_version: String,
     lease_duration_ms: u64,
     runtime_cache: RuntimeCacheConfig,
+    trace_mode: TraceMode,
     trace_store_kind: TraceStoreKind,
     metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
 }
@@ -689,6 +690,7 @@ impl FsBuilder {
             writer_version: default_writer_version(),
             lease_duration_ms: DEFAULT_LEASE_DURATION_MS,
             runtime_cache: RuntimeCacheConfig::default(),
+            trace_mode: TraceMode::Embedded,
             trace_store_kind: TraceStoreKind::Unknown,
             metrics_recorder: None,
         }
@@ -711,6 +713,11 @@ impl FsBuilder {
 
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.runtime_cache = runtime_cache;
+        self
+    }
+
+    pub fn trace_mode(mut self, trace_mode: TraceMode) -> Self {
+        self.trace_mode = trace_mode;
         self
     }
 
@@ -747,7 +754,7 @@ impl FsBuilder {
                 writer_version: self.writer_version,
                 lease_duration_ms: self.lease_duration_ms,
                 runtime_cache: self.runtime_cache,
-                trace_mode: TraceMode::Embedded,
+                trace_mode: self.trace_mode,
                 trace_store_kind,
             },
         )

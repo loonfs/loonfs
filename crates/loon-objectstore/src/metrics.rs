@@ -1,5 +1,8 @@
 use crate::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use serde::{Deserialize, Serialize};
+use std::fs::{self, File};
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -103,6 +106,46 @@ impl ObjectStoreMetricsRecorder for VecObjectStoreMetricsRecorder {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(sample);
+    }
+}
+
+/// Buffered JSONL recorder for process-level diagnostics and benchmarks.
+///
+/// Recording is best-effort: I/O errors while writing a sample are ignored so instrumentation does
+/// not change object-store behavior.
+pub struct JsonlObjectStoreMetricsRecorder {
+    writer: Mutex<BufWriter<File>>,
+}
+
+impl JsonlObjectStoreMetricsRecorder {
+    pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        Ok(Self {
+            writer: Mutex::new(BufWriter::new(File::create(path)?)),
+        })
+    }
+
+    pub fn flush(&self) -> io::Result<()> {
+        self.writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .flush()
+    }
+}
+
+impl ObjectStoreMetricsRecorder for JsonlObjectStoreMetricsRecorder {
+    fn record(&self, sample: ObjectStoreMetricSample) {
+        let mut writer = self
+            .writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = serde_json::to_writer(&mut *writer, &sample);
+        let _ = writer.write_all(b"\n");
     }
 }
 
