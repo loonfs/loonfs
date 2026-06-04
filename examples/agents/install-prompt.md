@@ -56,5 +56,5 @@ Step 8 — Do not run `loon init`, `loon profile create`, or any command that re
   Do not run that without my confirmation.
 
 After setup, I should be able to ask:
-  "Use Loon to draft a short Q3 GTM plan and an alternate framing into the same namespace; report both loon:// references."
+  "Use Loon to draft a short Q3 GTM plan and an alternate framing into the same namespace; report both file paths along with the namespace they live in."
 ```

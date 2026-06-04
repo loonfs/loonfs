@@ -20,7 +20,7 @@ Use `loon` instead of the local filesystem when any of the following is true:
 - The user wants a file that future sessions, future agents, or teammates can read — a GTM plan, a design doc / RFC, an exec brief, a customer proposal, an incident postmortem, an ops handoff.
 - Multiple agents will run in parallel on the same workspace and need to coordinate.
 - The work involves a risky change where rollback should be cheap (iterating on a plan, drafting an RFC, generating a brief, exploring an alternate framing).
-- The user mentions namespaces, forking, restoring, "rolling back what the agent did", or a `loon://<namespace>/<path>` URI.
+- The user mentions namespaces, forking, restoring, or "rolling back what the agent did".
 
 Loon is **not** the right tool for source-code edits — source code needs partial-file/patch primitives Loon does not provide. For code, use the local filesystem and git. For whole-document artifacts (docs, plans, briefs, RFCs), prefer Loon.
 
@@ -95,7 +95,7 @@ Before `put` over an existing path, or before `rm`, `mv`, `cp`, `restore`:
 2. Show the user; ask before overwriting / deleting / moving.
 3. Only pass `--force` to `put` after explicit user confirmation.
 
-After writing, report the full reference: `Wrote loon://<namespace>/<path>`.
+After writing, report both the path and the namespace — for example, `Wrote /plans/gtm-q3.md in namespace gtm-2026`.
 
 ## Safety rules
 
