@@ -32,7 +32,7 @@ loon namespace create {namespace_id}
 loon use {namespace_id}   # sets the newly created namespace as the default.
 ```
 
-You can add a `SKILL` to your agent of choice so that they know to use Loon when appropriate. See our [example `SKILL.md`](https://github.com.loonfs/loonfs/tree/main/examples/SKILL.md).
+You can add a `SKILL` to your agent of choice so that they know to use Loon when appropriate. See our [example `SKILL.md`](https://github.com/loonfs/loonfs/blob/main/examples/SKILL.md). For Codex users, you can share this [installation prompt](https://github.com/loonfs/loonfs/blob/main/examples/install-loon-skill-prompt.md) to have their agent install Loon and add the skill locally.
 
 ## Sample usage
 
