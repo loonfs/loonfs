@@ -5,12 +5,16 @@ use super::{
     CommitValidationContext, CommitValidationError, Precondition, ResolvedBinding,
 };
 use crate::invariants::InvariantId;
-use crate::metadata::MetadataState;
+use crate::metadata::{
+    DirentryBindRecord, InodeRecord, MetadataApplyError, MetadataState, RevisionRecord,
+    SubtreeTombstoneRecord,
+};
+use loon_api::wire::wal::WalDelta;
 use loon_api::{
     name_key_for_display_name, ChangeSeq, ContentRef, DisplayName, InodeId, InodeKind, NamePolicy,
     RevisionNo,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 struct CommitShape {
     assigned_seq: ChangeSeq,
@@ -21,6 +25,303 @@ struct CommitShape {
 struct ResolvedMetadataPreconditions {
     resolved_restore_content_refs: Vec<Option<ContentRef>>,
     resolved_source_bindings: Vec<Option<ResolvedBinding>>,
+}
+
+struct MetadataPreview<'a> {
+    base: &'a MetadataState,
+    rows: MetadataState,
+}
+
+impl<'a> MetadataPreview<'a> {
+    fn new(base: &'a MetadataState) -> Self {
+        Self {
+            base,
+            rows: MetadataState::default(),
+        }
+    }
+
+    fn apply_committed_wal_deltas_mut(
+        &mut self,
+        committed_seq: ChangeSeq,
+        deltas: &[WalDelta],
+    ) -> Result<Vec<InvariantId>, MetadataApplyError> {
+        self.rows
+            .apply_committed_wal_deltas_mut(committed_seq, deltas)
+    }
+
+    fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
+        self.rows
+            .inodes()
+            .iter()
+            .chain(self.base.inodes().iter())
+            .find(|inode| inode.inode_id == inode_id && inode.created_seq <= base_seq)
+            .cloned()
+    }
+
+    fn latest_revision_head_at_seq(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        self.rows
+            .revisions()
+            .iter()
+            .chain(self.base.revisions().iter())
+            .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
+            .max_by_key(|revision| {
+                (
+                    revision.revision_no,
+                    revision.committed_seq,
+                    revision.revision_delta_index,
+                )
+            })
+            .cloned()
+    }
+
+    fn revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        self.rows
+            .revisions()
+            .iter()
+            .chain(self.base.revisions().iter())
+            .filter(|revision| {
+                revision.inode_id == inode_id
+                    && revision.revision_no == revision_no
+                    && revision.committed_seq <= base_seq
+            })
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index))
+            .cloned()
+    }
+
+    fn bound_child_at_seq(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryBindRecord> {
+        self.rows
+            .direntry_binds()
+            .iter()
+            .chain(self.base.direntry_binds().iter())
+            .filter(|direntry| {
+                direntry.parent_inode_id == parent_inode_id
+                    && direntry.name_key == name_key
+                    && direntry.bind_seq <= base_seq
+            })
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .cloned()
+    }
+
+    fn current_parent_binding_for_child(
+        &self,
+        child_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryBindRecord> {
+        let direntry = self.latest_parent_binding_for_child_at_seq(child_inode_id, base_seq)?;
+        if self.is_direntry_unbound_at_seq(&direntry, base_seq) {
+            return None;
+        }
+        Some(direntry)
+    }
+
+    fn active_subtree_tombstone(
+        &self,
+        root_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<SubtreeTombstoneRecord> {
+        self.rows
+            .subtree_tombstones()
+            .iter()
+            .chain(self.base.subtree_tombstones().iter())
+            .filter(|tombstone| {
+                tombstone.root_inode_id == root_inode_id && tombstone.tombstone_seq <= base_seq
+            })
+            .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
+            .cloned()
+    }
+
+    fn covering_subtree_tombstone(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<SubtreeTombstoneRecord> {
+        let mut current = Some(inode_id);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+
+            if let Some(tombstone) = self.active_subtree_tombstone(candidate_inode_id, base_seq) {
+                return Some(tombstone);
+            }
+
+            current = self
+                .current_parent_binding_for_child(candidate_inode_id, base_seq)
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        None
+    }
+
+    fn visible_inode(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {
+        let inode = self.inode_at_seq(inode_id, base_seq)?;
+        if self
+            .covering_subtree_tombstone(inode_id, base_seq)
+            .is_some()
+        {
+            return None;
+        }
+
+        Some(inode)
+    }
+
+    fn visible_child(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryBindRecord> {
+        let parent = self.visible_inode(parent_inode_id, base_seq)?;
+        if parent.inode_kind != InodeKind::Dir {
+            return None;
+        }
+
+        let direntry = self.active_child_binding_at_seq(parent_inode_id, name_key, base_seq)?;
+        self.visible_inode(direntry.child_inode_id, base_seq)?;
+        Some(direntry)
+    }
+
+    fn visible_children(
+        &self,
+        parent_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Vec<DirentryBindRecord> {
+        let Some(parent) = self.visible_inode(parent_inode_id, base_seq) else {
+            return Vec::new();
+        };
+        if parent.inode_kind != InodeKind::Dir {
+            return Vec::new();
+        }
+
+        let mut children = self
+            .rows
+            .direntry_binds()
+            .iter()
+            .chain(self.base.direntry_binds().iter())
+            .filter(|direntry| {
+                direntry.parent_inode_id == parent_inode_id && direntry.bind_seq <= base_seq
+            })
+            .filter(|direntry| {
+                self.active_child_binding_at_seq(parent_inode_id, &direntry.name_key, base_seq)
+                    .map(|active| {
+                        active.child_inode_id == direntry.child_inode_id
+                            && active.bind_seq == direntry.bind_seq
+                            && active.bind_delta_index == direntry.bind_delta_index
+                    })
+                    .unwrap_or(false)
+            })
+            .filter(|direntry| {
+                self.visible_inode(direntry.child_inode_id, base_seq)
+                    .is_some()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        children.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then(left.child_inode_id.0.cmp(&right.child_inode_id.0))
+        });
+        children
+    }
+
+    fn active_child_binding_at_seq(
+        &self,
+        parent_inode_id: InodeId,
+        name_key: &str,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryBindRecord> {
+        let direntry = self.bound_child_at_seq(parent_inode_id, name_key, base_seq)?;
+        if self.is_direntry_unbound_at_seq(&direntry, base_seq) {
+            return None;
+        }
+        let latest_binding =
+            self.latest_parent_binding_for_child_at_seq(direntry.child_inode_id, base_seq)?;
+        if latest_binding.parent_inode_id != direntry.parent_inode_id
+            || latest_binding.name_key != direntry.name_key
+            || latest_binding.bind_seq != direntry.bind_seq
+            || latest_binding.bind_delta_index != direntry.bind_delta_index
+            || self.is_direntry_unbound_at_seq(&latest_binding, base_seq)
+        {
+            return None;
+        }
+
+        Some(direntry)
+    }
+
+    fn latest_parent_binding_for_child_at_seq(
+        &self,
+        child_inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<DirentryBindRecord> {
+        self.rows
+            .direntry_binds()
+            .iter()
+            .chain(self.base.direntry_binds().iter())
+            .filter(|direntry| {
+                direntry.child_inode_id == child_inode_id && direntry.bind_seq <= base_seq
+            })
+            .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
+            .cloned()
+    }
+
+    fn is_direntry_unbound_at_seq(
+        &self,
+        direntry: &DirentryBindRecord,
+        base_seq: ChangeSeq,
+    ) -> bool {
+        self.rows
+            .direntry_unbinds()
+            .iter()
+            .chain(self.base.direntry_unbinds().iter())
+            .any(|unbind| {
+                unbind.unbind_seq <= base_seq
+                    && unbind.parent_inode_id == direntry.parent_inode_id
+                    && unbind.name_key == direntry.name_key
+                    && unbind.child_inode_id == direntry.child_inode_id
+                    && unbind.bind_seq == direntry.bind_seq
+                    && unbind.bind_delta_index == direntry.bind_delta_index
+            })
+    }
+
+    fn would_create_directory_cycle(
+        &self,
+        inode_id: InodeId,
+        new_parent_inode: InodeId,
+        base_seq: ChangeSeq,
+    ) -> bool {
+        let mut current = Some(new_parent_inode);
+        let mut visited = BTreeSet::new();
+
+        while let Some(candidate_inode_id) = current {
+            if !visited.insert(candidate_inode_id.0) {
+                break;
+            }
+            if candidate_inode_id == inode_id {
+                return true;
+            }
+            current = self
+                .current_parent_binding_for_child(candidate_inode_id, base_seq)
+                .map(|direntry| direntry.parent_inode_id);
+        }
+
+        false
+    }
 }
 
 pub(crate) fn resolve_restore_content_refs(
@@ -85,7 +386,7 @@ pub fn build_commit_plan(
     let shape = compute_commit_shape(request, context)?;
     let resolved_metadata = validate_metadata_preconditions(
         request,
-        &context.metadata_state,
+        context.metadata_state,
         shape.assigned_seq,
         &shape.allocated_inode_ids,
         context.head.name_policy,
@@ -198,7 +499,7 @@ fn validate_metadata_preconditions(
     name_policy: NamePolicy,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<ResolvedMetadataPreconditions, CommitValidationError> {
-    let mut ephemeral_metadata_state = metadata_state.clone();
+    let mut ephemeral_metadata_state = MetadataPreview::new(metadata_state);
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
     let mut resolved_restore_content_refs = Vec::with_capacity(request.ops.len());
     let mut resolved_source_bindings = Vec::with_capacity(request.ops.len());
@@ -392,16 +693,13 @@ fn validate_metadata_preconditions(
             &mut next_delta_index,
         )
         .map_err(|err| materialization_error_to_validation_error(err, op))?;
-        let applied_metadata = ephemeral_metadata_state
-            .apply_committed_wal_deltas(
-                committed_seq,
-                &deltas
-                    .iter()
-                    .map(|delta| delta.wal_delta.clone())
-                    .collect::<Vec<_>>(),
-            )
+        let deltas = deltas
+            .iter()
+            .map(|delta| delta.wal_delta.clone())
+            .collect::<Vec<_>>();
+        ephemeral_metadata_state
+            .apply_committed_wal_deltas_mut(committed_seq, &deltas)
             .expect("validated commit ops should always apply into ephemeral metadata state");
-        ephemeral_metadata_state = applied_metadata.metadata_state;
     }
 
     Ok(ResolvedMetadataPreconditions {
@@ -474,7 +772,7 @@ fn request_op_inode(op: &CommitOp) -> Option<InodeId> {
 
 fn validate_explicit_preconditions(
     preconditions: &[Precondition],
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CommitValidationError> {
@@ -533,7 +831,7 @@ fn validate_explicit_preconditions(
 }
 
 fn validate_child_name_absent_precondition(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     name_key: &str,
     base_seq: ChangeSeq,
@@ -560,7 +858,7 @@ fn validate_child_name_absent_precondition(
 }
 
 fn resolve_current_binding_for_mutation(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<ResolvedBinding, CommitValidationError> {
@@ -578,7 +876,7 @@ fn resolve_current_binding_for_mutation(
 }
 
 fn validate_binding_is_precondition(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     name_key: &str,
     child_inode: InodeId,
@@ -618,7 +916,7 @@ fn validate_binding_is_precondition(
 }
 
 fn validate_directory_empty_precondition(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
@@ -645,7 +943,7 @@ fn validate_directory_empty_precondition(
 }
 
 fn validate_child_name_absent(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     display_name: &str,
     base_seq: ChangeSeq,
@@ -675,7 +973,7 @@ fn validate_child_name_absent(
 }
 
 fn validate_inode_revision_is(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
     base_seq: ChangeSeq,
@@ -705,7 +1003,7 @@ fn validate_inode_revision_is(
 }
 
 fn validate_restore_target(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
     base_seq: ChangeSeq,
@@ -735,7 +1033,7 @@ fn validate_restore_target(
 }
 
 fn validate_restore_source_revision(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     source_revision_no: RevisionNo,
     base_seq: ChangeSeq,
@@ -751,7 +1049,7 @@ fn validate_restore_source_revision(
 }
 
 fn validate_ancestors_not_subtree_deleted(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -781,7 +1079,7 @@ fn validate_ancestors_not_subtree_deleted(
 }
 
 fn validate_restore_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -804,7 +1102,7 @@ fn validate_restore_not_covered(
 }
 
 fn validate_delete_subtree_root(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     root_inode: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
@@ -822,7 +1120,7 @@ fn validate_delete_subtree_root(
 }
 
 fn validate_delete_file_target(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
@@ -840,7 +1138,7 @@ fn validate_delete_file_target(
 }
 
 fn validate_delete_file_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -861,7 +1159,7 @@ fn validate_delete_file_not_covered(
 }
 
 fn validate_delete_subtree_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     root_inode: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -882,7 +1180,7 @@ fn validate_delete_subtree_not_covered(
 }
 
 fn validate_rename_source(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
@@ -900,7 +1198,7 @@ fn validate_rename_source(
 }
 
 fn validate_rename_target_name_absent(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     display_name: &str,
     base_seq: ChangeSeq,
@@ -938,7 +1236,7 @@ fn validate_display_name(display_name: &str) -> Result<(), CommitValidationError
 }
 
 fn validate_rename_does_not_cycle(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     new_parent_inode: InodeId,
     base_seq: ChangeSeq,
@@ -960,7 +1258,7 @@ fn validate_rename_does_not_cycle(
 }
 
 fn validate_rename_inode_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -981,7 +1279,7 @@ fn validate_rename_inode_not_covered(
 }
 
 fn validate_rename_target_parent_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,

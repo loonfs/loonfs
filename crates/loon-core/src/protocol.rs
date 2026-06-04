@@ -471,16 +471,11 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         let Some(candidate_request) = candidate_request else {
             continue;
         };
-        let metadata_state = {
-            let _span =
-                tracing::info_span!("loon.phase", phase = "current_metadata_state.clone").entered();
-            current_metadata_state.clone()
-        };
         let validation = CommitValidationContext {
             head: current_head.clone(),
             lease: basis.lease.clone(),
             now_ms: context.now_ms,
-            metadata_state,
+            metadata_state: &current_metadata_state,
         };
         let request = candidate_request.request;
         let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
@@ -545,11 +540,10 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         let applied = {
             let _span =
                 tracing::info_span!("loon.phase", phase = "apply_committed_wal_record").entered();
-            current_metadata_state.apply_committed_wal_record(&preview)
+            current_metadata_state.apply_committed_wal_record_mut(&preview)
         };
         match applied {
-            Ok(applied) => {
-                current_metadata_state = applied.metadata_state;
+            Ok(_) => {
                 current_head.seq = plan.assigned_seq;
                 current_head.next_inode_id = plan.resulting_next_inode_id;
                 accepted.push((index, materialized));

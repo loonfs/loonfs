@@ -173,6 +173,20 @@ impl MetadataState {
         deltas: &[WalDelta],
     ) -> Result<AppliedMetadataState, MetadataApplyError> {
         let mut metadata_state = self.clone();
+        let checked_invariants =
+            metadata_state.apply_committed_wal_deltas_mut(committed_seq, deltas)?;
+
+        Ok(AppliedMetadataState {
+            metadata_state,
+            checked_invariants,
+        })
+    }
+
+    pub fn apply_committed_wal_deltas_mut(
+        &mut self,
+        committed_seq: ChangeSeq,
+        deltas: &[WalDelta],
+    ) -> Result<Vec<InvariantId>, MetadataApplyError> {
         let mut checked_invariants = Vec::new();
 
         for delta in deltas {
@@ -182,7 +196,7 @@ impl MetadataState {
                     inode_id,
                     inode_kind,
                 } => {
-                    metadata_state.inodes.push(InodeRecord {
+                    self.inodes.push(InodeRecord {
                         inode_id: *inode_id,
                         inode_kind: inode_kind.clone(),
                         created_seq: committed_seq,
@@ -199,7 +213,7 @@ impl MetadataState {
                     display_name,
                     child_inode,
                 } => {
-                    metadata_state.direntry_binds.push(DirentryBindRecord {
+                    self.direntry_binds.push(DirentryBindRecord {
                         parent_inode_id: *parent_inode,
                         name_key: name_key.clone(),
                         display_name: display_name.clone(),
@@ -220,7 +234,7 @@ impl MetadataState {
                     bind_seq,
                     bind_delta_index,
                 } => {
-                    metadata_state.direntry_unbinds.push(DirentryUnbindRecord {
+                    self.direntry_unbinds.push(DirentryUnbindRecord {
                         parent_inode_id: *parent_inode,
                         name_key: name_key.clone(),
                         child_inode_id: *child_inode,
@@ -240,7 +254,7 @@ impl MetadataState {
                     revision_no,
                     content_ref,
                 } => {
-                    metadata_state.revisions.push(RevisionRecord {
+                    self.revisions.push(RevisionRecord {
                         inode_id: *inode_id,
                         revision_no: *revision_no,
                         committed_seq,
@@ -256,13 +270,11 @@ impl MetadataState {
                     delta_index,
                     root_inode,
                 } => {
-                    metadata_state
-                        .subtree_tombstones
-                        .push(SubtreeTombstoneRecord {
-                            root_inode_id: *root_inode,
-                            tombstone_seq: committed_seq,
-                            tombstone_delta_index: *delta_index,
-                        });
+                    self.subtree_tombstones.push(SubtreeTombstoneRecord {
+                        root_inode_id: *root_inode,
+                        tombstone_seq: committed_seq,
+                        tombstone_delta_index: *delta_index,
+                    });
                     push_unique_invariant(
                         &mut checked_invariants,
                         InvariantId::TombstoneSubtreeWritesTombstoneRow,
@@ -271,38 +283,43 @@ impl MetadataState {
             }
         }
 
-        Ok(AppliedMetadataState {
-            metadata_state,
-            checked_invariants,
-        })
+        Ok(checked_invariants)
     }
 
     pub fn apply_committed_wal_record(
         &self,
         record: &WalCommitPayload,
     ) -> Result<AppliedMetadataState, MetadataApplyError> {
+        let mut metadata_state = self.clone();
+        let checked_invariants = metadata_state.apply_committed_wal_record_mut(record)?;
+
+        Ok(AppliedMetadataState {
+            metadata_state,
+            checked_invariants,
+        })
+    }
+
+    pub fn apply_committed_wal_record_mut(
+        &mut self,
+        record: &WalCommitPayload,
+    ) -> Result<Vec<InvariantId>, MetadataApplyError> {
         let deltas = record
             .deltas
             .iter()
             .map(|delta| delta.delta.clone())
             .collect::<Vec<_>>();
-        let mut applied = self.apply_committed_wal_deltas(record.seq, &deltas)?;
-        applied
-            .metadata_state
-            .commit_receipts
-            .push(CommitReceiptRecord {
-                commit_id: record.commit_id.clone(),
-                semantic_commit_fingerprint_sha256: record
-                    .semantic_commit_fingerprint_sha256
-                    .clone(),
-                committed_seq: record.seq,
-                results: record.results.clone(),
-            });
+        let mut checked_invariants = self.apply_committed_wal_deltas_mut(record.seq, &deltas)?;
+        self.commit_receipts.push(CommitReceiptRecord {
+            commit_id: record.commit_id.clone(),
+            semantic_commit_fingerprint_sha256: record.semantic_commit_fingerprint_sha256.clone(),
+            committed_seq: record.seq,
+            results: record.results.clone(),
+        });
         push_unique_invariant(
-            &mut applied.checked_invariants,
+            &mut checked_invariants,
             InvariantId::WalReplayRecordsCommitReceipt,
         );
-        Ok(applied)
+        Ok(checked_invariants)
     }
 
     pub fn inode_at_seq(&self, inode_id: InodeId, base_seq: ChangeSeq) -> Option<InodeRecord> {

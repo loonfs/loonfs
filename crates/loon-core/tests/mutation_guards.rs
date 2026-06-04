@@ -130,7 +130,7 @@ fn stale_revision_precondition_is_rejected() {
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
     let request = CommitRequest {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("stale-revision").expect("valid commit id"),
@@ -158,6 +158,48 @@ fn stale_revision_precondition_is_rejected() {
 }
 
 #[test]
+fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
+    let metadata_state = metadata_state_after(&[]);
+    let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
+    let request = CommitRequest {
+        namespace_id: namespace_id(),
+        commit_id: CommitId::parse("preview-rollback").expect("valid commit id"),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token: FenceToken(1),
+        ops: vec![
+            CommitOp::CreateDir {
+                parent_inode: InodeId(1),
+                display_name: "docs".to_owned(),
+            },
+            CommitOp::CreateFile {
+                parent_inode: InodeId(2),
+                display_name: "readme.txt".to_owned(),
+                content_ref: content_ref("content-1"),
+            },
+            CommitOp::ReplaceFile {
+                inode_id: InodeId(99),
+                base_revision_no: RevisionNo(1),
+                content_ref: content_ref("content-2"),
+            },
+        ],
+        preconditions: Vec::new(),
+        message: None,
+        annotations: None,
+    };
+
+    let error = build_commit_plan(&request, &context).expect_err("late op fails");
+    assert!(matches!(
+        error,
+        CommitValidationError::ReplaceFileInodeMissing {
+            inode_id: InodeId(99)
+        }
+    ));
+    assert!(metadata_state
+        .visible_child(InodeId(1), "docs", ChangeSeq(1))
+        .is_none());
+}
+
+#[test]
 fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -170,7 +212,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
         ),
         wal_tombstone(0, InodeId(2)),
     ]);
-    let context = validation_context(metadata_state.clone(), ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let create_error = build_commit_plan(
         &CommitRequest {
@@ -229,7 +271,7 @@ fn create_and_replace_under_ancestor_tombstone_are_rejected() {
 fn restore_revision_validation_rejects_missing_inode() {
     let metadata_state =
         metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
-    let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("restore-missing-inode").expect("valid commit id"),
@@ -258,7 +300,7 @@ fn restore_revision_validation_rejects_missing_inode() {
 fn restore_revision_validation_rejects_non_file_target() {
     let metadata_state =
         metadata_state_after(&[wal_create_dir(0, InodeId(2), InodeId(1), "docs".to_owned())]);
-    let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("restore-non-file").expect("valid commit id"),
@@ -297,7 +339,7 @@ fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let stale_base = build_commit_plan(
         &CommitRequest {
@@ -365,7 +407,7 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
             content_ref("content-1"),
         ),
     ]);
-    let context = validation_context(metadata_state, ChangeSeq(2), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(4));
 
     let plan = build_commit_plan(
         &CommitRequest {
@@ -411,7 +453,7 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
-    let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let plan = build_commit_plan(
         &CommitRequest {
@@ -461,7 +503,7 @@ fn restore_revision_under_tombstoned_ancestor_is_rejected() {
         ),
         wal_tombstone(0, InodeId(2)),
     ]);
-    let context = validation_context(metadata_state, ChangeSeq(3), InodeId(4));
+    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let error = build_commit_plan(
         &CommitRequest {
@@ -519,7 +561,7 @@ fn restore_revision_overflow_is_rejected() {
         .apply_committed_wal_deltas(ChangeSeq(1), &deltas)
         .expect("create max revision")
         .metadata_state;
-    let context = validation_context(metadata_state, ChangeSeq(1), InodeId(3));
+    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id(),
         commit_id: CommitId::parse("restore-overflow").expect("valid commit id"),
@@ -3215,10 +3257,10 @@ fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
 }
 
 fn validation_context(
-    metadata_state: MetadataState,
+    metadata_state: &MetadataState,
     seq: ChangeSeq,
     next_inode_id: InodeId,
-) -> CommitValidationContext {
+) -> CommitValidationContext<'_> {
     let namespace_id = namespace_id();
     let head = HeadState {
         namespace_id: namespace_id.clone(),
