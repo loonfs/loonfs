@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, Notify};
 use tokio::time::{Duration, Instant};
+use tracing::Instrument;
 
 type CommitResult = Result<ApiCommitResponse, CoreError>;
 
@@ -88,6 +89,8 @@ struct OpenBatch {
 struct BatchCandidate {
     commit_id: CommitId,
     candidate: NamespaceMutationCandidate,
+    operation_class: &'static str,
+    enqueued_at: Instant,
 }
 
 struct InFlightRequest {
@@ -111,9 +114,18 @@ impl NamespacePublisher {
 
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
+        let operation_class = operation_class(&candidate);
+        let enqueued_at = Instant::now();
         let semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
         let (sender, receiver) = oneshot::channel();
-        self.admit(commit_id, candidate, semantic_identity, sender)?;
+        self.admit(
+            commit_id,
+            candidate,
+            semantic_identity,
+            sender,
+            operation_class,
+            enqueued_at,
+        )?;
         receiver
             .await
             .unwrap_or_else(|_| Err(CoreError::Store("publisher task stopped".to_owned())))
@@ -125,6 +137,8 @@ impl NamespacePublisher {
         candidate: NamespaceMutationCandidate,
         semantic_identity: SemanticMutationIdentity,
         waiter: oneshot::Sender<CommitResult>,
+        operation_class: &'static str,
+        enqueued_at: Instant,
     ) -> Result<(), CoreError> {
         let mut should_spawn = false;
         let mut notify_full = None;
@@ -138,6 +152,7 @@ impl NamespacePublisher {
                     return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
                 }
                 existing.waiters.push(waiter);
+                self.trace_enqueue(operation_class, pending_queue_depth(&state), "duplicate");
                 return Ok(());
             }
 
@@ -152,14 +167,18 @@ impl NamespacePublisher {
             let (batch_len, batch_notify) = {
                 let batch = state.batch.as_mut().expect("open batch should exist");
                 if batch.candidates.len() >= MAX_BATCH_CANDIDATES {
+                    self.trace_enqueue(operation_class, batch.candidates.len(), "full");
                     return Err(CoreError::CommitQueueFull);
                 }
                 batch.candidates.push(BatchCandidate {
                     commit_id: commit_id.clone(),
                     candidate: candidate.clone(),
+                    operation_class,
+                    enqueued_at,
                 });
                 (batch.candidates.len(), batch.notify.clone())
             };
+            self.trace_enqueue(operation_class, batch_len, "new");
             state.in_flight.insert(
                 commit_id,
                 InFlightRequest {
@@ -189,7 +208,8 @@ impl NamespacePublisher {
     }
 
     async fn publish_open_batch(self) {
-        let (notify, already_full) = {
+        let collect_started = Instant::now();
+        let (notify, already_full, queue_depth_start) = {
             let state = self
                 .state
                 .lock()
@@ -200,6 +220,7 @@ impl NamespacePublisher {
             (
                 batch.notify.clone(),
                 batch.candidates.len() >= MAX_BATCH_CANDIDATES,
+                batch.candidates.len(),
             )
         };
 
@@ -209,7 +230,28 @@ impl NamespacePublisher {
                 _ = notify.notified() => {}
             }
         }
+        let queue_depth_end = {
+            let state = self
+                .state
+                .lock()
+                .expect("namespace publisher mutex poisoned");
+            state
+                .batch
+                .as_ref()
+                .map_or(0, |batch| batch.candidates.len())
+        };
+        tracing::info!(
+            phase = "batch_collect",
+            mode = self.trace_mode(),
+            store_kind = self.trace_store_kind(),
+            batch_size = usize_to_u64(queue_depth_end),
+            queue_depth_start = usize_to_u64(queue_depth_start),
+            queue_depth_end = usize_to_u64(queue_depth_end),
+            collect_ms = elapsed_ms_since(collect_started),
+            "publisher.batch_collect"
+        );
 
+        let cas_wait_started = Instant::now();
         loop {
             let sleep_until = {
                 let state = self
@@ -224,6 +266,7 @@ impl NamespacePublisher {
             }
             tokio::time::sleep_until(sleep_until).await;
         }
+        self.trace_cas_token_wait(cas_wait_started);
 
         let candidates = {
             let mut state = self
@@ -238,36 +281,70 @@ impl NamespacePublisher {
             state.next_allowed_cas_at = Instant::now() + MIN_NAMESPACE_CAS_INTERVAL;
             batch.candidates
         };
-
-        let mut results = Vec::new();
-        for attempt in 0..HEAD_CAS_RETRY_LIMIT {
-            let batch_candidates = candidates
-                .iter()
-                .map(|candidate| candidate.candidate.clone())
-                .collect::<Vec<_>>();
-            let namespace_id = self.namespace_id.clone();
-            let fs = self.fs.clone();
-            results = tokio::task::spawn_blocking(move || {
-                fs.publish_namespace_mutations_batch(&namespace_id, batch_candidates)
-                    .into_iter()
-                    .map(|result| result.map_err(runtime_error_to_core))
-                    .collect()
-            })
-            .await
-            .unwrap_or_else(|err| vec![Err(CoreError::Store(err.to_string())); candidates.len()]);
-            if !results.iter().any(is_head_publish_stale) {
-                break;
-            }
-            if attempt + 1 == HEAD_CAS_RETRY_LIMIT {
-                break;
-            }
-            self.wait_for_next_cas_token().await;
+        let selected_at = Instant::now();
+        for candidate in &candidates {
+            tracing::info!(
+                phase = "wait_for_batch",
+                mode = self.trace_mode(),
+                store_kind = self.trace_store_kind(),
+                operation_class = candidate.operation_class,
+                result = "ok",
+                wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at),
+                "publisher.wait_for_batch"
+            );
         }
 
-        self.complete_batch(candidates, results);
+        let publish_span = tracing::info_span!(
+            "publisher.batch_publish",
+            phase = "batch_publish",
+            mode = self.trace_mode(),
+            store_kind = self.trace_store_kind(),
+            batch_size = usize_to_u64(candidates.len()),
+            result = tracing::field::Empty,
+            retry_count = tracing::field::Empty
+        );
+        let (results, retry_count) = async {
+            let mut results = Vec::new();
+            let mut retry_count = 0_u64;
+            for attempt in 0..HEAD_CAS_RETRY_LIMIT {
+                let batch_candidates = candidates
+                    .iter()
+                    .map(|candidate| candidate.candidate.clone())
+                    .collect::<Vec<_>>();
+                let namespace_id = self.namespace_id.clone();
+                let fs = self.fs.clone();
+                results = tokio::task::spawn_blocking(move || {
+                    fs.publish_namespace_mutations_batch(&namespace_id, batch_candidates)
+                        .into_iter()
+                        .map(|result| result.map_err(runtime_error_to_core))
+                        .collect()
+                })
+                .await
+                .unwrap_or_else(|err| {
+                    vec![Err(CoreError::Store(err.to_string())); candidates.len()]
+                });
+                if !results.iter().any(is_head_publish_stale) {
+                    break;
+                }
+                if attempt + 1 == HEAD_CAS_RETRY_LIMIT {
+                    break;
+                }
+                retry_count += 1;
+                self.wait_for_next_cas_token().await;
+            }
+            (results, retry_count)
+        }
+        .instrument(publish_span.clone())
+        .await;
+        publish_span.record("result", batch_result_label(&results));
+        publish_span.record("retry_count", retry_count);
+        drop(publish_span);
+
+        self.complete_batch(candidates, results, selected_at);
     }
 
     async fn wait_for_next_cas_token(&self) {
+        let wait_started = Instant::now();
         loop {
             let sleep_until = {
                 let state = self
@@ -287,10 +364,20 @@ impl NamespacePublisher {
             }
             tokio::time::sleep_until(sleep_until).await;
         }
+        self.trace_cas_token_wait(wait_started);
     }
 
-    fn complete_batch(&self, candidates: Vec<BatchCandidate>, results: Vec<CommitResult>) {
+    fn complete_batch(
+        &self,
+        candidates: Vec<BatchCandidate>,
+        results: Vec<CommitResult>,
+        selected_at: Instant,
+    ) {
         let mut deliveries = Vec::new();
+        let mut wait_traces = Vec::new();
+        let mut success_count = 0_u64;
+        let mut failure_count = 0_u64;
+        let batch_size = candidates.len();
         let should_spawn_next = {
             let mut state = self
                 .state
@@ -304,6 +391,16 @@ impl NamespacePublisher {
                         "publisher returned too few batch results".to_owned(),
                     ))
                 });
+                if result.is_ok() {
+                    success_count += 1;
+                } else {
+                    failure_count += 1;
+                }
+                wait_traces.push((
+                    candidate.operation_class,
+                    result_label(&result),
+                    elapsed_ms_since(selected_at),
+                ));
                 if let Some(in_flight) = state.in_flight.remove(&candidate.commit_id) {
                     for waiter in in_flight.waiters {
                         deliveries.push((waiter, result.clone()));
@@ -316,13 +413,73 @@ impl NamespacePublisher {
                 .is_some_and(|batch| !batch.candidates.is_empty())
         };
 
+        for (operation_class, result, wait_ms) in wait_traces {
+            tracing::info!(
+                phase = "wait_for_result",
+                mode = self.trace_mode(),
+                store_kind = self.trace_store_kind(),
+                operation_class,
+                result,
+                wait_ms,
+                "publisher.wait_for_result"
+            );
+        }
+
+        let notify_span = tracing::info_span!(
+            "publisher.batch_notify",
+            phase = "batch_notify",
+            mode = self.trace_mode(),
+            store_kind = self.trace_store_kind(),
+            batch_size = usize_to_u64(batch_size),
+            waiter_count = usize_to_u64(deliveries.len()),
+            success_count,
+            failure_count
+        );
+        let _notify_enter = notify_span.enter();
         for (waiter, result) in deliveries {
             let _ = waiter.send(result);
         }
+        drop(_notify_enter);
+        drop(notify_span);
 
         if should_spawn_next {
             self.spawn_publish_task();
         }
+    }
+
+    fn trace_enqueue(
+        &self,
+        operation_class: &'static str,
+        queue_depth: usize,
+        reason: &'static str,
+    ) {
+        tracing::info!(
+            phase = "enqueue",
+            mode = self.trace_mode(),
+            store_kind = self.trace_store_kind(),
+            operation_class,
+            queue_depth = usize_to_u64(queue_depth),
+            reason,
+            "publisher.enqueue"
+        );
+    }
+
+    fn trace_cas_token_wait(&self, wait_started: Instant) {
+        tracing::info!(
+            phase = "batch_wait_for_cas_token",
+            mode = self.trace_mode(),
+            store_kind = self.trace_store_kind(),
+            wait_ms = elapsed_ms_since(wait_started),
+            "publisher.batch_wait_for_cas_token"
+        );
+    }
+
+    fn trace_mode(&self) -> &'static str {
+        self.fs.config().trace_mode.as_str()
+    }
+
+    fn trace_store_kind(&self) -> &'static str {
+        self.fs.config().trace_store_kind.as_str()
     }
 }
 
@@ -339,6 +496,52 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
         RuntimeError::Bootstrap(error) => CoreError::Store(error.to_string()),
         RuntimeError::Config(message) => CoreError::Store(message),
     }
+}
+
+fn operation_class(candidate: &NamespaceMutationCandidate) -> &'static str {
+    match candidate {
+        NamespaceMutationCandidate::Commit(_) => "explicit_commit",
+        NamespaceMutationCandidate::Path(_) => "path_mutation",
+    }
+}
+
+fn pending_queue_depth(state: &NamespacePublisherState) -> usize {
+    state
+        .batch
+        .as_ref()
+        .map_or(0, |batch| batch.candidates.len())
+}
+
+fn result_label<T, E>(result: &Result<T, E>) -> &'static str {
+    if result.is_ok() {
+        "ok"
+    } else {
+        "error"
+    }
+}
+
+fn batch_result_label(results: &[CommitResult]) -> &'static str {
+    if results.iter().all(Result::is_ok) {
+        "ok"
+    } else {
+        "error"
+    }
+}
+
+fn elapsed_ms_since(start: Instant) -> u64 {
+    duration_ms(start.elapsed())
+}
+
+fn elapsed_ms_from(start: Instant, end: Instant) -> u64 {
+    duration_ms(end.saturating_duration_since(start))
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -534,9 +737,17 @@ mod tests {
     ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
         let commit_id = request.commit_id.clone();
         let candidate = NamespaceMutationCandidate::Commit(request);
+        let operation_class = operation_class(&candidate);
         let semantic_identity = candidate.semantic_identity(namespace_id)?;
         let (sender, receiver) = oneshot::channel();
-        publisher.admit(commit_id, candidate, semantic_identity, sender)?;
+        publisher.admit(
+            commit_id,
+            candidate,
+            semantic_identity,
+            sender,
+            operation_class,
+            Instant::now(),
+        )?;
         Ok(receiver)
     }
 
@@ -548,6 +759,25 @@ mod tests {
             .await
             .unwrap_or_else(|err| panic!("{label} receiver dropped: {err}"))
             .unwrap_or_else(|err| panic!("{label} failed: {err}"))
+    }
+
+    #[test]
+    fn publisher_trace_labels_are_low_cardinality() {
+        let commit =
+            NamespaceMutationCandidate::Commit(create_dir_request("commit-trace", "private-name"));
+        let path = NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
+            commit_id: CommitId::parse("path-trace").expect("valid commit id"),
+            absolute_path: "/private/path".to_owned(),
+        });
+
+        assert_eq!(operation_class(&commit), "explicit_commit");
+        assert_eq!(operation_class(&path), "path_mutation");
+        assert_eq!(result_label(&Ok::<_, CoreError>(())), "ok");
+        assert_eq!(
+            result_label(&Err::<(), _>(CoreError::Store("private error".to_owned()))),
+            "error"
+        );
+        assert_eq!(usize_to_u64(7), 7);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

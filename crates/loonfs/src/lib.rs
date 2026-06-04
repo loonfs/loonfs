@@ -1332,6 +1332,7 @@ impl Fs {
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
+        let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
         let store = self.uploaded_content_proof_store(namespace_id);
         if self.commit_engine_cache_enabled() {
             let engine = self.commit_engine(namespace_id);
@@ -1339,14 +1340,24 @@ impl Fs {
                 let mut engine = engine.lock().expect("commit engine lock poisoned");
                 engine.publish_batch(&store, candidates, &self.mutation_context())
             };
-            self.inner.cache_stats.record_publish_result(&publish);
-            if let Some(basis) = publish
-                .verified_basis_cache_update
-                .verified_basis_to_cache()
             {
-                self.cache_basis(Arc::new(basis.clone()));
-            } else if publish.verified_basis_cache_update.is_invalidated() {
-                self.invalidate_namespace_cache(namespace_id);
+                let _span = tracing::info_span!(
+                    "publisher.batch_update_cache",
+                    phase = "batch_update_cache",
+                    mode = self.inner.config.trace_mode.as_str(),
+                    store_kind = self.inner.config.trace_store_kind.as_str(),
+                    batch_size
+                )
+                .entered();
+                self.inner.cache_stats.record_publish_result(&publish);
+                if let Some(basis) = publish
+                    .verified_basis_cache_update
+                    .verified_basis_to_cache()
+                {
+                    self.cache_basis(Arc::new(basis.clone()));
+                } else if publish.verified_basis_cache_update.is_invalidated() {
+                    self.invalidate_namespace_cache(namespace_id);
+                }
             }
             return publish
                 .results
@@ -1364,7 +1375,17 @@ impl Fs {
         .into_iter()
         .map(|result| result.map_err(RuntimeError::Core))
         .collect();
-        self.invalidate_namespace_cache_after_batch(namespace_id, &results);
+        {
+            let _span = tracing::info_span!(
+                "publisher.batch_update_cache",
+                phase = "batch_update_cache",
+                mode = self.inner.config.trace_mode.as_str(),
+                store_kind = self.inner.config.trace_store_kind.as_str(),
+                batch_size
+            )
+            .entered();
+            self.invalidate_namespace_cache_after_batch(namespace_id, &results);
+        }
         results
     }
 
