@@ -36,7 +36,7 @@ When you are ready to make the workspace shareable across machines or teammates,
 
 ## Use Loon with your agent
 
-Loon ships first-class skills for the major agent CLIs — used here for **whole-file artifacts** like GTM plans, design docs, RFCs, customer proposals, exec briefs, and ops handoffs. Loon is not the right tool for editing source code (use git for that); it shines on documents that get drafted, branched, reviewed, and revised by both agents and humans.
+Loon ships first-class skills for the major agent CLIs — used here for **whole-file artifacts** like GTM plans, design docs, RFCs, customer proposals, exec briefs, and ops handoffs. Loon is not the right tool for editing source code (use git for that); it shines on documents that get read, drafted, branched, reviewed, and revised by both agents and humans.
 
 Each command installs the `loon` binary **and** registers the Loon skill at the path that agent auto-discovers, so the agent picks it up after a restart with no manual file editing.
 
