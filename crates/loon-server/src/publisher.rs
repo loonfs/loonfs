@@ -251,7 +251,6 @@ impl NamespacePublisher {
             "publisher.batch_collect"
         );
 
-        let cas_wait_started = Instant::now();
         loop {
             let sleep_until = {
                 let state = self
@@ -266,7 +265,6 @@ impl NamespacePublisher {
             }
             tokio::time::sleep_until(sleep_until).await;
         }
-        self.trace_cas_token_wait(cas_wait_started);
 
         let candidates = {
             let mut state = self
@@ -344,7 +342,6 @@ impl NamespacePublisher {
     }
 
     async fn wait_for_next_cas_token(&self) {
-        let wait_started = Instant::now();
         loop {
             let sleep_until = {
                 let state = self
@@ -364,7 +361,6 @@ impl NamespacePublisher {
             }
             tokio::time::sleep_until(sleep_until).await;
         }
-        self.trace_cas_token_wait(wait_started);
     }
 
     fn complete_batch(
@@ -375,9 +371,6 @@ impl NamespacePublisher {
     ) {
         let mut deliveries = Vec::new();
         let mut wait_traces = Vec::new();
-        let mut success_count = 0_u64;
-        let mut failure_count = 0_u64;
-        let batch_size = candidates.len();
         let should_spawn_next = {
             let mut state = self
                 .state
@@ -391,11 +384,6 @@ impl NamespacePublisher {
                         "publisher returned too few batch results".to_owned(),
                     ))
                 });
-                if result.is_ok() {
-                    success_count += 1;
-                } else {
-                    failure_count += 1;
-                }
                 wait_traces.push((
                     candidate.operation_class,
                     result_label(&result),
@@ -425,22 +413,9 @@ impl NamespacePublisher {
             );
         }
 
-        let notify_span = tracing::info_span!(
-            "publisher.batch_notify",
-            phase = "batch_notify",
-            mode = self.trace_mode(),
-            store_kind = self.trace_store_kind(),
-            batch_size = usize_to_u64(batch_size),
-            waiter_count = usize_to_u64(deliveries.len()),
-            success_count,
-            failure_count
-        );
-        let _notify_enter = notify_span.enter();
         for (waiter, result) in deliveries {
             let _ = waiter.send(result);
         }
-        drop(_notify_enter);
-        drop(notify_span);
 
         if should_spawn_next {
             self.spawn_publish_task();
@@ -461,16 +436,6 @@ impl NamespacePublisher {
             queue_depth = usize_to_u64(queue_depth),
             reason,
             "publisher.enqueue"
-        );
-    }
-
-    fn trace_cas_token_wait(&self, wait_started: Instant) {
-        tracing::info!(
-            phase = "batch_wait_for_cas_token",
-            mode = self.trace_mode(),
-            store_kind = self.trace_store_kind(),
-            wait_ms = elapsed_ms_since(wait_started),
-            "publisher.batch_wait_for_cas_token"
         );
     }
 
