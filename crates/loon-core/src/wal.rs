@@ -430,15 +430,14 @@ pub fn replay_wal_segment_with_metadata(
     let mut current_metadata_state = current_metadata_state.clone();
     let mut checked_invariants = replayed.checked_invariants.clone();
     for record in &replayed.envelope.payload.records {
-        let applied = current_metadata_state
-            .apply_committed_wal_record(record)
+        let apply_invariants = current_metadata_state
+            .apply_committed_wal_record_mut(record)
             .map_err(WalReplayError::MetadataApply)?;
-        current_metadata_state = applied.metadata_state;
         push_invariant(
             &mut checked_invariants,
             InvariantId::WalReplayAppliesMetadataRows,
         );
-        extend_invariants(&mut checked_invariants, &applied.checked_invariants);
+        extend_invariants(&mut checked_invariants, &apply_invariants);
     }
 
     Ok(ReplayedWalSegmentWithMetadata {
@@ -507,15 +506,14 @@ pub(crate) fn replay_validated_wal_tail_with_metadata(
             current_head.seq = record.seq;
             current_head.next_inode_id =
                 replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-            let applied = current_metadata_state
-                .apply_committed_wal_record(record)
+            let apply_invariants = current_metadata_state
+                .apply_committed_wal_record_mut(record)
                 .map_err(WalReplayError::MetadataApply)?;
-            current_metadata_state = applied.metadata_state;
             push_invariant(
                 &mut checked_invariants,
                 InvariantId::WalReplayAppliesMetadataRows,
             );
-            extend_invariants(&mut checked_invariants, &applied.checked_invariants);
+            extend_invariants(&mut checked_invariants, &apply_invariants);
         }
         current_head.visible_wal_tip = Some(wal_segment.pointer());
         extend_wal_replay_invariants(&mut checked_invariants);

@@ -12,6 +12,7 @@ mod api_adapter;
 mod durable_adapter;
 mod frame;
 mod identity;
+mod metadata_preview;
 mod ordered;
 mod prepared;
 mod publish;
@@ -131,13 +132,12 @@ pub struct CommitPlan {
     pub checked_invariants: Vec<InvariantId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitValidationContext {
+#[derive(Debug, Clone)]
+pub struct CommitValidationContext<'a> {
     pub head: HeadState,
     pub lease: LeaseState,
     pub now_ms: u64,
-    #[serde(default)]
-    pub metadata_state: MetadataState,
+    pub metadata_state: &'a MetadataState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

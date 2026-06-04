@@ -1,4 +1,5 @@
 use super::frame::validate_commit_request_frame;
+use super::metadata_preview::MetadataPreview;
 use super::prepared::materialize_commit_op;
 use super::{
     push_unique_invariant, CommitMaterializationError, CommitOp, CommitPlan, CommitRequest,
@@ -85,7 +86,7 @@ pub fn build_commit_plan(
     let shape = compute_commit_shape(request, context)?;
     let resolved_metadata = validate_metadata_preconditions(
         request,
-        &context.metadata_state,
+        context.metadata_state,
         shape.assigned_seq,
         &shape.allocated_inode_ids,
         context.head.name_policy,
@@ -198,7 +199,7 @@ fn validate_metadata_preconditions(
     name_policy: NamePolicy,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<ResolvedMetadataPreconditions, CommitValidationError> {
-    let mut ephemeral_metadata_state = metadata_state.clone();
+    let mut ephemeral_metadata_state = MetadataPreview::new(metadata_state);
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
     let mut resolved_restore_content_refs = Vec::with_capacity(request.ops.len());
     let mut resolved_source_bindings = Vec::with_capacity(request.ops.len());
@@ -392,16 +393,13 @@ fn validate_metadata_preconditions(
             &mut next_delta_index,
         )
         .map_err(|err| materialization_error_to_validation_error(err, op))?;
-        let applied_metadata = ephemeral_metadata_state
-            .apply_committed_wal_deltas(
-                committed_seq,
-                &deltas
-                    .iter()
-                    .map(|delta| delta.wal_delta.clone())
-                    .collect::<Vec<_>>(),
-            )
+        let deltas = deltas
+            .iter()
+            .map(|delta| delta.wal_delta.clone())
+            .collect::<Vec<_>>();
+        ephemeral_metadata_state
+            .apply_committed_wal_deltas_mut(committed_seq, &deltas)
             .expect("validated commit ops should always apply into ephemeral metadata state");
-        ephemeral_metadata_state = applied_metadata.metadata_state;
     }
 
     Ok(ResolvedMetadataPreconditions {
@@ -474,7 +472,7 @@ fn request_op_inode(op: &CommitOp) -> Option<InodeId> {
 
 fn validate_explicit_preconditions(
     preconditions: &[Precondition],
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), CommitValidationError> {
@@ -533,7 +531,7 @@ fn validate_explicit_preconditions(
 }
 
 fn validate_child_name_absent_precondition(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     name_key: &str,
     base_seq: ChangeSeq,
@@ -560,7 +558,7 @@ fn validate_child_name_absent_precondition(
 }
 
 fn resolve_current_binding_for_mutation(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<ResolvedBinding, CommitValidationError> {
@@ -578,7 +576,7 @@ fn resolve_current_binding_for_mutation(
 }
 
 fn validate_binding_is_precondition(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     name_key: &str,
     child_inode: InodeId,
@@ -618,7 +616,7 @@ fn validate_binding_is_precondition(
 }
 
 fn validate_directory_empty_precondition(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
@@ -645,7 +643,7 @@ fn validate_directory_empty_precondition(
 }
 
 fn validate_child_name_absent(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     display_name: &str,
     base_seq: ChangeSeq,
@@ -675,7 +673,7 @@ fn validate_child_name_absent(
 }
 
 fn validate_inode_revision_is(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
     base_seq: ChangeSeq,
@@ -705,7 +703,7 @@ fn validate_inode_revision_is(
 }
 
 fn validate_restore_target(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     expected_revision_no: RevisionNo,
     base_seq: ChangeSeq,
@@ -735,7 +733,7 @@ fn validate_restore_target(
 }
 
 fn validate_restore_source_revision(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     source_revision_no: RevisionNo,
     base_seq: ChangeSeq,
@@ -751,7 +749,7 @@ fn validate_restore_source_revision(
 }
 
 fn validate_ancestors_not_subtree_deleted(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -781,7 +779,7 @@ fn validate_ancestors_not_subtree_deleted(
 }
 
 fn validate_restore_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -804,7 +802,7 @@ fn validate_restore_not_covered(
 }
 
 fn validate_delete_subtree_root(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     root_inode: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
@@ -822,7 +820,7 @@ fn validate_delete_subtree_root(
 }
 
 fn validate_delete_file_target(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
@@ -840,7 +838,7 @@ fn validate_delete_file_target(
 }
 
 fn validate_delete_file_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -861,7 +859,7 @@ fn validate_delete_file_not_covered(
 }
 
 fn validate_delete_subtree_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     root_inode: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -882,7 +880,7 @@ fn validate_delete_subtree_not_covered(
 }
 
 fn validate_rename_source(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
 ) -> Result<(), CommitValidationError> {
@@ -900,7 +898,7 @@ fn validate_rename_source(
 }
 
 fn validate_rename_target_name_absent(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     display_name: &str,
     base_seq: ChangeSeq,
@@ -938,7 +936,7 @@ fn validate_display_name(display_name: &str) -> Result<(), CommitValidationError
 }
 
 fn validate_rename_does_not_cycle(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     new_parent_inode: InodeId,
     base_seq: ChangeSeq,
@@ -960,7 +958,7 @@ fn validate_rename_does_not_cycle(
 }
 
 fn validate_rename_inode_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     inode_id: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
@@ -981,7 +979,7 @@ fn validate_rename_inode_not_covered(
 }
 
 fn validate_rename_target_parent_not_covered(
-    metadata_state: &MetadataState,
+    metadata_state: &MetadataPreview<'_>,
     parent_inode: InodeId,
     base_seq: ChangeSeq,
     checked_invariants: &mut Vec<InvariantId>,
