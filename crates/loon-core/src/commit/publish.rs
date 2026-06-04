@@ -150,12 +150,8 @@ mod tests {
             commit_id: CommitId::parse("publish-plan").expect("valid commit id"),
             apply_after_seq: ChangeSeq(assigned_seq.0.saturating_sub(1)),
             assigned_seq,
-            allocated_inode_ids: Vec::new(),
-            resolved_restore_content_refs: Vec::new(),
-            resolved_source_bindings: Vec::new(),
+            validated_ops: Vec::new(),
             resulting_next_inode_id: InodeId(10),
-            name_policy: loon_api::NamePolicy::default(),
-            metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         }
     }

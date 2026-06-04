@@ -86,7 +86,9 @@ impl From<&Precondition> for WalPrecondition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{materialize_commit, CommitOp, CommitPlan, CommitRequest, PreparedCommit};
+    use crate::commit::{
+        materialize_commit, CommitOp, CommitPlan, CommitRequest, PreparedCommit, ValidatedOp,
+    };
     use loon_api::{ChangeSeq, CommitId, FenceToken, InodeId, NamespaceId};
 
     #[test]
@@ -110,12 +112,16 @@ mod tests {
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             apply_after_seq: ChangeSeq(0),
             assigned_seq: ChangeSeq(1),
-            allocated_inode_ids: vec![InodeId(2)],
-            resolved_restore_content_refs: vec![None],
-            resolved_source_bindings: vec![None],
+            validated_ops: vec![ValidatedOp::CreateDir {
+                op_index: 0,
+                parent_inode: InodeId(1),
+                display_name: "docs".to_owned(),
+                name_key: "docs".to_owned(),
+                child_inode: InodeId(2),
+                create_inode_delta_index: 0,
+                bind_delta_index: 1,
+            }],
             resulting_next_inode_id: InodeId(3),
-            name_policy: loon_api::NamePolicy::default(),
-            metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");

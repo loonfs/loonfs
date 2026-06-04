@@ -3,8 +3,7 @@ use crate::metadata::MetadataState;
 use loon_api::v0::{CommitAnnotations, RenameMode};
 use loon_api::wire::control::{HeadState, HeadStateEnvelope, LeaseState};
 use loon_api::{
-    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, NamePolicy, NamespaceId,
-    RevisionNo,
+    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -123,13 +122,72 @@ pub struct CommitPlan {
     pub commit_id: CommitId,
     pub apply_after_seq: ChangeSeq,
     pub assigned_seq: ChangeSeq,
-    pub allocated_inode_ids: Vec<InodeId>,
-    pub resolved_restore_content_refs: Vec<Option<ContentRef>>,
-    pub resolved_source_bindings: Vec<Option<ResolvedBinding>>,
+    pub(crate) validated_ops: Vec<ValidatedOp>,
     pub resulting_next_inode_id: InodeId,
-    pub name_policy: NamePolicy,
-    pub metadata_preconditions: Vec<Precondition>,
     pub checked_invariants: Vec<InvariantId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ValidatedOp {
+    CreateDir {
+        op_index: u32,
+        parent_inode: InodeId,
+        display_name: String,
+        name_key: String,
+        child_inode: InodeId,
+        create_inode_delta_index: u32,
+        bind_delta_index: u32,
+    },
+    CreateFile {
+        op_index: u32,
+        parent_inode: InodeId,
+        display_name: String,
+        name_key: String,
+        child_inode: InodeId,
+        content_ref: ContentRef,
+        create_inode_delta_index: u32,
+        bind_delta_index: u32,
+        revision_delta_index: u32,
+    },
+    ReplaceFile {
+        op_index: u32,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        content_ref: ContentRef,
+        revision_delta_index: u32,
+    },
+    RestoreRevision {
+        op_index: u32,
+        inode_id: InodeId,
+        source_revision_no: RevisionNo,
+        revision_no: RevisionNo,
+        content_ref: ContentRef,
+        revision_delta_index: u32,
+    },
+    DeleteFile {
+        op_index: u32,
+        inode_id: InodeId,
+        source_binding: ResolvedBinding,
+        unbind_delta_index: u32,
+        tombstone_delta_index: u32,
+    },
+    Rename {
+        op_index: u32,
+        inode_id: InodeId,
+        source_binding: ResolvedBinding,
+        new_parent_inode: InodeId,
+        new_display_name: String,
+        new_name_key: String,
+        unbind_delta_index: u32,
+        bind_delta_index: u32,
+    },
+    DeleteSubtree {
+        op_index: u32,
+        root_inode: InodeId,
+        source_binding: ResolvedBinding,
+        unbind_delta_index: u32,
+        tombstone_delta_index: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +386,7 @@ pub enum CommitValidationError {
     SeqOverflow,
     NextInodeOverflow,
     OpIndexOverflow,
+    DeltaIndexOverflow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

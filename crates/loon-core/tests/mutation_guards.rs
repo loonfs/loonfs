@@ -13,7 +13,8 @@ use loon_api::{
     NameKey, NamespaceId, RevisionNo,
 };
 use loon_core::commit::{
-    build_commit_plan, CommitOp, CommitRequest, CommitValidationContext, CommitValidationError,
+    build_commit_plan, materialize_commit, CommitOp, CommitRequest, CommitValidationContext,
+    CommitValidationError, PreparedCommit,
 };
 use loon_core::metadata::MetadataState;
 use loon_core::{
@@ -409,35 +410,40 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(4));
 
-    let plan = build_commit_plan(
-        &CommitRequest {
-            namespace_id: namespace_id(),
-            commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
-            ops: vec![
-                CommitOp::ReplaceFile {
-                    inode_id: InodeId(3),
-                    base_revision_no: RevisionNo(1),
-                    content_ref: content_ref("content-2"),
-                },
-                CommitOp::RestoreRevision {
-                    inode_id: InodeId(3),
-                    source_revision_no: RevisionNo(2),
-                    base_revision_no: RevisionNo(2),
-                },
-            ],
-            preconditions: Vec::new(),
-            message: None,
-            annotations: None,
-        },
-        &context,
-    )
-    .expect("replace then restore in same request should validate");
-    assert_eq!(
-        plan.resolved_restore_content_refs,
-        vec![None, Some(content_ref("content-2"))]
-    );
+    let request = CommitRequest {
+        namespace_id: namespace_id(),
+        commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token: FenceToken(1),
+        ops: vec![
+            CommitOp::ReplaceFile {
+                inode_id: InodeId(3),
+                base_revision_no: RevisionNo(1),
+                content_ref: content_ref("content-2"),
+            },
+            CommitOp::RestoreRevision {
+                inode_id: InodeId(3),
+                source_revision_no: RevisionNo(2),
+                base_revision_no: RevisionNo(2),
+            },
+        ],
+        preconditions: Vec::new(),
+        message: None,
+        annotations: None,
+    };
+    let plan = build_commit_plan(&request, &context)
+        .expect("replace then restore in same request should validate");
+    let materialized =
+        materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"))
+            .expect("materialize commit");
+    let expected = content_ref("content-2");
+    assert!(matches!(
+        &materialized.results[1],
+        loon_api::v0::CommitOpResult::RestoreRevision {
+            content_ref,
+            ..
+        } if *content_ref == expected
+    ));
 }
 
 #[test]
@@ -455,39 +461,47 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
-    let plan = build_commit_plan(
-        &CommitRequest {
-            namespace_id: namespace_id(),
-            commit_id: CommitId::parse("restore-after-restore-same-request")
-                .expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_fence_token: FenceToken(1),
-            ops: vec![
-                CommitOp::RestoreRevision {
-                    inode_id: InodeId(3),
-                    source_revision_no: RevisionNo(1),
-                    base_revision_no: RevisionNo(2),
-                },
-                CommitOp::RestoreRevision {
-                    inode_id: InodeId(3),
-                    source_revision_no: RevisionNo(3),
-                    base_revision_no: RevisionNo(3),
-                },
-            ],
-            preconditions: Vec::new(),
-            message: None,
-            annotations: None,
-        },
-        &context,
-    )
-    .expect("restore then restore in same request should validate");
-    assert_eq!(
-        plan.resolved_restore_content_refs,
-        vec![
-            Some(content_ref("content-1")),
-            Some(content_ref("content-1"))
-        ]
-    );
+    let request = CommitRequest {
+        namespace_id: namespace_id(),
+        commit_id: CommitId::parse("restore-after-restore-same-request").expect("valid commit id"),
+        writer_id: "writer-a".to_owned(),
+        writer_fence_token: FenceToken(1),
+        ops: vec![
+            CommitOp::RestoreRevision {
+                inode_id: InodeId(3),
+                source_revision_no: RevisionNo(1),
+                base_revision_no: RevisionNo(2),
+            },
+            CommitOp::RestoreRevision {
+                inode_id: InodeId(3),
+                source_revision_no: RevisionNo(3),
+                base_revision_no: RevisionNo(3),
+            },
+        ],
+        preconditions: Vec::new(),
+        message: None,
+        annotations: None,
+    };
+    let plan = build_commit_plan(&request, &context)
+        .expect("restore then restore in same request should validate");
+    let materialized =
+        materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"))
+            .expect("materialize commit");
+    let expected = content_ref("content-1");
+    assert!(matches!(
+        &materialized.results[0],
+        loon_api::v0::CommitOpResult::RestoreRevision {
+            content_ref,
+            ..
+        } if *content_ref == expected
+    ));
+    assert!(matches!(
+        &materialized.results[1],
+        loon_api::v0::CommitOpResult::RestoreRevision {
+            content_ref,
+            ..
+        } if *content_ref == expected
+    ));
 }
 
 #[test]

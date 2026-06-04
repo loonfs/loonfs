@@ -236,32 +236,32 @@ impl MetadataState {
         );
     }
 
-    fn push_inode_record(&mut self, record: InodeRecord) {
+    pub(crate) fn push_inode_record(&mut self, record: InodeRecord) {
         self.indexes.record_inode(&record);
         self.inodes.push(record);
     }
 
-    fn push_direntry_bind_record(&mut self, record: DirentryBindRecord) {
+    pub(crate) fn push_direntry_bind_record(&mut self, record: DirentryBindRecord) {
         self.indexes.record_bind(&record);
         self.direntry_binds.push(record);
     }
 
-    fn push_direntry_unbind_record(&mut self, record: DirentryUnbindRecord) {
+    pub(crate) fn push_direntry_unbind_record(&mut self, record: DirentryUnbindRecord) {
         self.indexes.record_unbind(&record);
         self.direntry_unbinds.push(record);
     }
 
-    fn push_revision_record(&mut self, record: RevisionRecord) {
+    pub(crate) fn push_revision_record(&mut self, record: RevisionRecord) {
         self.indexes.record_revision(&record);
         self.revisions.push(record);
     }
 
-    fn push_subtree_tombstone_record(&mut self, record: SubtreeTombstoneRecord) {
+    pub(crate) fn push_subtree_tombstone_record(&mut self, record: SubtreeTombstoneRecord) {
         self.indexes.record_tombstone(&record);
         self.subtree_tombstones.push(record);
     }
 
-    fn push_commit_receipt_record(&mut self, record: CommitReceiptRecord) {
+    pub(crate) fn push_commit_receipt_record(&mut self, record: CommitReceiptRecord) {
         self.indexes.record_commit_receipt(&record);
         self.commit_receipts.push(record);
     }
