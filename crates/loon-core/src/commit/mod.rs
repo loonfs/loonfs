@@ -12,6 +12,7 @@ mod api_adapter;
 mod durable_adapter;
 mod frame;
 mod identity;
+mod metadata_preview;
 mod ordered;
 mod prepared;
 mod publish;
