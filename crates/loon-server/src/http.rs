@@ -20,15 +20,18 @@ use loon_api::{
 };
 use loonfs::{
     payload_class, BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs,
-    FsConfig, PathMutationIntent, PutFileBehavior, RuntimeCacheConfig, RuntimeError,
-    SharedObjectStore, TraceMode, TraceStoreKind,
+    JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, PathMutationIntent,
+    PutFileBehavior, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
+    TraceStoreKind,
 };
+use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::task;
 use tracing::Instrument;
 
 type SharedStore = SharedObjectStore;
+const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL";
 
 #[derive(Clone)]
 struct AppState {
@@ -142,21 +145,55 @@ fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
 }
 
 fn build_fs(config: &ServerConfig, store: SharedStore) -> Result<Fs, ServerConfigError> {
-    Fs::open(
+    build_fs_with_metrics_jsonl_path(
+        config,
         store,
-        FsConfig {
-            writer_id: config.writer_id.clone(),
-            writer_version: config.writer_version.clone(),
-            lease_duration_ms: config.lease_duration_ms,
-            runtime_cache: RuntimeCacheConfig::default(),
-            trace_mode: TraceMode::Remote,
-            trace_store_kind: trace_store_kind(&config.store),
-        },
+        std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
     )
-    .map_err(|error| ServerConfigError::InvalidField {
-        field: "runtime",
-        reason: error.to_string(),
-    })
+}
+
+fn build_fs_with_metrics_jsonl_path(
+    config: &ServerConfig,
+    store: SharedStore,
+    metrics_jsonl_path: Option<OsString>,
+) -> Result<Fs, ServerConfigError> {
+    let trace_store_kind = trace_store_kind(&config.store);
+    let mut builder = Fs::builder(store)
+        .writer_id(config.writer_id.clone())
+        .writer_version(config.writer_version.clone())
+        .lease_duration_ms(config.lease_duration_ms)
+        .runtime_cache(RuntimeCacheConfig::default())
+        .trace_mode(TraceMode::Remote)
+        .trace_store_kind(trace_store_kind);
+
+    if let Some(recorder) = object_store_metrics_recorder(metrics_jsonl_path)? {
+        builder = builder.with_metrics_recorder(recorder);
+    }
+
+    builder
+        .build()
+        .map_err(|error| ServerConfigError::InvalidField {
+            field: "runtime",
+            reason: error.to_string(),
+        })
+}
+
+fn object_store_metrics_recorder(
+    metrics_jsonl_path: Option<OsString>,
+) -> Result<Option<Arc<dyn ObjectStoreMetricsRecorder>>, ServerConfigError> {
+    let Some(path) = metrics_jsonl_path else {
+        return Ok(None);
+    };
+    if path.is_empty() {
+        return Ok(None);
+    }
+    let path = std::path::PathBuf::from(path);
+    JsonlObjectStoreMetricsRecorder::create(&path)
+        .map(|recorder| Some(Arc::new(recorder) as Arc<dyn ObjectStoreMetricsRecorder>))
+        .map_err(|error| ServerConfigError::InvalidField {
+            field: OBJECT_STORE_METRICS_JSONL_ENV,
+            reason: error.to_string(),
+        })
 }
 
 fn trace_store_kind(store: &StoreConfig) -> TraceStoreKind {
@@ -787,7 +824,7 @@ impl IntoResponse for ApiResponseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_with_store, SharedStore};
+    use super::{app_with_store, build_fs_with_metrics_jsonl_path, SharedStore};
     use crate::{ServerConfig, StoreConfig};
     use loon_api::{ChangeSeq, CommitId, NamespaceId};
     use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
@@ -859,6 +896,30 @@ mod tests {
         fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
             self.inner.list_prefix(prefix)
         }
+    }
+
+    #[test]
+    fn build_fs_installs_jsonl_object_store_metrics_recorder() {
+        let store_dir = tempdir().expect("store tempdir");
+        let metrics_dir = tempdir().expect("metrics tempdir");
+        let store = Arc::new(LocalFsStore::new(store_dir.path()).expect("store")) as SharedStore;
+        let config = test_config(store_dir.path(), "server-writer");
+        let metrics_path = metrics_dir.path().join("object-store.ndjson");
+
+        {
+            let fs = build_fs_with_metrics_jsonl_path(
+                &config,
+                store,
+                Some(metrics_path.clone().into_os_string()),
+            )
+            .expect("build fs");
+            fs.create_namespace(&namespace_id("metrics"), CreateNamespaceOptions::default())
+                .expect("create namespace");
+        }
+
+        let jsonl = std::fs::read_to_string(metrics_path).expect("read metrics");
+        assert!(!jsonl.is_empty());
+        assert!(!jsonl.contains("namespaces/metrics"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

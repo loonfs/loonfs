@@ -3,6 +3,7 @@ use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     checkpoint_manifest, namespace_descriptor, namespace_head, namespace_lease,
 };
+use loon_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
@@ -122,6 +123,30 @@ fn open_validates_runtime_config() {
         ),
         "lease_duration_ms",
     );
+}
+
+#[test]
+fn builder_metrics_recorder_instruments_object_store() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
+    let fs = Fs::builder(store(temp_dir.path()))
+        .writer_id("metrics-test")
+        .trace_store_kind(TraceStoreKind::LocalFs)
+        .with_metrics_recorder(recorder.clone())
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace(), CreateNamespaceOptions::default())
+        .expect("create namespace");
+
+    let samples = recorder.samples();
+    assert!(!samples.is_empty());
+    assert!(samples
+        .iter()
+        .any(|sample| sample.operation == ObjectStoreOperation::Put));
+    assert!(samples
+        .iter()
+        .all(|sample| sample.store_kind.as_deref() == Some("local_fs")));
 }
 
 #[test]

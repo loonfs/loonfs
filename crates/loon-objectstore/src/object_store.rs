@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Metadata returned by a successful `head` or `put` call.
@@ -92,5 +93,60 @@ pub trait ObjectStore {
                 expected_etag: expected_etag.to_owned(),
             },
         )
+    }
+}
+
+impl<T> ObjectStore for Arc<T>
+where
+    T: ObjectStore + ?Sized,
+{
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.as_ref().head(key)
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.as_ref().head_with_checksum(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.as_ref().get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.as_ref().put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.as_ref().delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.as_ref().list_prefix(prefix)
+    }
+
+    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.as_ref().put_overwrite(key, bytes)
+    }
+
+    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.as_ref().put_if_absent(key, bytes)
+    }
+
+    fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: &[u8],
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.as_ref().compare_and_swap(key, expected_etag, bytes)
     }
 }
