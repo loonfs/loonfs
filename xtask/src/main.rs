@@ -9,18 +9,16 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 
-mod perf;
+const PROFILE_NAME: &str = "smoke";
+const FORMAT_VERSION: u32 = 1;
 
-pub(crate) const PROFILE_NAME: &str = "smoke";
-pub(crate) const FORMAT_VERSION: u32 = 1;
-
-pub(crate) const STEP_CREATE_NAMESPACE: &str = "create_namespace";
+const STEP_CREATE_NAMESPACE: &str = "create_namespace";
 const STEP_LIST_NAMESPACES: &str = "list_namespaces";
-pub(crate) const STEP_PUT: &str = "put";
-pub(crate) const STEP_LS: &str = "ls";
-pub(crate) const STEP_STAT: &str = "stat";
-pub(crate) const STEP_CAT: &str = "cat";
-pub(crate) const STEP_GET: &str = "get";
+const STEP_PUT: &str = "put";
+const STEP_LS: &str = "ls";
+const STEP_STAT: &str = "stat";
+const STEP_CAT: &str = "cat";
+const STEP_GET: &str = "get";
 const STEP_CP: &str = "cp";
 const STEP_MOVE: &str = "move";
 const STEP_RM: &str = "rm";
@@ -37,10 +35,6 @@ enum CommandKind {
     Smoke {
         #[command(subcommand)]
         command: SmokeCommand,
-    },
-    Perf {
-        #[command(subcommand)]
-        command: perf::PerfCommand,
     },
 }
 
@@ -98,7 +92,7 @@ struct SmokeReport {
 }
 
 #[derive(Debug)]
-pub(crate) struct LoonOutput {
+struct LoonOutput {
     exit_code: Option<i32>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
@@ -110,7 +104,7 @@ impl LoonOutput {
     }
 }
 
-pub(crate) trait LoonRunner {
+trait LoonRunner {
     fn run(&self, session: &SmokeSession, args: &[String]) -> Result<LoonOutput>;
 }
 
@@ -155,13 +149,13 @@ impl LoonRunner for CargoLoonRunner {
 }
 
 #[derive(Debug)]
-pub(crate) struct SmokeSession {
+struct SmokeSession {
     _temp_dir: tempfile::TempDir,
     home_dir: PathBuf,
 }
 
 impl SmokeSession {
-    pub(crate) fn new() -> Result<Self> {
+    fn new() -> Result<Self> {
         let temp_dir = tempdir().context("create tempdir for smoke session")?;
         let home_dir = temp_dir.path().join("home");
         fs::create_dir_all(&home_dir).context("create smoke home dir")?;
@@ -173,24 +167,24 @@ impl SmokeSession {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct JsonEnvelope {
+struct JsonEnvelope {
     kind: String,
     format_version: u32,
     profile: Option<String>,
     mode: Option<String>,
     #[serde(default)]
-    pub(crate) data: Option<Value>,
+    data: Option<Value>,
     #[serde(default)]
-    pub(crate) error: Option<JsonError>,
+    error: Option<JsonError>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct JsonError {
-    pub(crate) code: String,
-    pub(crate) message: String,
+struct JsonError {
+    code: String,
+    message: String,
 }
 
-pub(crate) enum JsonCommandResult {
+enum JsonCommandResult {
     Success(JsonEnvelope),
     Failure(JsonEnvelope),
 }
@@ -198,12 +192,10 @@ pub(crate) enum JsonCommandResult {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let runner = CargoLoonRunner::new()?;
-    let rendered = match cli.command {
-        CommandKind::Smoke { command } => match command {
-            SmokeCommand::Local(args) => render_report(&run_local_smoke_with(&args, &runner)?),
-            SmokeCommand::Remote(args) => render_report(&run_remote_smoke_with(&args, &runner)?),
-        },
-        CommandKind::Perf { command } => perf::run_and_render(command, &runner)?,
+    let CommandKind::Smoke { command } = cli.command;
+    let rendered = match command {
+        SmokeCommand::Local(args) => render_report(&run_local_smoke_with(&args, &runner)?),
+        SmokeCommand::Remote(args) => render_report(&run_remote_smoke_with(&args, &runner)?),
     };
     println!("{rendered}");
     Ok(())
@@ -572,7 +564,7 @@ fn render_report(report: &SmokeReport) -> String {
     )
 }
 
-pub(crate) fn run_json_command(
+fn run_json_command(
     runner: &dyn LoonRunner,
     session: &SmokeSession,
     args: Vec<String>,
@@ -595,7 +587,7 @@ pub(crate) fn run_json_command(
     }
 }
 
-pub(crate) fn run_stream_command(
+fn run_stream_command(
     runner: &dyn LoonRunner,
     session: &SmokeSession,
     args: Vec<String>,
@@ -651,10 +643,7 @@ fn expect_success(
     }
 }
 
-pub(crate) fn expect_success_kind(
-    result: JsonCommandResult,
-    expected_kind: &str,
-) -> Result<JsonEnvelope> {
+fn expect_success_kind(result: JsonCommandResult, expected_kind: &str) -> Result<JsonEnvelope> {
     match result {
         JsonCommandResult::Success(envelope) => expect_kind_format(envelope, expected_kind),
         JsonCommandResult::Failure(envelope) => {
@@ -712,10 +701,7 @@ fn expect_envelope(
     Ok(envelope)
 }
 
-pub(crate) fn expect_kind_format(
-    envelope: JsonEnvelope,
-    expected_kind: &str,
-) -> Result<JsonEnvelope> {
+fn expect_kind_format(envelope: JsonEnvelope, expected_kind: &str) -> Result<JsonEnvelope> {
     if envelope.kind != expected_kind {
         bail!(
             "expected JSON kind `{expected_kind}`, got `{}`",
@@ -732,10 +718,7 @@ pub(crate) fn expect_kind_format(
     Ok(envelope)
 }
 
-pub(crate) fn require_data_type<'a>(
-    envelope: &'a JsonEnvelope,
-    expected_type: &str,
-) -> Result<&'a Value> {
+fn require_data_type<'a>(envelope: &'a JsonEnvelope, expected_type: &str) -> Result<&'a Value> {
     let data = envelope
         .data
         .as_ref()
@@ -758,7 +741,7 @@ fn data_type_name(data: &Option<Value>) -> String {
         .to_owned()
 }
 
-pub(crate) fn array_field<'a>(value: &'a Value, field: &str) -> Result<&'a [Value]> {
+fn array_field<'a>(value: &'a Value, field: &str) -> Result<&'a [Value]> {
     value
         .get(field)
         .and_then(Value::as_array)
@@ -766,14 +749,14 @@ pub(crate) fn array_field<'a>(value: &'a Value, field: &str) -> Result<&'a [Valu
         .ok_or_else(|| anyhow!("expected `{field}` to be an array"))
 }
 
-pub(crate) fn string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+fn string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
     value
         .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("expected `{field}` to be a string"))
 }
 
-pub(crate) fn namespace_field(value: &Value) -> Result<&str> {
+fn namespace_field(value: &Value) -> Result<&str> {
     value
         .get("namespace_id")
         .or_else(|| value.get("name"))
@@ -781,7 +764,7 @@ pub(crate) fn namespace_field(value: &Value) -> Result<&str> {
         .ok_or_else(|| anyhow!("expected `namespace_id` to be a string"))
 }
 
-pub(crate) fn u64_field(value: &Value, field: &str) -> Result<u64> {
+fn u64_field(value: &Value, field: &str) -> Result<u64> {
     value
         .get(field)
         .and_then(Value::as_u64)
