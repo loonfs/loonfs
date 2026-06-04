@@ -82,12 +82,6 @@ pub trait ObjectStoreMetricsRecorder: Send + Sync + 'static {
     fn record(&self, sample: ObjectStoreMetricSample);
 }
 
-pub struct NoopObjectStoreMetricsRecorder;
-
-impl ObjectStoreMetricsRecorder for NoopObjectStoreMetricsRecorder {
-    fn record(&self, _sample: ObjectStoreMetricSample) {}
-}
-
 /// In-memory recorder intended for tests and small local diagnostics.
 #[derive(Default)]
 pub struct VecObjectStoreMetricsRecorder {
@@ -119,14 +113,6 @@ pub struct InstrumentedObjectStore<S> {
 }
 
 impl<S> InstrumentedObjectStore<S> {
-    pub fn noop(inner: S) -> Self {
-        Self {
-            inner,
-            recorder: Arc::new(NoopObjectStoreMetricsRecorder),
-            store_kind: None,
-        }
-    }
-
     pub fn new(inner: S, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
         Self {
             inner,
