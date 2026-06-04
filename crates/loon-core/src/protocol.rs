@@ -423,6 +423,7 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     if candidates.is_empty() {
         return PublishBatchAgainstBasisResult::unchanged(Vec::new(), basis);
     }
+    let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     if basis.head.namespace_id != *namespace_id {
         return PublishBatchAgainstBasisResult::not_cacheable(
             (0..candidates.len())
@@ -443,6 +444,13 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
     let mut aliases: Vec<(usize, usize)> = Vec::new();
     let mut content_validation = ContentValidationTracker::default();
 
+    let prepare_span = tracing::info_span!(
+        "publisher.batch_prepare",
+        phase = "batch_prepare",
+        batch_size,
+        accepted_count = tracing::field::Empty
+    );
+    let prepare_enter = prepare_span.enter();
     for (index, candidate) in candidates.iter().enumerate() {
         let candidate_request = {
             let _span = tracing::info_span!("loon.phase", phase = "prepare_commit").entered();
@@ -463,11 +471,16 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         let Some(candidate_request) = candidate_request else {
             continue;
         };
+        let metadata_state = {
+            let _span =
+                tracing::info_span!("loon.phase", phase = "current_metadata_state.clone").entered();
+            current_metadata_state.clone()
+        };
         let validation = CommitValidationContext {
             head: current_head.clone(),
             lease: basis.lease.clone(),
             now_ms: context.now_ms,
-            metadata_state: current_metadata_state.clone(),
+            metadata_state,
         };
         let request = candidate_request.request;
         let resolved_restore_content_refs = resolve_restore_content_refs(&request, &validation);
@@ -481,14 +494,19 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             outcomes[index] = Some(Err(error));
             continue;
         }
-        let plan = match build_commit_plan(&request, &validation) {
-            Ok(plan) => plan,
-            Err(error) => {
-                outcomes[index] = Some(Err(error.into()));
-                continue;
+        let plan = {
+            let _span = tracing::info_span!("loon.phase", phase = "build_commit_plan").entered();
+            match build_commit_plan(&request, &validation) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    outcomes[index] = Some(Err(error.into()));
+                    continue;
+                }
             }
         };
-        let prepared =
+        let prepared = {
+            let _span =
+                tracing::info_span!("loon.phase", phase = "PreparedCommit::prepare").entered();
             match PreparedCommit::prepare(request, plan.clone(), candidate_request.identity_source)
             {
                 Ok(value) => value,
@@ -498,24 +516,38 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
                     ))));
                     continue;
                 }
-            };
-        let materialized = match materialize_commit(prepared) {
-            Ok(value) => value,
-            Err(error) => {
-                outcomes[index] = Some(Err(CoreError::Store(format!(
-                    "commit materialization failed: {error}"
-                ))));
-                continue;
             }
         };
-        let preview = match wal_payload_from_materialized_commit(&materialized) {
-            Ok(payload) => payload,
-            Err(error) => {
-                outcomes[index] = Some(Err(error.into()));
-                continue;
+        let materialized = {
+            let _span = tracing::info_span!("loon.phase", phase = "materialize_commit").entered();
+            match materialize_commit(prepared) {
+                Ok(value) => value,
+                Err(error) => {
+                    outcomes[index] = Some(Err(CoreError::Store(format!(
+                        "commit materialization failed: {error}"
+                    ))));
+                    continue;
+                }
             }
         };
-        match current_metadata_state.apply_committed_wal_record(&preview) {
+        let preview = {
+            let _span =
+                tracing::info_span!("loon.phase", phase = "wal_payload_from_materialized_commit")
+                    .entered();
+            match wal_payload_from_materialized_commit(&materialized) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    outcomes[index] = Some(Err(error.into()));
+                    continue;
+                }
+            }
+        };
+        let applied = {
+            let _span =
+                tracing::info_span!("loon.phase", phase = "apply_committed_wal_record").entered();
+            current_metadata_state.apply_committed_wal_record(&preview)
+        };
+        match applied {
             Ok(applied) => {
                 current_metadata_state = applied.metadata_state;
                 current_head.seq = plan.assigned_seq;
@@ -525,6 +557,12 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             Err(error) => outcomes[index] = Some(Err(error.into())),
         }
     }
+    drop(prepare_enter);
+    prepare_span.record(
+        "accepted_count",
+        u64::try_from(accepted.len()).unwrap_or(u64::MAX),
+    );
+    drop(prepare_span);
 
     if accepted.is_empty() {
         return PublishBatchAgainstBasisResult::unchanged(
@@ -536,13 +574,18 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         .iter()
         .map(|(_, record)| record.clone())
         .collect::<Vec<_>>();
+    let accepted_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+    let wal_span = tracing::info_span!(
+        "publisher.batch_write_wal",
+        phase = "batch_write_wal",
+        batch_size,
+        accepted_count,
+        wal_segment_count = 1_u64,
+        key_class = "wal_segment",
+        result = tracing::field::Empty
+    );
     let wal_result: Result<_, CoreError> = {
-        let _span = tracing::info_span!(
-            "loon.phase",
-            phase = "write_wal_segment",
-            key_class = "wal_segment"
-        )
-        .entered();
+        let _span = wal_span.enter();
         match prepare_wal_segment(
             namespace_id.clone(),
             basis.head.visible_wal_tip.clone(),
@@ -556,6 +599,8 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             Err(error) => Err(CoreError::Store(format!("wal build failed: {error:?}"))),
         }
     };
+    wal_span.record("result", if wal_result.is_ok() { "ok" } else { "error" });
+    drop(wal_span);
     let wal = match wal_result {
         Ok(wal) => wal,
         Err(error) => {
@@ -587,15 +632,27 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
             );
         }
     };
+    let head_cas_span = tracing::info_span!(
+        "publisher.batch_cas_head",
+        phase = "batch_cas_head",
+        batch_size,
+        accepted_count,
+        key_class = "namespace_head",
+        result = tracing::field::Empty
+    );
     let head_metadata_result = {
-        let _span = tracing::info_span!(
-            "loon.phase",
-            phase = "cas_namespace_head",
-            key_class = "namespace_head"
-        )
-        .entered();
+        let _span = head_cas_span.enter();
         publish_commit_head(store, &basis.head_etag, &head_publish)
     };
+    head_cas_span.record(
+        "result",
+        if head_metadata_result.is_ok() {
+            "ok"
+        } else {
+            "error"
+        },
+    );
+    drop(head_cas_span);
     let head_metadata = match head_metadata_result {
         Ok(metadata) => metadata,
         Err(error) => {
