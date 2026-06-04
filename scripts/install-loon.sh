@@ -19,11 +19,22 @@ set -eu
 REPO_SLUG="${LOON_REPO_SLUG:-loonfs/loonfs}"
 INSTALL_DIR="${LOON_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION=""
+WITH_SKILL=""
 tmpdir=""
 
 usage() {
     cat <<'EOF'
-Usage: install-loon.sh [--version <tag>] [--install-dir <path>]
+Usage: install-loon.sh [--version <tag>] [--install-dir <path>] [--with-skill <agent>]
+
+Options:
+  --version <tag>          Install a specific release tag (default: latest)
+  --install-dir <path>     Where to install the loon binary (default: $HOME/.local/bin)
+  --with-skill <agent>     Also install the Loon agent skill for one of:
+                             claude-code  -> $HOME/.claude/skills/loon/SKILL.md
+                             codex        -> $HOME/.codex/AGENTS.md
+                             agents-md    -> ./AGENTS.md
+                           If the destination already exists the file is left
+                           untouched and the path is printed.
 EOF
 }
 
@@ -108,6 +119,61 @@ checksum_file() {
     fi
 }
 
+install_skill() {
+    agent="$1"
+
+    case "$agent" in
+        claude-code)
+            src_path="examples/SKILL.md"
+            dest_dir="$HOME/.claude/skills/loon"
+            dest_file="$dest_dir/SKILL.md"
+            ;;
+        codex)
+            src_path="examples/agents/agents-md/AGENTS.md"
+            dest_dir="$HOME/.codex"
+            dest_file="$dest_dir/AGENTS.md"
+            ;;
+        agents-md)
+            src_path="examples/agents/agents-md/AGENTS.md"
+            dest_dir="."
+            dest_file="./AGENTS.md"
+            ;;
+        *)
+            die "unsupported --with-skill agent: $agent
+supported: claude-code, codex, agents-md"
+            ;;
+    esac
+
+    if [ -e "$dest_file" ]; then
+        printf 'skill destination already exists: %s\n' "$dest_file"
+        printf 'leaving the existing file untouched. inspect it, back it up, or remove it and rerun to install the current Loon skill.\n'
+        return 0
+    fi
+
+    if [ -n "$VERSION" ]; then
+        skill_ref="$VERSION"
+    else
+        skill_ref="main"
+    fi
+    src_url="${LOON_SKILL_URL_ROOT:-https://raw.githubusercontent.com/$REPO_SLUG}/$skill_ref/$src_path"
+
+    mkdir -p "$dest_dir"
+    download "$src_url" "$dest_file"
+    printf 'installed loon skill to %s\n' "$dest_file"
+
+    case "$agent" in
+        claude-code)
+            printf 'restart Claude Code (or start a new thread) for the skill to be discovered.\n'
+            ;;
+        codex)
+            printf "next Codex session will read this AGENTS.md from \$CODEX_HOME.\n"
+            ;;
+        agents-md)
+            printf 'any AGENTS.md-aware agent run from this directory will pick this up.\n'
+            ;;
+    esac
+}
+
 main() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -117,6 +183,10 @@ main() {
                 ;;
             --install-dir)
                 INSTALL_DIR="${2:-}"
+                shift 2
+                ;;
+            --with-skill)
+                WITH_SKILL="${2:-}"
                 shift 2
                 ;;
             -h|--help)
@@ -167,6 +237,10 @@ main() {
             printf 'add %s to PATH to run `loon` directly\n' "$INSTALL_DIR"
             ;;
     esac
+
+    if [ -n "$WITH_SKILL" ]; then
+        install_skill "$WITH_SKILL"
+    fi
 }
 
 trap cleanup EXIT INT TERM
