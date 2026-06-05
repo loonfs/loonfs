@@ -19,7 +19,7 @@ use crate::namespace::catalog::{
     load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
 };
-use crate::path::planner::{path_intent_fingerprint_for_path_intent, PathPlanner};
+use crate::path::write::{path_intent_fingerprint_for_path_intent, PathPlanner};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
 use loon_api::v0::{

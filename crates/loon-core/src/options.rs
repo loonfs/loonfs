@@ -1,5 +1,5 @@
 use crate::{
-    basis::VerifiedNamespaceBasis, checkpoint::MetadataTableCache, path::intent::PutFileBehavior,
+    basis::VerifiedNamespaceBasis, checkpoint::MetadataTableCache, path::write::PutFileBehavior,
 };
 use loon_api::wire::control::HeadState;
 use loon_api::CommitId;
