@@ -5,6 +5,7 @@ mod checkpoint;
 pub mod commit;
 pub mod content;
 mod context;
+mod engine;
 mod error;
 mod genesis;
 pub mod invariants;
@@ -12,6 +13,7 @@ mod lease;
 mod loading;
 pub mod metadata;
 pub mod namespace;
+mod options;
 mod path;
 mod protocol;
 pub mod publisher;
@@ -30,6 +32,7 @@ pub use checkpoint::{
     MetadataTableCacheStats,
 };
 pub use context::MutationContext;
+pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
 pub use error::{CoreError, CoreErrorKind};
 pub use lease::{acquire_or_renew_namespace_lease, LeaseAcquireError};
 pub use loading::{
@@ -38,6 +41,7 @@ pub use loading::{
     ControlObjectLoadError, LoadedContentStoreDescriptorControl, LoadedHeadControl,
     LoadedLeaseControl, LoadedNamespaceDescriptorControl,
 };
+pub use options::{CommitOptions, ReadOptions, WriteOptions};
 pub use path::intent::{PathMutationIntent, PutFileBehavior};
 pub use path::planner::PlannedPathMutation;
 pub use protocol::{
