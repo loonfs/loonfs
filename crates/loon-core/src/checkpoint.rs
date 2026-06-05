@@ -89,7 +89,7 @@ pub struct MetadataTableCacheStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum MetadataTableBlockKind {
+pub(crate) enum MetadataTableBlockKind {
     SegmentPayload,
 }
 
@@ -561,7 +561,7 @@ impl CheckpointLoadError {
     }
 }
 
-pub fn create_checkpoint<S: ObjectStore + ?Sized>(
+pub(crate) fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -569,7 +569,7 @@ pub fn create_checkpoint<S: ObjectStore + ?Sized>(
     create_checkpoint_with_policy(store, namespace_id, context, MetadataLsmPolicy::default())
 }
 
-pub fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
+pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -789,7 +789,7 @@ fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
     .map_err(|err| CoreError::Store(err.to_string()))
 }
 
-pub fn advance_retention_floor<S: ObjectStore + ?Sized>(
+pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -2489,13 +2489,11 @@ mod tests {
         MetadataTableCacheConfig, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
         CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
     };
+    use crate::basis::{load_verified_namespace_basis, BasisLoadError};
     use crate::metadata::MetadataState;
     use crate::namespace::lifecycle::bootstrap_namespace;
     use crate::path::mutation::{move_path, put_file_bytes, write_file_bytes};
-    use crate::{
-        load_verified_namespace_basis, BasisLoadError, CoreError, CoreErrorKind, MutationContext,
-        PutFileBehavior,
-    };
+    use crate::{CoreError, CoreErrorKind, MutationContext, PutFileBehavior};
     use loon_api::wire::checkpoint::{
         encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
         CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage, CheckpointRow,

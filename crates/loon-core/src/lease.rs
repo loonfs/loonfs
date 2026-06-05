@@ -52,7 +52,7 @@ pub enum LeaseAcquireError {
     RetryExhausted { attempts: usize },
 }
 
-pub fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
+pub(crate) fn acquire_or_renew_namespace_lease<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     params: &MutationContext,

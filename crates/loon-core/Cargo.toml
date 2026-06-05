@@ -17,3 +17,6 @@ tracing.workspace = true
 [dev-dependencies]
 loon-model = { path = "../loon-model" }
 tempfile.workspace = true
+
+[lints]
+workspace = true

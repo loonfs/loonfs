@@ -40,12 +40,6 @@ pub enum WalBuildError {
     Codec(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoredWalObject {
-    pub object_key: String,
-    pub encoded_bytes: Vec<u8>,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct WalChainLoadRequest<'a> {
     pub(crate) namespace_id: &'a NamespaceId,
@@ -131,24 +125,7 @@ impl From<WalReplayError> for WalChainLoadError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplayedWalSegment {
-    pub object_key: String,
-    pub envelope: WalSegmentEnvelope,
-    pub resulting_head: HeadState,
-    pub checked_invariants: Vec<InvariantId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplayedWalSegmentWithMetadata {
-    pub object_key: String,
-    pub envelope: WalSegmentEnvelope,
-    pub resulting_head: HeadState,
-    pub resulting_metadata_state: MetadataState,
-    pub checked_invariants: Vec<InvariantId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReplayedWalTail {
+pub(crate) struct ReplayedWalTail {
     pub resulting_head: HeadState,
     pub resulting_metadata_state: MetadataState,
     pub checked_invariants: Vec<InvariantId>,
@@ -179,7 +156,7 @@ pub enum WalReplayError {
     SeqOverflow,
 }
 
-pub fn prepare_wal_segment(
+pub(crate) fn prepare_wal_segment(
     namespace_id: NamespaceId,
     prev_visible_segment: Option<WalSegmentPointer>,
     records: &[MaterializedCommit],
@@ -394,98 +371,6 @@ pub(crate) fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn replay_wal_segment(
-    current_head: &HeadState,
-    wal_object: &StoredWalObject,
-) -> Result<ReplayedWalSegment, WalReplayError> {
-    let envelope = decode_and_validate_replayed_wal(current_head, wal_object)?;
-    let mut resulting_head = current_head.clone();
-    for record in &envelope.payload.records {
-        resulting_head.seq = record.seq;
-        resulting_head.next_inode_id =
-            replay_next_inode_id_from_commit_deltas(resulting_head.next_inode_id, &record.deltas);
-    }
-    resulting_head.visible_wal_tip = Some(envelope.pointer(wal_object.object_key.clone()));
-
-    Ok(ReplayedWalSegment {
-        object_key: wal_object.object_key.clone(),
-        envelope,
-        resulting_head,
-        checked_invariants: vec![
-            InvariantId::WalPayloadChecksumMatchesPayload,
-            InvariantId::WalKeyMatchesSegmentSeqRange,
-            InvariantId::WalReplayRequiresMatchingNamespace,
-            InvariantId::WalReplayRequiresMatchingBaseHeadSeq,
-            InvariantId::WalTailSeqIsContiguous,
-        ],
-    })
-}
-
-pub fn replay_wal_segment_with_metadata(
-    current_head: &HeadState,
-    current_metadata_state: &MetadataState,
-    wal_object: &StoredWalObject,
-) -> Result<ReplayedWalSegmentWithMetadata, WalReplayError> {
-    let replayed = replay_wal_segment(current_head, wal_object)?;
-    let mut current_metadata_state = current_metadata_state.clone();
-    let mut checked_invariants = replayed.checked_invariants.clone();
-    for record in &replayed.envelope.payload.records {
-        let apply_invariants = current_metadata_state
-            .apply_committed_wal_record_mut(record)
-            .map_err(WalReplayError::MetadataApply)?;
-        push_invariant(
-            &mut checked_invariants,
-            InvariantId::WalReplayAppliesMetadataRows,
-        );
-        extend_invariants(&mut checked_invariants, &apply_invariants);
-    }
-
-    Ok(ReplayedWalSegmentWithMetadata {
-        object_key: replayed.object_key,
-        envelope: replayed.envelope,
-        resulting_head: replayed.resulting_head,
-        resulting_metadata_state: current_metadata_state,
-        checked_invariants,
-    })
-}
-
-pub fn replay_wal_tail(
-    basis_head: &HeadState,
-    wal_tail: &[StoredWalObject],
-) -> Result<HeadState, WalReplayError> {
-    let mut current_head = basis_head.clone();
-
-    for wal_object in wal_tail {
-        current_head = replay_wal_segment(&current_head, wal_object)?.resulting_head;
-    }
-
-    Ok(current_head)
-}
-
-pub fn replay_wal_tail_with_metadata(
-    basis_head: &HeadState,
-    basis_metadata_state: &MetadataState,
-    wal_tail: &[StoredWalObject],
-) -> Result<ReplayedWalTail, WalReplayError> {
-    let mut current_head = basis_head.clone();
-    let mut current_metadata_state = basis_metadata_state.clone();
-    let mut checked_invariants = Vec::new();
-
-    for wal_object in wal_tail {
-        let replayed =
-            replay_wal_segment_with_metadata(&current_head, &current_metadata_state, wal_object)?;
-        current_head = replayed.resulting_head;
-        current_metadata_state = replayed.resulting_metadata_state;
-        extend_invariants(&mut checked_invariants, &replayed.checked_invariants);
-    }
-
-    Ok(ReplayedWalTail {
-        resulting_head: current_head,
-        resulting_metadata_state: current_metadata_state,
-        checked_invariants,
-    })
-}
-
 pub(crate) fn replay_validated_wal_tail_with_metadata(
     basis_head: &HeadState,
     basis_metadata_state: &MetadataState,
@@ -524,31 +409,6 @@ pub(crate) fn replay_validated_wal_tail_with_metadata(
         resulting_metadata_state: current_metadata_state,
         checked_invariants,
     })
-}
-
-impl From<&PreparedWalSegment> for StoredWalObject {
-    fn from(value: &PreparedWalSegment) -> Self {
-        Self {
-            object_key: value.object_key.clone(),
-            encoded_bytes: value.encoded_bytes.clone(),
-        }
-    }
-}
-
-fn decode_and_validate_replayed_wal(
-    current_head: &HeadState,
-    wal_object: &StoredWalObject,
-) -> Result<WalSegmentEnvelope, WalReplayError> {
-    let envelope = decode_wal_segment_envelope_zstd(&wal_object.encoded_bytes)
-        .map_err(|err| WalReplayError::Codec(err.to_string()))?;
-    validate_decoded_replayed_wal(
-        &current_head.namespace_id,
-        current_head.seq,
-        &wal_object.object_key,
-        &envelope,
-    )?;
-
-    Ok(envelope)
 }
 
 fn validate_pointer_matches_envelope(

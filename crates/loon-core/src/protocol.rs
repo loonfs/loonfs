@@ -9,6 +9,11 @@ use crate::commit::{
 use crate::content::{write_immutable_object, ContentValidationTracker};
 use crate::context::MutationContext;
 use crate::error::CoreError;
+use crate::lease::acquire_or_renew_namespace_lease;
+use crate::loading::{
+    load_content_store_descriptor_control, load_namespace_descriptor_control,
+    load_namespace_head_control, load_namespace_lease_control,
+};
 use crate::metadata::{CommitReceiptRecord, MetadataState};
 use crate::namespace::catalog::{
     load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
@@ -17,10 +22,6 @@ use crate::namespace::catalog::{
 use crate::path::planner::{path_intent_fingerprint_for_path_intent, PathPlanner};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
-use crate::{
-    load_content_store_descriptor_control, load_namespace_descriptor_control,
-    load_namespace_head_control, load_namespace_lease_control,
-};
 use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitDelta, CommitRequest as ApiCommitRequest,
     CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
@@ -101,7 +102,7 @@ struct CandidateCoreRequest {
     identity_source: CommitIdentitySource,
 }
 
-pub fn begin_upload<S: ObjectStore + ?Sized>(
+pub(crate) fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -197,7 +198,7 @@ fn map_upload_namespace_initialization_error(error: NamespaceInitializationError
     }
 }
 
-pub fn upload_content<S: ObjectStore + ?Sized>(
+pub(crate) fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &str,
@@ -267,7 +268,7 @@ pub fn upload_content<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub fn complete_upload<S: ObjectStore + ?Sized>(
+pub(crate) fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &str,
@@ -336,7 +337,7 @@ pub fn complete_upload<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub fn commit_operations<S: ObjectStore + ?Sized>(
+pub(crate) fn commit_operations<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: ApiCommitRequest,
@@ -352,7 +353,7 @@ pub fn commit_operations<S: ObjectStore + ?Sized>(
     .unwrap_or_else(|| Err(CoreError::Store("empty commit batch".to_owned())))
 }
 
-pub fn commit_operations_batch<S: ObjectStore + ?Sized>(
+pub(crate) fn commit_operations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     requests: Vec<ApiCommitRequest>,
@@ -387,7 +388,7 @@ fn commit_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     if candidates.is_empty() {
         return Vec::new();
     }
-    if let Err(error) = crate::acquire_or_renew_namespace_lease(store, namespace_id, context) {
+    if let Err(error) = acquire_or_renew_namespace_lease(store, namespace_id, context) {
         return (0..candidates.len())
             .map(|_| Err(CoreError::Lease(error.clone())))
             .collect();
@@ -680,7 +681,7 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
 fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     current_head: &HeadState,
     current_metadata_state: &MetadataState,
     candidate: &NamespaceMutationCandidate,
@@ -833,7 +834,7 @@ fn record_primary_request_or_complete_idempotent(
     true
 }
 
-pub fn list_changes_after<S: ObjectStore + ?Sized>(
+pub(crate) fn list_changes_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,

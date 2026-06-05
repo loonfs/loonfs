@@ -20,15 +20,22 @@ pub use loon_api::{
     FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse, MutationResult,
     NameKey, NamePolicy, NamespaceId, NamespaceSummary, RevisionNo,
 };
-use loon_core::publisher::{BasisReuseEvent, NamespaceCommitEnginePublishResult};
-pub use loon_core::{
-    BootstrapNamespaceError, CoreError, CoreErrorKind, MetadataTableCacheConfig,
-    NamespaceMutationCandidate, PathMutationIntent, PutFileBehavior,
+pub use loon_core::cache::MetadataTableCacheConfig;
+use loon_core::cache::{
+    load_namespace_head_summary, load_verified_namespace_basis,
+    load_verified_namespace_basis_at_head, probe_namespace_head_etag, BasisLoadError,
+    MetadataTableCache, MetadataTableCacheStats, NamespaceHeadEtagProbe, VerifiedNamespaceBasis,
+    VerifiedNamespaceBasisWeight,
 };
-use loon_core::{
-    ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MutationContext,
-    NamespaceCommitEngine, NamespaceEngine, VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
+use loon_core::control::{
+    load_namespace_head_control, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
 };
+use loon_core::publish::{
+    BasisReuseEvent, NamespaceCommitEngine, NamespaceCommitEnginePublishResult,
+};
+pub use loon_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
+pub use loon_core::{BootstrapNamespaceError, CoreError, CoreErrorKind, PutFileBehavior};
+use loon_core::{MutationContext, NamespaceEngine};
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::metrics::InstrumentedObjectStore;
 pub use loon_objectstore::metrics::{
@@ -135,7 +142,7 @@ struct FsInner {
     basis_cache: Mutex<BasisCache>,
     commit_engines: Mutex<CommitEngineCache>,
     control_cache: Mutex<RuntimeControlCache>,
-    metadata_table_cache: loon_core::MetadataTableCache,
+    metadata_table_cache: MetadataTableCache,
     uploaded_content_proofs: Mutex<UploadedContentProofCache>,
     cache_stats: RuntimeCacheStatsInner,
 }
@@ -183,7 +190,7 @@ impl CachedVerifiedBasis {
         self.head_etag_reuse_token == head_etag
     }
 
-    fn matches_head_etag_probe(&self, probe: &loon_core::NamespaceHeadEtagProbe) -> bool {
+    fn matches_head_etag_probe(&self, probe: &NamespaceHeadEtagProbe) -> bool {
         self.matches_head_etag(&probe.head_etag)
     }
 
@@ -692,10 +699,7 @@ struct RuntimeCacheStatsInner {
 }
 
 impl RuntimeCacheStatsInner {
-    fn snapshot(
-        &self,
-        metadata_table_cache: loon_core::MetadataTableCacheStats,
-    ) -> RuntimeCacheStats {
+    fn snapshot(&self, metadata_table_cache: MetadataTableCacheStats) -> RuntimeCacheStats {
         RuntimeCacheStats {
             warm_basis_cache_hits: self.warm_basis_cache_hits.load(Ordering::SeqCst),
             warm_basis_cache_misses: self.warm_basis_cache_misses.load(Ordering::SeqCst),
@@ -1045,7 +1049,7 @@ impl Fs {
     pub fn open(store: SharedObjectStore, config: FsConfig) -> Result<Self> {
         validate_config(&config)?;
         let metadata_table_cache =
-            loon_core::MetadataTableCache::new(config.runtime_cache.metadata_table_cache.clone());
+            MetadataTableCache::new(config.runtime_cache.metadata_table_cache.clone());
         Ok(Self {
             inner: Arc::new(FsInner {
                 store,
@@ -1106,11 +1110,11 @@ impl Fs {
     }
 
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>> {
-        Ok(loon_core::namespace::list_namespaces(self.store())?)
+        Ok(loon_core::list_namespaces(self.store())?)
     }
 
     pub fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatus> {
-        let summary = loon_core::load_namespace_head_summary(self.store(), namespace_id)?;
+        let summary = load_namespace_head_summary(self.store(), namespace_id)?;
         Ok(NamespaceStatus {
             namespace_id: summary.namespace_id,
             head_seq: summary.head_seq,
@@ -1557,11 +1561,7 @@ impl Fs {
     }
 
     pub fn begin_upload(&self, namespace_id: &NamespaceId) -> Result<BeginUploadResponse> {
-        Ok(loon_core::begin_upload(
-            self.store(),
-            namespace_id,
-            &self.mutation_context(),
-        )?)
+        Ok(self.namespace_engine(namespace_id).begin_upload()?)
     }
 
     pub fn upload_content(
@@ -1571,13 +1571,9 @@ impl Fs {
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
         let store = self.uploaded_content_proof_store(namespace_id);
-        Ok(loon_core::upload_content(
-            &store,
-            namespace_id,
-            upload_id,
-            bytes,
-            &self.mutation_context(),
-        )?)
+        Ok(self
+            .namespace_engine_with_store(namespace_id, store)
+            .upload_content(upload_id, bytes)?)
     }
 
     pub fn complete_upload(
@@ -1586,13 +1582,9 @@ impl Fs {
         upload_id: &str,
         request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse> {
-        Ok(loon_core::complete_upload(
-            self.store(),
-            namespace_id,
-            upload_id,
-            request,
-            &self.mutation_context(),
-        )?)
+        Ok(self
+            .namespace_engine(namespace_id)
+            .complete_upload(upload_id, request)?)
     }
 
     pub fn commit_operations(
@@ -1666,15 +1658,12 @@ impl Fs {
                 .collect();
         }
 
-        let results: Vec<_> = loon_core::publish_namespace_mutations_batch(
-            &store,
-            namespace_id,
-            candidates,
-            &self.mutation_context(),
-        )
-        .into_iter()
-        .map(|result| result.map_err(RuntimeError::Core))
-        .collect();
+        let results: Vec<_> = self
+            .namespace_engine_with_store(namespace_id, store)
+            .publish_namespace_mutations_batch(candidates)
+            .into_iter()
+            .map(|result| result.map_err(RuntimeError::Core))
+            .collect();
         {
             let _span = tracing::info_span!(
                 "publisher.batch_update_cache",
@@ -1700,11 +1689,9 @@ impl Fs {
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> Result<ChangesResponse> {
-        Ok(loon_core::list_changes_after(
-            self.store(),
-            namespace_id,
-            after_seq,
-        )?)
+        Ok(self
+            .namespace_engine(namespace_id)
+            .list_changes_after(after_seq)?)
     }
 
     #[tracing::instrument(
@@ -1724,9 +1711,10 @@ impl Fs {
     ) -> Result<CreateCheckpointResponse> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
-        let result =
-            loon_core::create_checkpoint(self.store(), namespace_id, &self.mutation_context())
-                .map_err(RuntimeError::from);
+        let result = self
+            .namespace_engine(namespace_id)
+            .create_checkpoint()
+            .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
     }
 
@@ -1734,12 +1722,10 @@ impl Fs {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
-        let result = loon_core::advance_retention_floor(
-            self.store(),
-            namespace_id,
-            &self.mutation_context(),
-        )
-        .map_err(RuntimeError::from);
+        let result = self
+            .namespace_engine(namespace_id)
+            .advance_retention_floor()
+            .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
     }
 
@@ -1749,8 +1735,7 @@ impl Fs {
     ) -> std::result::Result<CachedControl<HeadState>, ControlObjectLoadError> {
         let cache_config = &self.inner.config.runtime_cache;
         if !self.control_cache_enabled() {
-            return loon_core::load_namespace_head_control(self.store(), namespace_id)
-                .map(cached_head);
+            return load_namespace_head_control(self.store(), namespace_id).map(cached_head);
         }
 
         let cached = self
@@ -1782,7 +1767,7 @@ impl Fs {
             }
         }
 
-        let loaded = match loon_core::load_namespace_head_control(self.store(), namespace_id) {
+        let loaded = match load_namespace_head_control(self.store(), namespace_id) {
             Ok(loaded) => loaded,
             Err(error) => {
                 self.inner
@@ -1818,7 +1803,7 @@ impl Fs {
             ) => {
                 self.inner.cache_stats.record_warm_basis_miss();
                 let started = std::time::Instant::now();
-                let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
+                let basis = load_verified_namespace_basis(self.store(), namespace_id)
                     .map_err(CoreError::from)?;
                 self.inner
                     .cache_stats
@@ -1833,7 +1818,7 @@ impl Fs {
                 Ok(head)
             }
             Err(error) => Err(RuntimeError::Core(CoreError::Basis(
-                loon_core::BasisLoadError::LoadHead(error),
+                BasisLoadError::LoadHead(error),
             ))),
         }
     }
@@ -1886,7 +1871,7 @@ impl Fs {
         if !self.basis_cache_enabled() {
             self.inner.cache_stats.record_warm_basis_miss();
             let started = std::time::Instant::now();
-            let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
+            let basis = load_verified_namespace_basis(self.store(), namespace_id)
                 .map_err(CoreError::from)?;
             self.inner
                 .cache_stats
@@ -1917,7 +1902,7 @@ impl Fs {
                     }
                 }
             } else {
-                match loon_core::probe_namespace_head_etag(self.store(), namespace_id) {
+                match probe_namespace_head_etag(self.store(), namespace_id) {
                     Ok(probe) if basis.matches_head_etag_probe(&probe) => {
                         // A matching ETag only proves the durable head object is
                         // unchanged since this basis was reconstructed and
@@ -1936,8 +1921,8 @@ impl Fs {
 
         self.inner.cache_stats.record_warm_basis_miss();
         let started = std::time::Instant::now();
-        let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
-            .map_err(CoreError::from)?;
+        let basis =
+            load_verified_namespace_basis(self.store(), namespace_id).map_err(CoreError::from)?;
         self.inner
             .cache_stats
             .record_warm_basis_rehydrate(elapsed_ms_usize(started));
@@ -1972,7 +1957,7 @@ impl Fs {
 
         self.inner.cache_stats.record_warm_basis_miss();
         let started = std::time::Instant::now();
-        let basis = loon_core::load_verified_namespace_basis_at_head(
+        let basis = load_verified_namespace_basis_at_head(
             self.store(),
             namespace_id,
             head.state.clone(),

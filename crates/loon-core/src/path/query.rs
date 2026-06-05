@@ -1,8 +1,8 @@
 use super::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
-use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::basis::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use crate::checkpoint::{
-    checkpoint_basis_head, load_verified_checkpoint_tables_with_cache, MetadataTableCache,
-    VerifiedCheckpointTables,
+    checkpoint_basis_head, load_verified_checkpoint_tables_with_cache, CheckpointLoadError,
+    MetadataTableCache, VerifiedCheckpointTables,
 };
 use crate::content::read_durable_content_bytes;
 use crate::error::CoreError;
@@ -46,7 +46,7 @@ pub(crate) fn resolve_path<S: ObjectStore + ?Sized>(
     fields(phase = "walk_path")
 )]
 pub(crate) fn resolve_path_from_basis(
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
@@ -83,7 +83,7 @@ pub(crate) fn list_path<S: ObjectStore + ?Sized>(
     fields(phase = "walk_path")
 )]
 pub(crate) fn list_path_from_basis(
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
@@ -741,7 +741,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
     }
 }
 
-fn checkpoint_error_to_core(error: crate::CheckpointLoadError) -> CoreError {
+fn checkpoint_error_to_core(error: CheckpointLoadError) -> CoreError {
     CoreError::Basis(BasisLoadError::CheckpointLoad(error))
 }
 
@@ -865,7 +865,7 @@ pub(crate) fn read_file_bytes<S: ObjectStore + ?Sized>(
 
 pub(crate) fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
     let entry = resolve_path_from_basis(basis, absolute_path)?;
@@ -896,7 +896,7 @@ pub(crate) fn list_file_revisions<S: ObjectStore + ?Sized>(
 }
 
 pub(crate) fn list_file_revisions_from_basis(
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<ListFileRevisionsResponse, CoreError> {
     let entry = resolve_path_from_basis(basis, absolute_path)?;
@@ -919,7 +919,7 @@ pub(crate) fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
 }
 
 pub(crate) fn list_file_revisions_for_inode_from_basis(
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     inode_id: InodeId,
 ) -> Result<ListFileRevisionsResponse, CoreError> {
     let inode = basis
@@ -969,7 +969,7 @@ pub(crate) fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
 
 pub(crate) fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
     revision_no: RevisionNo,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
@@ -1003,7 +1003,7 @@ pub(crate) fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
 
 pub(crate) fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
@@ -1013,7 +1013,7 @@ pub(crate) fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Si
 }
 
 fn revision_for_inode(
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<crate::metadata::RevisionRecord, CoreError> {

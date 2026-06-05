@@ -2,13 +2,17 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::{lifecycle, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, WriteOptions};
-use crate::{MetadataTableCache, VerifiedNamespaceBasis};
-use loon_api::v0::{ChangesResponse, CommitRequest, CommitResponse};
+use crate::publisher::NamespaceMutationCandidate;
+use crate::{basis::VerifiedNamespaceBasis, checkpoint::MetadataTableCache};
+use loon_api::v0::{
+    BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse, CompleteUploadRequest,
+    CompleteUploadResponse, UploadContentResponse,
+};
 use loon_api::wire::control::HeadState;
 use loon_api::{
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
-    CreateCheckpointResponse, InodeId, ListFileRevisionsResponse, MutationResult, NamespaceId,
-    NamespaceSummary, RevisionNo,
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
+    ContentRef, CreateCheckpointResponse, InodeId, ListFileRevisionsResponse, MutationResult,
+    NamespaceId, NamespaceSummary, RevisionNo,
 };
 use loon_objectstore::ObjectStore;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -446,12 +450,64 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    pub fn publish_namespace_mutations_batch(
+        &self,
+        candidates: Vec<NamespaceMutationCandidate>,
+    ) -> Vec<Result<CommitResponse, CoreError>> {
+        crate::publisher::publish_namespace_mutations_batch(
+            &self.store,
+            &self.namespace_id,
+            candidates,
+            &self.mutation_context(),
+        )
+    }
+
     pub fn list_changes_after(&self, after_seq: ChangeSeq) -> Result<ChangesResponse, CoreError> {
         crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq)
     }
 
+    pub fn begin_upload(&self) -> Result<BeginUploadResponse, CoreError> {
+        crate::protocol::begin_upload(&self.store, &self.namespace_id, &self.mutation_context())
+    }
+
+    pub fn upload_content(
+        &self,
+        upload_id: &str,
+        bytes: &[u8],
+    ) -> Result<UploadContentResponse, CoreError> {
+        crate::protocol::upload_content(
+            &self.store,
+            &self.namespace_id,
+            upload_id,
+            bytes,
+            &self.mutation_context(),
+        )
+    }
+
+    pub fn complete_upload(
+        &self,
+        upload_id: &str,
+        request: &CompleteUploadRequest,
+    ) -> Result<CompleteUploadResponse, CoreError> {
+        crate::protocol::complete_upload(
+            &self.store,
+            &self.namespace_id,
+            upload_id,
+            request,
+            &self.mutation_context(),
+        )
+    }
+
     pub fn create_checkpoint(&self) -> Result<CreateCheckpointResponse, CoreError> {
         crate::checkpoint::create_checkpoint(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+        )
+    }
+
+    pub fn advance_retention_floor(&self) -> Result<AdvanceRetentionResponse, CoreError> {
+        crate::checkpoint::advance_retention_floor(
             &self.store,
             &self.namespace_id,
             &self.mutation_context(),

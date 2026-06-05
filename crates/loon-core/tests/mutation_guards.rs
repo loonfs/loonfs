@@ -12,19 +12,21 @@ use loon_api::{
     AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, FenceToken, InodeId, InodeKind,
     NameKey, NamespaceId, RevisionNo,
 };
+use loon_core::cache::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use loon_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitRequest, CommitValidationContext,
     CommitValidationError, PreparedCommit,
 };
 use loon_core::content::store_bytes_as_content;
+use loon_core::control::load_namespace_head_control;
 use loon_core::metadata::MetadataState;
+use loon_core::publish::{
+    DirectObjectStorePublisher, NamespaceCommitEngine, NamespaceMutationCandidate,
+    PathMutationIntent, PublishOptions,
+};
 use loon_core::{
-    begin_upload, commit_operations, commit_operations_batch, complete_upload, create_checkpoint,
-    list_changes_after, load_namespace_head_control, load_verified_namespace_basis,
-    publish_namespace_mutations_batch, upload_content, BootstrapOptions, CoreError, CoreErrorKind,
-    DirectObjectStorePublisher, ForkOptions, MutationContext, NamespaceEngine,
-    NamespaceMutationCandidate, PathMutationIntent, PublishOptions, PutFileBehavior, ReadOptions,
-    WriteOptions,
+    BootstrapOptions, CoreError, CoreErrorKind, ForkOptions, MutationContext, NamespaceEngine,
+    PutFileBehavior, ReadOptions, WriteOptions,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -87,6 +89,94 @@ fn list_namespaces<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> Result<Vec<loon_api::NamespaceSummary>, CoreError> {
     loon_core::namespace::list_namespaces(store)
+}
+
+fn commit_operations<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request: ApiCommitRequest,
+    context: &MutationContext,
+) -> Result<loon_api::v0::CommitResponse, CoreError> {
+    publish_namespace_mutations_batch(
+        store,
+        namespace_id,
+        vec![NamespaceMutationCandidate::Commit(request)],
+        context,
+    )
+    .into_iter()
+    .next()
+    .expect("single commit result")
+}
+
+fn commit_operations_batch<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    requests: Vec<ApiCommitRequest>,
+    context: &MutationContext,
+) -> Vec<Result<loon_api::v0::CommitResponse, CoreError>> {
+    publish_namespace_mutations_batch(
+        store,
+        namespace_id,
+        requests
+            .into_iter()
+            .map(NamespaceMutationCandidate::Commit)
+            .collect(),
+        context,
+    )
+}
+
+fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    candidates: Vec<NamespaceMutationCandidate>,
+    context: &MutationContext,
+) -> Vec<Result<loon_api::v0::CommitResponse, CoreError>> {
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    engine.publish_batch(store, candidates, context).results
+}
+
+fn begin_upload<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<loon_api::v0::BeginUploadResponse, CoreError> {
+    namespace_engine(store, namespace_id, context).begin_upload()
+}
+
+fn upload_content<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &str,
+    bytes: &[u8],
+    context: &MutationContext,
+) -> Result<loon_api::v0::UploadContentResponse, CoreError> {
+    namespace_engine(store, namespace_id, context).upload_content(upload_id, bytes)
+}
+
+fn complete_upload<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &str,
+    request: &CompleteUploadRequest,
+    context: &MutationContext,
+) -> Result<loon_api::v0::CompleteUploadResponse, CoreError> {
+    namespace_engine(store, namespace_id, context).complete_upload(upload_id, request)
+}
+
+fn list_changes_after<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    after_seq: ChangeSeq,
+) -> Result<loon_api::v0::ChangesResponse, CoreError> {
+    namespace_engine(store, namespace_id, &mutation_context()).list_changes_after(after_seq)
+}
+
+fn create_checkpoint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<loon_api::CreateCheckpointResponse, CoreError> {
+    namespace_engine(store, namespace_id, context).create_checkpoint()
 }
 
 fn write_options(commit_id: Option<&str>, behavior: PutFileBehavior) -> WriteOptions {
@@ -308,7 +398,7 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
 }
 
 fn resolve_path_from_basis(
-    basis: &loon_core::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<loon_api::AuthoritativePathEntry, CoreError> {
     let temp_dir = tempdir().expect("tempdir");
@@ -322,7 +412,7 @@ fn resolve_path_from_basis(
 }
 
 fn list_path_from_basis(
-    basis: &loon_core::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<Vec<loon_api::AuthoritativePathEntry>, CoreError> {
     let temp_dir = tempdir().expect("tempdir");
@@ -342,7 +432,7 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
 ) -> Result<MetadataRead<loon_api::AuthoritativePathEntry>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let head = load_namespace_head_control(store, namespace_id)
-        .map_err(loon_core::BasisLoadError::LoadHead)?
+        .map_err(BasisLoadError::LoadHead)?
         .state;
     if head.checkpoint_hint_seq.is_some() {
         if let Some(value) = engine.resolve_path_from_materialized_tables_at_head(
@@ -371,7 +461,7 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
 ) -> Result<MetadataRead<Vec<loon_api::AuthoritativePathEntry>>, CoreError> {
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let head = load_namespace_head_control(store, namespace_id)
-        .map_err(loon_core::BasisLoadError::LoadHead)?
+        .map_err(BasisLoadError::LoadHead)?
         .state;
     if head.checkpoint_hint_seq.is_some() {
         if let Some(value) = engine.list_path_from_materialized_tables_at_head(
