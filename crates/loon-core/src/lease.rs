@@ -242,7 +242,7 @@ fn map_head_takeover_error(err: HeadFenceTakeoverError) -> LeaseAcquireError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::CoreErrorKind;
+    use crate::error::ErrorCode;
     use crate::loading::{read_head_object, read_lease_object};
     use crate::namespace::lifecycle::bootstrap_namespace;
     use crate::protocol::commit_operations;
@@ -339,7 +339,7 @@ mod tests {
             &writer_a_retry,
         )
         .expect_err("previous writer should be fenced out");
-        assert_eq!(error.kind(), CoreErrorKind::LeaseConflict);
+        assert_eq!(error.code(), ErrorCode::LeaseConflict);
 
         let head = read_head_object(&store, &namespace_id)
             .expect("read head")

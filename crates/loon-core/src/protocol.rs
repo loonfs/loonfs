@@ -1101,7 +1101,7 @@ fn finish_batch_outcomes_with_aliases(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::CoreErrorKind;
+    use crate::error::ErrorCode;
     use loon_api::{ChangeSeq, InodeId};
 
     #[test]
@@ -1119,7 +1119,7 @@ mod tests {
 
         let error = commit_delta_from_wal(&delta).expect_err("invalid durable WAL name key");
 
-        assert_eq!(error.kind(), CoreErrorKind::NamespaceCorrupt);
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
 
     #[test]
@@ -1138,6 +1138,6 @@ mod tests {
 
         let error = commit_delta_from_wal(&delta).expect_err("invalid durable WAL name key");
 
-        assert_eq!(error.kind(), CoreErrorKind::NamespaceCorrupt);
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     }
 }

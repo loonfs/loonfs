@@ -25,7 +25,7 @@ use loon_core::publish::{
     PathMutationIntent, PublishOptions,
 };
 use loon_core::{
-    BootstrapOptions, CoreError, CoreErrorKind, ForkOptions, MutationContext, NamespaceEngine,
+    BootstrapOptions, Error as CoreError, ErrorCode, ForkOptions, MutationContext, NamespaceEngine,
     PutFileBehavior, ReadOptions, WriteOptions,
 };
 use loon_objectstore::fs::LocalFsStore;
@@ -1160,7 +1160,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
 
     let missing_error =
         begin_upload(&store, &namespace_id, &context).expect_err("missing namespace");
-    assert_eq!(missing_error.kind(), CoreErrorKind::NamespaceNotFound);
+    assert_eq!(missing_error.code(), ErrorCode::NamespaceNotFound);
 
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     store
@@ -1169,7 +1169,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
 
     let partial_error =
         begin_upload(&store, &namespace_id, &context).expect_err("partial namespace");
-    assert_eq!(partial_error.kind(), CoreErrorKind::NamespacePartial);
+    assert_eq!(partial_error.code(), ErrorCode::NamespacePartial);
 }
 
 #[test]
@@ -1271,7 +1271,7 @@ fn complete_upload_does_not_get_content_blob_after_staging() {
         &context,
     )
     .expect_err("mismatched content ref");
-    assert_eq!(mismatch.kind(), CoreErrorKind::InvalidUploadContent);
+    assert_eq!(mismatch.code(), ErrorCode::InvalidUploadContent);
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
@@ -1625,7 +1625,7 @@ fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     )
     .expect_err("invalid upload_id should be rejected");
 
-    assert_eq!(error.kind(), CoreErrorKind::InvalidUploadId);
+    assert_eq!(error.code(), ErrorCode::InvalidUploadId);
     assert_eq!(
         store
             .list_prefix(&upload_session_prefix(namespace_id.as_str()))
@@ -1697,8 +1697,8 @@ fn revision_queries_read_historical_bytes_and_path_restore_appends_revision() {
     assert_eq!(
         list_file_revisions(&store, &namespace_id, "/docs/rev.txt")
             .expect_err("old path no longer resolves")
-            .kind(),
-        CoreErrorKind::PathNotFound
+            .code(),
+        ErrorCode::PathNotFound
     );
     let inode_revisions =
         list_file_revisions_for_inode(&store, &namespace_id, inode_id).expect("inode revisions");
@@ -1852,7 +1852,7 @@ fn change_feed_validates_wal_chain_before_checkpoint_hint() {
         .expect("checkpoint-backed basis should not read pre-checkpoint wal");
     let error =
         list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect_err("corrupt wal chain");
-    assert_eq!(error.kind(), CoreErrorKind::NamespaceCorrupt);
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
 #[test]
@@ -1926,7 +1926,7 @@ fn binding_is_precondition_observes_earlier_batch_candidate() {
     let error = responses[1]
         .as_ref()
         .expect_err("stale binding precondition");
-    assert_eq!(error.kind(), CoreErrorKind::PathConflict);
+    assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
 #[test]
@@ -1997,7 +1997,7 @@ fn directory_empty_precondition_observes_earlier_batch_candidate() {
     let error = responses[1]
         .as_ref()
         .expect_err("directory empty precondition");
-    assert_eq!(error.kind(), CoreErrorKind::DirectoryNotEmpty);
+    assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
 #[test]
@@ -2232,7 +2232,7 @@ fn explicit_commit_rejects_invalid_display_names() {
         &context,
     )
     .expect_err("invalid create display name");
-    assert_eq!(create_error.kind(), CoreErrorKind::InvalidPath);
+    assert_eq!(create_error.code(), ErrorCode::InvalidPath);
     assert!(matches!(
         create_error,
         CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
@@ -2277,7 +2277,7 @@ fn explicit_commit_rejects_invalid_display_names() {
         &context,
     )
     .expect_err("invalid rename display name");
-    assert_eq!(rename_error.kind(), CoreErrorKind::InvalidPath);
+    assert_eq!(rename_error.code(), ErrorCode::InvalidPath);
     assert!(matches!(
         rename_error,
         CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
@@ -2552,7 +2552,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let duplicate_error =
         fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
             .expect_err("duplicate fork target");
-    assert_eq!(duplicate_error.kind(), CoreErrorKind::NamespaceExists);
+    assert_eq!(duplicate_error.code(), ErrorCode::NamespaceExists);
 
     let source_entry =
         resolve_path(&store, &source_namespace_id, "/docs/shared.txt").expect("source stat");
@@ -2568,10 +2568,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 
     let stale_clone_changes =
         list_changes_after(&store, &clone_namespace_id, ChangeSeq(0)).expect_err("old cursor");
-    assert_eq!(
-        stale_clone_changes.kind(),
-        CoreErrorKind::RebootstrapRequired
-    );
+    assert_eq!(stale_clone_changes.code(), ErrorCode::RebootstrapRequired);
     let empty_clone_changes =
         list_changes_after(&store, &clone_namespace_id, ChangeSeq(1)).expect("empty changes");
     assert!(empty_clone_changes.changes.is_empty());
@@ -2654,7 +2651,7 @@ fn fork_target_head_reservation_failure_writes_no_checkpoint_artifacts() {
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .expect_err("target head precondition should re-check partial namespace");
-    assert_eq!(error.kind(), CoreErrorKind::NamespacePartial);
+    assert_eq!(error.code(), ErrorCode::NamespacePartial);
     assert!(
         store
             .list_prefix(&format!(
@@ -2688,7 +2685,7 @@ fn fork_failure_after_target_head_reserves_partial_namespace() {
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .expect_err("target checkpoint write should fail");
-    assert_eq!(error.kind(), CoreErrorKind::ServerError);
+    assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
         store
             .head(&namespace_head(clone_namespace_id.as_str()))
@@ -2723,7 +2720,7 @@ fn fork_failure_after_target_checkpoint_artifacts_remains_partial() {
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .expect_err("target lease write should fail");
-    assert_eq!(error.kind(), CoreErrorKind::ServerError);
+    assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
         store
             .head(&namespace_head(clone_namespace_id.as_str()))
@@ -2791,7 +2788,7 @@ fn fork_target_control_conflict_rechecks_complete_namespace() {
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .expect_err("target head conflict should re-check complete namespace");
-    assert_eq!(error.kind(), CoreErrorKind::NamespaceExists);
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
     assert_eq!(
         list_namespaces(&store)
             .expect("list namespaces")
@@ -3038,7 +3035,7 @@ fn restore_revision_missing_source_is_revision_not_found() {
         &context,
     )
     .expect_err("missing restore source should fail");
-    assert_eq!(error.kind(), CoreErrorKind::RevisionNotFound);
+    assert_eq!(error.code(), ErrorCode::RevisionNotFound);
 }
 
 #[test]
@@ -3147,7 +3144,7 @@ fn move_path_into_occupied_target_is_path_conflict() {
         Some("move-conflict"),
     )
     .expect_err("move conflict");
-    assert_eq!(error.kind(), CoreErrorKind::PathConflict);
+    assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
 #[test]
@@ -3175,7 +3172,7 @@ fn move_path_directory_cycle_is_would_cycle() {
         Some("cycle"),
     )
     .expect_err("cycle");
-    assert_eq!(error.kind(), CoreErrorKind::WouldCycle);
+    assert_eq!(error.code(), ErrorCode::WouldCycle);
 }
 
 #[test]
@@ -3220,7 +3217,7 @@ fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
         Some("put-under-tombstone"),
     )
     .expect_err("put tombstone conflict");
-    assert_eq!(put_error.kind(), CoreErrorKind::TombstoneConflict);
+    assert_eq!(put_error.code(), ErrorCode::TombstoneConflict);
 
     let move_error = move_path(
         &store,
@@ -3231,7 +3228,7 @@ fn write_and_move_under_tombstoned_ancestor_are_tombstone_conflicts() {
         Some("move-under-tombstone"),
     )
     .expect_err("move tombstone conflict");
-    assert_eq!(move_error.kind(), CoreErrorKind::TombstoneConflict);
+    assert_eq!(move_error.code(), ErrorCode::TombstoneConflict);
 }
 
 #[test]
@@ -3261,7 +3258,7 @@ fn create_dir_path_creates_directory_without_auto_parents() {
         Some("mkdir-missing-parent"),
     )
     .expect_err("mkdir does not auto-create parents");
-    assert_eq!(missing_parent.kind(), CoreErrorKind::PathNotFound);
+    assert_eq!(missing_parent.code(), ErrorCode::PathNotFound);
 }
 
 #[test]
@@ -3329,7 +3326,7 @@ fn path_move_writes_unbind_and_stale_binding_is_fails() {
         &context,
     )
     .expect_err("stale binding should fail");
-    assert_eq!(stale_binding.kind(), CoreErrorKind::PathConflict);
+    assert_eq!(stale_binding.code(), ErrorCode::PathConflict);
 }
 
 #[test]
@@ -3375,7 +3372,7 @@ fn unsupported_rename_mode_is_named_bad_request_failure() {
         &context,
     )
     .expect_err("unsupported rename mode");
-    assert_eq!(error.kind(), CoreErrorKind::UnsupportedRenameMode);
+    assert_eq!(error.code(), ErrorCode::UnsupportedRenameMode);
 }
 
 #[test]
@@ -3404,7 +3401,7 @@ fn put_file_create_only_rejects_existing_target_without_force() {
         Some("put-no-force"),
     )
     .expect_err("put without force");
-    assert_eq!(error.kind(), CoreErrorKind::PathConflict);
+    assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
 #[test]
@@ -3518,7 +3515,7 @@ fn create_only_put_rejects_casefold_and_normalization_equivalent_name() {
         Some("create-only-conflict"),
     )
     .expect_err("create-only conflict");
-    assert_eq!(error.kind(), CoreErrorKind::PathConflict);
+    assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
 fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(

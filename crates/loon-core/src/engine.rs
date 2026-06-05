@@ -1,5 +1,5 @@
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::error::Result as CoreResult;
 use crate::namespace::{lifecycle, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, WriteOptions};
 use crate::publisher::NamespaceMutationCandidate;
@@ -94,7 +94,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         target: &NamespaceId,
         _options: ForkOptions,
-    ) -> Result<NamespaceSummary, CoreError> {
+    ) -> CoreResult<NamespaceSummary> {
         lifecycle::fork_namespace(
             &self.store,
             &self.namespace_id,
@@ -103,7 +103,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
-    pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CoreError> {
+    pub fn list_namespaces(&self) -> CoreResult<Vec<NamespaceSummary>> {
         lifecycle::list_namespaces(&self.store)
     }
 
@@ -111,7 +111,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         _options: ReadOptions,
-    ) -> Result<AuthoritativePathEntry, CoreError> {
+    ) -> CoreResult<AuthoritativePathEntry> {
         crate::path::query::resolve_path(&self.store, &self.namespace_id, path.as_ref())
     }
 
@@ -120,7 +120,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         basis: &VerifiedNamespaceBasis,
         path: impl AsRef<str>,
         _options: ReadOptions,
-    ) -> Result<AuthoritativePathEntry, CoreError> {
+    ) -> CoreResult<AuthoritativePathEntry> {
         crate::path::query::resolve_path_from_basis(basis, path.as_ref())
     }
 
@@ -130,7 +130,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         table_cache: Option<&MetadataTableCache>,
         _options: ReadOptions,
-    ) -> Result<Option<AuthoritativePathEntry>, CoreError> {
+    ) -> CoreResult<Option<AuthoritativePathEntry>> {
         crate::path::query::resolve_path_from_materialized_tables_at_head_with_cache(
             &self.store,
             &self.namespace_id,
@@ -144,7 +144,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         _options: ReadOptions,
-    ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+    ) -> CoreResult<Vec<AuthoritativePathEntry>> {
         crate::path::query::list_path(&self.store, &self.namespace_id, path.as_ref())
     }
 
@@ -153,7 +153,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         basis: &VerifiedNamespaceBasis,
         path: impl AsRef<str>,
         _options: ReadOptions,
-    ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+    ) -> CoreResult<Vec<AuthoritativePathEntry>> {
         crate::path::query::list_path_from_basis(basis, path.as_ref())
     }
 
@@ -163,7 +163,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         table_cache: Option<&MetadataTableCache>,
         _options: ReadOptions,
-    ) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
+    ) -> CoreResult<Option<Vec<AuthoritativePathEntry>>> {
         crate::path::query::list_path_from_materialized_tables_at_head_with_cache(
             &self.store,
             &self.namespace_id,
@@ -177,7 +177,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         _options: ReadOptions,
-    ) -> Result<AuthoritativeFileBytes, CoreError> {
+    ) -> CoreResult<AuthoritativeFileBytes> {
         crate::path::query::read_file_bytes(&self.store, &self.namespace_id, path.as_ref())
     }
 
@@ -186,7 +186,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         basis: &VerifiedNamespaceBasis,
         path: impl AsRef<str>,
         _options: ReadOptions,
-    ) -> Result<AuthoritativeFileBytes, CoreError> {
+    ) -> CoreResult<AuthoritativeFileBytes> {
         crate::path::query::read_file_bytes_from_basis(&self.store, basis, path.as_ref())
     }
 
@@ -194,7 +194,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         _options: ReadOptions,
-    ) -> Result<ListFileRevisionsResponse, CoreError> {
+    ) -> CoreResult<ListFileRevisionsResponse> {
         crate::path::query::list_file_revisions(&self.store, &self.namespace_id, path.as_ref())
     }
 
@@ -203,7 +203,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         basis: &VerifiedNamespaceBasis,
         path: impl AsRef<str>,
         _options: ReadOptions,
-    ) -> Result<ListFileRevisionsResponse, CoreError> {
+    ) -> CoreResult<ListFileRevisionsResponse> {
         crate::path::query::list_file_revisions_from_basis(basis, path.as_ref())
     }
 
@@ -211,7 +211,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         inode_id: InodeId,
         _options: ReadOptions,
-    ) -> Result<ListFileRevisionsResponse, CoreError> {
+    ) -> CoreResult<ListFileRevisionsResponse> {
         crate::path::query::list_file_revisions_for_inode(&self.store, &self.namespace_id, inode_id)
     }
 
@@ -220,7 +220,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         basis: &VerifiedNamespaceBasis,
         inode_id: InodeId,
         _options: ReadOptions,
-    ) -> Result<ListFileRevisionsResponse, CoreError> {
+    ) -> CoreResult<ListFileRevisionsResponse> {
         crate::path::query::list_file_revisions_for_inode_from_basis(basis, inode_id)
     }
 
@@ -229,7 +229,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         revision_no: RevisionNo,
         _options: ReadOptions,
-    ) -> Result<AuthoritativeFileBytes, CoreError> {
+    ) -> CoreResult<AuthoritativeFileBytes> {
         crate::path::query::read_file_revision_bytes(
             &self.store,
             &self.namespace_id,
@@ -244,7 +244,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         revision_no: RevisionNo,
         _options: ReadOptions,
-    ) -> Result<AuthoritativeFileBytes, CoreError> {
+    ) -> CoreResult<AuthoritativeFileBytes> {
         crate::path::query::read_file_revision_bytes_from_basis(
             &self.store,
             basis,
@@ -258,7 +258,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
         _options: ReadOptions,
-    ) -> Result<Vec<u8>, CoreError> {
+    ) -> CoreResult<Vec<u8>> {
         crate::path::query::read_file_revision_bytes_for_inode(
             &self.store,
             &self.namespace_id,
@@ -273,7 +273,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
         _options: ReadOptions,
-    ) -> Result<Vec<u8>, CoreError> {
+    ) -> CoreResult<Vec<u8>> {
         crate::path::query::read_file_revision_bytes_for_inode_from_basis(
             &self.store,
             basis,
@@ -287,7 +287,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         bytes: impl AsRef<[u8]>,
         options: WriteOptions,
-    ) -> Result<MutationResult, CoreError> {
+    ) -> CoreResult<MutationResult> {
         crate::path::mutation::put_file_bytes(
             &self.store,
             &self.namespace_id,
@@ -307,7 +307,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         content_ref: ContentRef,
         options: WriteOptions,
-    ) -> Result<MutationResult, CoreError> {
+    ) -> CoreResult<MutationResult> {
         crate::path::mutation::put_file_content_ref(
             &self.store,
             &self.namespace_id,
@@ -326,7 +326,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         options: WriteOptions,
-    ) -> Result<MutationResult, CoreError> {
+    ) -> CoreResult<MutationResult> {
         crate::path::mutation::create_dir_path(
             &self.store,
             &self.namespace_id,
@@ -343,7 +343,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         options: WriteOptions,
-    ) -> Result<MutationResult, CoreError> {
+    ) -> CoreResult<MutationResult> {
         let commit_id = options
             .commit_id
             .as_ref()
@@ -372,7 +372,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         source: impl AsRef<str>,
         dest: impl AsRef<str>,
         options: WriteOptions,
-    ) -> Result<MutationResult, CoreError> {
+    ) -> CoreResult<MutationResult> {
         crate::path::mutation::move_path(
             &self.store,
             &self.namespace_id,
@@ -391,7 +391,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         source: impl AsRef<str>,
         dest: impl AsRef<str>,
         options: WriteOptions,
-    ) -> Result<MutationResult, CoreError> {
+    ) -> CoreResult<MutationResult> {
         crate::path::mutation::copy_file_path(
             &self.store,
             &self.namespace_id,
@@ -410,7 +410,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         source_revision_no: RevisionNo,
         options: WriteOptions,
-    ) -> Result<MutationResult, CoreError> {
+    ) -> CoreResult<MutationResult> {
         crate::path::mutation::restore_file_revision(
             &self.store,
             &self.namespace_id,
@@ -428,7 +428,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         request: CommitRequest,
         _options: CommitOptions,
-    ) -> Result<CommitResponse, CoreError> {
+    ) -> CoreResult<CommitResponse> {
         crate::protocol::commit_operations(
             &self.store,
             &self.namespace_id,
@@ -441,7 +441,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         requests: Vec<CommitRequest>,
         _options: CommitOptions,
-    ) -> Vec<Result<CommitResponse, CoreError>> {
+    ) -> Vec<CoreResult<CommitResponse>> {
         crate::protocol::commit_operations_batch(
             &self.store,
             &self.namespace_id,
@@ -453,7 +453,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub fn publish_namespace_mutations_batch(
         &self,
         candidates: Vec<NamespaceMutationCandidate>,
-    ) -> Vec<Result<CommitResponse, CoreError>> {
+    ) -> Vec<CoreResult<CommitResponse>> {
         crate::publisher::publish_namespace_mutations_batch(
             &self.store,
             &self.namespace_id,
@@ -462,11 +462,11 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
-    pub fn list_changes_after(&self, after_seq: ChangeSeq) -> Result<ChangesResponse, CoreError> {
+    pub fn list_changes_after(&self, after_seq: ChangeSeq) -> CoreResult<ChangesResponse> {
         crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq)
     }
 
-    pub fn begin_upload(&self) -> Result<BeginUploadResponse, CoreError> {
+    pub fn begin_upload(&self) -> CoreResult<BeginUploadResponse> {
         crate::protocol::begin_upload(&self.store, &self.namespace_id, &self.mutation_context())
     }
 
@@ -474,7 +474,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         upload_id: &str,
         bytes: &[u8],
-    ) -> Result<UploadContentResponse, CoreError> {
+    ) -> CoreResult<UploadContentResponse> {
         crate::protocol::upload_content(
             &self.store,
             &self.namespace_id,
@@ -488,7 +488,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         upload_id: &str,
         request: &CompleteUploadRequest,
-    ) -> Result<CompleteUploadResponse, CoreError> {
+    ) -> CoreResult<CompleteUploadResponse> {
         crate::protocol::complete_upload(
             &self.store,
             &self.namespace_id,
@@ -498,7 +498,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
-    pub fn create_checkpoint(&self) -> Result<CreateCheckpointResponse, CoreError> {
+    pub fn create_checkpoint(&self) -> CoreResult<CreateCheckpointResponse> {
         crate::checkpoint::create_checkpoint(
             &self.store,
             &self.namespace_id,
@@ -506,7 +506,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
-    pub fn advance_retention_floor(&self) -> Result<AdvanceRetentionResponse, CoreError> {
+    pub fn advance_retention_floor(&self) -> CoreResult<AdvanceRetentionResponse> {
         crate::checkpoint::advance_retention_floor(
             &self.store,
             &self.namespace_id,

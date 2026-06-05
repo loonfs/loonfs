@@ -6,10 +6,10 @@ use loon_api::{
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs::{
-    BootstrapNamespaceError, CopyOptions, CoreError, CoreErrorKind, CreateDirOptions,
-    CreateNamespaceOptions, DeleteOptions, Fs, FsConfig, MoveOptions, PutFileBehavior,
-    PutFileOptions, RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore,
-    TraceMode, TraceStoreKind,
+    BootstrapNamespaceError, CopyOptions, CoreError, CreateDirOptions, CreateNamespaceOptions,
+    DeleteOptions, ErrorCode, Fs, FsConfig, MoveOptions, PutFileBehavior, PutFileOptions,
+    RestoreRevisionOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
+    TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -399,48 +399,17 @@ fn map_namespace_scoped_runtime_error(namespace: &str, error: RuntimeError) -> C
 
 fn map_core_error(error: CoreError) -> CliError {
     if matches!(
-        error.kind(),
-        CoreErrorKind::InvalidNamespaceId
-            | CoreErrorKind::InvalidCommitId
-            | CoreErrorKind::InvalidUploadId
+        error.code(),
+        ErrorCode::InvalidNamespaceId | ErrorCode::InvalidCommitId | ErrorCode::InvalidUploadId
     ) {
         return CliError::invalid_input(error.to_string());
     }
 
-    let code = match error.kind() {
-        CoreErrorKind::InvalidPath => "invalid_path",
-        CoreErrorKind::InvalidNamespaceId => unreachable!("handled before code mapping"),
-        CoreErrorKind::InvalidCommitId => unreachable!("handled before code mapping"),
-        CoreErrorKind::InvalidUploadId => unreachable!("handled before code mapping"),
-        CoreErrorKind::NamespaceNotFound => "namespace_not_found",
-        CoreErrorKind::NamespaceExists => "namespace_exists",
-        CoreErrorKind::NamespacePartial => "namespace_partial",
-        CoreErrorKind::PathNotFound => "path_not_found",
-        CoreErrorKind::RevisionNotFound => "revision_not_found",
-        CoreErrorKind::PathConflict => "path_conflict",
-        CoreErrorKind::DirectoryNotEmpty => "directory_not_empty",
-        CoreErrorKind::StaleHead => "stale_head",
-        CoreErrorKind::StaleRevision => "stale_revision",
-        CoreErrorKind::TombstoneConflict => "tombstone_conflict",
-        CoreErrorKind::LeaseConflict => "lease_conflict",
-        CoreErrorKind::WouldCycle => "would_cycle",
-        CoreErrorKind::UnsupportedRenameMode => "unsupported_rename_mode",
-        CoreErrorKind::CommitIdReuseConflict => "commit_id_reuse_conflict",
-        CoreErrorKind::CommitQueueFull => "commit_queue_full",
-        CoreErrorKind::CheckpointUnavailable => "checkpoint_unavailable",
-        CoreErrorKind::UploadNotFound => "upload_not_found",
-        CoreErrorKind::UploadAlreadyCompleted => "upload_already_completed",
-        CoreErrorKind::UploadContentConflict => "upload_content_conflict",
-        CoreErrorKind::InvalidUploadContent => "invalid_upload_content",
-        CoreErrorKind::RebootstrapRequired => "rebootstrap_required",
-        CoreErrorKind::NamespaceCorrupt => "namespace_corrupt",
-        CoreErrorKind::ServerError => "server_error",
-    };
-    CliError::new(code, error.to_string())
+    CliError::new(error.code().as_str(), error.to_string())
 }
 
 fn map_namespace_scoped_core_error(namespace: &str, error: CoreError) -> CliError {
-    if matches!(error.kind(), CoreErrorKind::NamespaceNotFound) {
+    if matches!(error.code(), ErrorCode::NamespaceNotFound) {
         return CliError::new(
             "namespace_not_found",
             format!("namespace `{namespace}` does not exist"),
