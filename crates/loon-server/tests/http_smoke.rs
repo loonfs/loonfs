@@ -10,7 +10,7 @@ use loon_api::{
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loon_objectstore::keys::{checkpoint_manifest, namespace_lease};
 use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
-use loon_server::{app, ServerConfig, StoreConfig};
+use loon_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -1153,6 +1153,7 @@ fn test_config(
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
         lease_duration_ms,
+        runtime_cache: RuntimeCacheConfigOverrides::default(),
         store: StoreConfig::LocalFs {
             root: store_root.display().to_string(),
             key_prefix: Some(key_prefix.to_owned()),

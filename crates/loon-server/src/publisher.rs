@@ -512,7 +512,7 @@ fn usize_to_u64(value: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ServerConfig, StoreConfig};
+    use crate::config::{RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
     use loon_api::v0::{CommitOp, CommitRequest};
     use loon_api::wire::wal::decode_wal_segment_envelope_zstd;
     use loon_api::{ChangeSeq, InodeId};
@@ -642,6 +642,7 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,
+            runtime_cache: RuntimeCacheConfigOverrides::default(),
             store: StoreConfig::LocalFs {
                 root: root.display().to_string(),
                 key_prefix: None,
@@ -955,6 +956,7 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,
+            runtime_cache: RuntimeCacheConfigOverrides::default(),
             store: StoreConfig::LocalFs {
                 root: temp_dir.path().display().to_string(),
                 key_prefix: None,
@@ -1007,6 +1009,7 @@ mod tests {
             writer_id: "writer-a".to_owned(),
             writer_version: "test".to_owned(),
             lease_duration_ms: 60_000,
+            runtime_cache: RuntimeCacheConfigOverrides::default(),
             store: StoreConfig::LocalFs {
                 root: temp_dir.path().display().to_string(),
                 key_prefix: None,

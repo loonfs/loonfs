@@ -2,7 +2,7 @@ use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
     SubtreeTombstoneRecord,
 };
-use loon_api::{ChangeSeq, InodeId};
+use loon_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +13,9 @@ pub(super) struct MetadataIndexes {
     active_parent_by_child: HashMap<InodeId, DirentryBindRecord>,
     unbound_binding_keys: HashSet<BindingKey>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
+    latest_revision_by_inode: HashMap<InodeId, RevisionRecord>,
+    revision_by_inode_no: HashMap<(InodeId, RevisionNo), RevisionRecord>,
+    commit_receipt_by_id: HashMap<CommitId, CommitReceiptRecord>,
 }
 
 impl Default for MetadataIndexes {
@@ -24,6 +27,9 @@ impl Default for MetadataIndexes {
             active_parent_by_child: HashMap::new(),
             unbound_binding_keys: HashSet::new(),
             tombstone_by_root: HashMap::new(),
+            latest_revision_by_inode: HashMap::new(),
+            revision_by_inode_no: HashMap::new(),
+            commit_receipt_by_id: HashMap::new(),
         }
     }
 }
@@ -132,6 +138,24 @@ impl MetadataIndexes {
         self.tombstone_by_root.get(&root_inode_id).cloned()
     }
 
+    pub(super) fn latest_revision(&self, inode_id: InodeId) -> Option<RevisionRecord> {
+        self.latest_revision_by_inode.get(&inode_id).cloned()
+    }
+
+    pub(super) fn revision(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Option<RevisionRecord> {
+        self.revision_by_inode_no
+            .get(&(inode_id, revision_no))
+            .cloned()
+    }
+
+    pub(super) fn commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
+        self.commit_receipt_by_id.get(commit_id)
+    }
+
     pub(super) fn is_unbound(&self, record: &DirentryBindRecord) -> bool {
         self.unbound_binding_keys
             .contains(&BindingKey::from_bind(record))
@@ -195,6 +219,16 @@ impl MetadataIndexes {
 
     pub(super) fn record_revision(&mut self, record: &RevisionRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
+        replace_if_newer_revision(
+            &mut self.latest_revision_by_inode,
+            record.inode_id,
+            record.clone(),
+        );
+        replace_if_newer_revision(
+            &mut self.revision_by_inode_no,
+            (record.inode_id, record.revision_no),
+            record.clone(),
+        );
     }
 
     pub(super) fn record_tombstone(&mut self, record: &SubtreeTombstoneRecord) {
@@ -208,6 +242,11 @@ impl MetadataIndexes {
 
     pub(super) fn record_commit_receipt(&mut self, record: &CommitReceiptRecord) {
         self.indexed_seq = self.indexed_seq.max(record.committed_seq);
+        replace_if_newer_receipt(
+            &mut self.commit_receipt_by_id,
+            record.commit_id.clone(),
+            record.clone(),
+        );
     }
 }
 
@@ -252,6 +291,36 @@ fn replace_if_newer_bind<K>(
     let should_replace = map
         .get(&key)
         .map(|existing| bind_order_key(&record) > bind_order_key(existing))
+        .unwrap_or(true);
+    if should_replace {
+        map.insert(key, record);
+    }
+}
+
+fn replace_if_newer_revision<K>(
+    map: &mut HashMap<K, RevisionRecord>,
+    key: K,
+    record: RevisionRecord,
+) where
+    K: Eq + std::hash::Hash,
+{
+    let should_replace = map
+        .get(&key)
+        .map(|existing| revision_order_key(&record) > revision_order_key(existing))
+        .unwrap_or(true);
+    if should_replace {
+        map.insert(key, record);
+    }
+}
+
+fn replace_if_newer_receipt(
+    map: &mut HashMap<CommitId, CommitReceiptRecord>,
+    key: CommitId,
+    record: CommitReceiptRecord,
+) {
+    let should_replace = map
+        .get(&key)
+        .map(|existing| record.committed_seq > existing.committed_seq)
         .unwrap_or(true);
     if should_replace {
         map.insert(key, record);
@@ -317,6 +386,14 @@ fn unbind_matches_bind(unbind: &DirentryUnbindRecord, bind: &DirentryBindRecord)
 
 fn bind_order_key(record: &DirentryBindRecord) -> (ChangeSeq, u32) {
     (record.bind_seq, record.bind_delta_index)
+}
+
+fn revision_order_key(record: &RevisionRecord) -> (RevisionNo, ChangeSeq, u32) {
+    (
+        record.revision_no,
+        record.committed_seq,
+        record.revision_delta_index,
+    )
 }
 
 fn tombstone_order_key(record: &SubtreeTombstoneRecord) -> (ChangeSeq, u32) {

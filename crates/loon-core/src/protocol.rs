@@ -37,6 +37,7 @@ use loon_api::{
 use loon_objectstore::keys::{content_blob, namespace_descriptor, upload_session};
 use loon_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
 
@@ -48,8 +49,8 @@ pub(crate) struct PublishBatchAgainstBasisResult {
 
 #[derive(Debug, Clone)]
 pub(crate) enum BasisPromotion {
-    Unchanged(VerifiedNamespaceBasis),
-    Advanced(VerifiedNamespaceBasis),
+    Unchanged(Arc<VerifiedNamespaceBasis>),
+    Advanced(Arc<VerifiedNamespaceBasis>),
     NotCacheable,
 }
 
@@ -60,7 +61,7 @@ impl PublishBatchAgainstBasisResult {
     ) -> Self {
         Self {
             results,
-            basis_promotion: BasisPromotion::Unchanged(basis.clone()),
+            basis_promotion: BasisPromotion::Unchanged(Arc::new(basis.clone())),
         }
     }
 
@@ -70,7 +71,7 @@ impl PublishBatchAgainstBasisResult {
     ) -> Self {
         Self {
             results,
-            basis_promotion: BasisPromotion::Advanced(basis),
+            basis_promotion: BasisPromotion::Advanced(Arc::new(basis)),
         }
     }
 

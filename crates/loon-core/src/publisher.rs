@@ -7,7 +7,7 @@ use crate::path::planner::{
 };
 use crate::{
     load_namespace_lease_control, load_verified_namespace_basis, probe_namespace_head_etag,
-    BasisLoadError, NamespaceHeadEtagProbe, VerifiedNamespaceBasis,
+    BasisLoadError, NamespaceHeadEtagProbe, VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
 };
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::wire::control::LeaseState;
@@ -84,16 +84,16 @@ pub struct NamespaceCommitEnginePublishResult {
 #[derive(Debug, Clone)]
 pub enum VerifiedBasisCacheUpdate {
     NoChange,
-    ReusableAfterHeadEtagMatch(VerifiedNamespaceBasis),
-    AdvancedAfterHeadCas(VerifiedNamespaceBasis),
+    ReusableAfterHeadEtagMatch(Arc<VerifiedNamespaceBasis>),
+    AdvancedAfterHeadCas(Arc<VerifiedNamespaceBasis>),
     Invalidated,
 }
 
 impl VerifiedBasisCacheUpdate {
-    pub fn verified_basis_to_cache(&self) -> Option<&VerifiedNamespaceBasis> {
+    pub fn verified_basis_to_cache(&self) -> Option<Arc<VerifiedNamespaceBasis>> {
         match self {
             Self::ReusableAfterHeadEtagMatch(basis) | Self::AdvancedAfterHeadCas(basis) => {
-                Some(basis)
+                Some(Arc::clone(basis))
             }
             Self::NoChange | Self::Invalidated => None,
         }
@@ -118,22 +118,24 @@ pub struct NamespaceCommitEngine {
 struct CachedVerifiedBasis {
     basis: Arc<VerifiedNamespaceBasis>,
     head_etag_reuse_token: String,
+    weight: VerifiedNamespaceBasisWeight,
 }
 
 impl CachedVerifiedBasis {
-    fn new(basis: VerifiedNamespaceBasis) -> Self {
-        Self::from_arc(Arc::new(basis))
-    }
-
     fn from_arc(basis: Arc<VerifiedNamespaceBasis>) -> Self {
         Self {
             head_etag_reuse_token: basis.head_etag.clone(),
+            weight: basis.weight(),
             basis,
         }
     }
 
     fn matches_head_etag_probe(&self, probe: &NamespaceHeadEtagProbe) -> bool {
         self.head_etag_reuse_token == probe.head_etag
+    }
+
+    fn weight(&self) -> VerifiedNamespaceBasisWeight {
+        self.weight
     }
 
     fn basis_to_reuse_with_refreshed_lease(&self, lease: LeaseState) -> VerifiedNamespaceBasis {
@@ -158,6 +160,10 @@ impl NamespaceCommitEngine {
 
     pub fn invalidate(&mut self) {
         self.basis = None;
+    }
+
+    pub fn cached_basis_weight(&self) -> Option<VerifiedNamespaceBasisWeight> {
+        self.basis.as_ref().map(CachedVerifiedBasis::weight)
     }
 
     pub fn publish_batch<S: ObjectStore + ?Sized>(
@@ -236,11 +242,11 @@ impl NamespaceCommitEngine {
     ) -> NamespaceCommitEnginePublishResult {
         let verified_basis_cache_update = match published.basis_promotion {
             crate::protocol::BasisPromotion::Unchanged(basis) => {
-                self.basis = Some(CachedVerifiedBasis::new(basis.clone()));
+                self.basis = Some(CachedVerifiedBasis::from_arc(Arc::clone(&basis)));
                 VerifiedBasisCacheUpdate::ReusableAfterHeadEtagMatch(basis)
             }
             crate::protocol::BasisPromotion::Advanced(basis) => {
-                self.basis = Some(CachedVerifiedBasis::new(basis.clone()));
+                self.basis = Some(CachedVerifiedBasis::from_arc(Arc::clone(&basis)));
                 VerifiedBasisCacheUpdate::AdvancedAfterHeadCas(basis)
             }
             crate::protocol::BasisPromotion::NotCacheable => {
@@ -430,7 +436,7 @@ mod tests {
             lease: original_lease.clone(),
             metadata_state: MetadataState::default(),
         };
-        let cached = CachedVerifiedBasis::new(basis.clone());
+        let cached = CachedVerifiedBasis::from_arc(Arc::new(basis.clone()));
 
         assert!(cached.matches_head_etag_probe(&NamespaceHeadEtagProbe {
             head_etag: "etag-a".to_owned(),

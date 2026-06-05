@@ -27,7 +27,7 @@ pub use loon_core::{
 };
 use loon_core::{
     ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl, MutationContext,
-    NamespaceCommitEngine, VerifiedNamespaceBasis,
+    NamespaceCommitEngine, VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
 };
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::metrics::InstrumentedObjectStore;
@@ -42,6 +42,9 @@ pub use trace::{payload_class, TraceMode, TraceStoreKind};
 
 pub const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
+pub const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
+pub const DEFAULT_MAX_CACHED_BASIS_ROWS: usize = 1_000_000;
+pub const DEFAULT_MAX_CACHED_BASIS_DECODED_BYTES: usize = 256 * 1024 * 1024;
 const MAX_UPLOADED_CONTENT_PROOF_ENTRIES: usize = 16_384;
 const UPLOADED_CONTENT_PROOF_TTL: Duration = Duration::from_secs(30);
 
@@ -86,6 +89,8 @@ pub struct RuntimeCacheConfig {
     pub basis_cache_enabled: bool,
     pub control_cache_enabled: bool,
     pub max_cached_namespaces: usize,
+    pub max_cached_basis_rows: usize,
+    pub max_cached_basis_decoded_bytes: Option<usize>,
     pub metadata_table_cache: MetadataTableCacheConfig,
 }
 
@@ -95,10 +100,12 @@ impl RuntimeCacheConfig {
             basis_cache_enabled: false,
             control_cache_enabled: false,
             max_cached_namespaces: 0,
+            max_cached_basis_rows: 0,
+            max_cached_basis_decoded_bytes: Some(0),
             metadata_table_cache: MetadataTableCacheConfig {
                 enabled: false,
                 max_blocks: 0,
-                max_decoded_bytes: None,
+                max_decoded_bytes: Some(0),
             },
         }
     }
@@ -109,7 +116,9 @@ impl Default for RuntimeCacheConfig {
         Self {
             basis_cache_enabled: true,
             control_cache_enabled: true,
-            max_cached_namespaces: 64,
+            max_cached_namespaces: DEFAULT_MAX_CACHED_NAMESPACES,
+            max_cached_basis_rows: DEFAULT_MAX_CACHED_BASIS_ROWS,
+            max_cached_basis_decoded_bytes: Some(DEFAULT_MAX_CACHED_BASIS_DECODED_BYTES),
             metadata_table_cache: MetadataTableCacheConfig::default(),
         }
     }
@@ -146,18 +155,22 @@ pub struct FsBuilder {
 struct BasisCache {
     entries: HashMap<NamespaceId, CachedVerifiedBasis>,
     order: VecDeque<NamespaceId>,
+    cached_rows: usize,
+    cached_decoded_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
 struct CachedVerifiedBasis {
     basis: Arc<VerifiedNamespaceBasis>,
     head_etag_reuse_token: String,
+    weight: VerifiedNamespaceBasisWeight,
 }
 
 impl CachedVerifiedBasis {
     fn new(basis: Arc<VerifiedNamespaceBasis>) -> Self {
         Self {
             head_etag_reuse_token: basis.head_etag.clone(),
+            weight: basis.weight(),
             basis,
         }
     }
@@ -173,6 +186,77 @@ impl CachedVerifiedBasis {
     fn matches_head_etag_probe(&self, probe: &loon_core::NamespaceHeadEtagProbe) -> bool {
         self.matches_head_etag(&probe.head_etag)
     }
+
+    fn weight(&self) -> VerifiedNamespaceBasisWeight {
+        self.weight
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BasisCacheLimits {
+    max_namespaces: usize,
+    max_rows: usize,
+    max_decoded_bytes: Option<usize>,
+}
+
+impl BasisCacheLimits {
+    fn from_config(config: &RuntimeCacheConfig) -> Self {
+        Self {
+            max_namespaces: config.max_cached_namespaces,
+            max_rows: config.max_cached_basis_rows,
+            max_decoded_bytes: config.max_cached_basis_decoded_bytes,
+        }
+    }
+
+    fn basis_cache_enabled(&self) -> bool {
+        self.max_namespaces > 0
+            && self.max_rows > 0
+            && self.max_decoded_bytes.map(|max| max > 0).unwrap_or(true)
+    }
+
+    fn can_cache(&self, weight: VerifiedNamespaceBasisWeight) -> bool {
+        self.basis_cache_enabled()
+            && weight.rows <= self.max_rows
+            && self
+                .max_decoded_bytes
+                .map(|max| weight.decoded_bytes <= max)
+                .unwrap_or(true)
+    }
+
+    fn is_over_budget(&self, namespace_count: usize, rows: usize, decoded_bytes: usize) -> bool {
+        namespace_count > self.max_namespaces
+            || rows > self.max_rows
+            || self
+                .max_decoded_bytes
+                .map(|max| decoded_bytes > max)
+                .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BasisCacheEviction {
+    count: usize,
+    rows: usize,
+    decoded_bytes: usize,
+}
+
+impl BasisCacheEviction {
+    fn add_weight(&mut self, weight: VerifiedNamespaceBasisWeight) {
+        self.count = self.count.saturating_add(1);
+        self.rows = self.rows.saturating_add(weight.rows);
+        self.decoded_bytes = self.decoded_bytes.saturating_add(weight.decoded_bytes);
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.count = self.count.saturating_add(other.count);
+        self.rows = self.rows.saturating_add(other.rows);
+        self.decoded_bytes = self.decoded_bytes.saturating_add(other.decoded_bytes);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BasisCacheUpdate {
+    eviction: BasisCacheEviction,
 }
 
 impl BasisCache {
@@ -182,30 +266,77 @@ impl BasisCache {
         Some(basis)
     }
 
-    fn insert(&mut self, basis: Arc<VerifiedNamespaceBasis>, max_cached_namespaces: usize) {
-        if max_cached_namespaces == 0 {
-            return;
-        }
+    fn insert(
+        &mut self,
+        basis: Arc<VerifiedNamespaceBasis>,
+        limits: BasisCacheLimits,
+    ) -> BasisCacheUpdate {
         let namespace_id = basis.head.namespace_id.clone();
-        self.entries
-            .insert(namespace_id.clone(), CachedVerifiedBasis::new(basis));
+        let mut eviction = self.remove_entry(&namespace_id);
+        let cached = CachedVerifiedBasis::new(basis);
+        debug_assert!(limits.can_cache(cached.weight()));
+        self.cached_rows = self.cached_rows.saturating_add(cached.weight().rows);
+        self.cached_decoded_bytes = self
+            .cached_decoded_bytes
+            .saturating_add(cached.weight().decoded_bytes);
+        self.entries.insert(namespace_id.clone(), cached);
         self.touch(&namespace_id);
-        while self.entries.len() > max_cached_namespaces {
+        while limits.is_over_budget(
+            self.entries.len(),
+            self.cached_rows,
+            self.cached_decoded_bytes,
+        ) {
             let Some(evicted) = self.order.pop_front() else {
                 break;
             };
-            self.entries.remove(&evicted);
+            eviction.merge(self.remove_entry(&evicted));
         }
+        self.update_with_eviction(eviction)
     }
 
-    fn invalidate(&mut self, namespace_id: &NamespaceId) {
-        self.entries.remove(namespace_id);
+    fn invalidate(&mut self, namespace_id: &NamespaceId) -> BasisCacheUpdate {
         self.order.retain(|candidate| candidate != namespace_id);
+        let eviction = self.remove_entry(namespace_id);
+        self.update_with_eviction(eviction)
     }
 
     fn touch(&mut self, namespace_id: &NamespaceId) {
         self.order.retain(|candidate| candidate != namespace_id);
         self.order.push_back(namespace_id.clone());
+    }
+
+    fn remove_entry(&mut self, namespace_id: &NamespaceId) -> BasisCacheEviction {
+        let Some(entry) = self.entries.remove(namespace_id) else {
+            return BasisCacheEviction::default();
+        };
+        self.order.retain(|candidate| candidate != namespace_id);
+        let weight = entry.weight();
+        self.cached_rows = self.cached_rows.saturating_sub(weight.rows);
+        self.cached_decoded_bytes = self
+            .cached_decoded_bytes
+            .saturating_sub(weight.decoded_bytes);
+        let mut eviction = BasisCacheEviction::default();
+        eviction.add_weight(weight);
+        eviction
+    }
+
+    fn update_with_eviction(&self, eviction: BasisCacheEviction) -> BasisCacheUpdate {
+        BasisCacheUpdate { eviction }
+    }
+
+    fn cached_totals(&self) -> (usize, usize, usize) {
+        (
+            self.entries.len(),
+            self.cached_rows,
+            self.cached_decoded_bytes,
+        )
+    }
+
+    fn prune_one_lru(&mut self) -> BasisCacheEviction {
+        let Some(evicted) = self.order.pop_front() else {
+            return BasisCacheEviction::default();
+        };
+        self.remove_entry(&evicted)
     }
 }
 
@@ -415,25 +546,78 @@ impl CommitEngineCache {
             let Some(evicted) = self.order.pop_front() else {
                 break;
             };
-            self.entries.remove(&evicted);
+            self.remove_entry(&evicted);
         }
         engine
     }
 
-    fn invalidate(&mut self, namespace_id: &NamespaceId) {
-        if let Some(engine) = self.entries.remove(namespace_id) {
-            engine
-                .lock()
-                .expect("commit engine lock poisoned")
-                .invalidate();
-        }
+    fn invalidate(&mut self, namespace_id: &NamespaceId) -> BasisCacheEviction {
+        let eviction = self.remove_entry(namespace_id);
         self.order.retain(|candidate| candidate != namespace_id);
+        eviction
+    }
+
+    fn cached_basis_totals(&self) -> (usize, usize, usize) {
+        self.entries
+            .values()
+            .filter_map(|engine| {
+                engine
+                    .lock()
+                    .expect("commit engine lock poisoned")
+                    .cached_basis_weight()
+            })
+            .fold(
+                (0_usize, 0_usize, 0_usize),
+                |(count, rows, decoded_bytes), weight| {
+                    (
+                        count.saturating_add(1),
+                        rows.saturating_add(weight.rows),
+                        decoded_bytes.saturating_add(weight.decoded_bytes),
+                    )
+                },
+            )
+    }
+
+    fn prune_one_lru(&mut self) -> BasisCacheEviction {
+        while let Some(evicted) = self.order.pop_front() {
+            let eviction = self.remove_entry(&evicted);
+            if eviction.count > 0 {
+                return eviction;
+            }
+        }
+        BasisCacheEviction::default()
+    }
+
+    fn remove_entry(&mut self, namespace_id: &NamespaceId) -> BasisCacheEviction {
+        let Some(engine) = self.entries.remove(namespace_id) else {
+            return BasisCacheEviction::default();
+        };
+        let mut engine = engine.lock().expect("commit engine lock poisoned");
+        let mut eviction = BasisCacheEviction::default();
+        if let Some(weight) = engine.cached_basis_weight() {
+            eviction.add_weight(weight);
+        }
+        engine.invalidate();
+        eviction
     }
 
     fn touch(&mut self, namespace_id: &NamespaceId) {
         self.order.retain(|candidate| candidate != namespace_id);
         self.order.push_back(namespace_id.clone());
     }
+}
+
+fn combined_cached_basis_totals(
+    basis_cache: &BasisCache,
+    commit_engines: &CommitEngineCache,
+) -> (usize, usize, usize) {
+    let (basis_count, basis_rows, basis_decoded_bytes) = basis_cache.cached_totals();
+    let (engine_count, engine_rows, engine_decoded_bytes) = commit_engines.cached_basis_totals();
+    (
+        basis_count.saturating_add(engine_count),
+        basis_rows.saturating_add(engine_rows),
+        basis_decoded_bytes.saturating_add(engine_decoded_bytes),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -455,6 +639,18 @@ struct CachedControl<T> {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeCacheStats {
+    pub warm_basis_cache_hits: usize,
+    pub warm_basis_cache_misses: usize,
+    pub warm_basis_evictions: usize,
+    pub warm_basis_evicted_rows: usize,
+    pub warm_basis_evicted_decoded_bytes: usize,
+    pub warm_basis_uncacheable_count: usize,
+    pub warm_basis_uncacheable_rows: usize,
+    pub warm_basis_uncacheable_decoded_bytes: usize,
+    pub warm_basis_cached_rows: usize,
+    pub warm_basis_cached_decoded_bytes: usize,
+    pub warm_basis_rehydrate_count: usize,
+    pub warm_basis_rehydrate_ms: usize,
     pub publish_warm_basis_hits: usize,
     pub publish_warm_basis_misses: usize,
     pub publish_warm_basis_invalidations: usize,
@@ -469,6 +665,18 @@ pub struct RuntimeCacheStats {
 
 #[derive(Debug, Default)]
 struct RuntimeCacheStatsInner {
+    warm_basis_cache_hits: AtomicUsize,
+    warm_basis_cache_misses: AtomicUsize,
+    warm_basis_evictions: AtomicUsize,
+    warm_basis_evicted_rows: AtomicUsize,
+    warm_basis_evicted_decoded_bytes: AtomicUsize,
+    warm_basis_uncacheable_count: AtomicUsize,
+    warm_basis_uncacheable_rows: AtomicUsize,
+    warm_basis_uncacheable_decoded_bytes: AtomicUsize,
+    warm_basis_cached_rows: AtomicUsize,
+    warm_basis_cached_decoded_bytes: AtomicUsize,
+    warm_basis_rehydrate_count: AtomicUsize,
+    warm_basis_rehydrate_ms: AtomicUsize,
     publish_warm_basis_hits: AtomicUsize,
     publish_warm_basis_misses: AtomicUsize,
     publish_warm_basis_invalidations: AtomicUsize,
@@ -483,6 +691,24 @@ impl RuntimeCacheStatsInner {
         metadata_table_cache: loon_core::MetadataTableCacheStats,
     ) -> RuntimeCacheStats {
         RuntimeCacheStats {
+            warm_basis_cache_hits: self.warm_basis_cache_hits.load(Ordering::SeqCst),
+            warm_basis_cache_misses: self.warm_basis_cache_misses.load(Ordering::SeqCst),
+            warm_basis_evictions: self.warm_basis_evictions.load(Ordering::SeqCst),
+            warm_basis_evicted_rows: self.warm_basis_evicted_rows.load(Ordering::SeqCst),
+            warm_basis_evicted_decoded_bytes: self
+                .warm_basis_evicted_decoded_bytes
+                .load(Ordering::SeqCst),
+            warm_basis_uncacheable_count: self.warm_basis_uncacheable_count.load(Ordering::SeqCst),
+            warm_basis_uncacheable_rows: self.warm_basis_uncacheable_rows.load(Ordering::SeqCst),
+            warm_basis_uncacheable_decoded_bytes: self
+                .warm_basis_uncacheable_decoded_bytes
+                .load(Ordering::SeqCst),
+            warm_basis_cached_rows: self.warm_basis_cached_rows.load(Ordering::SeqCst),
+            warm_basis_cached_decoded_bytes: self
+                .warm_basis_cached_decoded_bytes
+                .load(Ordering::SeqCst),
+            warm_basis_rehydrate_count: self.warm_basis_rehydrate_count.load(Ordering::SeqCst),
+            warm_basis_rehydrate_ms: self.warm_basis_rehydrate_ms.load(Ordering::SeqCst),
             publish_warm_basis_hits: self.publish_warm_basis_hits.load(Ordering::SeqCst),
             publish_warm_basis_misses: self.publish_warm_basis_misses.load(Ordering::SeqCst),
             publish_warm_basis_invalidations: self
@@ -501,9 +727,11 @@ impl RuntimeCacheStatsInner {
     fn record_publish_result(&self, result: &NamespaceCommitEnginePublishResult) {
         match result.basis_reuse_event {
             BasisReuseEvent::ReusedAfterHeadEtagMatch => {
+                self.warm_basis_cache_hits.fetch_add(1, Ordering::SeqCst);
                 self.publish_warm_basis_hits.fetch_add(1, Ordering::SeqCst);
             }
             BasisReuseEvent::ColdLoaded | BasisReuseEvent::InvalidatedThenColdLoaded => {
+                self.warm_basis_cache_misses.fetch_add(1, Ordering::SeqCst);
                 self.publish_warm_basis_misses
                     .fetch_add(1, Ordering::SeqCst);
             }
@@ -519,6 +747,52 @@ impl RuntimeCacheStatsInner {
             self.publish_warm_basis_advances
                 .fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    fn record_warm_basis_hit(&self) {
+        self.warm_basis_cache_hits.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn record_warm_basis_miss(&self) {
+        self.warm_basis_cache_misses.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn record_warm_basis_rehydrate(&self, elapsed_ms: usize) {
+        self.warm_basis_rehydrate_count
+            .fetch_add(1, Ordering::SeqCst);
+        self.warm_basis_rehydrate_ms
+            .fetch_add(elapsed_ms, Ordering::SeqCst);
+    }
+
+    fn record_warm_basis_cache_update(&self, update: BasisCacheUpdate) {
+        self.record_warm_basis_eviction(update.eviction);
+    }
+
+    fn record_warm_basis_uncacheable(&self, weight: VerifiedNamespaceBasisWeight) {
+        self.warm_basis_uncacheable_count
+            .fetch_add(1, Ordering::SeqCst);
+        self.warm_basis_uncacheable_rows
+            .fetch_add(weight.rows, Ordering::SeqCst);
+        self.warm_basis_uncacheable_decoded_bytes
+            .fetch_add(weight.decoded_bytes, Ordering::SeqCst);
+    }
+
+    fn set_warm_basis_cached_weight(&self, rows: usize, decoded_bytes: usize) {
+        self.warm_basis_cached_rows.store(rows, Ordering::SeqCst);
+        self.warm_basis_cached_decoded_bytes
+            .store(decoded_bytes, Ordering::SeqCst);
+    }
+
+    fn record_warm_basis_eviction(&self, eviction: BasisCacheEviction) {
+        if eviction.count == 0 {
+            return;
+        }
+        self.warm_basis_evictions
+            .fetch_add(eviction.count, Ordering::SeqCst);
+        self.warm_basis_evicted_rows
+            .fetch_add(eviction.rows, Ordering::SeqCst);
+        self.warm_basis_evicted_decoded_bytes
+            .fetch_add(eviction.decoded_bytes, Ordering::SeqCst);
     }
 
     fn record_metadata_read_source(&self, source: loon_core::MetadataReadSource) {
@@ -1354,7 +1628,7 @@ impl Fs {
                     .verified_basis_cache_update
                     .verified_basis_to_cache()
                 {
-                    self.cache_basis(Arc::new(basis.clone()));
+                    self.cache_basis(basis);
                 } else if publish.verified_basis_cache_update.is_invalidated() {
                     self.invalidate_namespace_cache(namespace_id);
                 }
@@ -1516,8 +1790,13 @@ impl Fs {
                 ControlObjectLoadError::MissingObject { .. }
                 | ControlObjectLoadError::MissingObjectAfterHead { .. },
             ) => {
+                self.inner.cache_stats.record_warm_basis_miss();
+                let started = std::time::Instant::now();
                 let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
                     .map_err(CoreError::from)?;
+                self.inner
+                    .cache_stats
+                    .record_warm_basis_rehydrate(elapsed_ms_usize(started));
                 let head = CachedControl {
                     identity: ControlObjectIdentity {
                         etag: basis.head_etag.clone(),
@@ -1559,8 +1838,13 @@ impl Fs {
     }
 
     fn commit_engine_cache_enabled(&self) -> bool {
+        self.basis_cache_enabled()
+    }
+
+    fn basis_cache_enabled(&self) -> bool {
         let cache_config = &self.inner.config.runtime_cache;
-        cache_config.basis_cache_enabled && cache_config.max_cached_namespaces > 0
+        cache_config.basis_cache_enabled
+            && BasisCacheLimits::from_config(cache_config).basis_cache_enabled()
     }
 
     fn commit_engine(&self, namespace_id: &NamespaceId) -> Arc<Mutex<NamespaceCommitEngine>> {
@@ -1573,12 +1857,15 @@ impl Fs {
     }
 
     fn basis_for_read(&self, namespace_id: &NamespaceId) -> Result<Arc<VerifiedNamespaceBasis>> {
-        let cache_config = &self.inner.config.runtime_cache;
-        if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
-            return Ok(Arc::new(
-                loon_core::load_verified_namespace_basis(self.store(), namespace_id)
-                    .map_err(CoreError::from)?,
-            ));
+        if !self.basis_cache_enabled() {
+            self.inner.cache_stats.record_warm_basis_miss();
+            let started = std::time::Instant::now();
+            let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
+                .map_err(CoreError::from)?;
+            self.inner
+                .cache_stats
+                .record_warm_basis_rehydrate(elapsed_ms_usize(started));
+            return Ok(Arc::new(basis));
         }
 
         let cached = self
@@ -1596,6 +1883,7 @@ impl Fs {
                         // verified; the cache itself is not authoritative.
                         tracing::Span::current()
                             .record("cache_path", trace::CachePath::WarmReuse.as_str());
+                        self.inner.cache_stats.record_warm_basis_hit();
                         return Ok(basis.basis_arc());
                     }
                     Ok(_) | Err(_) => {
@@ -1610,6 +1898,7 @@ impl Fs {
                         // verified; the cache itself is not authoritative.
                         tracing::Span::current()
                             .record("cache_path", trace::CachePath::EtagProbe.as_str());
+                        self.inner.cache_stats.record_warm_basis_hit();
                         return Ok(basis.basis_arc());
                     }
                     Ok(_) | Err(_) => {
@@ -1619,8 +1908,13 @@ impl Fs {
             }
         }
 
+        self.inner.cache_stats.record_warm_basis_miss();
+        let started = std::time::Instant::now();
         let basis = loon_core::load_verified_namespace_basis(self.store(), namespace_id)
             .map_err(CoreError::from)?;
+        self.inner
+            .cache_stats
+            .record_warm_basis_rehydrate(elapsed_ms_usize(started));
         tracing::Span::current().record("cache_path", trace::CachePath::ColdReconstruct.as_str());
         let basis = Arc::new(basis);
         self.cache_basis(Arc::clone(&basis));
@@ -1632,8 +1926,7 @@ impl Fs {
         namespace_id: &NamespaceId,
         head: &CachedControl<HeadState>,
     ) -> Result<Arc<VerifiedNamespaceBasis>> {
-        let cache_config = &self.inner.config.runtime_cache;
-        if cache_config.basis_cache_enabled && cache_config.max_cached_namespaces > 0 {
+        if self.basis_cache_enabled() {
             let cached = self
                 .inner
                 .basis_cache
@@ -1644,12 +1937,15 @@ impl Fs {
                 if basis.matches_head_etag(&head.identity.etag) {
                     tracing::Span::current()
                         .record("cache_path", trace::CachePath::WarmReuse.as_str());
+                    self.inner.cache_stats.record_warm_basis_hit();
                     return Ok(basis.basis_arc());
                 }
                 self.invalidate_namespace_cache(namespace_id);
             }
         }
 
+        self.inner.cache_stats.record_warm_basis_miss();
+        let started = std::time::Instant::now();
         let basis = loon_core::load_verified_namespace_basis_at_head(
             self.store(),
             namespace_id,
@@ -1657,6 +1953,9 @@ impl Fs {
             head.identity.etag.clone(),
         )
         .map_err(CoreError::from)?;
+        self.inner
+            .cache_stats
+            .record_warm_basis_rehydrate(elapsed_ms_usize(started));
         tracing::Span::current().record("cache_path", trace::CachePath::ColdReconstruct.as_str());
         let basis = Arc::new(basis);
         self.cache_basis(Arc::clone(&basis));
@@ -1671,14 +1970,34 @@ impl Fs {
     )]
     fn cache_basis(&self, basis: Arc<VerifiedNamespaceBasis>) {
         let cache_config = &self.inner.config.runtime_cache;
-        if !cache_config.basis_cache_enabled || cache_config.max_cached_namespaces == 0 {
+        if !self.basis_cache_enabled() {
             return;
         }
-        self.inner
+        let limits = BasisCacheLimits::from_config(cache_config);
+        let weight = basis.weight();
+        if !limits.can_cache(weight) {
+            self.inner.cache_stats.record_warm_basis_uncacheable(weight);
+            tracing::debug!(
+                namespace_id = %basis.head.namespace_id,
+                rows = weight.rows,
+                decoded_bytes = weight.decoded_bytes,
+                max_rows = limits.max_rows,
+                max_decoded_bytes = ?limits.max_decoded_bytes,
+                "warm basis exceeds cache limits"
+            );
+            self.prune_warm_basis_budget();
+            return;
+        }
+        let update = self
+            .inner
             .basis_cache
             .lock()
             .expect("basis cache lock poisoned")
-            .insert(basis, cache_config.max_cached_namespaces);
+            .insert(basis, limits);
+        self.inner
+            .cache_stats
+            .record_warm_basis_cache_update(update);
+        self.prune_warm_basis_budget();
     }
 
     #[tracing::instrument(
@@ -1688,7 +2007,8 @@ impl Fs {
         fields(phase = "update_cache")
     )]
     fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
-        self.inner
+        let basis_update = self
+            .inner
             .basis_cache
             .lock()
             .expect("basis cache lock poisoned")
@@ -1698,11 +2018,91 @@ impl Fs {
             .lock()
             .expect("control cache lock poisoned")
             .invalidate_namespace(namespace_id);
-        self.inner
+        let engine_eviction = self
+            .inner
             .commit_engines
             .lock()
             .expect("commit engine cache lock poisoned")
             .invalidate(namespace_id);
+        self.inner
+            .cache_stats
+            .record_warm_basis_cache_update(basis_update);
+        self.inner
+            .cache_stats
+            .record_warm_basis_eviction(engine_eviction);
+        self.refresh_warm_basis_cached_weight();
+    }
+
+    fn prune_warm_basis_budget(&self) {
+        if !self.basis_cache_enabled() {
+            return;
+        }
+        let limits = BasisCacheLimits::from_config(&self.inner.config.runtime_cache);
+        loop {
+            let over_budget = {
+                let basis_cache = self
+                    .inner
+                    .basis_cache
+                    .lock()
+                    .expect("basis cache lock poisoned");
+                let commit_engines = self
+                    .inner
+                    .commit_engines
+                    .lock()
+                    .expect("commit engine cache lock poisoned");
+                let (count, rows, decoded_bytes) =
+                    combined_cached_basis_totals(&basis_cache, &commit_engines);
+                limits.is_over_budget(count, rows, decoded_bytes)
+            };
+            if !over_budget {
+                break;
+            }
+
+            let basis_eviction = self
+                .inner
+                .basis_cache
+                .lock()
+                .expect("basis cache lock poisoned")
+                .prune_one_lru();
+            if basis_eviction.count > 0 {
+                self.inner
+                    .cache_stats
+                    .record_warm_basis_eviction(basis_eviction);
+                continue;
+            }
+
+            let engine_eviction = self
+                .inner
+                .commit_engines
+                .lock()
+                .expect("commit engine cache lock poisoned")
+                .prune_one_lru();
+            if engine_eviction.count == 0 {
+                break;
+            }
+            self.inner
+                .cache_stats
+                .record_warm_basis_eviction(engine_eviction);
+        }
+
+        self.refresh_warm_basis_cached_weight();
+    }
+
+    fn refresh_warm_basis_cached_weight(&self) {
+        let basis_cache = self
+            .inner
+            .basis_cache
+            .lock()
+            .expect("basis cache lock poisoned");
+        let commit_engines = self
+            .inner
+            .commit_engines
+            .lock()
+            .expect("commit engine cache lock poisoned");
+        let (_, rows, decoded_bytes) = combined_cached_basis_totals(&basis_cache, &commit_engines);
+        self.inner
+            .cache_stats
+            .set_warm_basis_cached_weight(rows, decoded_bytes);
     }
 
     fn finish_namespace_mutation<T>(
@@ -1794,6 +2194,10 @@ fn current_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn elapsed_ms_usize(started: std::time::Instant) -> usize {
+    usize::try_from(started.elapsed().as_millis()).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ use loon_objectstore::{
     ObjectStore,
 };
 use serde::{Deserialize, Serialize};
+use std::mem::size_of;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,49 @@ pub struct VerifiedNamespaceBasis {
     pub head_etag: String,
     pub lease: LeaseState,
     pub metadata_state: MetadataState,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedNamespaceBasisWeight {
+    pub rows: usize,
+    pub decoded_bytes: usize,
+}
+
+impl VerifiedNamespaceBasis {
+    pub fn weight(&self) -> VerifiedNamespaceBasisWeight {
+        VerifiedNamespaceBasisWeight {
+            rows: self.row_count(),
+            decoded_bytes: self.decoded_bytes(),
+        }
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.metadata_state.row_count()
+    }
+
+    pub fn decoded_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.namespace_descriptor.namespace_id.as_str().len()
+            + self.namespace_descriptor.content_store_id.as_str().len()
+            + self.content_store_id.as_str().len()
+            + self.head.namespace_id.as_str().len()
+            + self.head_etag.len()
+            + wal_tip_decoded_bytes(self.head.visible_wal_tip.as_ref())
+            + self.lease.namespace_id.as_str().len()
+            + self.lease.holder_id.len()
+            + self.metadata_state.decoded_bytes()
+    }
+}
+
+fn wal_tip_decoded_bytes(pointer: Option<&loon_api::wire::control::WalSegmentPointer>) -> usize {
+    pointer
+        .map(|pointer| {
+            size_of::<loon_api::wire::control::WalSegmentPointer>()
+                + pointer.object_key.len()
+                + pointer.segment_id.len()
+                + pointer.payload_checksum_sha256.len()
+        })
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

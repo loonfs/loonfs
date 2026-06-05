@@ -324,6 +324,179 @@ fn runtime_cache_can_be_disabled() {
 }
 
 #[test]
+fn runtime_basis_cache_evicts_by_namespace_count() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = Fs::builder(store(temp_dir.path()))
+        .writer_id("basis-count-budget")
+        .runtime_cache(RuntimeCacheConfig {
+            max_cached_namespaces: 1,
+            ..RuntimeCacheConfig::default()
+        })
+        .build()
+        .expect("build runtime");
+    let first = NamespaceId::parse("first").expect("valid namespace id");
+    let second = NamespaceId::parse("second").expect("valid namespace id");
+    fs.create_namespace(&first, CreateNamespaceOptions::default())
+        .expect("create first namespace");
+    fs.create_namespace(&second, CreateNamespaceOptions::default())
+        .expect("create second namespace");
+
+    fs.stat_path(&first, "/").expect("cache first basis");
+    fs.stat_path(&second, "/")
+        .expect("cache second basis and evict first");
+    let after_second = fs.runtime_cache_stats();
+    assert_eq!(after_second.warm_basis_evictions, 1);
+    assert_eq!(after_second.warm_basis_cached_rows, 1);
+
+    fs.stat_path(&first, "/")
+        .expect("first basis rehydrates after eviction");
+    let after_reload = fs.runtime_cache_stats();
+    assert_eq!(after_reload.warm_basis_cache_misses, 3);
+    assert_eq!(after_reload.warm_basis_evictions, 2);
+}
+
+#[test]
+fn runtime_basis_cache_evicts_by_row_budget() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = Fs::builder(store(temp_dir.path()))
+        .writer_id("basis-row-budget")
+        .runtime_cache(RuntimeCacheConfig {
+            max_cached_basis_rows: 1,
+            max_cached_basis_decoded_bytes: None,
+            ..RuntimeCacheConfig::default()
+        })
+        .build()
+        .expect("build runtime");
+    let first = NamespaceId::parse("row-one").expect("valid namespace id");
+    let second = NamespaceId::parse("row-two").expect("valid namespace id");
+    fs.create_namespace(&first, CreateNamespaceOptions::default())
+        .expect("create first namespace");
+    fs.create_namespace(&second, CreateNamespaceOptions::default())
+        .expect("create second namespace");
+
+    fs.stat_path(&first, "/").expect("cache first basis");
+    fs.stat_path(&second, "/")
+        .expect("cache second basis and evict first by rows");
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.warm_basis_evictions, 1);
+    assert_eq!(stats.warm_basis_evicted_rows, 1);
+    assert_eq!(stats.warm_basis_cached_rows, 1);
+}
+
+#[test]
+fn runtime_basis_budget_includes_commit_engine_bases() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("combined-budget").expect("valid namespace id");
+    let fs = Fs::builder(store(temp_dir.path()))
+        .writer_id("combined-basis-budget")
+        .runtime_cache(RuntimeCacheConfig {
+            max_cached_basis_rows: 2,
+            max_cached_basis_decoded_bytes: None,
+            ..RuntimeCacheConfig::default()
+        })
+        .build()
+        .expect("build runtime");
+
+    fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.stat_path(&namespace_id, "/").expect("cache read basis");
+    assert_single_publish_ok(fs.publish_namespace_mutations_batch(
+        &namespace_id,
+        vec![create_dir_candidate("combined-budget-create-docs", "/docs")],
+    ));
+
+    let stats = fs.runtime_cache_stats();
+    assert!(stats.warm_basis_evictions > 0);
+    assert!(stats.warm_basis_cached_rows <= 2);
+
+    let misses_before = stats.warm_basis_cache_misses;
+    fs.stat_path(&namespace_id, "/docs")
+        .expect("read still works after aggregate budget pruning");
+    let stats = fs.runtime_cache_stats();
+    assert!(stats.warm_basis_cache_misses > misses_before);
+    assert!(stats.warm_basis_cached_rows <= 2);
+}
+
+#[test]
+fn runtime_basis_cache_evicts_by_decoded_byte_budget() {
+    let temp_dir = tempdir().expect("tempdir");
+    let setup = runtime(temp_dir.path(), "basis-byte-budget-setup");
+    let first = NamespaceId::parse("byte-one").expect("valid namespace id");
+    let second = NamespaceId::parse("byte-two").expect("valid namespace id");
+    setup
+        .create_namespace(&first, CreateNamespaceOptions::default())
+        .expect("create first namespace");
+    setup
+        .create_namespace(&second, CreateNamespaceOptions::default())
+        .expect("create second namespace");
+    let raw_store = store(temp_dir.path());
+    let basis_weight = loon_core::load_verified_namespace_basis(raw_store.as_ref(), &first)
+        .expect("load basis")
+        .weight();
+    assert!(basis_weight.decoded_bytes > 1);
+
+    let fs = Fs::builder(raw_store)
+        .writer_id("basis-byte-budget")
+        .runtime_cache(RuntimeCacheConfig {
+            max_cached_basis_decoded_bytes: Some(basis_weight.decoded_bytes),
+            ..RuntimeCacheConfig::default()
+        })
+        .build()
+        .expect("build runtime");
+
+    fs.stat_path(&first, "/").expect("cache first basis");
+    fs.stat_path(&second, "/")
+        .expect("cache second basis and evict first by bytes");
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.warm_basis_evictions, 1);
+    assert!(stats.warm_basis_evicted_decoded_bytes >= basis_weight.decoded_bytes);
+    assert_eq!(stats.warm_basis_cached_rows, basis_weight.rows);
+}
+
+#[test]
+fn runtime_basis_cache_skips_oversized_basis() {
+    let temp_dir = tempdir().expect("tempdir");
+    let setup = runtime(temp_dir.path(), "basis-oversized-setup");
+    let namespace_id = namespace();
+    setup
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let raw_store = store(temp_dir.path());
+    let basis_weight = loon_core::load_verified_namespace_basis(raw_store.as_ref(), &namespace_id)
+        .expect("load basis")
+        .weight();
+    assert!(basis_weight.decoded_bytes > 1);
+
+    let fs = Fs::builder(raw_store)
+        .writer_id("basis-oversized")
+        .runtime_cache(RuntimeCacheConfig {
+            max_cached_basis_decoded_bytes: Some(basis_weight.decoded_bytes - 1),
+            ..RuntimeCacheConfig::default()
+        })
+        .build()
+        .expect("build runtime");
+
+    fs.stat_path(&namespace_id, "/")
+        .expect("first stat reconstructs oversized basis");
+    fs.stat_path(&namespace_id, "/")
+        .expect("second stat reconstructs oversized basis again");
+    let stats = fs.runtime_cache_stats();
+    assert_eq!(stats.warm_basis_cache_misses, 2);
+    assert_eq!(stats.warm_basis_cache_hits, 0);
+    assert_eq!(stats.warm_basis_uncacheable_count, 2);
+    assert_eq!(
+        stats.warm_basis_uncacheable_rows,
+        basis_weight.rows.saturating_mul(2)
+    );
+    assert_eq!(
+        stats.warm_basis_uncacheable_decoded_bytes,
+        basis_weight.decoded_bytes.saturating_mul(2)
+    );
+    assert_eq!(stats.warm_basis_cached_rows, 0);
+    assert_eq!(stats.warm_basis_cached_decoded_bytes, 0);
+}
+
+#[test]
 fn runtime_publish_reuses_warm_basis_for_adjacent_batches() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
@@ -991,10 +1164,8 @@ fn control_cache_eviction_reloads_head_for_basis_validation() {
     let fs = Fs::builder(object_store)
         .writer_id("control-cache-eviction-test")
         .runtime_cache(RuntimeCacheConfig {
-            basis_cache_enabled: true,
-            control_cache_enabled: true,
             max_cached_namespaces: 1,
-            metadata_table_cache: Default::default(),
+            ..RuntimeCacheConfig::default()
         })
         .build()
         .expect("build runtime");

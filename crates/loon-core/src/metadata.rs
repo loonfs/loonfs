@@ -9,6 +9,7 @@ use loon_api::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::mem::{size_of, size_of_val};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -25,6 +26,10 @@ pub struct MetadataState {
     subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
     commit_receipts: Vec<CommitReceiptRecord>,
+    #[serde(skip)]
+    row_count: usize,
+    #[serde(skip)]
+    decoded_bytes: usize,
     #[serde(skip)]
     indexes: MetadataIndexes,
 }
@@ -184,6 +189,8 @@ impl MetadataState {
             revisions,
             subtree_tombstones,
             commit_receipts,
+            row_count: 0,
+            decoded_bytes: 0,
             indexes: MetadataIndexes::default(),
         };
         state.rebuild_indexes();
@@ -218,14 +225,35 @@ impl MetadataState {
         &self.commit_receipts
     }
 
+    pub fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    pub fn decoded_bytes(&self) -> usize {
+        self.decoded_bytes
+    }
+
     pub fn find_commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
-        self.commit_receipts
-            .iter()
-            .filter(|record| record.commit_id == *commit_id)
-            .max_by_key(|record| record.committed_seq)
+        self.indexes.commit_receipt(commit_id)
     }
 
     fn rebuild_indexes(&mut self) {
+        self.row_count = metadata_row_count(
+            &self.inodes,
+            &self.direntry_binds,
+            &self.direntry_unbinds,
+            &self.revisions,
+            &self.subtree_tombstones,
+            &self.commit_receipts,
+        );
+        self.decoded_bytes = metadata_decoded_bytes(
+            &self.inodes,
+            &self.direntry_binds,
+            &self.direntry_unbinds,
+            &self.revisions,
+            &self.subtree_tombstones,
+            &self.commit_receipts,
+        );
         self.indexes = MetadataIndexes::rebuild(
             &self.inodes,
             &self.direntry_binds,
@@ -238,32 +266,43 @@ impl MetadataState {
 
     pub(crate) fn push_inode_record(&mut self, record: InodeRecord) {
         self.indexes.record_inode(&record);
+        self.record_row_weight(size_of::<InodeRecord>());
         self.inodes.push(record);
     }
 
     pub(crate) fn push_direntry_bind_record(&mut self, record: DirentryBindRecord) {
         self.indexes.record_bind(&record);
+        self.record_row_weight(direntry_bind_decoded_bytes(&record));
         self.direntry_binds.push(record);
     }
 
     pub(crate) fn push_direntry_unbind_record(&mut self, record: DirentryUnbindRecord) {
         self.indexes.record_unbind(&record);
+        self.record_row_weight(direntry_unbind_decoded_bytes(&record));
         self.direntry_unbinds.push(record);
     }
 
     pub(crate) fn push_revision_record(&mut self, record: RevisionRecord) {
         self.indexes.record_revision(&record);
+        self.record_row_weight(revision_decoded_bytes(&record));
         self.revisions.push(record);
     }
 
     pub(crate) fn push_subtree_tombstone_record(&mut self, record: SubtreeTombstoneRecord) {
         self.indexes.record_tombstone(&record);
+        self.record_row_weight(size_of::<SubtreeTombstoneRecord>());
         self.subtree_tombstones.push(record);
     }
 
     pub(crate) fn push_commit_receipt_record(&mut self, record: CommitReceiptRecord) {
         self.indexes.record_commit_receipt(&record);
+        self.record_row_weight(commit_receipt_decoded_bytes(&record));
         self.commit_receipts.push(record);
+    }
+
+    fn record_row_weight(&mut self, decoded_bytes: usize) {
+        self.row_count = self.row_count.saturating_add(1);
+        self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
     }
 
     pub fn apply_committed_wal_deltas(
@@ -444,6 +483,21 @@ impl MetadataState {
         inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<RevisionRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.latest_revision_at_head(inode_id);
+        }
+        self.latest_revision_head_at_seq_scan(inode_id, base_seq)
+    }
+
+    pub fn latest_revision_at_head(&self, inode_id: InodeId) -> Option<RevisionRecord> {
+        self.indexes.latest_revision(inode_id)
+    }
+
+    fn latest_revision_head_at_seq_scan(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
         self.revisions
             .iter()
             .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
@@ -458,6 +512,26 @@ impl MetadataState {
     }
 
     pub fn revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.revision_at_head(inode_id, revision_no);
+        }
+        self.revision_at_seq_scan(inode_id, revision_no, base_seq)
+    }
+
+    pub fn revision_at_head(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Option<RevisionRecord> {
+        self.indexes.revision(inode_id, revision_no)
+    }
+
+    fn revision_at_seq_scan(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -989,6 +1063,96 @@ fn join_display_path(base: &str, component: &str) -> String {
     }
 }
 
+fn metadata_row_count(
+    inodes: &[InodeRecord],
+    direntry_binds: &[DirentryBindRecord],
+    direntry_unbinds: &[DirentryUnbindRecord],
+    revisions: &[RevisionRecord],
+    subtree_tombstones: &[SubtreeTombstoneRecord],
+    commit_receipts: &[CommitReceiptRecord],
+) -> usize {
+    inodes
+        .len()
+        .saturating_add(direntry_binds.len())
+        .saturating_add(direntry_unbinds.len())
+        .saturating_add(revisions.len())
+        .saturating_add(subtree_tombstones.len())
+        .saturating_add(commit_receipts.len())
+}
+
+fn metadata_decoded_bytes(
+    inodes: &[InodeRecord],
+    direntry_binds: &[DirentryBindRecord],
+    direntry_unbinds: &[DirentryUnbindRecord],
+    revisions: &[RevisionRecord],
+    subtree_tombstones: &[SubtreeTombstoneRecord],
+    commit_receipts: &[CommitReceiptRecord],
+) -> usize {
+    size_of_val(inodes)
+        .saturating_add(
+            direntry_binds
+                .iter()
+                .map(direntry_bind_decoded_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            direntry_unbinds
+                .iter()
+                .map(direntry_unbind_decoded_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(revisions.iter().map(revision_decoded_bytes).sum::<usize>())
+        .saturating_add(size_of_val(subtree_tombstones))
+        .saturating_add(
+            commit_receipts
+                .iter()
+                .map(commit_receipt_decoded_bytes)
+                .sum::<usize>(),
+        )
+}
+
+fn direntry_bind_decoded_bytes(record: &DirentryBindRecord) -> usize {
+    size_of::<DirentryBindRecord>() + record.name_key.len() + record.display_name.len()
+}
+
+fn direntry_unbind_decoded_bytes(record: &DirentryUnbindRecord) -> usize {
+    size_of::<DirentryUnbindRecord>() + record.name_key.len()
+}
+
+fn revision_decoded_bytes(record: &RevisionRecord) -> usize {
+    size_of::<RevisionRecord>() + content_ref_decoded_bytes(&record.content_ref)
+}
+
+fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
+    size_of::<CommitReceiptRecord>()
+        + record.commit_id.as_str().len()
+        + record.semantic_commit_fingerprint_sha256.len()
+        + record
+            .results
+            .iter()
+            .map(commit_op_result_decoded_bytes)
+            .sum::<usize>()
+}
+
+fn commit_op_result_decoded_bytes(result: &CommitOpResult) -> usize {
+    size_of::<CommitOpResult>()
+        + match result {
+            CommitOpResult::CreateFile { content_ref, .. }
+            | CommitOpResult::ReplaceFile { content_ref, .. }
+            | CommitOpResult::RestoreRevision { content_ref, .. } => {
+                content_ref_decoded_bytes(content_ref)
+            }
+            CommitOpResult::CreateDir { .. }
+            | CommitOpResult::DeleteFile { .. }
+            | CommitOpResult::Rename { .. }
+            | CommitOpResult::DeleteSubtree { .. } => 0,
+        }
+}
+
+fn content_ref_decoded_bytes(content_ref: &ContentRef) -> usize {
+    size_of::<ContentRef>() + content_ref.digest.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1211,8 +1375,12 @@ mod tests {
 
         let encoded = serde_json::to_string(&metadata_state).expect("encode metadata");
         assert!(!encoded.contains("indexes"));
+        assert!(!encoded.contains("row_count"));
+        assert!(!encoded.contains("decoded_bytes"));
         let decoded: MetadataState = serde_json::from_str(&encoded).expect("decode metadata");
 
+        assert_eq!(decoded.row_count(), metadata_state.row_count());
+        assert_eq!(decoded.decoded_bytes(), metadata_state.decoded_bytes());
         assert_eq!(decoded.indexed_seq(), ChangeSeq(1));
         assert_eq!(
             decoded
@@ -1413,5 +1581,97 @@ mod tests {
             .expect("receipt");
         assert_eq!(receipt.committed_seq, ChangeSeq(2));
         assert_eq!(receipt.semantic_commit_fingerprint_sha256, "new");
+    }
+
+    #[test]
+    fn revision_and_receipt_indexes_rebuild_and_update_incrementally() {
+        let commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
+        let content_ref = ContentRef {
+            kind: loon_api::ContentRefKind::WholeFileV0,
+            digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            size_bytes: 12,
+        };
+        let replacement_ref = ContentRef {
+            kind: loon_api::ContentRefKind::WholeFileV0,
+            digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            size_bytes: 24,
+        };
+
+        let mut builder = MetadataStateBuilder::default();
+        builder.push_inode(InodeRecord {
+            inode_id: InodeId(7),
+            inode_kind: InodeKind::File,
+            created_seq: ChangeSeq(1),
+        });
+        builder.push_revision(RevisionRecord {
+            inode_id: InodeId(7),
+            revision_no: RevisionNo(1),
+            committed_seq: ChangeSeq(2),
+            revision_delta_index: 0,
+            content_ref: content_ref.clone(),
+        });
+        builder.push_revision(RevisionRecord {
+            inode_id: InodeId(7),
+            revision_no: RevisionNo(2),
+            committed_seq: ChangeSeq(3),
+            revision_delta_index: 0,
+            content_ref: replacement_ref.clone(),
+        });
+        builder.push_commit_receipt(CommitReceiptRecord {
+            commit_id: commit_id.clone(),
+            semantic_commit_fingerprint_sha256: "fingerprint".to_owned(),
+            committed_seq: ChangeSeq(3),
+            results: vec![CommitOpResult::ReplaceFile {
+                op_index: 0,
+                inode_id: InodeId(7),
+                revision_no: RevisionNo(2),
+                content_ref: replacement_ref.clone(),
+            }],
+        });
+        let metadata_state = builder.finish();
+
+        assert_eq!(metadata_state.row_count(), 4);
+        assert!(metadata_state.decoded_bytes() >= metadata_state.row_count());
+        assert_eq!(
+            metadata_state
+                .latest_revision_at_head(InodeId(7))
+                .expect("latest revision")
+                .revision_no,
+            RevisionNo(2)
+        );
+        assert_eq!(
+            metadata_state
+                .revision_at_head(InodeId(7), RevisionNo(1))
+                .expect("first revision")
+                .content_ref,
+            content_ref
+        );
+        assert_eq!(
+            metadata_state
+                .find_commit_receipt(&commit_id)
+                .expect("commit receipt")
+                .committed_seq,
+            ChangeSeq(3)
+        );
+
+        let decoded: MetadataState =
+            serde_json::from_value(serde_json::to_value(&metadata_state).expect("encode"))
+                .expect("decode");
+        assert_eq!(
+            decoded
+                .latest_revision_at_head(InodeId(7))
+                .expect("latest revision after decode")
+                .content_ref,
+            replacement_ref
+        );
+        assert_eq!(
+            decoded
+                .find_commit_receipt(&commit_id)
+                .expect("receipt after decode")
+                .semantic_commit_fingerprint_sha256,
+            "fingerprint"
+        );
     }
 }
