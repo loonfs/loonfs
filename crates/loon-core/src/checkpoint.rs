@@ -2490,10 +2490,11 @@ mod tests {
         CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
     };
     use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+    use crate::error::CoreError;
     use crate::metadata::MetadataState;
     use crate::namespace::lifecycle::bootstrap_namespace;
     use crate::path::mutation::{move_path, put_file_bytes, write_file_bytes};
-    use crate::{CoreError, CoreErrorKind, MutationContext, PutFileBehavior};
+    use crate::{ErrorCode, MutationContext, PutFileBehavior};
     use loon_api::wire::checkpoint::{
         encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
         CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointPage, CheckpointRow,
@@ -3926,7 +3927,7 @@ mod tests {
         )
         .expect_err("checkpoint hint publication should exhaust CAS retries");
 
-        assert_eq!(error.kind(), CoreErrorKind::StaleHead);
+        assert_eq!(error.code(), ErrorCode::StaleHead);
     }
 
     fn test_context() -> MutationContext {

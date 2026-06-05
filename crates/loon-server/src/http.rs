@@ -19,7 +19,7 @@ use loon_api::{
     RevisionNo,
 };
 use loonfs::{
-    payload_class, BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs,
+    payload_class, BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, Fs,
     JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, PathMutationIntent,
     PutFileBehavior, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
 };
@@ -744,56 +744,12 @@ impl ApiResponseError {
     }
 
     fn core(error: CoreError) -> Self {
-        let (status, code) = match error.kind() {
-            CoreErrorKind::InvalidPath => (StatusCode::BAD_REQUEST, "invalid_path"),
-            CoreErrorKind::InvalidNamespaceId => (StatusCode::BAD_REQUEST, "invalid_namespace_id"),
-            CoreErrorKind::InvalidCommitId => (StatusCode::BAD_REQUEST, "invalid_commit_id"),
-            CoreErrorKind::InvalidUploadId => (StatusCode::BAD_REQUEST, "invalid_upload_id"),
-            CoreErrorKind::NamespaceNotFound => (StatusCode::NOT_FOUND, "namespace_not_found"),
-            CoreErrorKind::NamespaceExists => (StatusCode::CONFLICT, "namespace_exists"),
-            CoreErrorKind::NamespacePartial => (StatusCode::CONFLICT, "namespace_partial"),
-            CoreErrorKind::PathNotFound => (StatusCode::NOT_FOUND, "path_not_found"),
-            CoreErrorKind::RevisionNotFound => (StatusCode::CONFLICT, "revision_not_found"),
-            CoreErrorKind::PathConflict => (StatusCode::CONFLICT, "path_conflict"),
-            CoreErrorKind::DirectoryNotEmpty => (StatusCode::CONFLICT, "directory_not_empty"),
-            CoreErrorKind::StaleHead => (StatusCode::CONFLICT, "stale_head"),
-            CoreErrorKind::StaleRevision => (StatusCode::CONFLICT, "stale_revision"),
-            CoreErrorKind::TombstoneConflict => (StatusCode::CONFLICT, "tombstone_conflict"),
-            CoreErrorKind::LeaseConflict => (StatusCode::CONFLICT, "lease_conflict"),
-            CoreErrorKind::WouldCycle => (StatusCode::CONFLICT, "would_cycle"),
-            CoreErrorKind::UnsupportedRenameMode => {
-                (StatusCode::BAD_REQUEST, "unsupported_rename_mode")
-            }
-            CoreErrorKind::CommitIdReuseConflict => {
-                (StatusCode::CONFLICT, "commit_id_reuse_conflict")
-            }
-            CoreErrorKind::CommitQueueFull => {
-                (StatusCode::SERVICE_UNAVAILABLE, "commit_queue_full")
-            }
-            CoreErrorKind::CheckpointUnavailable => {
-                (StatusCode::CONFLICT, "checkpoint_unavailable")
-            }
-            CoreErrorKind::UploadNotFound => (StatusCode::NOT_FOUND, "upload_not_found"),
-            CoreErrorKind::UploadAlreadyCompleted => {
-                (StatusCode::CONFLICT, "upload_already_completed")
-            }
-            CoreErrorKind::UploadContentConflict => {
-                (StatusCode::CONFLICT, "upload_content_conflict")
-            }
-            CoreErrorKind::InvalidUploadContent => {
-                (StatusCode::BAD_REQUEST, "invalid_upload_content")
-            }
-            CoreErrorKind::RebootstrapRequired => (StatusCode::CONFLICT, "rebootstrap_required"),
-            CoreErrorKind::NamespaceCorrupt => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "namespace_corrupt")
-            }
-            CoreErrorKind::ServerError => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
-        };
-        Self::new(status, code, &error.to_string())
+        let status = status_for_core_error_code(error.code());
+        Self::new(status, error.code().as_str(), &error.to_string())
     }
 
     fn core_for_namespace(namespace: &NamespaceId, error: CoreError) -> Self {
-        if matches!(error.kind(), CoreErrorKind::NamespaceNotFound) {
+        if matches!(error.code(), ErrorCode::NamespaceNotFound) {
             return Self::new(
                 StatusCode::NOT_FOUND,
                 "namespace_not_found",
@@ -812,6 +768,37 @@ impl ApiResponseError {
                 Self::new(StatusCode::BAD_REQUEST, "invalid_config", &message)
             }
         }
+    }
+}
+
+fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
+    match code {
+        ErrorCode::InvalidPath
+        | ErrorCode::InvalidNamespaceId
+        | ErrorCode::InvalidCommitId
+        | ErrorCode::InvalidUploadId
+        | ErrorCode::UnsupportedRenameMode
+        | ErrorCode::InvalidUploadContent => StatusCode::BAD_REQUEST,
+        ErrorCode::NamespaceNotFound | ErrorCode::PathNotFound | ErrorCode::UploadNotFound => {
+            StatusCode::NOT_FOUND
+        }
+        ErrorCode::CommitQueueFull => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::NamespaceCorrupt | ErrorCode::ServerError => StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::NamespaceExists
+        | ErrorCode::NamespacePartial
+        | ErrorCode::RevisionNotFound
+        | ErrorCode::PathConflict
+        | ErrorCode::DirectoryNotEmpty
+        | ErrorCode::StaleHead
+        | ErrorCode::StaleRevision
+        | ErrorCode::TombstoneConflict
+        | ErrorCode::LeaseConflict
+        | ErrorCode::WouldCycle
+        | ErrorCode::CommitIdReuseConflict
+        | ErrorCode::CheckpointUnavailable
+        | ErrorCode::UploadAlreadyCompleted
+        | ErrorCode::UploadContentConflict
+        | ErrorCode::RebootstrapRequired => StatusCode::CONFLICT,
     }
 }
 
@@ -1345,7 +1332,7 @@ mod tests {
         bytes: &[u8],
         context: &MutationContext,
         commit_id: Option<&str>,
-    ) -> Result<loon_api::MutationResult, loon_core::CoreError> {
+    ) -> Result<loon_api::MutationResult, loon_core::Error> {
         namespace_engine(store, namespace_id, context).put_file(
             absolute_path,
             bytes,
@@ -1364,7 +1351,7 @@ mod tests {
         absolute_path: &str,
         context: &MutationContext,
         commit_id: Option<&str>,
-    ) -> Result<loon_api::MutationResult, loon_core::CoreError> {
+    ) -> Result<loon_api::MutationResult, loon_core::Error> {
         namespace_engine(store, namespace_id, context).delete_path(
             absolute_path,
             WriteOptions {

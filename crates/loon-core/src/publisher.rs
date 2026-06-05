@@ -4,7 +4,7 @@ use crate::basis::{
 };
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::context::MutationContext;
-use crate::error::{CoreError, CoreErrorKind};
+use crate::error::{CoreError, ErrorCode};
 use crate::lease::acquire_or_renew_namespace_lease;
 use crate::loading::load_namespace_lease_control;
 use crate::path::intent::PathMutationIntent;
@@ -361,9 +361,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
                         committed_seq: response.committed_seq,
                     });
                 }
-                Err(error)
-                    if error.kind() == CoreErrorKind::StaleHead && attempt + 1 < attempts =>
-                {
+                Err(error) if error.code() == ErrorCode::StaleHead && attempt + 1 < attempts => {
                     last_error = Some(error);
                 }
                 Err(error) => return Err(error),

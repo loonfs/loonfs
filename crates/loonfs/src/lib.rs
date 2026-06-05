@@ -34,7 +34,9 @@ use loon_core::publish::{
     BasisReuseEvent, NamespaceCommitEngine, NamespaceCommitEnginePublishResult,
 };
 pub use loon_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
-pub use loon_core::{BootstrapNamespaceError, CoreError, CoreErrorKind, PutFileBehavior};
+pub use loon_core::{
+    BootstrapNamespaceError, Error, Error as CoreError, ErrorCode, ErrorKind, PutFileBehavior,
+};
 use loon_core::{MutationContext, NamespaceEngine};
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::metrics::InstrumentedObjectStore;
@@ -1160,7 +1162,7 @@ impl Fs {
 
         let checkpoint = match self.create_checkpoint(namespace_id) {
             Ok(checkpoint) => checkpoint,
-            Err(RuntimeError::Core(error)) if error.kind() == CoreErrorKind::StaleHead => {
+            Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
                     status_before,
@@ -2213,7 +2215,7 @@ fn validate_config(config: &FsConfig) -> Result<()> {
 fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
     match result {
         Ok(_) => true,
-        Err(RuntimeError::Core(error)) if error.kind() == CoreErrorKind::StaleHead => true,
+        Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => true,
         _ => false,
     }
 }
