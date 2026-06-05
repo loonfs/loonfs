@@ -1,20 +1,22 @@
+use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
 use crate::namespace::{lifecycle, BootstrapNamespaceError};
-use crate::options::{BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, WriteOptions};
+use crate::options::{
+    BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, ReadSource, WriteOptions,
+};
 use crate::publisher::NamespaceMutationCandidate;
-use crate::{basis::VerifiedNamespaceBasis, checkpoint::MetadataTableCache};
 use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitRequest, CommitResponse, CompleteUploadRequest,
     CompleteUploadResponse, UploadContentResponse,
 };
-use loon_api::wire::control::HeadState;
 use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     ContentRef, CreateCheckpointResponse, InodeId, ListFileRevisionsResponse, MutationResult,
     NamespaceId, NamespaceSummary, RevisionNo,
 };
 use loon_objectstore::ObjectStore;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -110,144 +112,110 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub fn resolve_path(
         &self,
         path: impl AsRef<str>,
-        _options: ReadOptions,
+        options: ReadOptions,
     ) -> CoreResult<AuthoritativePathEntry> {
-        crate::path::query::resolve_path(&self.store, &self.namespace_id, path.as_ref())
-    }
-
-    pub fn resolve_path_from_basis(
-        &self,
-        basis: &VerifiedNamespaceBasis,
-        path: impl AsRef<str>,
-        _options: ReadOptions,
-    ) -> CoreResult<AuthoritativePathEntry> {
-        crate::path::query::resolve_path_from_basis(basis, path.as_ref())
-    }
-
-    pub fn resolve_path_from_materialized_tables_at_head(
-        &self,
-        head: &HeadState,
-        path: impl AsRef<str>,
-        table_cache: Option<&MetadataTableCache>,
-        _options: ReadOptions,
-    ) -> CoreResult<Option<AuthoritativePathEntry>> {
-        crate::path::query::resolve_path_from_materialized_tables_at_head_with_cache(
-            &self.store,
-            &self.namespace_id,
-            head,
-            path.as_ref(),
-            table_cache,
-        )
+        let path = path.as_ref();
+        match options.source() {
+            ReadSource::PreferMaterialized => {
+                if let Some(entry) = crate::path::query::resolve_path_from_materialized_tables(
+                    &self.store,
+                    &self.namespace_id,
+                    path,
+                )? {
+                    return Ok(entry);
+                }
+            }
+            ReadSource::MaterializedTablesAtHead { head, table_cache } => {
+                if let Some(entry) =
+                    crate::path::query::resolve_path_from_materialized_tables_at_head_with_cache(
+                        &self.store,
+                        &self.namespace_id,
+                        head,
+                        path,
+                        table_cache.as_deref(),
+                    )?
+                {
+                    return Ok(entry);
+                }
+            }
+            ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
+        }
+        let basis = self.basis_for_read_options(options)?;
+        crate::path::query::resolve_path_from_basis(&basis, path)
     }
 
     pub fn list_path(
         &self,
         path: impl AsRef<str>,
-        _options: ReadOptions,
+        options: ReadOptions,
     ) -> CoreResult<Vec<AuthoritativePathEntry>> {
-        crate::path::query::list_path(&self.store, &self.namespace_id, path.as_ref())
-    }
-
-    pub fn list_path_from_basis(
-        &self,
-        basis: &VerifiedNamespaceBasis,
-        path: impl AsRef<str>,
-        _options: ReadOptions,
-    ) -> CoreResult<Vec<AuthoritativePathEntry>> {
-        crate::path::query::list_path_from_basis(basis, path.as_ref())
-    }
-
-    pub fn list_path_from_materialized_tables_at_head(
-        &self,
-        head: &HeadState,
-        path: impl AsRef<str>,
-        table_cache: Option<&MetadataTableCache>,
-        _options: ReadOptions,
-    ) -> CoreResult<Option<Vec<AuthoritativePathEntry>>> {
-        crate::path::query::list_path_from_materialized_tables_at_head_with_cache(
-            &self.store,
-            &self.namespace_id,
-            head,
-            path.as_ref(),
-            table_cache,
-        )
+        let path = path.as_ref();
+        match options.source() {
+            ReadSource::PreferMaterialized => {
+                if let Some(entries) = crate::path::query::list_path_from_materialized_tables(
+                    &self.store,
+                    &self.namespace_id,
+                    path,
+                )? {
+                    return Ok(entries);
+                }
+            }
+            ReadSource::MaterializedTablesAtHead { head, table_cache } => {
+                if let Some(entries) =
+                    crate::path::query::list_path_from_materialized_tables_at_head_with_cache(
+                        &self.store,
+                        &self.namespace_id,
+                        head,
+                        path,
+                        table_cache.as_deref(),
+                    )?
+                {
+                    return Ok(entries);
+                }
+            }
+            ReadSource::FullBasis | ReadSource::VerifiedBasis(_) => {}
+        }
+        let basis = self.basis_for_read_options(options)?;
+        crate::path::query::list_path_from_basis(&basis, path)
     }
 
     pub fn read_file(
         &self,
         path: impl AsRef<str>,
-        _options: ReadOptions,
+        options: ReadOptions,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        crate::path::query::read_file_bytes(&self.store, &self.namespace_id, path.as_ref())
-    }
-
-    pub fn read_file_from_basis(
-        &self,
-        basis: &VerifiedNamespaceBasis,
-        path: impl AsRef<str>,
-        _options: ReadOptions,
-    ) -> CoreResult<AuthoritativeFileBytes> {
-        crate::path::query::read_file_bytes_from_basis(&self.store, basis, path.as_ref())
+        let basis = self.basis_for_read_options(options)?;
+        crate::path::query::read_file_bytes_from_basis(&self.store, &basis, path.as_ref())
     }
 
     pub fn list_file_revisions(
         &self,
         path: impl AsRef<str>,
-        _options: ReadOptions,
+        options: ReadOptions,
     ) -> CoreResult<ListFileRevisionsResponse> {
-        crate::path::query::list_file_revisions(&self.store, &self.namespace_id, path.as_ref())
-    }
-
-    pub fn list_file_revisions_from_basis(
-        &self,
-        basis: &VerifiedNamespaceBasis,
-        path: impl AsRef<str>,
-        _options: ReadOptions,
-    ) -> CoreResult<ListFileRevisionsResponse> {
-        crate::path::query::list_file_revisions_from_basis(basis, path.as_ref())
+        let basis = self.basis_for_read_options(options)?;
+        crate::path::query::list_file_revisions_from_basis(&basis, path.as_ref())
     }
 
     pub fn list_file_revisions_for_inode(
         &self,
         inode_id: InodeId,
-        _options: ReadOptions,
+        options: ReadOptions,
     ) -> CoreResult<ListFileRevisionsResponse> {
-        crate::path::query::list_file_revisions_for_inode(&self.store, &self.namespace_id, inode_id)
-    }
-
-    pub fn list_file_revisions_for_inode_from_basis(
-        &self,
-        basis: &VerifiedNamespaceBasis,
-        inode_id: InodeId,
-        _options: ReadOptions,
-    ) -> CoreResult<ListFileRevisionsResponse> {
-        crate::path::query::list_file_revisions_for_inode_from_basis(basis, inode_id)
+        let basis = self.basis_for_read_options(options)?;
+        crate::path::query::list_file_revisions_for_inode_from_basis(&basis, inode_id)
     }
 
     pub fn read_file_revision(
         &self,
         path: impl AsRef<str>,
         revision_no: RevisionNo,
-        _options: ReadOptions,
+        options: ReadOptions,
     ) -> CoreResult<AuthoritativeFileBytes> {
-        crate::path::query::read_file_revision_bytes(
-            &self.store,
-            &self.namespace_id,
-            path.as_ref(),
-            revision_no,
-        )
-    }
-
-    pub fn read_file_revision_from_basis(
-        &self,
-        basis: &VerifiedNamespaceBasis,
-        path: impl AsRef<str>,
-        revision_no: RevisionNo,
-        _options: ReadOptions,
-    ) -> CoreResult<AuthoritativeFileBytes> {
+        let basis = self.basis_for_read_options(options)?;
         crate::path::query::read_file_revision_bytes_from_basis(
             &self.store,
-            basis,
+            &basis,
             path.as_ref(),
             revision_no,
         )
@@ -257,26 +225,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        _options: ReadOptions,
+        options: ReadOptions,
     ) -> CoreResult<Vec<u8>> {
-        crate::path::query::read_file_revision_bytes_for_inode(
-            &self.store,
-            &self.namespace_id,
-            inode_id,
-            revision_no,
-        )
-    }
-
-    pub fn read_file_revision_for_inode_from_basis(
-        &self,
-        basis: &VerifiedNamespaceBasis,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        _options: ReadOptions,
-    ) -> CoreResult<Vec<u8>> {
+        let basis = self.basis_for_read_options(options)?;
         crate::path::query::read_file_revision_bytes_for_inode_from_basis(
             &self.store,
-            basis,
+            &basis,
             inode_id,
             revision_no,
         )
@@ -514,6 +468,20 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
+    fn basis_for_read_options(
+        &self,
+        options: ReadOptions,
+    ) -> CoreResult<Arc<VerifiedNamespaceBasis>> {
+        match options.into_source() {
+            ReadSource::VerifiedBasis(basis) => Ok(basis),
+            ReadSource::PreferMaterialized
+            | ReadSource::FullBasis
+            | ReadSource::MaterializedTablesAtHead { .. } => Ok(Arc::new(
+                load_verified_namespace_basis(&self.store, &self.namespace_id)?,
+            )),
+        }
+    }
+
     fn mutation_context(&self) -> MutationContext {
         MutationContext {
             writer_id: self.writer_id.clone(),
@@ -644,7 +612,10 @@ mod tests {
         assert_eq!(engine.writer_id(), "writer-a");
         assert!(!engine.writer_version().is_empty());
         assert_eq!(engine.lease_duration_ms(), DEFAULT_LEASE_DURATION_MS);
-        assert_eq!(engine.read_options(), &ReadOptions::default());
+        assert!(matches!(
+            engine.read_options().source(),
+            ReadSource::PreferMaterialized
+        ));
         assert_eq!(engine.write_options(), &WriteOptions::default());
         assert_eq!(engine.commit_options(), &CommitOptions::default());
     }

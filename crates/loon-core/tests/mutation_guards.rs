@@ -36,7 +36,7 @@ use loon_objectstore::keys::{
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,7 +397,7 @@ fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     )
 }
 
-fn resolve_path_from_basis(
+fn resolve_path_using_basis_option(
     basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<loon_api::AuthoritativePathEntry, CoreError> {
@@ -408,10 +408,13 @@ fn resolve_path_from_basis(
         .writer("test")
         .build()
         .expect("test engine")
-        .resolve_path_from_basis(basis, absolute_path, ReadOptions::default())
+        .resolve_path(
+            absolute_path,
+            ReadOptions::verified_basis(Arc::new(basis.clone())),
+        )
 }
 
-fn list_path_from_basis(
+fn list_path_using_basis_option(
     basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<Vec<loon_api::AuthoritativePathEntry>, CoreError> {
@@ -422,7 +425,10 @@ fn list_path_from_basis(
         .writer("test")
         .build()
         .expect("test engine")
-        .list_path_from_basis(basis, absolute_path, ReadOptions::default())
+        .list_path(
+            absolute_path,
+            ReadOptions::verified_basis(Arc::new(basis.clone())),
+        )
 }
 
 fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
@@ -435,21 +441,18 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
         .map_err(BasisLoadError::LoadHead)?
         .state;
     if head.checkpoint_hint_seq.is_some() {
-        if let Some(value) = engine.resolve_path_from_materialized_tables_at_head(
-            &head,
+        let value = engine.resolve_path(
             absolute_path,
-            None,
-            ReadOptions::default(),
-        )? {
-            return Ok(MetadataRead {
-                value,
-                source: MetadataReadSource::MaterializedTables,
-            });
-        }
+            ReadOptions::materialized_tables_at_head(head.clone(), None),
+        )?;
+        return Ok(MetadataRead {
+            value,
+            source: MetadataReadSource::MaterializedTables,
+        });
     }
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     Ok(MetadataRead {
-        value: engine.resolve_path_from_basis(&basis, absolute_path, ReadOptions::default())?,
+        value: engine.resolve_path(absolute_path, ReadOptions::verified_basis(Arc::new(basis)))?,
         source: MetadataReadSource::FullBasisFallback,
     })
 }
@@ -464,21 +467,18 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
         .map_err(BasisLoadError::LoadHead)?
         .state;
     if head.checkpoint_hint_seq.is_some() {
-        if let Some(value) = engine.list_path_from_materialized_tables_at_head(
-            &head,
+        let value = engine.list_path(
             absolute_path,
-            None,
-            ReadOptions::default(),
-        )? {
-            return Ok(MetadataRead {
-                value,
-                source: MetadataReadSource::MaterializedTables,
-            });
-        }
+            ReadOptions::materialized_tables_at_head(head.clone(), None),
+        )?;
+        return Ok(MetadataRead {
+            value,
+            source: MetadataReadSource::MaterializedTables,
+        });
     }
     let basis = load_verified_namespace_basis(store, namespace_id)?;
     Ok(MetadataRead {
-        value: engine.list_path_from_basis(&basis, absolute_path, ReadOptions::default())?,
+        value: engine.list_path(absolute_path, ReadOptions::verified_basis(Arc::new(basis)))?,
         source: MetadataReadSource::FullBasisFallback,
     })
 }
@@ -1530,10 +1530,11 @@ fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
     .expect("put wal tail");
 
     let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-    let expected_stat = resolve_path_from_basis(&basis, "/docs/moved.txt").expect("basis stat");
-    let expected_list = list_path_from_basis(&basis, "/docs").expect("basis list");
+    let expected_stat =
+        resolve_path_using_basis_option(&basis, "/docs/moved.txt").expect("basis stat");
+    let expected_list = list_path_using_basis_option(&basis, "/docs").expect("basis list");
     let expected_file_list =
-        list_path_from_basis(&basis, "/docs/moved.txt").expect("basis file list");
+        list_path_using_basis_option(&basis, "/docs/moved.txt").expect("basis file list");
 
     store.reset_content_blob_get_count();
     let actual_stat = resolve_path_with_read_source(&store, &namespace_id, "/docs/moved.txt")
@@ -1597,7 +1598,7 @@ fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
     let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-    let expected = resolve_path_from_basis(&basis, "/docs/report").expect("basis stat");
+    let expected = resolve_path_using_basis_option(&basis, "/docs/report").expect("basis stat");
     let actual = resolve_path_with_read_source(&store, &namespace_id, "/docs/report")
         .expect("materialized stat");
 
