@@ -774,12 +774,12 @@ fn resolve_parent_directory(
 mod tests {
     use super::*;
     use crate::commit::core_commit_fingerprint_for_v0_request;
+    use crate::content::store_bytes_as_content;
     use crate::context::MutationContext;
     use crate::error::CoreErrorKind;
     use crate::metadata::{DirentryBindRecord, InodeRecord};
-    use crate::services::{
-        bootstrap_namespace, delete_path, put_file_bytes, store_bytes_as_content,
-    };
+    use crate::namespace::lifecycle::bootstrap_namespace;
+    use crate::path::mutation::{delete_path, put_file_bytes};
     use loon_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
     use loon_api::RevisionNo;
     use loon_objectstore::fs::LocalFsStore;

@@ -244,8 +244,8 @@ mod tests {
     use super::*;
     use crate::error::CoreErrorKind;
     use crate::loading::{read_head_object, read_lease_object};
+    use crate::namespace::lifecycle::bootstrap_namespace;
     use crate::protocol::commit_operations;
-    use crate::services::bootstrap_namespace;
     use loon_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
     use loon_api::{ChangeSeq, CommitId, InodeId};
     use loon_objectstore::fs::LocalFsStore;

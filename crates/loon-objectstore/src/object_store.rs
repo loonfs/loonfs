@@ -96,6 +96,61 @@ pub trait ObjectStore {
     }
 }
 
+impl<T> ObjectStore for &T
+where
+    T: ObjectStore + ?Sized,
+{
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        (*self).head(key)
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        (*self).head_with_checksum(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        (*self).get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        (*self).put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        (*self).delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        (*self).list_prefix(prefix)
+    }
+
+    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        (*self).put_overwrite(key, bytes)
+    }
+
+    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        (*self).put_if_absent(key, bytes)
+    }
+
+    fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: &[u8],
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        (*self).compare_and_swap(key, expected_etag, bytes)
+    }
+}
+
 impl<T> ObjectStore for Arc<T>
 where
     T: ObjectStore + ?Sized,

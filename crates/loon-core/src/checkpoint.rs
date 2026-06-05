@@ -2490,9 +2490,10 @@ mod tests {
         CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
     };
     use crate::metadata::MetadataState;
+    use crate::namespace::lifecycle::bootstrap_namespace;
+    use crate::path::mutation::{move_path, put_file_bytes, write_file_bytes};
     use crate::{
-        bootstrap_namespace, load_verified_namespace_basis, move_path, put_file_bytes,
-        write_file_bytes, BasisLoadError, CoreError, CoreErrorKind, MutationContext,
+        load_verified_namespace_basis, BasisLoadError, CoreError, CoreErrorKind, MutationContext,
         PutFileBehavior,
     };
     use loon_api::wire::checkpoint::{

@@ -17,7 +17,6 @@ mod options;
 mod path;
 mod protocol;
 pub mod publisher;
-pub mod services;
 pub mod wal;
 
 pub use basis::{
@@ -41,7 +40,8 @@ pub use loading::{
     ControlObjectLoadError, LoadedContentStoreDescriptorControl, LoadedHeadControl,
     LoadedLeaseControl, LoadedNamespaceDescriptorControl,
 };
-pub use options::{CommitOptions, ReadOptions, WriteOptions};
+pub use namespace::BootstrapNamespaceError;
+pub use options::{BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, WriteOptions};
 pub use path::intent::{PathMutationIntent, PutFileBehavior};
 pub use path::planner::PlannedPathMutation;
 pub use protocol::{
@@ -51,20 +51,4 @@ pub use protocol::{
 pub use publisher::{
     publish_namespace_mutations_batch, DirectObjectStorePublisher, FlushPolicy,
     NamespaceCommitEngine, NamespaceMutationCandidate, PublishOptions,
-};
-pub use services::{
-    bootstrap_namespace, copy_file_path, create_dir_path, delete_path, delete_path_non_recursive,
-    fork_namespace, list_file_revisions, list_file_revisions_for_inode,
-    list_file_revisions_for_inode_from_basis, list_file_revisions_from_basis, list_namespaces,
-    list_path, list_path_from_basis, list_path_from_materialized_tables,
-    list_path_from_materialized_tables_at_head,
-    list_path_from_materialized_tables_at_head_with_cache, list_path_with_read_source, move_path,
-    put_file_bytes, put_file_content_ref, read_file_bytes, read_file_bytes_from_basis,
-    read_file_revision_bytes, read_file_revision_bytes_for_inode,
-    read_file_revision_bytes_for_inode_from_basis, read_file_revision_bytes_from_basis,
-    resolve_path, resolve_path_from_basis, resolve_path_from_materialized_tables,
-    resolve_path_from_materialized_tables_at_head,
-    resolve_path_from_materialized_tables_at_head_with_cache, resolve_path_with_read_source,
-    restore_file_revision, store_bytes_as_content, write_file_bytes, BootstrapNamespaceError,
-    MetadataRead, MetadataReadSource, StoredContent,
 };

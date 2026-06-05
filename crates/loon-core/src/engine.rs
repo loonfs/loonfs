@@ -1,6 +1,17 @@
-use crate::options::{CommitOptions, ReadOptions, WriteOptions};
-use loon_api::NamespaceId;
+use crate::context::MutationContext;
+use crate::error::CoreError;
+use crate::namespace::{lifecycle, BootstrapNamespaceError};
+use crate::options::{BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, WriteOptions};
+use crate::{MetadataTableCache, VerifiedNamespaceBasis};
+use loon_api::v0::{ChangesResponse, CommitRequest, CommitResponse};
+use loon_api::wire::control::HeadState;
+use loon_api::{
+    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
+    CreateCheckpointResponse, InodeId, ListFileRevisionsResponse, MutationResult, NamespaceId,
+    NamespaceSummary, RevisionNo,
+};
 use loon_objectstore::ObjectStore;
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
@@ -61,6 +72,399 @@ impl<S: ObjectStore> NamespaceEngine<S> {
 
     pub fn into_store(self) -> S {
         self.store
+    }
+
+    pub fn bootstrap_namespace(
+        &self,
+        options: BootstrapOptions,
+    ) -> Result<NamespaceSummary, BootstrapNamespaceError> {
+        lifecycle::bootstrap_namespace(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+            options.allow_existing,
+        )
+    }
+
+    pub fn fork_namespace(
+        &self,
+        target: &NamespaceId,
+        _options: ForkOptions,
+    ) -> Result<NamespaceSummary, CoreError> {
+        lifecycle::fork_namespace(
+            &self.store,
+            &self.namespace_id,
+            target,
+            &self.mutation_context(),
+        )
+    }
+
+    pub fn list_namespaces(&self) -> Result<Vec<NamespaceSummary>, CoreError> {
+        lifecycle::list_namespaces(&self.store)
+    }
+
+    pub fn resolve_path(
+        &self,
+        path: impl AsRef<str>,
+        _options: ReadOptions,
+    ) -> Result<AuthoritativePathEntry, CoreError> {
+        crate::path::query::resolve_path(&self.store, &self.namespace_id, path.as_ref())
+    }
+
+    pub fn resolve_path_from_basis(
+        &self,
+        basis: &VerifiedNamespaceBasis,
+        path: impl AsRef<str>,
+        _options: ReadOptions,
+    ) -> Result<AuthoritativePathEntry, CoreError> {
+        crate::path::query::resolve_path_from_basis(basis, path.as_ref())
+    }
+
+    pub fn resolve_path_from_materialized_tables_at_head(
+        &self,
+        head: &HeadState,
+        path: impl AsRef<str>,
+        table_cache: Option<&MetadataTableCache>,
+        _options: ReadOptions,
+    ) -> Result<Option<AuthoritativePathEntry>, CoreError> {
+        crate::path::query::resolve_path_from_materialized_tables_at_head_with_cache(
+            &self.store,
+            &self.namespace_id,
+            head,
+            path.as_ref(),
+            table_cache,
+        )
+    }
+
+    pub fn list_path(
+        &self,
+        path: impl AsRef<str>,
+        _options: ReadOptions,
+    ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+        crate::path::query::list_path(&self.store, &self.namespace_id, path.as_ref())
+    }
+
+    pub fn list_path_from_basis(
+        &self,
+        basis: &VerifiedNamespaceBasis,
+        path: impl AsRef<str>,
+        _options: ReadOptions,
+    ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
+        crate::path::query::list_path_from_basis(basis, path.as_ref())
+    }
+
+    pub fn list_path_from_materialized_tables_at_head(
+        &self,
+        head: &HeadState,
+        path: impl AsRef<str>,
+        table_cache: Option<&MetadataTableCache>,
+        _options: ReadOptions,
+    ) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
+        crate::path::query::list_path_from_materialized_tables_at_head_with_cache(
+            &self.store,
+            &self.namespace_id,
+            head,
+            path.as_ref(),
+            table_cache,
+        )
+    }
+
+    pub fn read_file(
+        &self,
+        path: impl AsRef<str>,
+        _options: ReadOptions,
+    ) -> Result<AuthoritativeFileBytes, CoreError> {
+        crate::path::query::read_file_bytes(&self.store, &self.namespace_id, path.as_ref())
+    }
+
+    pub fn read_file_from_basis(
+        &self,
+        basis: &VerifiedNamespaceBasis,
+        path: impl AsRef<str>,
+        _options: ReadOptions,
+    ) -> Result<AuthoritativeFileBytes, CoreError> {
+        crate::path::query::read_file_bytes_from_basis(&self.store, basis, path.as_ref())
+    }
+
+    pub fn list_file_revisions(
+        &self,
+        path: impl AsRef<str>,
+        _options: ReadOptions,
+    ) -> Result<ListFileRevisionsResponse, CoreError> {
+        crate::path::query::list_file_revisions(&self.store, &self.namespace_id, path.as_ref())
+    }
+
+    pub fn list_file_revisions_from_basis(
+        &self,
+        basis: &VerifiedNamespaceBasis,
+        path: impl AsRef<str>,
+        _options: ReadOptions,
+    ) -> Result<ListFileRevisionsResponse, CoreError> {
+        crate::path::query::list_file_revisions_from_basis(basis, path.as_ref())
+    }
+
+    pub fn list_file_revisions_for_inode(
+        &self,
+        inode_id: InodeId,
+        _options: ReadOptions,
+    ) -> Result<ListFileRevisionsResponse, CoreError> {
+        crate::path::query::list_file_revisions_for_inode(&self.store, &self.namespace_id, inode_id)
+    }
+
+    pub fn list_file_revisions_for_inode_from_basis(
+        &self,
+        basis: &VerifiedNamespaceBasis,
+        inode_id: InodeId,
+        _options: ReadOptions,
+    ) -> Result<ListFileRevisionsResponse, CoreError> {
+        crate::path::query::list_file_revisions_for_inode_from_basis(basis, inode_id)
+    }
+
+    pub fn read_file_revision(
+        &self,
+        path: impl AsRef<str>,
+        revision_no: RevisionNo,
+        _options: ReadOptions,
+    ) -> Result<AuthoritativeFileBytes, CoreError> {
+        crate::path::query::read_file_revision_bytes(
+            &self.store,
+            &self.namespace_id,
+            path.as_ref(),
+            revision_no,
+        )
+    }
+
+    pub fn read_file_revision_from_basis(
+        &self,
+        basis: &VerifiedNamespaceBasis,
+        path: impl AsRef<str>,
+        revision_no: RevisionNo,
+        _options: ReadOptions,
+    ) -> Result<AuthoritativeFileBytes, CoreError> {
+        crate::path::query::read_file_revision_bytes_from_basis(
+            &self.store,
+            basis,
+            path.as_ref(),
+            revision_no,
+        )
+    }
+
+    pub fn read_file_revision_for_inode(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        _options: ReadOptions,
+    ) -> Result<Vec<u8>, CoreError> {
+        crate::path::query::read_file_revision_bytes_for_inode(
+            &self.store,
+            &self.namespace_id,
+            inode_id,
+            revision_no,
+        )
+    }
+
+    pub fn read_file_revision_for_inode_from_basis(
+        &self,
+        basis: &VerifiedNamespaceBasis,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        _options: ReadOptions,
+    ) -> Result<Vec<u8>, CoreError> {
+        crate::path::query::read_file_revision_bytes_for_inode_from_basis(
+            &self.store,
+            basis,
+            inode_id,
+            revision_no,
+        )
+    }
+
+    pub fn put_file(
+        &self,
+        path: impl AsRef<str>,
+        bytes: impl AsRef<[u8]>,
+        options: WriteOptions,
+    ) -> Result<MutationResult, CoreError> {
+        crate::path::mutation::put_file_bytes(
+            &self.store,
+            &self.namespace_id,
+            path.as_ref(),
+            bytes.as_ref(),
+            options.put_file_behavior,
+            &self.mutation_context(),
+            options
+                .commit_id
+                .as_ref()
+                .map(|commit_id| commit_id.as_str()),
+        )
+    }
+
+    pub fn put_file_content_ref(
+        &self,
+        path: impl AsRef<str>,
+        content_ref: ContentRef,
+        options: WriteOptions,
+    ) -> Result<MutationResult, CoreError> {
+        crate::path::mutation::put_file_content_ref(
+            &self.store,
+            &self.namespace_id,
+            path.as_ref(),
+            content_ref,
+            options.put_file_behavior,
+            &self.mutation_context(),
+            options
+                .commit_id
+                .as_ref()
+                .map(|commit_id| commit_id.as_str()),
+        )
+    }
+
+    pub fn create_dir(
+        &self,
+        path: impl AsRef<str>,
+        options: WriteOptions,
+    ) -> Result<MutationResult, CoreError> {
+        crate::path::mutation::create_dir_path(
+            &self.store,
+            &self.namespace_id,
+            path.as_ref(),
+            &self.mutation_context(),
+            options
+                .commit_id
+                .as_ref()
+                .map(|commit_id| commit_id.as_str()),
+        )
+    }
+
+    pub fn delete_path(
+        &self,
+        path: impl AsRef<str>,
+        options: WriteOptions,
+    ) -> Result<MutationResult, CoreError> {
+        let commit_id = options
+            .commit_id
+            .as_ref()
+            .map(|commit_id| commit_id.as_str());
+        if options.recursive_delete {
+            crate::path::mutation::delete_path(
+                &self.store,
+                &self.namespace_id,
+                path.as_ref(),
+                &self.mutation_context(),
+                commit_id,
+            )
+        } else {
+            crate::path::mutation::delete_path_non_recursive(
+                &self.store,
+                &self.namespace_id,
+                path.as_ref(),
+                &self.mutation_context(),
+                commit_id,
+            )
+        }
+    }
+
+    pub fn move_path(
+        &self,
+        source: impl AsRef<str>,
+        dest: impl AsRef<str>,
+        options: WriteOptions,
+    ) -> Result<MutationResult, CoreError> {
+        crate::path::mutation::move_path(
+            &self.store,
+            &self.namespace_id,
+            source.as_ref(),
+            dest.as_ref(),
+            &self.mutation_context(),
+            options
+                .commit_id
+                .as_ref()
+                .map(|commit_id| commit_id.as_str()),
+        )
+    }
+
+    pub fn copy_path(
+        &self,
+        source: impl AsRef<str>,
+        dest: impl AsRef<str>,
+        options: WriteOptions,
+    ) -> Result<MutationResult, CoreError> {
+        crate::path::mutation::copy_file_path(
+            &self.store,
+            &self.namespace_id,
+            source.as_ref(),
+            dest.as_ref(),
+            &self.mutation_context(),
+            options
+                .commit_id
+                .as_ref()
+                .map(|commit_id| commit_id.as_str()),
+        )
+    }
+
+    pub fn restore_file_revision(
+        &self,
+        path: impl AsRef<str>,
+        source_revision_no: RevisionNo,
+        options: WriteOptions,
+    ) -> Result<MutationResult, CoreError> {
+        crate::path::mutation::restore_file_revision(
+            &self.store,
+            &self.namespace_id,
+            path.as_ref(),
+            source_revision_no,
+            &self.mutation_context(),
+            options
+                .commit_id
+                .as_ref()
+                .map(|commit_id| commit_id.as_str()),
+        )
+    }
+
+    pub fn commit_operations(
+        &self,
+        request: CommitRequest,
+        _options: CommitOptions,
+    ) -> Result<CommitResponse, CoreError> {
+        crate::protocol::commit_operations(
+            &self.store,
+            &self.namespace_id,
+            request,
+            &self.mutation_context(),
+        )
+    }
+
+    pub fn commit_operations_batch(
+        &self,
+        requests: Vec<CommitRequest>,
+        _options: CommitOptions,
+    ) -> Vec<Result<CommitResponse, CoreError>> {
+        crate::protocol::commit_operations_batch(
+            &self.store,
+            &self.namespace_id,
+            requests,
+            &self.mutation_context(),
+        )
+    }
+
+    pub fn list_changes_after(&self, after_seq: ChangeSeq) -> Result<ChangesResponse, CoreError> {
+        crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq)
+    }
+
+    pub fn create_checkpoint(&self) -> Result<CreateCheckpointResponse, CoreError> {
+        crate::checkpoint::create_checkpoint(
+            &self.store,
+            &self.namespace_id,
+            &self.mutation_context(),
+        )
+    }
+
+    fn mutation_context(&self) -> MutationContext {
+        MutationContext {
+            writer_id: self.writer_id.clone(),
+            writer_version: self.writer_version.clone(),
+            now_ms: current_time_ms(),
+            lease_duration_ms: self.lease_duration_ms,
+        }
     }
 }
 
@@ -153,6 +557,13 @@ pub enum NamespaceEngineBuildError {
 
 fn default_writer_version() -> String {
     format!("loon-core/{}", env!("CARGO_PKG_VERSION"))
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]

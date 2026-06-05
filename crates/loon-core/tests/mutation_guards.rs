@@ -16,18 +16,15 @@ use loon_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitRequest, CommitValidationContext,
     CommitValidationError, PreparedCommit,
 };
+use loon_core::content::store_bytes_as_content;
 use loon_core::metadata::MetadataState;
 use loon_core::{
-    begin_upload, bootstrap_namespace, commit_operations, commit_operations_batch, complete_upload,
-    copy_file_path, create_checkpoint, create_dir_path, delete_path, delete_path_non_recursive,
-    fork_namespace, list_changes_after, list_file_revisions, list_file_revisions_for_inode,
-    list_namespaces, list_path, list_path_from_basis, list_path_with_read_source,
-    load_verified_namespace_basis, move_path, publish_namespace_mutations_batch, put_file_bytes,
-    read_file_bytes, read_file_revision_bytes, read_file_revision_bytes_for_inode, resolve_path,
-    resolve_path_from_basis, resolve_path_with_read_source, restore_file_revision,
-    store_bytes_as_content, upload_content, write_file_bytes, CoreError, CoreErrorKind,
-    DirectObjectStorePublisher, MetadataReadSource, MutationContext, NamespaceMutationCandidate,
-    PathMutationIntent, PublishOptions, PutFileBehavior,
+    begin_upload, commit_operations, commit_operations_batch, complete_upload, create_checkpoint,
+    list_changes_after, load_namespace_head_control, load_verified_namespace_basis,
+    publish_namespace_mutations_batch, upload_content, BootstrapOptions, CoreError, CoreErrorKind,
+    DirectObjectStorePublisher, ForkOptions, MutationContext, NamespaceEngine,
+    NamespaceMutationCandidate, PathMutationIntent, PublishOptions, PutFileBehavior, ReadOptions,
+    WriteOptions,
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
@@ -39,6 +36,362 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tempfile::tempdir;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataReadSource {
+    MaterializedTables,
+    FullBasisFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataRead<T> {
+    value: T,
+    source: MetadataReadSource,
+}
+
+fn namespace_engine<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> NamespaceEngine<&'a S> {
+    NamespaceEngine::builder(store)
+        .namespace(namespace_id.clone())
+        .writer(context.writer_id.clone())
+        .writer_version(context.writer_version.clone())
+        .lease_duration_ms(context.lease_duration_ms)
+        .build()
+        .expect("test context should build namespace engine")
+}
+
+fn bootstrap_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    allow_existing: bool,
+) -> Result<loon_api::NamespaceSummary, loon_core::BootstrapNamespaceError> {
+    namespace_engine(store, namespace_id, context)
+        .bootstrap_namespace(BootstrapOptions { allow_existing })
+}
+
+fn fork_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    source_namespace_id: &NamespaceId,
+    new_namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> Result<loon_api::NamespaceSummary, CoreError> {
+    namespace_engine(store, source_namespace_id, context)
+        .fork_namespace(new_namespace_id, ForkOptions::default())
+}
+
+fn list_namespaces<S: ObjectStore + ?Sized>(
+    store: &S,
+) -> Result<Vec<loon_api::NamespaceSummary>, CoreError> {
+    loon_core::namespace::list_namespaces(store)
+}
+
+fn write_options(commit_id: Option<&str>, behavior: PutFileBehavior) -> WriteOptions {
+    WriteOptions {
+        commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
+        put_file_behavior: behavior,
+        ..WriteOptions::default()
+    }
+}
+
+fn put_file_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    bytes: &[u8],
+    behavior: PutFileBehavior,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<loon_api::MutationResult, CoreError> {
+    namespace_engine(store, namespace_id, context).put_file(
+        absolute_path,
+        bytes,
+        write_options(commit_id, behavior),
+    )
+}
+
+fn write_file_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    bytes: &[u8],
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<loon_api::MutationResult, CoreError> {
+    put_file_bytes(
+        store,
+        namespace_id,
+        absolute_path,
+        bytes,
+        PutFileBehavior::ReplaceExisting,
+        context,
+        commit_id,
+    )
+}
+
+fn create_dir_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<loon_api::MutationResult, CoreError> {
+    namespace_engine(store, namespace_id, context).create_dir(
+        absolute_path,
+        WriteOptions {
+            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
+            ..WriteOptions::default()
+        },
+    )
+}
+
+fn delete_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<loon_api::MutationResult, CoreError> {
+    namespace_engine(store, namespace_id, context).delete_path(
+        absolute_path,
+        WriteOptions {
+            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
+            recursive_delete: true,
+            ..WriteOptions::default()
+        },
+    )
+}
+
+fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<loon_api::MutationResult, CoreError> {
+    namespace_engine(store, namespace_id, context).delete_path(
+        absolute_path,
+        WriteOptions {
+            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
+            recursive_delete: false,
+            ..WriteOptions::default()
+        },
+    )
+}
+
+fn move_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    from_path: &str,
+    to_path: &str,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<loon_api::MutationResult, CoreError> {
+    namespace_engine(store, namespace_id, context).move_path(
+        from_path,
+        to_path,
+        WriteOptions {
+            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
+            ..WriteOptions::default()
+        },
+    )
+}
+
+fn copy_file_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    from_path: &str,
+    to_path: &str,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<loon_api::MutationResult, CoreError> {
+    namespace_engine(store, namespace_id, context).copy_path(
+        from_path,
+        to_path,
+        WriteOptions {
+            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
+            ..WriteOptions::default()
+        },
+    )
+}
+
+fn restore_file_revision<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    source_revision_no: RevisionNo,
+    context: &MutationContext,
+    commit_id: Option<&str>,
+) -> Result<loon_api::MutationResult, CoreError> {
+    namespace_engine(store, namespace_id, context).restore_file_revision(
+        absolute_path,
+        source_revision_no,
+        WriteOptions {
+            commit_id: commit_id.map(|value| CommitId::parse(value).expect("valid test commit id")),
+            ..WriteOptions::default()
+        },
+    )
+}
+
+fn resolve_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<loon_api::AuthoritativePathEntry, CoreError> {
+    namespace_engine(store, namespace_id, &mutation_context())
+        .resolve_path(absolute_path, ReadOptions::default())
+}
+
+fn list_path<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<Vec<loon_api::AuthoritativePathEntry>, CoreError> {
+    namespace_engine(store, namespace_id, &mutation_context())
+        .list_path(absolute_path, ReadOptions::default())
+}
+
+fn read_file_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<loon_api::AuthoritativeFileBytes, CoreError> {
+    namespace_engine(store, namespace_id, &mutation_context())
+        .read_file(absolute_path, ReadOptions::default())
+}
+
+fn list_file_revisions<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<loon_api::ListFileRevisionsResponse, CoreError> {
+    namespace_engine(store, namespace_id, &mutation_context())
+        .list_file_revisions(absolute_path, ReadOptions::default())
+}
+
+fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+) -> Result<loon_api::ListFileRevisionsResponse, CoreError> {
+    namespace_engine(store, namespace_id, &mutation_context())
+        .list_file_revisions_for_inode(inode_id, ReadOptions::default())
+}
+
+fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    revision_no: RevisionNo,
+) -> Result<loon_api::AuthoritativeFileBytes, CoreError> {
+    namespace_engine(store, namespace_id, &mutation_context()).read_file_revision(
+        absolute_path,
+        revision_no,
+        ReadOptions::default(),
+    )
+}
+
+fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    inode_id: InodeId,
+    revision_no: RevisionNo,
+) -> Result<Vec<u8>, CoreError> {
+    namespace_engine(store, namespace_id, &mutation_context()).read_file_revision_for_inode(
+        inode_id,
+        revision_no,
+        ReadOptions::default(),
+    )
+}
+
+fn resolve_path_from_basis(
+    basis: &loon_core::VerifiedNamespaceBasis,
+    absolute_path: &str,
+) -> Result<loon_api::AuthoritativePathEntry, CoreError> {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    NamespaceEngine::builder(&store)
+        .namespace(basis.head.namespace_id.clone())
+        .writer("test")
+        .build()
+        .expect("test engine")
+        .resolve_path_from_basis(basis, absolute_path, ReadOptions::default())
+}
+
+fn list_path_from_basis(
+    basis: &loon_core::VerifiedNamespaceBasis,
+    absolute_path: &str,
+) -> Result<Vec<loon_api::AuthoritativePathEntry>, CoreError> {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    NamespaceEngine::builder(&store)
+        .namespace(basis.head.namespace_id.clone())
+        .writer("test")
+        .build()
+        .expect("test engine")
+        .list_path_from_basis(basis, absolute_path, ReadOptions::default())
+}
+
+fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<MetadataRead<loon_api::AuthoritativePathEntry>, CoreError> {
+    let engine = namespace_engine(store, namespace_id, &mutation_context());
+    let head = load_namespace_head_control(store, namespace_id)
+        .map_err(loon_core::BasisLoadError::LoadHead)?
+        .state;
+    if head.checkpoint_hint_seq.is_some() {
+        if let Some(value) = engine.resolve_path_from_materialized_tables_at_head(
+            &head,
+            absolute_path,
+            None,
+            ReadOptions::default(),
+        )? {
+            return Ok(MetadataRead {
+                value,
+                source: MetadataReadSource::MaterializedTables,
+            });
+        }
+    }
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    Ok(MetadataRead {
+        value: engine.resolve_path_from_basis(&basis, absolute_path, ReadOptions::default())?,
+        source: MetadataReadSource::FullBasisFallback,
+    })
+}
+
+fn list_path_with_read_source<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+) -> Result<MetadataRead<Vec<loon_api::AuthoritativePathEntry>>, CoreError> {
+    let engine = namespace_engine(store, namespace_id, &mutation_context());
+    let head = load_namespace_head_control(store, namespace_id)
+        .map_err(loon_core::BasisLoadError::LoadHead)?
+        .state;
+    if head.checkpoint_hint_seq.is_some() {
+        if let Some(value) = engine.list_path_from_materialized_tables_at_head(
+            &head,
+            absolute_path,
+            None,
+            ReadOptions::default(),
+        )? {
+            return Ok(MetadataRead {
+                value,
+                source: MetadataReadSource::MaterializedTables,
+            });
+        }
+    }
+    let basis = load_verified_namespace_basis(store, namespace_id)?;
+    Ok(MetadataRead {
+        value: engine.list_path_from_basis(&basis, absolute_path, ReadOptions::default())?,
+        source: MetadataReadSource::FullBasisFallback,
+    })
+}
 
 fn wal_create_dir(
     delta_index: u32,

@@ -828,7 +828,7 @@ mod tests {
     use crate::{ServerConfig, StoreConfig};
     use loon_api::{ChangeSeq, CommitId, NamespaceId};
     use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
-    use loon_core::{bootstrap_namespace, delete_path, write_file_bytes, MutationContext};
+    use loon_core::{BootstrapOptions, MutationContext, NamespaceEngine, WriteOptions};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -1312,6 +1312,68 @@ mod tests {
             now_ms,
             lease_duration_ms: 60_000,
         }
+    }
+
+    fn namespace_engine<'a, S: ObjectStore + ?Sized>(
+        store: &'a S,
+        namespace_id: &NamespaceId,
+        context: &MutationContext,
+    ) -> NamespaceEngine<&'a S> {
+        NamespaceEngine::builder(store)
+            .namespace(namespace_id.clone())
+            .writer(context.writer_id.clone())
+            .writer_version(context.writer_version.clone())
+            .lease_duration_ms(context.lease_duration_ms)
+            .build()
+            .expect("test context should build namespace engine")
+    }
+
+    fn bootstrap_namespace<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        context: &MutationContext,
+        allow_existing: bool,
+    ) -> Result<loon_api::NamespaceSummary, loon_core::BootstrapNamespaceError> {
+        namespace_engine(store, namespace_id, context)
+            .bootstrap_namespace(BootstrapOptions { allow_existing })
+    }
+
+    fn write_file_bytes<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        context: &MutationContext,
+        commit_id: Option<&str>,
+    ) -> Result<loon_api::MutationResult, loon_core::CoreError> {
+        namespace_engine(store, namespace_id, context).put_file(
+            absolute_path,
+            bytes,
+            WriteOptions {
+                commit_id: commit_id
+                    .map(|value| CommitId::parse(value).expect("valid test commit id")),
+                put_file_behavior: PutFileBehavior::ReplaceExisting,
+                ..WriteOptions::default()
+            },
+        )
+    }
+
+    fn delete_path<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        context: &MutationContext,
+        commit_id: Option<&str>,
+    ) -> Result<loon_api::MutationResult, loon_core::CoreError> {
+        namespace_engine(store, namespace_id, context).delete_path(
+            absolute_path,
+            WriteOptions {
+                commit_id: commit_id
+                    .map(|value| CommitId::parse(value).expect("valid test commit id")),
+                recursive_delete: true,
+                ..WriteOptions::default()
+            },
+        )
     }
 
     fn namespace_id(value: &str) -> NamespaceId {

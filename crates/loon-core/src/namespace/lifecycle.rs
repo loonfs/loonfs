@@ -72,7 +72,7 @@ impl From<NamespaceInitializationError> for BootstrapNamespaceError {
     }
 }
 
-pub fn bootstrap_namespace<S: ObjectStore + ?Sized>(
+pub(crate) fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -193,7 +193,7 @@ fn create_new_content_store<S: ObjectStore + ?Sized>(
     ))
 }
 
-pub fn fork_namespace<S: ObjectStore + ?Sized>(
+pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
@@ -338,7 +338,7 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
     }
 }
 
-pub fn list_namespaces<S: ObjectStore + ?Sized>(
+pub(crate) fn list_namespaces<S: ObjectStore + ?Sized>(
     store: &S,
 ) -> Result<Vec<NamespaceSummary>, CoreError> {
     let keys = store
