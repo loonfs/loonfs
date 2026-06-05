@@ -372,7 +372,8 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> CoreErrorK
         | CommitValidationError::ReplaceFileRevisionOverflow { .. }
         | CommitValidationError::SeqOverflow
         | CommitValidationError::NextInodeOverflow
-        | CommitValidationError::OpIndexOverflow => CoreErrorKind::ServerError,
+        | CommitValidationError::OpIndexOverflow
+        | CommitValidationError::DeltaIndexOverflow => CoreErrorKind::ServerError,
     }
 }
 

@@ -1,12 +1,9 @@
 use super::{
-    core_commit_fingerprint, CommitFingerprintError, CommitOp, CommitPlan, CommitRequest,
-    PathIntentFingerprint, ResolvedBinding, SemanticMutationIdentity,
+    core_commit_fingerprint, CommitFingerprintError, CommitPlan, CommitRequest,
+    PathIntentFingerprint, ResolvedBinding, SemanticMutationIdentity, ValidatedOp,
 };
 use loon_api::wire::wal::WalDelta;
-use loon_api::{
-    name_key_for_display_name, v0::CommitOpResult, ContentRef, FenceToken, InodeId, InodeKind,
-    NamePolicy, NamespaceId, RevisionNo,
-};
+use loon_api::{v0::CommitOpResult, FenceToken, InodeKind, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -57,37 +54,6 @@ pub enum CommitPrepareError {
     Fingerprint(#[from] CommitFingerprintError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum CommitMaterializationError {
-    #[error("commit op index overflow")]
-    OpIndexOverflow,
-    #[error("commit delta index overflow")]
-    DeltaIndexOverflow,
-    #[error(
-        "allocated inode count mismatch: request_create_ops={request_create_ops}, plan_allocated_count={plan_allocated_count}"
-    )]
-    AllocatedInodeCountMismatch {
-        request_create_ops: usize,
-        plan_allocated_count: usize,
-    },
-    #[error("missing allocated inode for op index {op_index}")]
-    MissingAllocatedInode { op_index: u32 },
-    #[error("missing resolved restore content ref for op index {op_index}")]
-    MissingResolvedRestoreContentRef { op_index: u32 },
-    #[error("missing resolved source binding for op index {op_index}")]
-    MissingResolvedSourceBinding { op_index: u32 },
-    #[error("replace_file revision overflow for inode {inode_id:?} at base {base_revision_no:?}")]
-    ReplaceRevisionOverflow {
-        inode_id: InodeId,
-        base_revision_no: RevisionNo,
-    },
-    #[error("restore_revision overflow for inode {inode_id:?} at base {base_revision_no:?}")]
-    RestoreRevisionOverflow {
-        inode_id: InodeId,
-        base_revision_no: RevisionNo,
-    },
-}
-
 impl PreparedCommit {
     pub fn new(request: CommitRequest, plan: CommitPlan) -> Result<Self, CommitPrepareError> {
         Self::prepare(request, plan, CommitIdentitySource::CoreCommitRequest)
@@ -124,290 +90,242 @@ impl PreparedCommit {
     }
 }
 
-pub fn materialize_commit(
-    prepared: PreparedCommit,
-) -> Result<MaterializedCommit, CommitMaterializationError> {
-    let request_create_ops = prepared
-        .request
-        .ops
-        .iter()
-        .filter(|op| matches!(op, CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. }))
-        .count();
-    if request_create_ops != prepared.plan.allocated_inode_ids.len() {
-        return Err(CommitMaterializationError::AllocatedInodeCountMismatch {
-            request_create_ops,
-            plan_allocated_count: prepared.plan.allocated_inode_ids.len(),
-        });
-    }
-
-    let mut allocated_inode_ids = prepared.plan.allocated_inode_ids.iter().copied();
-    let mut deltas = Vec::with_capacity(prepared.request.ops.len());
-    let mut results = Vec::with_capacity(prepared.request.ops.len());
-    let mut next_delta_index = 0u32;
-    for (op_index, op) in prepared.request.ops.iter().enumerate() {
-        let op_index =
-            u32::try_from(op_index).map_err(|_| CommitMaterializationError::OpIndexOverflow)?;
-        let resolved_restore_content_ref = prepared
-            .plan
-            .resolved_restore_content_refs
-            .get(op_index as usize)
-            .and_then(|content_ref| content_ref.as_ref());
-        let resolved_source_binding = prepared
-            .plan
-            .resolved_source_bindings
-            .get(op_index as usize)
-            .and_then(|binding| binding.as_ref());
-        let (mut op_deltas, result) = materialize_commit_op(
-            op,
-            op_index,
-            prepared.plan.name_policy,
-            resolved_restore_content_ref,
-            resolved_source_binding,
-            &mut allocated_inode_ids,
-            &mut next_delta_index,
-        )?;
+pub fn materialize_commit(prepared: PreparedCommit) -> MaterializedCommit {
+    let mut deltas = Vec::new();
+    let mut results = Vec::with_capacity(prepared.plan.validated_ops.len());
+    for op in &prepared.plan.validated_ops {
+        let (mut op_deltas, result) = materialize_validated_op(op);
         deltas.append(&mut op_deltas);
         results.push(result);
     }
 
-    Ok(MaterializedCommit {
+    MaterializedCommit {
         prepared,
         deltas,
         results,
-    })
+    }
 }
 
-pub(super) fn materialize_commit_op(
-    op: &CommitOp,
-    op_index: u32,
-    name_policy: NamePolicy,
-    resolved_restore_content_ref: Option<&ContentRef>,
-    resolved_source_binding: Option<&ResolvedBinding>,
-    allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
-    next_delta_index: &mut u32,
-) -> Result<(Vec<MaterializedCommitDelta>, CommitOpResult), CommitMaterializationError> {
+fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, CommitOpResult) {
     let mut deltas = Vec::new();
     let result = match op {
-        CommitOp::CreateDir {
+        ValidatedOp::CreateDir {
+            op_index,
             parent_inode,
             display_name,
+            name_key,
+            child_inode,
+            create_inode_delta_index,
+            bind_delta_index,
         } => {
-            let inode_id = allocated_inode_ids
-                .next()
-                .ok_or(CommitMaterializationError::MissingAllocatedInode { op_index })?;
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::CreateInode {
-                    delta_index: 0,
-                    inode_id,
+                    delta_index: *create_inode_delta_index,
+                    inode_id: *child_inode,
                     inode_kind: InodeKind::Dir,
                 },
-            )?;
+            );
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::BindDirentry {
-                    delta_index: 0,
+                    delta_index: *bind_delta_index,
                     parent_inode: *parent_inode,
-                    name_key: name_key_for_display_name(name_policy, display_name),
+                    name_key: name_key.clone(),
                     display_name: display_name.clone(),
-                    child_inode: inode_id,
+                    child_inode: *child_inode,
                 },
-            )?;
-            CommitOpResult::CreateDir { op_index, inode_id }
+            );
+            CommitOpResult::CreateDir {
+                op_index: *op_index,
+                inode_id: *child_inode,
+            }
         }
-        CommitOp::CreateFile {
+        ValidatedOp::CreateFile {
+            op_index,
             parent_inode,
             display_name,
+            name_key,
+            child_inode,
             content_ref,
+            create_inode_delta_index,
+            bind_delta_index,
+            revision_delta_index,
         } => {
-            let inode_id = allocated_inode_ids
-                .next()
-                .ok_or(CommitMaterializationError::MissingAllocatedInode { op_index })?;
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::CreateInode {
-                    delta_index: 0,
-                    inode_id,
+                    delta_index: *create_inode_delta_index,
+                    inode_id: *child_inode,
                     inode_kind: InodeKind::File,
                 },
-            )?;
+            );
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::BindDirentry {
-                    delta_index: 0,
+                    delta_index: *bind_delta_index,
                     parent_inode: *parent_inode,
-                    name_key: name_key_for_display_name(name_policy, display_name),
+                    name_key: name_key.clone(),
                     display_name: display_name.clone(),
-                    child_inode: inode_id,
+                    child_inode: *child_inode,
                 },
-            )?;
+            );
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::AppendFileRevision {
-                    delta_index: 0,
-                    inode_id,
+                    delta_index: *revision_delta_index,
+                    inode_id: *child_inode,
                     revision_no: RevisionNo(1),
                     content_ref: content_ref.clone(),
                 },
-            )?;
+            );
             CommitOpResult::CreateFile {
-                op_index,
-                inode_id,
+                op_index: *op_index,
+                inode_id: *child_inode,
                 revision_no: RevisionNo(1),
                 content_ref: content_ref.clone(),
             }
         }
-        CommitOp::ReplaceFile {
+        ValidatedOp::ReplaceFile {
+            op_index,
             inode_id,
-            base_revision_no,
+            revision_no,
             content_ref,
+            revision_delta_index,
         } => {
-            let revision_no = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
-                CommitMaterializationError::ReplaceRevisionOverflow {
-                    inode_id: *inode_id,
-                    base_revision_no: *base_revision_no,
-                },
-            )?;
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::AppendFileRevision {
-                    delta_index: 0,
+                    delta_index: *revision_delta_index,
                     inode_id: *inode_id,
-                    revision_no,
+                    revision_no: *revision_no,
                     content_ref: content_ref.clone(),
                 },
-            )?;
+            );
             CommitOpResult::ReplaceFile {
-                op_index,
+                op_index: *op_index,
                 inode_id: *inode_id,
-                revision_no,
+                revision_no: *revision_no,
                 content_ref: content_ref.clone(),
             }
         }
-        CommitOp::RestoreRevision {
+        ValidatedOp::RestoreRevision {
+            op_index,
             inode_id,
             source_revision_no,
-            base_revision_no,
+            revision_no,
+            content_ref,
+            revision_delta_index,
         } => {
-            let content_ref = resolved_restore_content_ref
-                .ok_or(CommitMaterializationError::MissingResolvedRestoreContentRef { op_index })?
-                .clone();
-            let revision_no = base_revision_no.0.checked_add(1).map(RevisionNo).ok_or(
-                CommitMaterializationError::RestoreRevisionOverflow {
-                    inode_id: *inode_id,
-                    base_revision_no: *base_revision_no,
-                },
-            )?;
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::AppendFileRevision {
-                    delta_index: 0,
+                    delta_index: *revision_delta_index,
                     inode_id: *inode_id,
-                    revision_no,
+                    revision_no: *revision_no,
                     content_ref: content_ref.clone(),
                 },
-            )?;
+            );
             CommitOpResult::RestoreRevision {
-                op_index,
+                op_index: *op_index,
                 inode_id: *inode_id,
                 source_revision_no: *source_revision_no,
-                revision_no,
-                content_ref,
+                revision_no: *revision_no,
+                content_ref: content_ref.clone(),
             }
         }
-        CommitOp::DeleteFile { inode_id } => {
-            let binding = resolved_source_binding
-                .ok_or(CommitMaterializationError::MissingResolvedSourceBinding { op_index })?;
-            push_unbind_delta(&mut deltas, op_index, next_delta_index, binding)?;
+        ValidatedOp::DeleteFile {
+            op_index,
+            inode_id,
+            source_binding,
+            unbind_delta_index,
+            tombstone_delta_index,
+        } => {
+            push_unbind_delta(&mut deltas, *op_index, *unbind_delta_index, source_binding);
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::TombstoneSubtree {
-                    delta_index: 0,
+                    delta_index: *tombstone_delta_index,
                     root_inode: *inode_id,
                 },
-            )?;
+            );
             CommitOpResult::DeleteFile {
-                op_index,
+                op_index: *op_index,
                 inode_id: *inode_id,
             }
         }
-        CommitOp::Rename {
+        ValidatedOp::Rename {
+            op_index,
             inode_id,
             new_parent_inode,
             new_display_name,
-            ..
+            new_name_key,
+            source_binding,
+            unbind_delta_index,
+            bind_delta_index,
         } => {
-            let binding = resolved_source_binding
-                .ok_or(CommitMaterializationError::MissingResolvedSourceBinding { op_index })?;
-            push_unbind_delta(&mut deltas, op_index, next_delta_index, binding)?;
+            push_unbind_delta(&mut deltas, *op_index, *unbind_delta_index, source_binding);
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::BindDirentry {
-                    delta_index: 0,
+                    delta_index: *bind_delta_index,
                     parent_inode: *new_parent_inode,
-                    name_key: name_key_for_display_name(name_policy, new_display_name),
+                    name_key: new_name_key.clone(),
                     display_name: new_display_name.clone(),
                     child_inode: *inode_id,
                 },
-            )?;
+            );
             CommitOpResult::Rename {
-                op_index,
+                op_index: *op_index,
                 inode_id: *inode_id,
             }
         }
-        CommitOp::DeleteSubtree { root_inode } => {
-            let binding = resolved_source_binding
-                .ok_or(CommitMaterializationError::MissingResolvedSourceBinding { op_index })?;
-            push_unbind_delta(&mut deltas, op_index, next_delta_index, binding)?;
+        ValidatedOp::DeleteSubtree {
+            op_index,
+            root_inode,
+            source_binding,
+            unbind_delta_index,
+            tombstone_delta_index,
+        } => {
+            push_unbind_delta(&mut deltas, *op_index, *unbind_delta_index, source_binding);
             push_delta(
                 &mut deltas,
-                op_index,
-                next_delta_index,
+                *op_index,
                 WalDelta::TombstoneSubtree {
-                    delta_index: 0,
+                    delta_index: *tombstone_delta_index,
                     root_inode: *root_inode,
                 },
-            )?;
+            );
             CommitOpResult::DeleteSubtree {
-                op_index,
+                op_index: *op_index,
                 root_inode: *root_inode,
             }
         }
     };
 
-    Ok((deltas, result))
+    (deltas, result)
 }
 
 fn push_unbind_delta(
     deltas: &mut Vec<MaterializedCommitDelta>,
     semantic_op_index: u32,
-    next_delta_index: &mut u32,
+    delta_index: u32,
     binding: &ResolvedBinding,
-) -> Result<(), CommitMaterializationError> {
+) {
     push_delta(
         deltas,
         semantic_op_index,
-        next_delta_index,
         WalDelta::UnbindDirentry {
-            delta_index: 0,
+            delta_index,
             parent_inode: binding.parent_inode,
             name_key: binding.name_key.clone(),
             child_inode: binding.child_inode,
@@ -420,39 +338,23 @@ fn push_unbind_delta(
 fn push_delta(
     deltas: &mut Vec<MaterializedCommitDelta>,
     semantic_op_index: u32,
-    next_delta_index: &mut u32,
-    mut wal_delta: WalDelta,
-) -> Result<(), CommitMaterializationError> {
-    let delta_index = *next_delta_index;
-    *next_delta_index = next_delta_index
-        .checked_add(1)
-        .ok_or(CommitMaterializationError::DeltaIndexOverflow)?;
-    set_wal_delta_index(&mut wal_delta, delta_index);
+    wal_delta: WalDelta,
+) {
+    let delta_index = wal_delta_index(&wal_delta);
     deltas.push(MaterializedCommitDelta {
         semantic_op_index,
         delta_index,
         wal_delta,
     });
-    Ok(())
 }
 
-fn set_wal_delta_index(wal_delta: &mut WalDelta, delta_index: u32) {
+fn wal_delta_index(wal_delta: &WalDelta) -> u32 {
     match wal_delta {
-        WalDelta::CreateInode {
-            delta_index: slot, ..
-        }
-        | WalDelta::BindDirentry {
-            delta_index: slot, ..
-        }
-        | WalDelta::UnbindDirentry {
-            delta_index: slot, ..
-        }
-        | WalDelta::AppendFileRevision {
-            delta_index: slot, ..
-        }
-        | WalDelta::TombstoneSubtree {
-            delta_index: slot, ..
-        } => *slot = delta_index,
+        WalDelta::CreateInode { delta_index, .. }
+        | WalDelta::BindDirentry { delta_index, .. }
+        | WalDelta::UnbindDirentry { delta_index, .. }
+        | WalDelta::AppendFileRevision { delta_index, .. }
+        | WalDelta::TombstoneSubtree { delta_index, .. } => *delta_index,
     }
 }
 
@@ -460,7 +362,7 @@ fn set_wal_delta_index(wal_delta: &mut WalDelta, delta_index: u32) {
 mod tests {
     use super::*;
     use crate::commit::CommitOp;
-    use loon_api::{ChangeSeq, CommitId};
+    use loon_api::{ChangeSeq, CommitId, InodeId};
 
     fn request() -> CommitRequest {
         CommitRequest {
@@ -484,12 +386,16 @@ mod tests {
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             apply_after_seq: ChangeSeq(0),
             assigned_seq: ChangeSeq(1),
-            allocated_inode_ids: vec![InodeId(2)],
-            resolved_restore_content_refs: vec![None],
-            resolved_source_bindings: vec![None],
+            validated_ops: vec![ValidatedOp::CreateDir {
+                op_index: 0,
+                parent_inode: InodeId(1),
+                display_name: "docs".to_owned(),
+                name_key: "docs".to_owned(),
+                child_inode: InodeId(2),
+                create_inode_delta_index: 0,
+                bind_delta_index: 1,
+            }],
             resulting_next_inode_id: InodeId(3),
-            name_policy: loon_api::NamePolicy::default(),
-            metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         }
     }
@@ -543,8 +449,7 @@ mod tests {
     #[test]
     fn materialize_commit_outputs_wal_ops_and_results_once() {
         let materialized =
-            materialize_commit(PreparedCommit::new(request(), plan()).expect("prepare commit"))
-                .expect("materialize commit");
+            materialize_commit(PreparedCommit::new(request(), plan()).expect("prepare commit"));
 
         assert_eq!(materialized.deltas.len(), 2);
         assert!(matches!(

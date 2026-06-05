@@ -1,9 +1,8 @@
 use super::frame::validate_commit_request_frame;
 use super::metadata_preview::MetadataPreview;
-use super::prepared::materialize_commit_op;
 use super::{
-    push_unique_invariant, CommitMaterializationError, CommitOp, CommitPlan, CommitRequest,
-    CommitValidationContext, CommitValidationError, Precondition, ResolvedBinding,
+    push_unique_invariant, CommitOp, CommitPlan, CommitRequest, CommitValidationContext,
+    CommitValidationError, Precondition, ResolvedBinding, ValidatedOp,
 };
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
@@ -19,9 +18,8 @@ struct CommitShape {
     resulting_next_inode_id: InodeId,
 }
 
-struct ResolvedMetadataPreconditions {
-    resolved_restore_content_refs: Vec<Option<ContentRef>>,
-    resolved_source_bindings: Vec<Option<ResolvedBinding>>,
+struct ValidatedMetadataOps {
+    validated_ops: Vec<ValidatedOp>,
 }
 
 pub(crate) fn resolve_restore_content_refs(
@@ -84,7 +82,7 @@ pub fn build_commit_plan(
         InvariantId::NextInodeIdIsMonotonic,
     ];
     let shape = compute_commit_shape(request, context)?;
-    let resolved_metadata = validate_metadata_preconditions(
+    let validated_metadata = validate_metadata_preconditions(
         request,
         context.metadata_state,
         shape.assigned_seq,
@@ -135,12 +133,8 @@ pub fn build_commit_plan(
         commit_id: request.commit_id.clone(),
         apply_after_seq: context.head.seq,
         assigned_seq: shape.assigned_seq,
-        allocated_inode_ids: shape.allocated_inode_ids,
-        resolved_restore_content_refs: resolved_metadata.resolved_restore_content_refs,
-        resolved_source_bindings: resolved_metadata.resolved_source_bindings,
+        validated_ops: validated_metadata.validated_ops,
         resulting_next_inode_id: shape.resulting_next_inode_id,
-        name_policy: context.head.name_policy,
-        metadata_preconditions: request.preconditions.clone(),
         checked_invariants,
     })
 }
@@ -198,11 +192,10 @@ fn validate_metadata_preconditions(
     allocated_inode_ids: &[InodeId],
     name_policy: NamePolicy,
     checked_invariants: &mut Vec<InvariantId>,
-) -> Result<ResolvedMetadataPreconditions, CommitValidationError> {
+) -> Result<ValidatedMetadataOps, CommitValidationError> {
     let mut ephemeral_metadata_state = MetadataPreview::new(metadata_state);
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
-    let mut resolved_restore_content_refs = Vec::with_capacity(request.ops.len());
-    let mut resolved_source_bindings = Vec::with_capacity(request.ops.len());
+    let mut validated_ops = Vec::with_capacity(request.ops.len());
     let mut next_delta_index = 0u32;
 
     validate_explicit_preconditions(
@@ -215,75 +208,12 @@ fn validate_metadata_preconditions(
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index =
             u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
-        let resolved_restore_content_ref = match op {
-            CommitOp::RestoreRevision {
-                inode_id,
-                source_revision_no,
-                base_revision_no,
-            } => {
-                validate_restore_target(
-                    &ephemeral_metadata_state,
-                    *inode_id,
-                    *base_revision_no,
-                    committed_seq,
-                )?;
-                let source_revision_no = validate_restore_source_revision(
-                    &ephemeral_metadata_state,
-                    *inode_id,
-                    *source_revision_no,
-                    committed_seq,
-                )?;
-                if base_revision_no.0.checked_add(1).is_none() {
-                    return Err(CommitValidationError::RestoreRevisionOverflow {
-                        inode_id: *inode_id,
-                        base_revision_no: *base_revision_no,
-                    });
-                }
-                validate_restore_not_covered(
-                    &ephemeral_metadata_state,
-                    *inode_id,
-                    committed_seq,
-                    checked_invariants,
-                )?;
-                Some(source_revision_no.content_ref)
-            }
-            _ => None,
-        };
-        let resolved_source_binding = match op {
-            CommitOp::DeleteFile { inode_id } => Some(resolve_current_binding_for_mutation(
-                &ephemeral_metadata_state,
-                *inode_id,
-                committed_seq,
-            )?),
-            CommitOp::Rename { inode_id, mode, .. } => {
-                if *mode != loon_api::v0::RenameMode::NoReplace {
-                    return Err(CommitValidationError::UnsupportedRenameMode { mode: *mode });
-                }
-                Some(resolve_current_binding_for_mutation(
-                    &ephemeral_metadata_state,
-                    *inode_id,
-                    committed_seq,
-                )?)
-            }
-            CommitOp::DeleteSubtree { root_inode } => Some(resolve_current_binding_for_mutation(
-                &ephemeral_metadata_state,
-                *root_inode,
-                committed_seq,
-            )?),
-            _ => None,
-        };
-
-        match op {
+        let validated_op = match op {
             CommitOp::CreateDir {
                 parent_inode,
                 display_name,
-            }
-            | CommitOp::CreateFile {
-                parent_inode,
-                display_name,
-                ..
             } => {
-                validate_child_name_absent(
+                let name_key = validate_child_name_absent(
                     &ephemeral_metadata_state,
                     *parent_inode,
                     display_name,
@@ -297,11 +227,57 @@ fn validate_metadata_preconditions(
                     checked_invariants,
                     true,
                 )?;
+                ValidatedOp::CreateDir {
+                    op_index,
+                    parent_inode: *parent_inode,
+                    display_name: display_name.clone(),
+                    name_key,
+                    child_inode: next_allocated_inode(
+                        &mut allocated_inode_ids,
+                        CommitValidationError::NextInodeOverflow,
+                    )?,
+                    create_inode_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                }
+            }
+            CommitOp::CreateFile {
+                parent_inode,
+                display_name,
+                content_ref,
+            } => {
+                let name_key = validate_child_name_absent(
+                    &ephemeral_metadata_state,
+                    *parent_inode,
+                    display_name,
+                    committed_seq,
+                    name_policy,
+                )?;
+                validate_ancestors_not_subtree_deleted(
+                    &ephemeral_metadata_state,
+                    *parent_inode,
+                    committed_seq,
+                    checked_invariants,
+                    true,
+                )?;
+                ValidatedOp::CreateFile {
+                    op_index,
+                    parent_inode: *parent_inode,
+                    display_name: display_name.clone(),
+                    name_key,
+                    child_inode: next_allocated_inode(
+                        &mut allocated_inode_ids,
+                        CommitValidationError::NextInodeOverflow,
+                    )?,
+                    content_ref: content_ref.clone(),
+                    create_inode_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    revision_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                }
             }
             CommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no,
-                ..
+                content_ref,
             } => {
                 validate_inode_revision_is(
                     &ephemeral_metadata_state,
@@ -309,12 +285,7 @@ fn validate_metadata_preconditions(
                     *base_revision_no,
                     committed_seq,
                 )?;
-                if base_revision_no.0.checked_add(1).is_none() {
-                    return Err(CommitValidationError::ReplaceFileRevisionOverflow {
-                        inode_id: *inode_id,
-                        base_revision_no: *base_revision_no,
-                    });
-                }
+                let revision_no = next_revision_no(*inode_id, *base_revision_no, true)?;
                 validate_ancestors_not_subtree_deleted(
                     &ephemeral_metadata_state,
                     *inode_id,
@@ -322,9 +293,53 @@ fn validate_metadata_preconditions(
                     checked_invariants,
                     false,
                 )?;
+                ValidatedOp::ReplaceFile {
+                    op_index,
+                    inode_id: *inode_id,
+                    revision_no,
+                    content_ref: content_ref.clone(),
+                    revision_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                }
             }
-            CommitOp::RestoreRevision { .. } => {}
+            CommitOp::RestoreRevision {
+                inode_id,
+                source_revision_no,
+                base_revision_no,
+            } => {
+                validate_restore_target(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    *base_revision_no,
+                    committed_seq,
+                )?;
+                let source_revision = validate_restore_source_revision(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    *source_revision_no,
+                    committed_seq,
+                )?;
+                let revision_no = next_revision_no(*inode_id, *base_revision_no, false)?;
+                validate_restore_not_covered(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    committed_seq,
+                    checked_invariants,
+                )?;
+                ValidatedOp::RestoreRevision {
+                    op_index,
+                    inode_id: *inode_id,
+                    source_revision_no: *source_revision_no,
+                    revision_no,
+                    content_ref: source_revision.content_ref,
+                    revision_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                }
+            }
             CommitOp::DeleteFile { inode_id } => {
+                let source_binding = resolve_current_binding_for_mutation(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    committed_seq,
+                )?;
                 validate_delete_file_target(&ephemeral_metadata_state, *inode_id, committed_seq)?;
                 validate_delete_file_not_covered(
                     &ephemeral_metadata_state,
@@ -332,15 +347,30 @@ fn validate_metadata_preconditions(
                     committed_seq,
                     checked_invariants,
                 )?;
+                ValidatedOp::DeleteFile {
+                    op_index,
+                    inode_id: *inode_id,
+                    source_binding,
+                    unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                }
             }
             CommitOp::Rename {
                 inode_id,
                 new_parent_inode,
                 new_display_name,
-                ..
+                mode,
             } => {
+                if *mode != loon_api::v0::RenameMode::NoReplace {
+                    return Err(CommitValidationError::UnsupportedRenameMode { mode: *mode });
+                }
+                let source_binding = resolve_current_binding_for_mutation(
+                    &ephemeral_metadata_state,
+                    *inode_id,
+                    committed_seq,
+                )?;
                 validate_rename_source(&ephemeral_metadata_state, *inode_id, committed_seq)?;
-                validate_rename_target_name_absent(
+                let new_name_key = validate_rename_target_name_absent(
                     &ephemeral_metadata_state,
                     *new_parent_inode,
                     new_display_name,
@@ -365,8 +395,23 @@ fn validate_metadata_preconditions(
                     committed_seq,
                     checked_invariants,
                 )?;
+                ValidatedOp::Rename {
+                    op_index,
+                    inode_id: *inode_id,
+                    source_binding,
+                    new_parent_inode: *new_parent_inode,
+                    new_display_name: new_display_name.clone(),
+                    new_name_key,
+                    unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                }
             }
             CommitOp::DeleteSubtree { root_inode } => {
+                let source_binding = resolve_current_binding_for_mutation(
+                    &ephemeral_metadata_state,
+                    *root_inode,
+                    committed_seq,
+                )?;
                 validate_delete_subtree_root(
                     &ephemeral_metadata_state,
                     *root_inode,
@@ -378,96 +423,55 @@ fn validate_metadata_preconditions(
                     committed_seq,
                     checked_invariants,
                 )?;
+                ValidatedOp::DeleteSubtree {
+                    op_index,
+                    root_inode: *root_inode,
+                    source_binding,
+                    unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                }
             }
-        }
-        resolved_restore_content_refs.push(resolved_restore_content_ref.clone());
-        resolved_source_bindings.push(resolved_source_binding.clone());
-
-        let (deltas, _result) = materialize_commit_op(
-            op,
-            op_index,
-            name_policy,
-            resolved_restore_content_ref.as_ref(),
-            resolved_source_binding.as_ref(),
-            &mut allocated_inode_ids,
-            &mut next_delta_index,
-        )
-        .map_err(|err| materialization_error_to_validation_error(err, op))?;
-        let deltas = deltas
-            .iter()
-            .map(|delta| delta.wal_delta.clone())
-            .collect::<Vec<_>>();
-        ephemeral_metadata_state
-            .apply_committed_wal_deltas_mut(committed_seq, &deltas)
-            .expect("validated commit ops should always apply into ephemeral metadata state");
+        };
+        ephemeral_metadata_state.apply_validated_op_mut(committed_seq, &validated_op);
+        validated_ops.push(validated_op);
     }
 
-    Ok(ResolvedMetadataPreconditions {
-        resolved_restore_content_refs,
-        resolved_source_bindings,
+    Ok(ValidatedMetadataOps { validated_ops })
+}
+
+fn next_allocated_inode(
+    allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
+    error: CommitValidationError,
+) -> Result<InodeId, CommitValidationError> {
+    allocated_inode_ids.next().ok_or(error)
+}
+
+fn reserve_delta_index(next_delta_index: &mut u32) -> Result<u32, CommitValidationError> {
+    let delta_index = *next_delta_index;
+    *next_delta_index = next_delta_index
+        .checked_add(1)
+        .ok_or(CommitValidationError::DeltaIndexOverflow)?;
+    Ok(delta_index)
+}
+
+fn next_revision_no(
+    inode_id: InodeId,
+    base_revision_no: RevisionNo,
+    is_replace: bool,
+) -> Result<RevisionNo, CommitValidationError> {
+    base_revision_no.0.checked_add(1).map(RevisionNo).ok_or({
+        if is_replace {
+            CommitValidationError::ReplaceFileRevisionOverflow {
+                inode_id,
+                base_revision_no,
+            }
+        } else {
+            CommitValidationError::RestoreRevisionOverflow {
+                inode_id,
+                base_revision_no,
+            }
+        }
     })
-}
-
-fn materialization_error_to_validation_error(
-    error: CommitMaterializationError,
-    op: &CommitOp,
-) -> CommitValidationError {
-    match (error, op) {
-        (
-            CommitMaterializationError::MissingResolvedRestoreContentRef { .. },
-            CommitOp::RestoreRevision {
-                inode_id,
-                source_revision_no,
-                ..
-            },
-        ) => CommitValidationError::RestoreRevisionSourceRevisionMissing {
-            inode_id: *inode_id,
-            source_revision_no: *source_revision_no,
-        },
-        (
-            CommitMaterializationError::ReplaceRevisionOverflow { .. },
-            CommitOp::ReplaceFile {
-                inode_id,
-                base_revision_no,
-                ..
-            },
-        ) => CommitValidationError::ReplaceFileRevisionOverflow {
-            inode_id: *inode_id,
-            base_revision_no: *base_revision_no,
-        },
-        (
-            CommitMaterializationError::RestoreRevisionOverflow { .. },
-            CommitOp::RestoreRevision {
-                inode_id,
-                base_revision_no,
-                ..
-            },
-        ) => CommitValidationError::RestoreRevisionOverflow {
-            inode_id: *inode_id,
-            base_revision_no: *base_revision_no,
-        },
-        (CommitMaterializationError::OpIndexOverflow, _) => CommitValidationError::OpIndexOverflow,
-        (CommitMaterializationError::DeltaIndexOverflow, _) => {
-            CommitValidationError::OpIndexOverflow
-        }
-        (CommitMaterializationError::MissingResolvedSourceBinding { op_index }, _) => {
-            CommitValidationError::SourceBindingMissing {
-                inode_id: request_op_inode(op).unwrap_or(InodeId(u64::from(op_index))),
-            }
-        }
-        _ => CommitValidationError::NextInodeOverflow,
-    }
-}
-
-fn request_op_inode(op: &CommitOp) -> Option<InodeId> {
-    match op {
-        CommitOp::ReplaceFile { inode_id, .. }
-        | CommitOp::RestoreRevision { inode_id, .. }
-        | CommitOp::DeleteFile { inode_id }
-        | CommitOp::Rename { inode_id, .. } => Some(*inode_id),
-        CommitOp::DeleteSubtree { root_inode } => Some(*root_inode),
-        CommitOp::CreateDir { .. } | CommitOp::CreateFile { .. } => None,
-    }
 }
 
 fn validate_explicit_preconditions(
@@ -648,7 +652,7 @@ fn validate_child_name_absent(
     display_name: &str,
     base_seq: ChangeSeq,
     name_policy: NamePolicy,
-) -> Result<(), CommitValidationError> {
+) -> Result<String, CommitValidationError> {
     validate_display_name(display_name)?;
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
@@ -669,7 +673,7 @@ fn validate_child_name_absent(
         });
     }
 
-    Ok(())
+    Ok(name_key)
 }
 
 fn validate_inode_revision_is(
@@ -903,7 +907,7 @@ fn validate_rename_target_name_absent(
     display_name: &str,
     base_seq: ChangeSeq,
     name_policy: NamePolicy,
-) -> Result<(), CommitValidationError> {
+) -> Result<String, CommitValidationError> {
     validate_display_name(display_name)?;
     let parent = metadata_state
         .inode_at_seq(parent_inode, base_seq)
@@ -924,7 +928,7 @@ fn validate_rename_target_name_absent(
         });
     }
 
-    Ok(())
+    Ok(name_key)
 }
 
 fn validate_display_name(display_name: &str) -> Result<(), CommitValidationError> {

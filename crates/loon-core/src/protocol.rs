@@ -515,15 +515,7 @@ pub(crate) fn publish_namespace_mutations_batch_against_basis<S: ObjectStore + ?
         };
         let materialized = {
             let _span = tracing::info_span!("loon.phase", phase = "materialize_commit").entered();
-            match materialize_commit(prepared) {
-                Ok(value) => value,
-                Err(error) => {
-                    outcomes[index] = Some(Err(CoreError::Store(format!(
-                        "commit materialization failed: {error}"
-                    ))));
-                    continue;
-                }
-            }
+            materialize_commit(prepared)
         };
         let preview = {
             let _span =

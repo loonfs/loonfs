@@ -696,7 +696,9 @@ fn push_invariant(checked_invariants: &mut Vec<InvariantId>, invariant: Invarian
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{materialize_commit, CommitOp, CommitPlan, CommitRequest, PreparedCommit};
+    use crate::commit::{
+        materialize_commit, CommitOp, CommitPlan, CommitRequest, PreparedCommit, ValidatedOp,
+    };
     use loon_api::{CommitId, FenceToken};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::ObjectStore;
@@ -723,16 +725,20 @@ mod tests {
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             apply_after_seq: ChangeSeq(0),
             assigned_seq: ChangeSeq(1),
-            allocated_inode_ids: vec![InodeId(2)],
-            resolved_restore_content_refs: vec![None],
-            resolved_source_bindings: vec![None],
+            validated_ops: vec![ValidatedOp::CreateDir {
+                op_index: 0,
+                parent_inode: InodeId(1),
+                display_name: "docs".to_owned(),
+                name_key: "docs".to_owned(),
+                child_inode: InodeId(2),
+                create_inode_delta_index: 0,
+                bind_delta_index: 1,
+            }],
             resulting_next_inode_id: InodeId(3),
-            name_policy: loon_api::NamePolicy::default(),
-            metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-        let record = materialize_commit(prepared).expect("materialize commit");
+        let record = materialize_commit(prepared);
 
         let segment = prepare_wal_segment(
             namespace_id,
@@ -946,16 +952,23 @@ mod tests {
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             apply_after_seq,
             assigned_seq,
-            allocated_inode_ids: vec![InodeId(2)],
-            resolved_restore_content_refs: vec![None],
-            resolved_source_bindings: vec![None],
+            validated_ops: vec![ValidatedOp::CreateDir {
+                op_index: 0,
+                parent_inode: InodeId(1),
+                display_name: display_name.to_owned(),
+                name_key: loon_api::name_key_for_display_name(
+                    loon_api::NamePolicy::default(),
+                    display_name,
+                ),
+                child_inode: InodeId(2),
+                create_inode_delta_index: 0,
+                bind_delta_index: 1,
+            }],
             resulting_next_inode_id: InodeId(3),
-            name_policy: loon_api::NamePolicy::default(),
-            metadata_preconditions: Vec::new(),
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-        materialize_commit(prepared).expect("materialize commit")
+        materialize_commit(prepared)
     }
 
     fn assert_wal_chain_corruption_rejected(
