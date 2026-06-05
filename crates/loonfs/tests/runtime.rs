@@ -483,6 +483,15 @@ fn runtime_basis_cache_skips_oversized_basis() {
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.warm_basis_cache_misses, 2);
     assert_eq!(stats.warm_basis_cache_hits, 0);
+    assert_eq!(stats.warm_basis_uncacheable_count, 2);
+    assert_eq!(
+        stats.warm_basis_uncacheable_rows,
+        basis_weight.rows.saturating_mul(2)
+    );
+    assert_eq!(
+        stats.warm_basis_uncacheable_decoded_bytes,
+        basis_weight.decoded_bytes.saturating_mul(2)
+    );
     assert_eq!(stats.warm_basis_cached_rows, 0);
     assert_eq!(stats.warm_basis_cached_decoded_bytes, 0);
 }

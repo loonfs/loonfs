@@ -646,6 +646,9 @@ pub struct RuntimeCacheStats {
     pub warm_basis_evictions: usize,
     pub warm_basis_evicted_rows: usize,
     pub warm_basis_evicted_decoded_bytes: usize,
+    pub warm_basis_uncacheable_count: usize,
+    pub warm_basis_uncacheable_rows: usize,
+    pub warm_basis_uncacheable_decoded_bytes: usize,
     pub warm_basis_cached_rows: usize,
     pub warm_basis_cached_decoded_bytes: usize,
     pub warm_basis_rehydrate_count: usize,
@@ -669,6 +672,9 @@ struct RuntimeCacheStatsInner {
     warm_basis_evictions: AtomicUsize,
     warm_basis_evicted_rows: AtomicUsize,
     warm_basis_evicted_decoded_bytes: AtomicUsize,
+    warm_basis_uncacheable_count: AtomicUsize,
+    warm_basis_uncacheable_rows: AtomicUsize,
+    warm_basis_uncacheable_decoded_bytes: AtomicUsize,
     warm_basis_cached_rows: AtomicUsize,
     warm_basis_cached_decoded_bytes: AtomicUsize,
     warm_basis_rehydrate_count: AtomicUsize,
@@ -693,6 +699,11 @@ impl RuntimeCacheStatsInner {
             warm_basis_evicted_rows: self.warm_basis_evicted_rows.load(Ordering::SeqCst),
             warm_basis_evicted_decoded_bytes: self
                 .warm_basis_evicted_decoded_bytes
+                .load(Ordering::SeqCst),
+            warm_basis_uncacheable_count: self.warm_basis_uncacheable_count.load(Ordering::SeqCst),
+            warm_basis_uncacheable_rows: self.warm_basis_uncacheable_rows.load(Ordering::SeqCst),
+            warm_basis_uncacheable_decoded_bytes: self
+                .warm_basis_uncacheable_decoded_bytes
                 .load(Ordering::SeqCst),
             warm_basis_cached_rows: self.warm_basis_cached_rows.load(Ordering::SeqCst),
             warm_basis_cached_decoded_bytes: self
@@ -757,6 +768,15 @@ impl RuntimeCacheStatsInner {
 
     fn record_warm_basis_cache_update(&self, update: BasisCacheUpdate) {
         self.record_warm_basis_eviction(update.eviction);
+    }
+
+    fn record_warm_basis_uncacheable(&self, weight: VerifiedNamespaceBasisWeight) {
+        self.warm_basis_uncacheable_count
+            .fetch_add(1, Ordering::SeqCst);
+        self.warm_basis_uncacheable_rows
+            .fetch_add(weight.rows, Ordering::SeqCst);
+        self.warm_basis_uncacheable_decoded_bytes
+            .fetch_add(weight.decoded_bytes, Ordering::SeqCst);
     }
 
     fn set_warm_basis_cached_weight(&self, rows: usize, decoded_bytes: usize) {
@@ -1955,12 +1975,27 @@ impl Fs {
         if !self.basis_cache_enabled() {
             return;
         }
+        let limits = BasisCacheLimits::from_config(cache_config);
+        let weight = basis.weight();
+        if !limits.can_cache(weight) {
+            self.inner.cache_stats.record_warm_basis_uncacheable(weight);
+            tracing::warn!(
+                namespace_id = %basis.head.namespace_id,
+                rows = weight.rows,
+                decoded_bytes = weight.decoded_bytes,
+                max_rows = limits.max_rows,
+                max_decoded_bytes = ?limits.max_decoded_bytes,
+                "warm basis exceeds cache limits"
+            );
+            self.prune_warm_basis_budget();
+            return;
+        }
         let update = self
             .inner
             .basis_cache
             .lock()
             .expect("basis cache lock poisoned")
-            .insert(basis, BasisCacheLimits::from_config(cache_config));
+            .insert(basis, limits);
         self.inner
             .cache_stats
             .record_warm_basis_cache_update(update);

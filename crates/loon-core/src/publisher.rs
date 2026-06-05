@@ -118,12 +118,14 @@ pub struct NamespaceCommitEngine {
 struct CachedVerifiedBasis {
     basis: Arc<VerifiedNamespaceBasis>,
     head_etag_reuse_token: String,
+    weight: VerifiedNamespaceBasisWeight,
 }
 
 impl CachedVerifiedBasis {
     fn from_arc(basis: Arc<VerifiedNamespaceBasis>) -> Self {
         Self {
             head_etag_reuse_token: basis.head_etag.clone(),
+            weight: basis.weight(),
             basis,
         }
     }
@@ -133,7 +135,7 @@ impl CachedVerifiedBasis {
     }
 
     fn weight(&self) -> VerifiedNamespaceBasisWeight {
-        self.basis.weight()
+        self.weight
     }
 
     fn basis_to_reuse_with_refreshed_lease(&self, lease: LeaseState) -> VerifiedNamespaceBasis {

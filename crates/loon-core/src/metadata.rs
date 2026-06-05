@@ -9,7 +9,7 @@ use loon_api::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::mem::size_of;
+use std::mem::{size_of, size_of_val};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -26,6 +26,10 @@ pub struct MetadataState {
     subtree_tombstones: Vec<SubtreeTombstoneRecord>,
     #[serde(default)]
     commit_receipts: Vec<CommitReceiptRecord>,
+    #[serde(skip)]
+    row_count: usize,
+    #[serde(skip)]
+    decoded_bytes: usize,
     #[serde(skip)]
     indexes: MetadataIndexes,
 }
@@ -185,6 +189,8 @@ impl MetadataState {
             revisions,
             subtree_tombstones,
             commit_receipts,
+            row_count: 0,
+            decoded_bytes: 0,
             indexes: MetadataIndexes::default(),
         };
         state.rebuild_indexes();
@@ -220,37 +226,11 @@ impl MetadataState {
     }
 
     pub fn row_count(&self) -> usize {
-        self.inodes.len()
-            + self.direntry_binds.len()
-            + self.direntry_unbinds.len()
-            + self.revisions.len()
-            + self.subtree_tombstones.len()
-            + self.commit_receipts.len()
+        self.row_count
     }
 
     pub fn decoded_bytes(&self) -> usize {
-        self.inodes.len() * size_of::<InodeRecord>()
-            + self
-                .direntry_binds
-                .iter()
-                .map(direntry_bind_decoded_bytes)
-                .sum::<usize>()
-            + self
-                .direntry_unbinds
-                .iter()
-                .map(direntry_unbind_decoded_bytes)
-                .sum::<usize>()
-            + self
-                .revisions
-                .iter()
-                .map(revision_decoded_bytes)
-                .sum::<usize>()
-            + self.subtree_tombstones.len() * size_of::<SubtreeTombstoneRecord>()
-            + self
-                .commit_receipts
-                .iter()
-                .map(commit_receipt_decoded_bytes)
-                .sum::<usize>()
+        self.decoded_bytes
     }
 
     pub fn find_commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
@@ -258,6 +238,22 @@ impl MetadataState {
     }
 
     fn rebuild_indexes(&mut self) {
+        self.row_count = metadata_row_count(
+            &self.inodes,
+            &self.direntry_binds,
+            &self.direntry_unbinds,
+            &self.revisions,
+            &self.subtree_tombstones,
+            &self.commit_receipts,
+        );
+        self.decoded_bytes = metadata_decoded_bytes(
+            &self.inodes,
+            &self.direntry_binds,
+            &self.direntry_unbinds,
+            &self.revisions,
+            &self.subtree_tombstones,
+            &self.commit_receipts,
+        );
         self.indexes = MetadataIndexes::rebuild(
             &self.inodes,
             &self.direntry_binds,
@@ -270,32 +266,43 @@ impl MetadataState {
 
     fn push_inode_record(&mut self, record: InodeRecord) {
         self.indexes.record_inode(&record);
+        self.record_row_weight(size_of::<InodeRecord>());
         self.inodes.push(record);
     }
 
     fn push_direntry_bind_record(&mut self, record: DirentryBindRecord) {
         self.indexes.record_bind(&record);
+        self.record_row_weight(direntry_bind_decoded_bytes(&record));
         self.direntry_binds.push(record);
     }
 
     fn push_direntry_unbind_record(&mut self, record: DirentryUnbindRecord) {
         self.indexes.record_unbind(&record);
+        self.record_row_weight(direntry_unbind_decoded_bytes(&record));
         self.direntry_unbinds.push(record);
     }
 
     fn push_revision_record(&mut self, record: RevisionRecord) {
         self.indexes.record_revision(&record);
+        self.record_row_weight(revision_decoded_bytes(&record));
         self.revisions.push(record);
     }
 
     fn push_subtree_tombstone_record(&mut self, record: SubtreeTombstoneRecord) {
         self.indexes.record_tombstone(&record);
+        self.record_row_weight(size_of::<SubtreeTombstoneRecord>());
         self.subtree_tombstones.push(record);
     }
 
     fn push_commit_receipt_record(&mut self, record: CommitReceiptRecord) {
         self.indexes.record_commit_receipt(&record);
+        self.record_row_weight(commit_receipt_decoded_bytes(&record));
         self.commit_receipts.push(record);
+    }
+
+    fn record_row_weight(&mut self, decoded_bytes: usize) {
+        self.row_count = self.row_count.saturating_add(1);
+        self.decoded_bytes = self.decoded_bytes.saturating_add(decoded_bytes);
     }
 
     pub fn apply_committed_wal_deltas(
@@ -1056,6 +1063,54 @@ fn join_display_path(base: &str, component: &str) -> String {
     }
 }
 
+fn metadata_row_count(
+    inodes: &[InodeRecord],
+    direntry_binds: &[DirentryBindRecord],
+    direntry_unbinds: &[DirentryUnbindRecord],
+    revisions: &[RevisionRecord],
+    subtree_tombstones: &[SubtreeTombstoneRecord],
+    commit_receipts: &[CommitReceiptRecord],
+) -> usize {
+    inodes
+        .len()
+        .saturating_add(direntry_binds.len())
+        .saturating_add(direntry_unbinds.len())
+        .saturating_add(revisions.len())
+        .saturating_add(subtree_tombstones.len())
+        .saturating_add(commit_receipts.len())
+}
+
+fn metadata_decoded_bytes(
+    inodes: &[InodeRecord],
+    direntry_binds: &[DirentryBindRecord],
+    direntry_unbinds: &[DirentryUnbindRecord],
+    revisions: &[RevisionRecord],
+    subtree_tombstones: &[SubtreeTombstoneRecord],
+    commit_receipts: &[CommitReceiptRecord],
+) -> usize {
+    size_of_val(inodes)
+        .saturating_add(
+            direntry_binds
+                .iter()
+                .map(direntry_bind_decoded_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            direntry_unbinds
+                .iter()
+                .map(direntry_unbind_decoded_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(revisions.iter().map(revision_decoded_bytes).sum::<usize>())
+        .saturating_add(size_of_val(subtree_tombstones))
+        .saturating_add(
+            commit_receipts
+                .iter()
+                .map(commit_receipt_decoded_bytes)
+                .sum::<usize>(),
+        )
+}
+
 fn direntry_bind_decoded_bytes(record: &DirentryBindRecord) -> usize {
     size_of::<DirentryBindRecord>() + record.name_key.len() + record.display_name.len()
 }
@@ -1320,8 +1375,12 @@ mod tests {
 
         let encoded = serde_json::to_string(&metadata_state).expect("encode metadata");
         assert!(!encoded.contains("indexes"));
+        assert!(!encoded.contains("row_count"));
+        assert!(!encoded.contains("decoded_bytes"));
         let decoded: MetadataState = serde_json::from_str(&encoded).expect("decode metadata");
 
+        assert_eq!(decoded.row_count(), metadata_state.row_count());
+        assert_eq!(decoded.decoded_bytes(), metadata_state.decoded_bytes());
         assert_eq!(decoded.indexed_seq(), ChangeSeq(1));
         assert_eq!(
             decoded
