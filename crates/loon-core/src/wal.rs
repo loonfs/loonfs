@@ -738,7 +738,7 @@ mod tests {
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-        let record = materialize_commit(prepared).expect("materialize commit");
+        let record = materialize_commit(prepared);
 
         let segment = prepare_wal_segment(
             namespace_id,
@@ -968,7 +968,7 @@ mod tests {
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-        materialize_commit(prepared).expect("materialize commit")
+        materialize_commit(prepared)
     }
 
     fn assert_wal_chain_corruption_rejected(

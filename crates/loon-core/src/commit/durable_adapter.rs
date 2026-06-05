@@ -125,7 +125,7 @@ mod tests {
             checked_invariants: Vec::new(),
         };
         let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
-        let materialized = materialize_commit(prepared).expect("materialize commit");
+        let materialized = materialize_commit(prepared);
 
         let payload =
             wal_payload_from_materialized_commit(&materialized).expect("build wal payload");

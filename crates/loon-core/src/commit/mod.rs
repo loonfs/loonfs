@@ -27,8 +27,8 @@ pub use self::ordered::build_commit_plan;
 pub(crate) use self::ordered::resolve_restore_content_refs;
 pub(crate) use self::prepared::CommitIdentitySource;
 pub use self::prepared::{
-    materialize_commit, CommitExecutionContext, CommitMaterializationError, CommitPrepareError,
-    MaterializedCommit, MaterializedCommitDelta, PreparedCommit,
+    materialize_commit, CommitExecutionContext, CommitPrepareError, MaterializedCommit,
+    MaterializedCommitDelta, PreparedCommit,
 };
 pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 

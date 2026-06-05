@@ -54,12 +54,6 @@ pub enum CommitPrepareError {
     Fingerprint(#[from] CommitFingerprintError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum CommitMaterializationError {
-    #[error("commit delta index overflow")]
-    DeltaIndexOverflow,
-}
-
 impl PreparedCommit {
     pub fn new(request: CommitRequest, plan: CommitPlan) -> Result<Self, CommitPrepareError> {
         Self::prepare(request, plan, CommitIdentitySource::CoreCommitRequest)
@@ -96,9 +90,7 @@ impl PreparedCommit {
     }
 }
 
-pub fn materialize_commit(
-    prepared: PreparedCommit,
-) -> Result<MaterializedCommit, CommitMaterializationError> {
+pub fn materialize_commit(prepared: PreparedCommit) -> MaterializedCommit {
     let mut deltas = Vec::new();
     let mut results = Vec::with_capacity(prepared.plan.validated_ops.len());
     for op in &prepared.plan.validated_ops {
@@ -107,11 +99,11 @@ pub fn materialize_commit(
         results.push(result);
     }
 
-    Ok(MaterializedCommit {
+    MaterializedCommit {
         prepared,
         deltas,
         results,
-    })
+    }
 }
 
 fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, CommitOpResult) {
@@ -457,8 +449,7 @@ mod tests {
     #[test]
     fn materialize_commit_outputs_wal_ops_and_results_once() {
         let materialized =
-            materialize_commit(PreparedCommit::new(request(), plan()).expect("prepare commit"))
-                .expect("materialize commit");
+            materialize_commit(PreparedCommit::new(request(), plan()).expect("prepare commit"));
 
         assert_eq!(materialized.deltas.len(), 2);
         assert!(matches!(

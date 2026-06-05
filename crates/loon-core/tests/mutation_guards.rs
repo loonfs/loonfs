@@ -434,8 +434,7 @@ fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let plan = build_commit_plan(&request, &context)
         .expect("replace then restore in same request should validate");
     let materialized =
-        materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"))
-            .expect("materialize commit");
+        materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"));
     let expected = content_ref("content-2");
     assert!(matches!(
         &materialized.results[1],
@@ -485,8 +484,7 @@ fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     let plan = build_commit_plan(&request, &context)
         .expect("restore then restore in same request should validate");
     let materialized =
-        materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"))
-            .expect("materialize commit");
+        materialize_commit(PreparedCommit::new(request, plan).expect("prepare commit"));
     let expected = content_ref("content-1");
     assert!(matches!(
         &materialized.results[0],
