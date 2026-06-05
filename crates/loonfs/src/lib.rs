@@ -274,9 +274,7 @@ impl BasisCache {
         let namespace_id = basis.head.namespace_id.clone();
         let mut eviction = self.remove_entry(&namespace_id);
         let cached = CachedVerifiedBasis::new(basis);
-        if !limits.can_cache(cached.weight()) {
-            return self.update_with_eviction(eviction);
-        }
+        debug_assert!(limits.can_cache(cached.weight()));
         self.cached_rows = self.cached_rows.saturating_add(cached.weight().rows);
         self.cached_decoded_bytes = self
             .cached_decoded_bytes
@@ -1979,7 +1977,7 @@ impl Fs {
         let weight = basis.weight();
         if !limits.can_cache(weight) {
             self.inner.cache_stats.record_warm_basis_uncacheable(weight);
-            tracing::warn!(
+            tracing::debug!(
                 namespace_id = %basis.head.namespace_id,
                 rows = weight.rows,
                 decoded_bytes = weight.decoded_bytes,
