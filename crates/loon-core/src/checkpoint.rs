@@ -2493,7 +2493,7 @@ mod tests {
     use crate::error::CoreError;
     use crate::metadata::MetadataState;
     use crate::namespace::lifecycle::bootstrap_namespace;
-    use crate::path::mutation::{move_path, put_file_bytes, write_file_bytes};
+    use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
     use crate::{ErrorCode, MutationContext, PutFileBehavior};
     use loon_api::wire::checkpoint::{
         encode_checkpoint_manifest_json, encode_checkpoint_segment_envelope_zstd,
