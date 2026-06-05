@@ -9,6 +9,7 @@ use loon_api::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::mem::size_of;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -218,11 +219,42 @@ impl MetadataState {
         &self.commit_receipts
     }
 
+    pub fn row_count(&self) -> usize {
+        self.inodes.len()
+            + self.direntry_binds.len()
+            + self.direntry_unbinds.len()
+            + self.revisions.len()
+            + self.subtree_tombstones.len()
+            + self.commit_receipts.len()
+    }
+
+    pub fn decoded_bytes(&self) -> usize {
+        self.inodes.len() * size_of::<InodeRecord>()
+            + self
+                .direntry_binds
+                .iter()
+                .map(direntry_bind_decoded_bytes)
+                .sum::<usize>()
+            + self
+                .direntry_unbinds
+                .iter()
+                .map(direntry_unbind_decoded_bytes)
+                .sum::<usize>()
+            + self
+                .revisions
+                .iter()
+                .map(revision_decoded_bytes)
+                .sum::<usize>()
+            + self.subtree_tombstones.len() * size_of::<SubtreeTombstoneRecord>()
+            + self
+                .commit_receipts
+                .iter()
+                .map(commit_receipt_decoded_bytes)
+                .sum::<usize>()
+    }
+
     pub fn find_commit_receipt(&self, commit_id: &CommitId) -> Option<&CommitReceiptRecord> {
-        self.commit_receipts
-            .iter()
-            .filter(|record| record.commit_id == *commit_id)
-            .max_by_key(|record| record.committed_seq)
+        self.indexes.commit_receipt(commit_id)
     }
 
     fn rebuild_indexes(&mut self) {
@@ -444,6 +476,21 @@ impl MetadataState {
         inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<RevisionRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.latest_revision_at_head(inode_id);
+        }
+        self.latest_revision_head_at_seq_scan(inode_id, base_seq)
+    }
+
+    pub fn latest_revision_at_head(&self, inode_id: InodeId) -> Option<RevisionRecord> {
+        self.indexes.latest_revision(inode_id)
+    }
+
+    fn latest_revision_head_at_seq_scan(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
         self.revisions
             .iter()
             .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
@@ -458,6 +505,26 @@ impl MetadataState {
     }
 
     pub fn revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        if base_seq == self.indexed_seq() {
+            return self.revision_at_head(inode_id, revision_no);
+        }
+        self.revision_at_seq_scan(inode_id, revision_no, base_seq)
+    }
+
+    pub fn revision_at_head(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+    ) -> Option<RevisionRecord> {
+        self.indexes.revision(inode_id, revision_no)
+    }
+
+    fn revision_at_seq_scan(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -989,6 +1056,48 @@ fn join_display_path(base: &str, component: &str) -> String {
     }
 }
 
+fn direntry_bind_decoded_bytes(record: &DirentryBindRecord) -> usize {
+    size_of::<DirentryBindRecord>() + record.name_key.len() + record.display_name.len()
+}
+
+fn direntry_unbind_decoded_bytes(record: &DirentryUnbindRecord) -> usize {
+    size_of::<DirentryUnbindRecord>() + record.name_key.len()
+}
+
+fn revision_decoded_bytes(record: &RevisionRecord) -> usize {
+    size_of::<RevisionRecord>() + content_ref_decoded_bytes(&record.content_ref)
+}
+
+fn commit_receipt_decoded_bytes(record: &CommitReceiptRecord) -> usize {
+    size_of::<CommitReceiptRecord>()
+        + record.commit_id.as_str().len()
+        + record.semantic_commit_fingerprint_sha256.len()
+        + record
+            .results
+            .iter()
+            .map(commit_op_result_decoded_bytes)
+            .sum::<usize>()
+}
+
+fn commit_op_result_decoded_bytes(result: &CommitOpResult) -> usize {
+    size_of::<CommitOpResult>()
+        + match result {
+            CommitOpResult::CreateFile { content_ref, .. }
+            | CommitOpResult::ReplaceFile { content_ref, .. }
+            | CommitOpResult::RestoreRevision { content_ref, .. } => {
+                content_ref_decoded_bytes(content_ref)
+            }
+            CommitOpResult::CreateDir { .. }
+            | CommitOpResult::DeleteFile { .. }
+            | CommitOpResult::Rename { .. }
+            | CommitOpResult::DeleteSubtree { .. } => 0,
+        }
+}
+
+fn content_ref_decoded_bytes(content_ref: &ContentRef) -> usize {
+    size_of::<ContentRef>() + content_ref.digest.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1413,5 +1522,97 @@ mod tests {
             .expect("receipt");
         assert_eq!(receipt.committed_seq, ChangeSeq(2));
         assert_eq!(receipt.semantic_commit_fingerprint_sha256, "new");
+    }
+
+    #[test]
+    fn revision_and_receipt_indexes_rebuild_and_update_incrementally() {
+        let commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
+        let content_ref = ContentRef {
+            kind: loon_api::ContentRefKind::WholeFileV0,
+            digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            size_bytes: 12,
+        };
+        let replacement_ref = ContentRef {
+            kind: loon_api::ContentRefKind::WholeFileV0,
+            digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+            size_bytes: 24,
+        };
+
+        let mut builder = MetadataStateBuilder::default();
+        builder.push_inode(InodeRecord {
+            inode_id: InodeId(7),
+            inode_kind: InodeKind::File,
+            created_seq: ChangeSeq(1),
+        });
+        builder.push_revision(RevisionRecord {
+            inode_id: InodeId(7),
+            revision_no: RevisionNo(1),
+            committed_seq: ChangeSeq(2),
+            revision_delta_index: 0,
+            content_ref: content_ref.clone(),
+        });
+        builder.push_revision(RevisionRecord {
+            inode_id: InodeId(7),
+            revision_no: RevisionNo(2),
+            committed_seq: ChangeSeq(3),
+            revision_delta_index: 0,
+            content_ref: replacement_ref.clone(),
+        });
+        builder.push_commit_receipt(CommitReceiptRecord {
+            commit_id: commit_id.clone(),
+            semantic_commit_fingerprint_sha256: "fingerprint".to_owned(),
+            committed_seq: ChangeSeq(3),
+            results: vec![CommitOpResult::ReplaceFile {
+                op_index: 0,
+                inode_id: InodeId(7),
+                revision_no: RevisionNo(2),
+                content_ref: replacement_ref.clone(),
+            }],
+        });
+        let metadata_state = builder.finish();
+
+        assert_eq!(metadata_state.row_count(), 4);
+        assert!(metadata_state.decoded_bytes() >= metadata_state.row_count());
+        assert_eq!(
+            metadata_state
+                .latest_revision_at_head(InodeId(7))
+                .expect("latest revision")
+                .revision_no,
+            RevisionNo(2)
+        );
+        assert_eq!(
+            metadata_state
+                .revision_at_head(InodeId(7), RevisionNo(1))
+                .expect("first revision")
+                .content_ref,
+            content_ref
+        );
+        assert_eq!(
+            metadata_state
+                .find_commit_receipt(&commit_id)
+                .expect("commit receipt")
+                .committed_seq,
+            ChangeSeq(3)
+        );
+
+        let decoded: MetadataState =
+            serde_json::from_value(serde_json::to_value(&metadata_state).expect("encode"))
+                .expect("decode");
+        assert_eq!(
+            decoded
+                .latest_revision_at_head(InodeId(7))
+                .expect("latest revision after decode")
+                .content_ref,
+            replacement_ref
+        );
+        assert_eq!(
+            decoded
+                .find_commit_receipt(&commit_id)
+                .expect("receipt after decode")
+                .semantic_commit_fingerprint_sha256,
+            "fingerprint"
+        );
     }
 }

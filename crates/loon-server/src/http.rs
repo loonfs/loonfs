@@ -21,8 +21,7 @@ use loon_api::{
 use loonfs::{
     payload_class, BootstrapNamespaceError, CoreError, CoreErrorKind, CreateNamespaceOptions, Fs,
     JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder, PathMutationIntent,
-    PutFileBehavior, RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode,
-    TraceStoreKind,
+    PutFileBehavior, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -162,7 +161,7 @@ fn build_fs_with_metrics_jsonl_path(
         .writer_id(config.writer_id.clone())
         .writer_version(config.writer_version.clone())
         .lease_duration_ms(config.lease_duration_ms)
-        .runtime_cache(RuntimeCacheConfig::default())
+        .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
 
@@ -825,6 +824,7 @@ impl IntoResponse for ApiResponseError {
 #[cfg(test)]
 mod tests {
     use super::{app_with_store, build_fs_with_metrics_jsonl_path, SharedStore};
+    use crate::config::RuntimeCacheConfigOverrides;
     use crate::{ServerConfig, StoreConfig};
     use loon_api::{ChangeSeq, CommitId, NamespaceId};
     use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
@@ -1297,6 +1297,7 @@ mod tests {
             writer_id: writer_id.to_owned(),
             writer_version: format!("{writer_id}/0.1.0"),
             lease_duration_ms: 60_000,
+            runtime_cache: RuntimeCacheConfigOverrides::default(),
             store: StoreConfig::LocalFs {
                 root: root.display().to_string(),
                 key_prefix: Some("http-tests".to_owned()),

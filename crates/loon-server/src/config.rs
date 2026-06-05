@@ -2,6 +2,7 @@ use http::Uri;
 use loon_objectstore::r2::R2StoreConfig;
 use loon_objectstore::s3::AwsS3StoreConfig;
 use loon_objectstore::ConfiguredObjectStore;
+use loonfs::RuntimeCacheConfig;
 use serde::Deserialize;
 use std::fs;
 use std::net::SocketAddr;
@@ -15,7 +16,21 @@ pub struct ServerConfig {
     pub writer_id: String,
     pub writer_version: String,
     pub lease_duration_ms: u64,
+    #[serde(default)]
+    pub runtime_cache: RuntimeCacheConfigOverrides,
     pub store: StoreConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RuntimeCacheConfigOverrides {
+    pub basis_cache_enabled: Option<bool>,
+    pub control_cache_enabled: Option<bool>,
+    pub max_cached_namespaces: Option<usize>,
+    pub max_cached_basis_rows: Option<usize>,
+    pub max_cached_basis_decoded_bytes: Option<usize>,
+    pub metadata_table_cache_enabled: Option<bool>,
+    pub metadata_table_cache_max_blocks: Option<usize>,
+    pub metadata_table_cache_max_decoded_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +73,35 @@ pub enum ServerConfigError {
 }
 
 impl ServerConfig {
+    pub fn runtime_cache_config(&self) -> RuntimeCacheConfig {
+        let mut config = RuntimeCacheConfig::default();
+        if let Some(value) = self.runtime_cache.basis_cache_enabled {
+            config.basis_cache_enabled = value;
+        }
+        if let Some(value) = self.runtime_cache.control_cache_enabled {
+            config.control_cache_enabled = value;
+        }
+        if let Some(value) = self.runtime_cache.max_cached_namespaces {
+            config.max_cached_namespaces = value;
+        }
+        if let Some(value) = self.runtime_cache.max_cached_basis_rows {
+            config.max_cached_basis_rows = value;
+        }
+        if let Some(value) = self.runtime_cache.max_cached_basis_decoded_bytes {
+            config.max_cached_basis_decoded_bytes = Some(value);
+        }
+        if let Some(value) = self.runtime_cache.metadata_table_cache_enabled {
+            config.metadata_table_cache.enabled = value;
+        }
+        if let Some(value) = self.runtime_cache.metadata_table_cache_max_blocks {
+            config.metadata_table_cache.max_blocks = value;
+        }
+        if let Some(value) = self.runtime_cache.metadata_table_cache_max_decoded_bytes {
+            config.metadata_table_cache.max_decoded_bytes = Some(value);
+        }
+        config
+    }
+
     pub fn object_store(&self) -> Result<ConfiguredObjectStore, ServerConfigError> {
         match &self.store {
             StoreConfig::LocalFs { root, key_prefix } => {
@@ -437,6 +481,120 @@ root = "/tmp/loon-server"
         let error = load_server_config(&path).expect_err("blank auth token");
 
         assert_invalid_field(error, "auth_token");
+    }
+
+    #[test]
+    fn load_uses_default_runtime_cache_when_omitted() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
+lease_duration_ms = 60000
+
+[store]
+kind = "local-fs"
+root = "/tmp/loon-server"
+"#,
+        );
+
+        let config = load_server_config(&path).expect("load config");
+        assert_eq!(
+            config.runtime_cache_config(),
+            loonfs::RuntimeCacheConfig::default()
+        );
+    }
+
+    #[test]
+    fn load_applies_runtime_cache_overrides() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
+lease_duration_ms = 60000
+
+[runtime_cache]
+basis_cache_enabled = true
+control_cache_enabled = false
+max_cached_namespaces = 2
+max_cached_basis_rows = 10
+max_cached_basis_decoded_bytes = 4096
+
+[store]
+kind = "local-fs"
+root = "/tmp/loon-server"
+"#,
+        );
+
+        let config = load_server_config(&path)
+            .expect("load config")
+            .runtime_cache_config();
+        assert!(config.basis_cache_enabled);
+        assert!(!config.control_cache_enabled);
+        assert_eq!(config.max_cached_namespaces, 2);
+        assert_eq!(config.max_cached_basis_rows, 10);
+        assert_eq!(config.max_cached_basis_decoded_bytes, Some(4096));
+    }
+
+    #[test]
+    fn load_accepts_disabled_runtime_cache_overrides() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
+lease_duration_ms = 60000
+
+[runtime_cache]
+basis_cache_enabled = false
+control_cache_enabled = false
+max_cached_namespaces = 0
+max_cached_basis_rows = 0
+max_cached_basis_decoded_bytes = 0
+metadata_table_cache_enabled = false
+metadata_table_cache_max_blocks = 0
+metadata_table_cache_max_decoded_bytes = 0
+
+[store]
+kind = "local-fs"
+root = "/tmp/loon-server"
+"#,
+        );
+
+        let config = load_server_config(&path)
+            .expect("load config")
+            .runtime_cache_config();
+        assert_eq!(config, loonfs::RuntimeCacheConfig::disabled());
+    }
+
+    #[test]
+    fn load_rejects_negative_runtime_cache_limits_as_decode_error() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loon-server"
+writer_version = "loon-server/0.1.0"
+lease_duration_ms = 60000
+
+[runtime_cache]
+max_cached_basis_rows = -1
+
+[store]
+kind = "local-fs"
+root = "/tmp/loon-server"
+"#,
+        );
+
+        let error = load_server_config(&path).expect_err("negative row limit");
+        match error {
+            ServerConfigError::Decode(_) => {}
+            other => panic!("expected decode error, got {other:?}"),
+        }
     }
 
     fn write_config(contents: &str) -> std::path::PathBuf {

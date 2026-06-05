@@ -44,10 +44,38 @@ impl<'a> MetadataPreview<'a> {
         inode_id: InodeId,
         base_seq: ChangeSeq,
     ) -> Option<RevisionRecord> {
+        self.rows_latest_revision_head_at_seq(inode_id, base_seq)
+            .into_iter()
+            .chain(self.base_latest_revision_head_at_seq(inode_id, base_seq))
+            .max_by_key(|revision| {
+                (
+                    revision.revision_no,
+                    revision.committed_seq,
+                    revision.revision_delta_index,
+                )
+            })
+    }
+
+    pub(super) fn revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        self.rows_revision_at_seq(inode_id, revision_no, base_seq)
+            .into_iter()
+            .chain(self.base_revision_at_seq(inode_id, revision_no, base_seq))
+            .max_by_key(|revision| (revision.committed_seq, revision.revision_delta_index))
+    }
+
+    fn rows_latest_revision_head_at_seq(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
         self.rows
             .revisions()
             .iter()
-            .chain(self.base.revisions().iter())
             .filter(|revision| revision.inode_id == inode_id && revision.committed_seq <= base_seq)
             .max_by_key(|revision| {
                 (
@@ -59,7 +87,7 @@ impl<'a> MetadataPreview<'a> {
             .cloned()
     }
 
-    pub(super) fn revision_at_seq(
+    fn rows_revision_at_seq(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -68,7 +96,6 @@ impl<'a> MetadataPreview<'a> {
         self.rows
             .revisions()
             .iter()
-            .chain(self.base.revisions().iter())
             .filter(|revision| {
                 revision.inode_id == inode_id
                     && revision.revision_no == revision_no
@@ -366,6 +393,31 @@ impl<'a> MetadataPreview<'a> {
             self.base.active_subtree_tombstone_at_head(root_inode_id)
         } else {
             self.base.active_subtree_tombstone(root_inode_id, base_seq)
+        }
+    }
+
+    fn base_latest_revision_head_at_seq(
+        &self,
+        inode_id: InodeId,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        if base_seq >= self.base.indexed_seq() {
+            self.base.latest_revision_at_head(inode_id)
+        } else {
+            self.base.latest_revision_head_at_seq(inode_id, base_seq)
+        }
+    }
+
+    fn base_revision_at_seq(
+        &self,
+        inode_id: InodeId,
+        revision_no: RevisionNo,
+        base_seq: ChangeSeq,
+    ) -> Option<RevisionRecord> {
+        if base_seq >= self.base.indexed_seq() {
+            self.base.revision_at_head(inode_id, revision_no)
+        } else {
+            self.base.revision_at_seq(inode_id, revision_no, base_seq)
         }
     }
 

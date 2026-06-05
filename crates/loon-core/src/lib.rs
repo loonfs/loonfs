@@ -22,6 +22,7 @@ pub use basis::{
     load_namespace_head_summary, load_verified_namespace_basis,
     load_verified_namespace_basis_at_head, probe_namespace_head_etag, BasisLoadError,
     NamespaceHeadEtagProbe, NamespaceHeadSummary, VerifiedNamespaceBasis,
+    VerifiedNamespaceBasisWeight,
 };
 pub use checkpoint::{
     advance_retention_floor, create_checkpoint, create_checkpoint_with_policy, CheckpointLoadError,
