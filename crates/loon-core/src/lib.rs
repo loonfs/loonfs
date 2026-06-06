@@ -13,6 +13,7 @@ mod options;
 mod path;
 mod protocol;
 mod publisher;
+mod storage;
 mod wal;
 
 pub mod cache {
