@@ -1,3 +1,9 @@
+//! LoonFS command-line entrypoint.
+//!
+//! The CLI supports embedded profiles that talk directly to object storage and
+//! remote profiles that talk to a LoonFS server. It keeps command output stable
+//! for humans and scripts.
+
 #![forbid(unsafe_code)]
 
 mod args;

@@ -10,9 +10,13 @@ pub type CommitAnnotations = BTreeMap<String, Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Rename behavior.
 pub enum RenameMode {
+    /// Move only if the destination name is absent.
     NoReplace,
+    /// Reserved for a future version.
     ReplaceExisting,
+    /// Reserved for a future version.
     Exchange,
 }
 
@@ -22,11 +26,14 @@ pub fn default_rename_mode() -> RenameMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Upload transport mode.
 pub enum UploadMode {
+    /// The service receives bytes and writes content to object storage.
     ServiceProxied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Response for starting an upload session.
 pub struct BeginUploadResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
@@ -34,6 +41,7 @@ pub struct BeginUploadResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Response after uploading bytes into a session.
 pub struct UploadContentResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
@@ -41,11 +49,13 @@ pub struct UploadContentResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Request to complete an upload with the expected content ref.
 pub struct CompleteUploadRequest {
     pub content_ref: ContentRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Response after an upload session is completed.
 pub struct CompleteUploadResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: String,
@@ -53,18 +63,28 @@ pub struct CompleteUploadResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Explicit semantic commit request.
+///
+/// Use this lower-level shape when you need one commit id, optional
+/// preconditions, and multiple ordered operations.
 pub struct CommitRequest {
+    /// Client idempotency key for this logical commit.
     pub commit_id: CommitId,
+    /// Optional race checks evaluated before mutation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preconditions: Vec<CommitPrecondition>,
+    /// Ordered semantic operations.
     pub ops: Vec<CommitOp>,
+    /// Optional human-readable note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Optional structured metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<CommitAnnotations>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Response for a committed explicit request.
 pub struct CommitResponse {
     pub namespace_id: NamespaceId,
     pub commit_id: CommitId,
@@ -74,29 +94,34 @@ pub struct CommitResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+/// Semantic operation inside a commit request.
 pub enum CommitOp {
+    /// Create a directory under a parent inode.
     CreateDir {
         parent_inode: InodeId,
         display_name: String,
     },
+    /// Create a file under a parent inode.
     CreateFile {
         parent_inode: InodeId,
         display_name: String,
         content_ref: ContentRef,
     },
+    /// Append a new revision to an existing file.
     ReplaceFile {
         inode_id: InodeId,
         base_revision_no: RevisionNo,
         content_ref: ContentRef,
     },
+    /// Restore a prior revision as a new current revision.
     RestoreRevision {
         inode_id: InodeId,
         source_revision_no: RevisionNo,
         base_revision_no: RevisionNo,
     },
-    DeleteFile {
-        inode_id: InodeId,
-    },
+    /// Delete a file inode.
+    DeleteFile { inode_id: InodeId },
+    /// Rename or move an inode.
     Rename {
         inode_id: InodeId,
         new_parent_inode: InodeId,
@@ -104,25 +129,27 @@ pub enum CommitOp {
         #[serde(default = "default_rename_mode")]
         mode: RenameMode,
     },
-    DeleteSubtree {
-        root_inode: InodeId,
-    },
+    /// Delete a directory subtree.
+    DeleteSubtree { root_inode: InodeId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+/// Race check evaluated before a commit is accepted.
 pub enum CommitPrecondition {
+    /// File inode is still at this revision.
     InodeRevisionIs {
         inode_id: InodeId,
         revision_no: RevisionNo,
     },
-    AncestorsNotSubtreeDeleted {
-        inode_id: InodeId,
-    },
+    /// Inode ancestors have not been subtree-deleted.
+    AncestorsNotSubtreeDeleted { inode_id: InodeId },
+    /// Directory child name is still absent.
     ChildNameAbsent {
         parent_inode: InodeId,
         name_key: NameKey,
     },
+    /// Directory binding is still exactly the binding the caller saw.
     BindingIs {
         parent_inode: InodeId,
         name_key: NameKey,
@@ -130,13 +157,13 @@ pub enum CommitPrecondition {
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
     },
-    DirectoryEmpty {
-        inode_id: InodeId,
-    },
+    /// Directory is still empty.
+    DirectoryEmpty { inode_id: InodeId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+/// Per-operation result returned after a commit succeeds.
 pub enum CommitOpResult {
     CreateDir {
         op_index: u32,
@@ -177,6 +204,10 @@ pub enum CommitOpResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "delta", rename_all = "snake_case")]
+/// Durable metadata fact exposed through the change feed.
+///
+/// Most clients should use semantic operation results. Sync and projection
+/// clients can apply deltas directly.
 pub enum CommitDelta {
     CreateInode {
         semantic_op_index: u32,
@@ -216,18 +247,24 @@ pub enum CommitDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One committed change in namespace order.
 pub struct CommittedChange {
+    /// Namespace sequence for this logical commit.
     pub seq: ChangeSeq,
+    /// Client idempotency key for this logical commit.
     pub commit_id: CommitId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<CommitAnnotations>,
+    /// Semantic operation results.
     pub ops: Vec<CommitOpResult>,
+    /// Materialized metadata deltas.
     pub deltas: Vec<CommitDelta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Change-feed response after a cursor.
 pub struct ChangesResponse {
     pub namespace_id: NamespaceId,
     pub from_exclusive_seq: ChangeSeq,

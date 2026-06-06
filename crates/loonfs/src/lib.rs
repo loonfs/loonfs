@@ -1,3 +1,9 @@
+//! Embedded LoonFS runtime.
+//!
+//! `loonfs` is the ergonomic runtime layer. It wraps `loon-core` with caching,
+//! upload helpers, maintenance hooks, and optional object-store metrics. Use it
+//! when you want LoonFS in-process, or when building the reference server.
+
 #![forbid(unsafe_code)]
 
 mod trace;
@@ -57,10 +63,13 @@ pub const DEFAULT_MAX_CACHED_BASIS_DECODED_BYTES: usize = 256 * 1024 * 1024;
 const MAX_UPLOADED_CONTENT_PROOF_ENTRIES: usize = 16_384;
 const UPLOADED_CONTENT_PROOF_TTL: Duration = Duration::from_secs(30);
 
+/// Shared object-store handle used by the runtime.
 pub type SharedObjectStore = Arc<dyn ObjectStore + Send + Sync>;
+/// Result type used by the embedded runtime.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
 
 #[derive(Debug, Error)]
+/// Runtime error.
 pub enum RuntimeError {
     #[error(transparent)]
     Core(#[from] CoreError),
@@ -71,16 +80,24 @@ pub enum RuntimeError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Configuration for an embedded runtime instance.
 pub struct FsConfig {
+    /// Writer id used for namespace leases and commits.
     pub writer_id: String,
+    /// Writer version reported in mutation context.
     pub writer_version: String,
+    /// Lease duration used by write operations.
     pub lease_duration_ms: u64,
+    /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
+    /// Tracing mode label.
     pub trace_mode: TraceMode,
+    /// Object-store kind label used by tracing.
     pub trace_store_kind: TraceStoreKind,
 }
 
 impl FsConfig {
+    /// Builds a config with default runtime settings.
     pub fn new(writer_id: impl Into<String>) -> Self {
         Self {
             writer_id: writer_id.into(),
@@ -94,16 +111,24 @@ impl FsConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Cache configuration for the embedded runtime.
 pub struct RuntimeCacheConfig {
+    /// Enables verified-basis caching.
     pub basis_cache_enabled: bool,
+    /// Enables namespace control-object caching.
     pub control_cache_enabled: bool,
+    /// Maximum namespaces retained in runtime caches.
     pub max_cached_namespaces: usize,
+    /// Maximum metadata rows retained across cached bases.
     pub max_cached_basis_rows: usize,
+    /// Approximate decoded-byte budget for cached bases.
     pub max_cached_basis_decoded_bytes: Option<usize>,
+    /// Cache settings for decoded metadata tables.
     pub metadata_table_cache: MetadataTableCacheConfig,
 }
 
 impl RuntimeCacheConfig {
+    /// Disables runtime caches.
     pub fn disabled() -> Self {
         Self {
             basis_cache_enabled: false,
@@ -134,6 +159,9 @@ impl Default for RuntimeCacheConfig {
 }
 
 #[derive(Clone)]
+/// Embedded filesystem runtime.
+///
+/// `Fs` is cheap to clone. Clones share caches and the underlying object store.
 pub struct Fs {
     inner: Arc<FsInner>,
 }
@@ -149,6 +177,7 @@ struct FsInner {
     cache_stats: RuntimeCacheStatsInner,
 }
 
+/// Builder for [`Fs`].
 pub struct FsBuilder {
     store: SharedObjectStore,
     writer_id: Option<String>,
@@ -647,6 +676,10 @@ struct CachedControl<T> {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Snapshot of runtime cache counters.
+///
+/// These counters are diagnostic. They are useful for tuning cache limits and
+/// understanding read/write warmup behavior.
 pub struct RuntimeCacheStats {
     pub warm_basis_cache_hits: usize,
     pub warm_basis_cache_misses: usize,
@@ -879,16 +912,24 @@ impl RuntimeControlCache {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Current maintenance-related namespace status.
 pub struct NamespaceStatus {
+    /// Namespace being inspected.
     pub namespace_id: NamespaceId,
+    /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
+    /// Checkpoint currently hinted by the head.
     pub checkpoint_hint_seq: Option<ChangeSeq>,
+    /// Number of visible WAL segments after the checkpoint basis.
     pub wal_tail_segments: u64,
+    /// Oldest sequence still promised for incremental replay.
     pub retention_floor_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Options for one maintenance tick.
 pub struct MaintenanceTickOptions {
+    /// Publish a checkpoint when the visible WAL tail reaches this many segments.
     pub max_wal_tail_segments: u64,
 }
 
@@ -901,21 +942,23 @@ impl Default for MaintenanceTickOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Outcome of one maintenance tick.
 pub enum MaintenanceTickOutcome {
+    /// No checkpoint was needed.
     NotNeeded,
-    CheckpointPublished {
-        checkpoint_seq: ChangeSeq,
-    },
+    /// A checkpoint was published.
+    CheckpointPublished { checkpoint_seq: ChangeSeq },
+    /// Another checkpoint already covered the attempted sequence.
     CheckpointSuperseded {
         attempted_seq: ChangeSeq,
         checkpoint_hint_seq: ChangeSeq,
     },
-    CheckpointPublishRaceLost {
-        observed_head_seq: ChangeSeq,
-    },
+    /// A concurrent head update won the race.
+    CheckpointPublishRaceLost { observed_head_seq: ChangeSeq },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of one maintenance tick.
 pub struct MaintenanceTickResult {
     pub namespace_id: NamespaceId,
     pub status_before: NamespaceStatus,
@@ -923,13 +966,18 @@ pub struct MaintenanceTickResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Options for creating a namespace.
 pub struct CreateNamespaceOptions {
+    /// Treat an existing namespace as success.
     pub allow_existing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Options for writing a file path.
 pub struct PutFileOptions {
+    /// Create-only or replace-existing behavior.
     pub behavior: PutFileBehavior,
+    /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
@@ -943,32 +991,44 @@ impl Default for PutFileOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Options for creating a directory.
 pub struct CreateDirOptions {
+    /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Options for deleting a path.
 pub struct DeleteOptions {
+    /// Whether directory deletes may remove a subtree.
     pub recursive: bool,
+    /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Options for moving a path.
 pub struct MoveOptions {
+    /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Options for copying a file path.
 pub struct CopyOptions {
+    /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Options for restoring a file revision by path.
 pub struct RestoreRevisionOptions {
+    /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
 
 impl FsBuilder {
+    /// Starts an embedded runtime builder.
     pub fn new(store: SharedObjectStore) -> Self {
         Self {
             store,
@@ -982,31 +1042,37 @@ impl FsBuilder {
         }
     }
 
+    /// Sets the writer id used by namespace mutations.
     pub fn writer_id(mut self, writer_id: impl Into<String>) -> Self {
         self.writer_id = Some(writer_id.into());
         self
     }
 
+    /// Sets the writer version used in mutation context.
     pub fn writer_version(mut self, writer_version: impl Into<String>) -> Self {
         self.writer_version = writer_version.into();
         self
     }
 
+    /// Sets the lease duration for write operations.
     pub fn lease_duration_ms(mut self, lease_duration_ms: u64) -> Self {
         self.lease_duration_ms = lease_duration_ms;
         self
     }
 
+    /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.runtime_cache = runtime_cache;
         self
     }
 
+    /// Sets the tracing mode label.
     pub fn trace_mode(mut self, trace_mode: TraceMode) -> Self {
         self.trace_mode = trace_mode;
         self
     }
 
+    /// Sets the object-store kind label used by tracing and metrics.
     pub fn trace_store_kind(mut self, trace_store_kind: TraceStoreKind) -> Self {
         self.trace_store_kind = trace_store_kind;
         self
@@ -1021,6 +1087,7 @@ impl FsBuilder {
         self
     }
 
+    /// Opens the runtime.
     pub fn build(self) -> Result<Fs> {
         let writer_id = self
             .writer_id
@@ -1048,6 +1115,7 @@ impl FsBuilder {
 }
 
 impl Fs {
+    /// Opens an embedded runtime from an object store and config.
     pub fn open(store: SharedObjectStore, config: FsConfig) -> Result<Self> {
         validate_config(&config)?;
         let metadata_table_cache = Arc::new(MetadataTableCache::new(
@@ -1067,10 +1135,12 @@ impl Fs {
         })
     }
 
+    /// Starts a runtime builder.
     pub fn builder(store: SharedObjectStore) -> FsBuilder {
         FsBuilder::new(store)
     }
 
+    /// Returns this runtime's config.
     pub fn config(&self) -> &FsConfig {
         &self.inner.config
     }

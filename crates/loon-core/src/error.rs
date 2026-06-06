@@ -12,30 +12,38 @@ use loon_api::{
 };
 use thiserror::Error;
 
+/// Public error type returned by `loon-core`.
+///
+/// Use [`Error::kind`] for broad caller action and [`Error::code`] for a stable
+/// machine-readable reason.
 pub type Error = CoreError;
+
+/// Result type used by `loon-core` entrypoints.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Broad error category for caller or operator action.
 pub enum ErrorKind {
-    /// Caller input is malformed or names an unsupported operation shape.
+    /// Fix the request before retrying.
     InvalidRequest,
-    /// The requested namespace, path, inode, revision, or upload session does not exist.
+    /// The requested object does not exist. Refresh state or choose another target.
     NotFound,
-    /// The caller attempted to create a resource that already exists.
+    /// The create target already exists. Pick another id or treat this as idempotent.
     AlreadyExists,
-    /// The request conflicts with current namespace state or another writer.
+    /// The request raced with current namespace state. Re-read and retry if desired.
     Conflict,
-    /// A caller-supplied precondition was false at validation time.
+    /// A caller-supplied precondition was false. Re-plan against fresh state.
     PreconditionFailed,
-    /// The operation is temporarily unavailable and may succeed later.
+    /// The system is temporarily unavailable. Back off and retry.
     Unavailable,
-    /// Durable namespace, WAL, checkpoint, or content state is malformed.
+    /// Durable state is malformed. Treat this as operator or repair work.
     DataCorruption,
-    /// LoonFS hit an internal invariant or implementation failure.
+    /// LoonFS hit an internal failure. Capture details and report it.
     Internal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Stable machine-readable error reason.
 pub enum ErrorCode {
     InvalidPath,
     InvalidNamespaceId,
@@ -67,6 +75,10 @@ pub enum ErrorCode {
 }
 
 #[derive(Debug, Clone, Error)]
+/// Detailed core error.
+///
+/// Most callers should branch on [`CoreError::kind`] or [`CoreError::code`]
+/// instead of matching every internal variant.
 pub enum CoreError {
     #[error(transparent)]
     Basis(#[from] BasisLoadError),
