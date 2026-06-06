@@ -3,6 +3,7 @@ use loon_objectstore::keys::{
     checkpoint_manifest, checkpoint_run_table, namespace_head, namespace_lease, wal_segment,
     CheckpointTableFamily,
 };
+use loon_objectstore::layout::{NamespaceGcBoundaryKind, ObjectLayout};
 use loon_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
@@ -205,6 +206,72 @@ fn classifies_wal_and_checkpoint_key_families() {
     assert_eq!(samples[0].key_class, KeyClass::WalSegment);
     assert_eq!(samples[1].key_class, KeyClass::CheckpointManifest);
     assert_eq!(samples[2].key_class, KeyClass::CheckpointTable);
+}
+
+#[test]
+fn classifies_reserved_namespace_layout_families() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
+    let store = instrumented_object_store(temp_dir.path(), recorder.clone());
+    let layout = ObjectLayout::new();
+
+    store
+        .put_overwrite(
+            &layout.namespace_manifest("ns-1", 1).into_string(),
+            b"manifest",
+        )
+        .expect("put namespace manifest");
+    store
+        .put_overwrite(
+            &layout.namespace_compactions("ns-1", 1).into_string(),
+            b"compactions",
+        )
+        .expect("put compactions");
+    store
+        .put_overwrite(
+            &layout
+                .compacted_metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
+                .into_string(),
+            b"metadata",
+        )
+        .expect("put metadata sst");
+    store
+        .put_overwrite(
+            &layout
+                .compacted_index_sst(
+                    "ns-1",
+                    "grep",
+                    "default",
+                    "tbl_00000000000000000000000000000002",
+                )
+                .into_string(),
+            b"index",
+        )
+        .expect("put index sst");
+    store
+        .put_overwrite(
+            &layout
+                .index_manifest("ns-1", "grep", "default", 1)
+                .into_string(),
+            b"index manifest",
+        )
+        .expect("put index manifest");
+    store
+        .put_overwrite(
+            &layout
+                .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Wal)
+                .into_string(),
+            b"boundary",
+        )
+        .expect("put gc boundary");
+
+    let samples = recorder.samples();
+    assert_eq!(samples[0].key_class, KeyClass::NamespaceManifest);
+    assert_eq!(samples[1].key_class, KeyClass::NamespaceCompactions);
+    assert_eq!(samples[2].key_class, KeyClass::CompactedMetadata);
+    assert_eq!(samples[3].key_class, KeyClass::CompactedIndex);
+    assert_eq!(samples[4].key_class, KeyClass::IndexManifest);
+    assert_eq!(samples[5].key_class, KeyClass::GcControl);
 }
 
 #[test]
