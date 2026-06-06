@@ -1,3 +1,4 @@
+use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -57,8 +58,14 @@ pub enum KeyClass {
     NamespaceHead,
     Lease,
     WalSegment,
+    NamespaceManifest,
+    NamespaceCompactions,
+    CompactedMetadata,
     CheckpointManifest,
     CheckpointTable,
+    CompactedIndex,
+    IndexManifest,
+    GcControl,
     DerivedProgress,
     Unknown,
 }
@@ -396,22 +403,32 @@ impl<S> InstrumentedObjectStore<S> {
 }
 
 fn classify_key(key: &str) -> KeyClass {
-    let segments = key.split('/').collect::<Vec<_>>();
-    match segments.as_slice() {
-        ["content-stores", _, "blobs", ..] => KeyClass::Content,
-        ["content-stores", ..] => KeyClass::Metadata,
-        ["namespaces", _, "control", "head.json"] => KeyClass::NamespaceHead,
-        ["namespaces", _, "control", "lease.json"] => KeyClass::Lease,
-        ["namespaces", _, "wal", ..] => KeyClass::WalSegment,
-        ["namespaces", _, "compacted", "checkpoints", _, "manifest.json"] => {
-            KeyClass::CheckpointManifest
-        }
-        ["namespaces", _, "compacted", "checkpoints", _, "runs", _, "tables", ..] => {
-            KeyClass::CheckpointTable
-        }
-        ["namespaces", _, "derived", .., "progress.json"] => KeyClass::DerivedProgress,
-        ["namespaces", ..] | ["queue", ..] => KeyClass::Metadata,
-        _ => KeyClass::Unknown,
+    let Some(parsed) = parse_object_key(key) else {
+        return KeyClass::Unknown;
+    };
+
+    match parsed.family() {
+        DurableObjectFamily::ContentBlob => KeyClass::Content,
+        DurableObjectFamily::NamespaceHead => KeyClass::NamespaceHead,
+        DurableObjectFamily::NamespaceLease => KeyClass::Lease,
+        DurableObjectFamily::WalSegment => KeyClass::WalSegment,
+        DurableObjectFamily::NamespaceManifest => KeyClass::NamespaceManifest,
+        DurableObjectFamily::NamespaceCompactions => KeyClass::NamespaceCompactions,
+        DurableObjectFamily::CompactedMetadataSst => KeyClass::CompactedMetadata,
+        DurableObjectFamily::CheckpointManifest => KeyClass::CheckpointManifest,
+        DurableObjectFamily::CheckpointRunTable => KeyClass::CheckpointTable,
+        DurableObjectFamily::CompactedIndexSst => KeyClass::CompactedIndex,
+        DurableObjectFamily::IndexManifest => KeyClass::IndexManifest,
+        DurableObjectFamily::IndexGcBoundary
+        | DurableObjectFamily::NamespaceGcBoundary
+        | DurableObjectFamily::GcPin => KeyClass::GcControl,
+        DurableObjectFamily::DerivedProgress => KeyClass::DerivedProgress,
+        DurableObjectFamily::NamespaceDescriptor
+        | DurableObjectFamily::NamespaceForkState
+        | DurableObjectFamily::UploadSession
+        | DurableObjectFamily::ConflictArtifact
+        | DurableObjectFamily::ContentStoreDescriptor
+        | DurableObjectFamily::QueueShard => KeyClass::Metadata,
     }
 }
 
