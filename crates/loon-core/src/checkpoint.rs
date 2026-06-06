@@ -1,13 +1,13 @@
-use crate::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::commit::CommitHeadPublishError;
 use crate::content::write_immutable_object;
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::loading::read_head_object;
 use crate::metadata::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
     MetadataStateBuilder, RevisionRecord, SubtreeTombstoneRecord,
 };
+use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::namespace::control::read_head_object;
 use loon_api::wire::checkpoint::{
     checkpoint_page_checksum_sha256, checkpoint_segment_payload_checksum_sha256,
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
@@ -695,7 +695,7 @@ pub(crate) fn write_verified_checkpoint_from_metadata<S: ObjectStore + ?Sized>(
 fn build_checkpoint_manifest_for_basis<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    basis: &crate::basis::VerifiedNamespaceBasis,
+    basis: &crate::namespace::basis::VerifiedNamespaceBasis,
     writer_version: &str,
     policy: MetadataLsmPolicy,
 ) -> Result<CheckpointManifestEnvelope, CoreError> {
@@ -2489,10 +2489,10 @@ mod tests {
         MetadataTableCacheConfig, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
         CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
     };
-    use crate::basis::{load_verified_namespace_basis, BasisLoadError};
     use crate::error::CoreError;
     use crate::metadata::MetadataState;
-    use crate::namespace::lifecycle::bootstrap_namespace;
+    use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
+    use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
     use crate::{ErrorCode, MutationContext, PutFileBehavior};
     use loon_api::wire::checkpoint::{

@@ -1,16 +1,16 @@
 use super::{checkpoint_index, row_decode::unbind_matches_binding};
-use crate::basis::BasisLoadError;
 use crate::checkpoint::{
     checkpoint_basis_head, load_verified_checkpoint_tables_with_cache, MetadataTableCache,
     VerifiedCheckpointTables,
 };
 use crate::error::CoreError;
-use crate::loading::read_head_object;
 use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, ResolvedVisiblePath,
     RevisionRecord, SubtreeTombstoneRecord,
 };
+use crate::namespace::basis::BasisLoadError;
 use crate::namespace::catalog::load_namespace_catalog_entry;
+use crate::namespace::control::read_head_object;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use crate::wal::{
     load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadRequest,

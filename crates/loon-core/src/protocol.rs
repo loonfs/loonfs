@@ -1,4 +1,3 @@
-use crate::basis::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use crate::commit::{
     build_commit_plan, commit_request_from_v0, core_commit_fingerprint, materialize_commit,
     prepare_commit_head_publish, publish_commit_head, resolve_restore_content_refs,
@@ -9,16 +8,19 @@ use crate::commit::{
 use crate::content::{write_immutable_object, ContentValidationTracker};
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::lease::acquire_or_renew_namespace_lease;
-use crate::loading::{
-    load_content_store_descriptor_control, load_namespace_descriptor_control,
-    load_namespace_head_control, load_namespace_lease_control,
-};
 use crate::metadata::{CommitReceiptRecord, MetadataState};
+use crate::namespace::basis::{
+    load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis,
+};
 use crate::namespace::catalog::{
     load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
     NamespaceInitializationState,
 };
+use crate::namespace::control::{
+    load_content_store_descriptor_control, load_namespace_descriptor_control,
+    load_namespace_head_control, load_namespace_lease_control,
+};
+use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PathPlanner};
 use crate::publisher::NamespaceMutationCandidate;
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
@@ -165,7 +167,7 @@ fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
         }
         Ok(NamespaceInitializationState::Absent) => {
             Err(CoreError::Basis(BasisLoadError::LoadNamespaceDescriptor(
-                crate::loading::ControlObjectLoadError::MissingObject {
+                crate::namespace::control::ControlObjectLoadError::MissingObject {
                     object_key: namespace_descriptor(namespace_id.as_str()),
                 },
             )))

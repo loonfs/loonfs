@@ -3,12 +3,12 @@ use super::row_decode::{
     inode_from_checkpoint_row, revision_from_checkpoint_row, tombstone_from_checkpoint_row,
     unbind_matches_binding,
 };
-use crate::basis::BasisLoadError;
 use crate::checkpoint::{CheckpointLoadError, VerifiedCheckpointTables};
 use crate::error::CoreError;
 use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
+use crate::namespace::basis::BasisLoadError;
 use loon_api::wire::checkpoint::{hex_encode_row_key_component, CheckpointTableFamily};
 use loon_api::InodeId;
 use loon_objectstore::ObjectStore;

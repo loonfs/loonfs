@@ -1,14 +1,18 @@
+pub(crate) mod basis;
+pub(crate) mod bootstrap;
 pub(crate) mod catalog;
-pub(crate) mod lifecycle;
+pub(crate) mod control;
+pub(crate) mod fork;
+pub(crate) mod lease;
 
-pub use lifecycle::BootstrapNamespaceError;
+pub use bootstrap::BootstrapNamespaceError;
 pub use loon_api::wire::control::{HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope};
 use loon_api::{FenceToken, NamespaceSummary};
 use loon_objectstore::ObjectStore;
 use thiserror::Error;
 
 pub fn list_namespaces<S: ObjectStore + ?Sized>(store: &S) -> crate::Result<Vec<NamespaceSummary>> {
-    lifecycle::list_namespaces(store)
+    catalog::list_namespaces(store)
 }
 
 pub fn head_and_lease_fence_tokens_agree(head: &HeadState, lease: &LeaseState) -> bool {

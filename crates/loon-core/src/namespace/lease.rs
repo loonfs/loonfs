@@ -1,5 +1,5 @@
 use crate::context::MutationContext;
-use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
+use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::namespace::{next_takeover_head, HeadFenceTakeoverError};
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
@@ -243,8 +243,8 @@ fn map_head_takeover_error(err: HeadFenceTakeoverError) -> LeaseAcquireError {
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
-    use crate::loading::{read_head_object, read_lease_object};
-    use crate::namespace::lifecycle::bootstrap_namespace;
+    use crate::namespace::bootstrap::bootstrap_namespace;
+    use crate::namespace::control::{read_head_object, read_lease_object};
     use crate::protocol::commit_operations;
     use loon_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
     use loon_api::{ChangeSeq, CommitId, InodeId};

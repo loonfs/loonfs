@@ -1,8 +1,8 @@
 use super::resolver::resolve_path_from_basis;
-use crate::basis::VerifiedNamespaceBasis;
 use crate::content::read_durable_content_bytes;
 use crate::error::CoreError;
 use crate::metadata::RevisionRecord;
+use crate::namespace::basis::VerifiedNamespaceBasis;
 use loon_api::{
     AuthoritativeFileBytes, FileRevision, InodeId, InodeKind, ListFileRevisionsResponse, RevisionNo,
 };

@@ -1,7 +1,7 @@
 use super::resolver::build_authoritative_path_entry;
-use crate::basis::VerifiedNamespaceBasis;
 use crate::error::CoreError;
 use crate::metadata::ResolvedVisiblePath;
+use crate::namespace::basis::VerifiedNamespaceBasis;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
 use loon_api::{AbsolutePath, AuthoritativePathEntry, DisplayName, InodeKind};
 

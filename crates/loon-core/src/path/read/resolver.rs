@@ -1,6 +1,6 @@
-use crate::basis::VerifiedNamespaceBasis;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath};
+use crate::namespace::basis::VerifiedNamespaceBasis;
 use crate::path::helpers::parse_absolute_path_for_core;
 use loon_api::{AuthoritativePathEntry, ChangeSeq, NamespaceId};
 
