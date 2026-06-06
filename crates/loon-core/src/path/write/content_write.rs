@@ -1,6 +1,6 @@
-use crate::content::store_bytes_as_content;
 use crate::error::CoreError;
 use crate::path::helpers::validate_path_for_mutation;
+use crate::storage::content::store_bytes_as_content;
 use loon_api::{ContentRef, NamespaceId};
 use loon_objectstore::ObjectStore;
 

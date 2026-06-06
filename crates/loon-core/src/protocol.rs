@@ -5,7 +5,6 @@ use crate::commit::{
     CommitRequest as CoreCommitRequest, CommitValidationContext, MaterializedCommit,
     PreparedCommit, SemanticMutationIdentity,
 };
-use crate::content::{write_immutable_object, ContentValidationTracker};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{CommitReceiptRecord, MetadataState};
@@ -23,6 +22,7 @@ use crate::namespace::control::{
 use crate::namespace::lease::acquire_or_renew_namespace_lease;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PathPlanner};
 use crate::publisher::NamespaceMutationCandidate;
+use crate::storage::content::{write_immutable_object, ContentValidationTracker};
 use crate::wal::{load_validated_wal_chain, prepare_wal_segment, WalChainLoadRequest};
 use loon_api::v0::{
     BeginUploadResponse, ChangesResponse, CommitDelta, CommitRequest as ApiCommitRequest,

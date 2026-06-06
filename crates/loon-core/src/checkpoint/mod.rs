@@ -1,5 +1,14 @@
+mod cache;
+mod row;
+
+use self::cache::{DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCacheKey};
+pub use self::cache::{MetadataTableCache, MetadataTableCacheConfig, MetadataTableCacheStats};
+use self::row::{
+    checkpoint_row_commit_seq, checkpoint_row_kind, checkpoint_row_matches_family,
+    checkpoint_rows_for_family, checkpoint_rows_for_family_after_seq, checkpoint_table_family,
+    metadata_states_equivalent,
+};
 use crate::commit::CommitHeadPublishError;
-use crate::content::write_immutable_object;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::metadata::{
@@ -8,6 +17,7 @@ use crate::metadata::{
 };
 use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::control::read_head_object;
+use crate::storage::content::write_immutable_object;
 use loon_api::wire::checkpoint::{
     checkpoint_page_checksum_sha256, checkpoint_segment_payload_checksum_sha256,
     decode_checkpoint_manifest_json, decode_checkpoint_segment_envelope_zstd,
@@ -24,15 +34,12 @@ use loon_api::{
     CreateCheckpointResponse, FenceToken, InodeId, NamespaceId,
 };
 use loon_objectstore::keys::{
-    checkpoint_manifest, checkpoint_run_table, derived_progress,
-    CheckpointTableFamily as ObjectStoreCheckpointTableFamily, DerivedWorkClass,
+    checkpoint_manifest, checkpoint_run_table, derived_progress, DerivedWorkClass,
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
@@ -61,159 +68,6 @@ const CHECKPOINT_TABLE_FAMILIES: [CheckpointTableFamily; 7] = [
 pub struct MetadataLsmPolicy {
     pub max_l0_runs: usize,
     pub max_rows_per_segment: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MetadataTableCacheConfig {
-    pub enabled: bool,
-    pub max_blocks: usize,
-    pub max_decoded_bytes: Option<usize>,
-}
-
-impl Default for MetadataTableCacheConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_blocks: 256,
-            max_decoded_bytes: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MetadataTableCacheStats {
-    pub hits: usize,
-    pub misses: usize,
-    pub inserts: usize,
-    pub evictions: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum MetadataTableBlockKind {
-    SegmentPayload,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct MetadataTableCacheKey {
-    table_digest: String,
-    block_kind: MetadataTableBlockKind,
-    block_offset: u64,
-}
-
-#[derive(Debug, Clone)]
-struct DecodedMetadataTableBlock {
-    rows: Vec<CheckpointRow>,
-    segment_seq: ChangeSeq,
-    family: CheckpointTableFamily,
-    segment_index: u32,
-    segment_key: CheckpointSegmentKey,
-    row_count: u64,
-    min_key: String,
-    max_key: String,
-    page_checksums_sha256: Vec<String>,
-    decoded_byte_len: usize,
-}
-
-#[derive(Debug)]
-pub struct MetadataTableCache {
-    config: MetadataTableCacheConfig,
-    inner: Mutex<MetadataTableCacheInner>,
-    stats: MetadataTableCacheStatsInner,
-}
-
-#[derive(Debug, Default)]
-struct MetadataTableCacheInner {
-    entries: HashMap<MetadataTableCacheKey, DecodedMetadataTableBlock>,
-    order: VecDeque<MetadataTableCacheKey>,
-    decoded_byte_len: usize,
-}
-
-#[derive(Debug, Default)]
-struct MetadataTableCacheStatsInner {
-    hits: AtomicUsize,
-    misses: AtomicUsize,
-    inserts: AtomicUsize,
-    evictions: AtomicUsize,
-}
-
-impl MetadataTableCache {
-    pub fn new(config: MetadataTableCacheConfig) -> Self {
-        Self {
-            config,
-            inner: Mutex::new(MetadataTableCacheInner::default()),
-            stats: MetadataTableCacheStatsInner::default(),
-        }
-    }
-
-    pub fn stats(&self) -> MetadataTableCacheStats {
-        MetadataTableCacheStats {
-            hits: self.stats.hits.load(Ordering::SeqCst),
-            misses: self.stats.misses.load(Ordering::SeqCst),
-            inserts: self.stats.inserts.load(Ordering::SeqCst),
-            evictions: self.stats.evictions.load(Ordering::SeqCst),
-        }
-    }
-
-    fn get(&self, key: &MetadataTableCacheKey) -> Option<DecodedMetadataTableBlock> {
-        if !self.config.enabled || self.config.max_blocks == 0 {
-            return None;
-        }
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("metadata table cache lock poisoned");
-        let Some(block) = inner.entries.get(key).cloned() else {
-            self.stats.misses.fetch_add(1, Ordering::SeqCst);
-            return None;
-        };
-        inner.touch(key);
-        self.stats.hits.fetch_add(1, Ordering::SeqCst);
-        Some(block)
-    }
-
-    fn insert(&self, key: MetadataTableCacheKey, block: DecodedMetadataTableBlock) {
-        if !self.config.enabled || self.config.max_blocks == 0 {
-            return;
-        }
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("metadata table cache lock poisoned");
-        if let Some(previous) = inner.entries.insert(key.clone(), block.clone()) {
-            inner.decoded_byte_len = inner
-                .decoded_byte_len
-                .saturating_sub(previous.decoded_byte_len);
-        }
-        inner.decoded_byte_len = inner
-            .decoded_byte_len
-            .saturating_add(block.decoded_byte_len);
-        inner.touch(&key);
-        self.stats.inserts.fetch_add(1, Ordering::SeqCst);
-        while inner.entries.len() > self.config.max_blocks
-            || self
-                .config
-                .max_decoded_bytes
-                .map(|max_decoded_bytes| inner.decoded_byte_len > max_decoded_bytes)
-                .unwrap_or(false)
-        {
-            let Some(evicted) = inner.order.pop_front() else {
-                break;
-            };
-            if let Some(block) = inner.entries.remove(&evicted) {
-                inner.decoded_byte_len = inner
-                    .decoded_byte_len
-                    .saturating_sub(block.decoded_byte_len);
-                self.stats.evictions.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }
-}
-
-impl MetadataTableCacheInner {
-    fn touch(&mut self, key: &MetadataTableCacheKey) {
-        self.order.retain(|candidate| candidate != key);
-        self.order.push_back(key.clone());
-    }
 }
 
 impl Default for MetadataLsmPolicy {
@@ -2313,168 +2167,6 @@ fn validate_direntry_child_bind_index(
     }
 
     Ok(())
-}
-
-fn metadata_states_equivalent(left: &MetadataState, right: &MetadataState) -> bool {
-    CHECKPOINT_TABLE_FAMILIES.into_iter().all(|family| {
-        checkpoint_rows_for_family(left, family) == checkpoint_rows_for_family(right, family)
-    })
-}
-
-fn checkpoint_rows_for_family(
-    metadata_state: &MetadataState,
-    family: CheckpointTableFamily,
-) -> Vec<CheckpointRow> {
-    let mut rows = match family {
-        CheckpointTableFamily::Inodes => metadata_state
-            .inodes()
-            .iter()
-            .map(|inode| CheckpointRow::Inode {
-                inode_id: inode.inode_id,
-                inode_kind: inode.inode_kind.clone(),
-                created_seq: inode.created_seq,
-            })
-            .collect::<Vec<_>>(),
-        CheckpointTableFamily::DirentryBinds | CheckpointTableFamily::DirentryChildBinds => {
-            metadata_state
-                .direntry_binds()
-                .iter()
-                .map(|direntry| CheckpointRow::DirentryBind {
-                    parent_inode_id: direntry.parent_inode_id,
-                    name_key: direntry.name_key.clone(),
-                    display_name: direntry.display_name.clone(),
-                    child_inode_id: direntry.child_inode_id,
-                    bind_seq: direntry.bind_seq,
-                    bind_delta_index: direntry.bind_delta_index,
-                })
-                .collect::<Vec<_>>()
-        }
-        CheckpointTableFamily::DirentryUnbinds => metadata_state
-            .direntry_unbinds()
-            .iter()
-            .map(|unbind| CheckpointRow::DirentryUnbind {
-                parent_inode_id: unbind.parent_inode_id,
-                name_key: unbind.name_key.clone(),
-                child_inode_id: unbind.child_inode_id,
-                bind_seq: unbind.bind_seq,
-                bind_delta_index: unbind.bind_delta_index,
-                unbind_seq: unbind.unbind_seq,
-                unbind_delta_index: unbind.unbind_delta_index,
-            })
-            .collect::<Vec<_>>(),
-        CheckpointTableFamily::Revisions => metadata_state
-            .revisions()
-            .iter()
-            .map(|revision| CheckpointRow::Revision {
-                inode_id: revision.inode_id,
-                revision_no: revision.revision_no,
-                committed_seq: revision.committed_seq,
-                revision_delta_index: revision.revision_delta_index,
-                content_ref: revision.content_ref.clone(),
-            })
-            .collect::<Vec<_>>(),
-        CheckpointTableFamily::Tombstones => metadata_state
-            .subtree_tombstones()
-            .iter()
-            .map(|tombstone| CheckpointRow::Tombstone {
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-                tombstone_delta_index: tombstone.tombstone_delta_index,
-            })
-            .collect::<Vec<_>>(),
-        CheckpointTableFamily::CommitReceipts => metadata_state
-            .commit_receipts()
-            .iter()
-            .map(|record| CheckpointRow::CommitReceipt {
-                commit_id: record.commit_id.clone(),
-                semantic_commit_fingerprint_sha256: record
-                    .semantic_commit_fingerprint_sha256
-                    .clone(),
-                committed_seq: record.committed_seq,
-                results: record.results.clone(),
-            })
-            .collect::<Vec<_>>(),
-    };
-    rows.sort_by_key(|row| row.row_key_for_family(family));
-    rows
-}
-
-fn checkpoint_rows_for_family_after_seq(
-    metadata_state: &MetadataState,
-    family: CheckpointTableFamily,
-    after_seq: ChangeSeq,
-) -> Vec<CheckpointRow> {
-    checkpoint_rows_for_family(metadata_state, family)
-        .into_iter()
-        .filter(|row| checkpoint_row_commit_seq(row) > after_seq)
-        .collect()
-}
-
-fn checkpoint_row_commit_seq(row: &CheckpointRow) -> ChangeSeq {
-    match row {
-        CheckpointRow::Inode { created_seq, .. } => *created_seq,
-        CheckpointRow::DirentryBind { bind_seq, .. } => *bind_seq,
-        CheckpointRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq,
-        CheckpointRow::Revision { committed_seq, .. } => *committed_seq,
-        CheckpointRow::Tombstone { tombstone_seq, .. } => *tombstone_seq,
-        CheckpointRow::CommitReceipt { committed_seq, .. } => *committed_seq,
-    }
-}
-
-fn checkpoint_table_family(family: CheckpointTableFamily) -> ObjectStoreCheckpointTableFamily {
-    match family {
-        CheckpointTableFamily::Inodes => ObjectStoreCheckpointTableFamily::Inodes,
-        CheckpointTableFamily::DirentryBinds => ObjectStoreCheckpointTableFamily::DirentryBinds,
-        CheckpointTableFamily::DirentryChildBinds => {
-            ObjectStoreCheckpointTableFamily::DirentryChildBinds
-        }
-        CheckpointTableFamily::DirentryUnbinds => ObjectStoreCheckpointTableFamily::DirentryUnbinds,
-        CheckpointTableFamily::Revisions => ObjectStoreCheckpointTableFamily::Revisions,
-        CheckpointTableFamily::Tombstones => ObjectStoreCheckpointTableFamily::Tombstones,
-        CheckpointTableFamily::CommitReceipts => ObjectStoreCheckpointTableFamily::CommitReceipts,
-    }
-}
-
-fn checkpoint_row_kind(row: &CheckpointRow) -> &'static str {
-    match row {
-        CheckpointRow::Inode { .. } => "inode",
-        CheckpointRow::DirentryBind { .. } => "direntry_bind",
-        CheckpointRow::DirentryUnbind { .. } => "direntry_unbind",
-        CheckpointRow::Revision { .. } => "revision",
-        CheckpointRow::Tombstone { .. } => "tombstone",
-        CheckpointRow::CommitReceipt { .. } => "commit_receipt",
-    }
-}
-
-fn checkpoint_row_matches_family(row: &CheckpointRow, family: CheckpointTableFamily) -> bool {
-    matches!(
-        (family, row),
-        (CheckpointTableFamily::Inodes, CheckpointRow::Inode { .. })
-            | (
-                CheckpointTableFamily::DirentryBinds,
-                CheckpointRow::DirentryBind { .. }
-            )
-            | (
-                CheckpointTableFamily::DirentryChildBinds,
-                CheckpointRow::DirentryBind { .. }
-            )
-            | (
-                CheckpointTableFamily::DirentryUnbinds,
-                CheckpointRow::DirentryUnbind { .. }
-            )
-            | (
-                CheckpointTableFamily::Revisions,
-                CheckpointRow::Revision { .. }
-            )
-            | (
-                CheckpointTableFamily::Tombstones,
-                CheckpointRow::Tombstone { .. }
-            )
-            | (
-                CheckpointTableFamily::CommitReceipts,
-                CheckpointRow::CommitReceipt { .. }
-            )
-    )
 }
 
 #[cfg(test)]
