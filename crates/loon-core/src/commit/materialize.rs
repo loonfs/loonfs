@@ -1,0 +1,286 @@
+use super::{PreparedCommit, ResolvedBinding, ValidatedOp};
+use loon_api::wire::wal::WalDelta;
+use loon_api::{v0::CommitOpResult, InodeKind, RevisionNo};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializedCommitDelta {
+    pub semantic_op_index: u32,
+    pub delta_index: u32,
+    pub wal_delta: WalDelta,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializedCommit {
+    pub prepared: PreparedCommit,
+    pub deltas: Vec<MaterializedCommitDelta>,
+    pub results: Vec<CommitOpResult>,
+}
+
+pub fn materialize_commit(prepared: PreparedCommit) -> MaterializedCommit {
+    let mut deltas = Vec::new();
+    let mut results = Vec::with_capacity(prepared.plan.validated_ops.len());
+    for op in &prepared.plan.validated_ops {
+        let (mut op_deltas, result) = materialize_validated_op(op);
+        deltas.append(&mut op_deltas);
+        results.push(result);
+    }
+
+    MaterializedCommit {
+        prepared,
+        deltas,
+        results,
+    }
+}
+
+fn materialize_validated_op(op: &ValidatedOp) -> (Vec<MaterializedCommitDelta>, CommitOpResult) {
+    let mut deltas = Vec::new();
+    let result = match op {
+        ValidatedOp::CreateDir {
+            op_index,
+            parent_inode,
+            display_name,
+            name_key,
+            child_inode,
+            create_inode_delta_index,
+            bind_delta_index,
+        } => {
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::CreateInode {
+                    delta_index: *create_inode_delta_index,
+                    inode_id: *child_inode,
+                    inode_kind: InodeKind::Dir,
+                },
+            );
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::BindDirentry {
+                    delta_index: *bind_delta_index,
+                    parent_inode: *parent_inode,
+                    name_key: name_key.clone(),
+                    display_name: display_name.clone(),
+                    child_inode: *child_inode,
+                },
+            );
+            CommitOpResult::CreateDir {
+                op_index: *op_index,
+                inode_id: *child_inode,
+            }
+        }
+        ValidatedOp::CreateFile {
+            op_index,
+            parent_inode,
+            display_name,
+            name_key,
+            child_inode,
+            content_ref,
+            create_inode_delta_index,
+            bind_delta_index,
+            revision_delta_index,
+        } => {
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::CreateInode {
+                    delta_index: *create_inode_delta_index,
+                    inode_id: *child_inode,
+                    inode_kind: InodeKind::File,
+                },
+            );
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::BindDirentry {
+                    delta_index: *bind_delta_index,
+                    parent_inode: *parent_inode,
+                    name_key: name_key.clone(),
+                    display_name: display_name.clone(),
+                    child_inode: *child_inode,
+                },
+            );
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::AppendFileRevision {
+                    delta_index: *revision_delta_index,
+                    inode_id: *child_inode,
+                    revision_no: RevisionNo(1),
+                    content_ref: content_ref.clone(),
+                },
+            );
+            CommitOpResult::CreateFile {
+                op_index: *op_index,
+                inode_id: *child_inode,
+                revision_no: RevisionNo(1),
+                content_ref: content_ref.clone(),
+            }
+        }
+        ValidatedOp::ReplaceFile {
+            op_index,
+            inode_id,
+            revision_no,
+            content_ref,
+            revision_delta_index,
+        } => {
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::AppendFileRevision {
+                    delta_index: *revision_delta_index,
+                    inode_id: *inode_id,
+                    revision_no: *revision_no,
+                    content_ref: content_ref.clone(),
+                },
+            );
+            CommitOpResult::ReplaceFile {
+                op_index: *op_index,
+                inode_id: *inode_id,
+                revision_no: *revision_no,
+                content_ref: content_ref.clone(),
+            }
+        }
+        ValidatedOp::RestoreRevision {
+            op_index,
+            inode_id,
+            source_revision_no,
+            revision_no,
+            content_ref,
+            revision_delta_index,
+        } => {
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::AppendFileRevision {
+                    delta_index: *revision_delta_index,
+                    inode_id: *inode_id,
+                    revision_no: *revision_no,
+                    content_ref: content_ref.clone(),
+                },
+            );
+            CommitOpResult::RestoreRevision {
+                op_index: *op_index,
+                inode_id: *inode_id,
+                source_revision_no: *source_revision_no,
+                revision_no: *revision_no,
+                content_ref: content_ref.clone(),
+            }
+        }
+        ValidatedOp::DeleteFile {
+            op_index,
+            inode_id,
+            source_binding,
+            unbind_delta_index,
+            tombstone_delta_index,
+        } => {
+            push_unbind_delta(&mut deltas, *op_index, *unbind_delta_index, source_binding);
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::TombstoneSubtree {
+                    delta_index: *tombstone_delta_index,
+                    root_inode: *inode_id,
+                },
+            );
+            CommitOpResult::DeleteFile {
+                op_index: *op_index,
+                inode_id: *inode_id,
+            }
+        }
+        ValidatedOp::Rename {
+            op_index,
+            inode_id,
+            new_parent_inode,
+            new_display_name,
+            new_name_key,
+            source_binding,
+            unbind_delta_index,
+            bind_delta_index,
+        } => {
+            push_unbind_delta(&mut deltas, *op_index, *unbind_delta_index, source_binding);
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::BindDirentry {
+                    delta_index: *bind_delta_index,
+                    parent_inode: *new_parent_inode,
+                    name_key: new_name_key.clone(),
+                    display_name: new_display_name.clone(),
+                    child_inode: *inode_id,
+                },
+            );
+            CommitOpResult::Rename {
+                op_index: *op_index,
+                inode_id: *inode_id,
+            }
+        }
+        ValidatedOp::DeleteSubtree {
+            op_index,
+            root_inode,
+            source_binding,
+            unbind_delta_index,
+            tombstone_delta_index,
+        } => {
+            push_unbind_delta(&mut deltas, *op_index, *unbind_delta_index, source_binding);
+            push_delta(
+                &mut deltas,
+                *op_index,
+                WalDelta::TombstoneSubtree {
+                    delta_index: *tombstone_delta_index,
+                    root_inode: *root_inode,
+                },
+            );
+            CommitOpResult::DeleteSubtree {
+                op_index: *op_index,
+                root_inode: *root_inode,
+            }
+        }
+    };
+
+    (deltas, result)
+}
+
+fn push_unbind_delta(
+    deltas: &mut Vec<MaterializedCommitDelta>,
+    semantic_op_index: u32,
+    delta_index: u32,
+    binding: &ResolvedBinding,
+) {
+    push_delta(
+        deltas,
+        semantic_op_index,
+        WalDelta::UnbindDirentry {
+            delta_index,
+            parent_inode: binding.parent_inode,
+            name_key: binding.name_key.clone(),
+            child_inode: binding.child_inode,
+            bind_seq: binding.bind_seq,
+            bind_delta_index: binding.bind_delta_index,
+        },
+    )
+}
+
+fn push_delta(
+    deltas: &mut Vec<MaterializedCommitDelta>,
+    semantic_op_index: u32,
+    wal_delta: WalDelta,
+) {
+    let delta_index = wal_delta_index(&wal_delta);
+    deltas.push(MaterializedCommitDelta {
+        semantic_op_index,
+        delta_index,
+        wal_delta,
+    });
+}
+
+fn wal_delta_index(wal_delta: &WalDelta) -> u32 {
+    match wal_delta {
+        WalDelta::CreateInode { delta_index, .. }
+        | WalDelta::BindDirentry { delta_index, .. }
+        | WalDelta::UnbindDirentry { delta_index, .. }
+        | WalDelta::AppendFileRevision { delta_index, .. }
+        | WalDelta::TombstoneSubtree { delta_index, .. } => *delta_index,
+    }
+}

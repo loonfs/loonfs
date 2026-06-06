@@ -1,4 +1,4 @@
-use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan, PreparedCommitHeadPublish};
+use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan};
 use crate::invariants::InvariantId;
 use crate::wal::PreparedWalSegment;
 use loon_api::wire::control::{ControlObjectKind, HeadState, HeadStateEnvelope};
@@ -6,6 +6,16 @@ use loon_api::ChangeSeq;
 use loon_objectstore::keys::namespace_head;
 use loon_objectstore::ObjectStoreError;
 use loon_objectstore::{ObjectMetadata, ObjectStore};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreparedCommitHeadPublish {
+    pub object_key: String,
+    pub resulting_head: HeadState,
+    pub envelope: HeadStateEnvelope,
+    pub encoded_bytes: Vec<u8>,
+    pub checked_invariants: Vec<InvariantId>,
+}
 
 pub fn prepare_commit_head_publish(
     current_head: &HeadState,
