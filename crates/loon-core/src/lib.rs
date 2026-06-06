@@ -1,3 +1,34 @@
+//! Core LoonFS namespace operations.
+//!
+//! `loon-core` is the low-level API for building directly on the LoonFS
+//! metadata protocol. Most callers should start with [`NamespaceEngine`].
+//!
+//! A namespace is one durable filesystem history. File bytes are written to
+//! object storage first, then metadata is published as a committed namespace
+//! mutation. Reads rebuild or reuse a verified view of the namespace before
+//! walking paths.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use loon_api::NamespaceId;
+//! use loon_core::{BootstrapOptions, NamespaceEngine, ReadOptions, WriteOptions};
+//! use loon_objectstore::fs::LocalFsStore;
+//!
+//! let store = LocalFsStore::new(std::env::temp_dir()).expect("store");
+//! let namespace = NamespaceId::parse("docs").expect("valid namespace id");
+//!
+//! let engine = NamespaceEngine::builder(store)
+//!     .namespace(namespace)
+//!     .writer("example-writer")
+//!     .build()
+//!     .expect("engine");
+//!
+//! let _ = engine.bootstrap_namespace(BootstrapOptions::default());
+//! let _ = engine.put_file("/plan.md", b"hello", WriteOptions::default());
+//! let _ = engine.read_file("/plan.md", ReadOptions::default());
+//! ```
+
 #![forbid(unsafe_code)]
 
 mod checkpoint;

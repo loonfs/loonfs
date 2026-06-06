@@ -6,15 +6,22 @@ use uuid::Uuid;
 
 const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
 
-/// Unique identifier for a namespace (a logical sync boundary).
+/// Durable id for one namespace.
+///
+/// A namespace is one filesystem history. This id is not a display name and
+/// should not be reused after destruction.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NamespaceId(String);
 
-/// Unique identifier for an immutable content store.
+/// Durable id for an immutable content store.
+///
+/// Content stores own file bytes. Namespaces point at content stores.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContentStoreId(String);
 
-/// Client-supplied stable identifier for one logical commit.
+/// Client-supplied idempotency key for one logical commit.
+///
+/// Reuse the same `CommitId` when retrying the same request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CommitId(String);
 
@@ -87,40 +94,47 @@ impl NameKeyValidationError {
 }
 
 impl NamespaceId {
+    /// Parses and validates a namespace id.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, NamespaceIdValidationError> {
         let value = value.as_ref();
         validate_namespace_id(value)?;
         Ok(Self(value.to_owned()))
     }
 
+    /// Builds a namespace id from an owned string after validation.
     pub fn try_new(value: impl Into<String>) -> Result<Self, NamespaceIdValidationError> {
         let value = value.into();
         validate_namespace_id(&value)?;
         Ok(Self(value))
     }
 
+    /// Returns the serialized namespace id.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 impl CommitId {
+    /// Parses and validates a commit id.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, CommitIdValidationError> {
         let value = value.as_ref();
         validate_commit_id(value)?;
         Ok(Self(value.to_owned()))
     }
 
+    /// Builds a commit id from an owned string after validation.
     pub fn try_new(value: impl Into<String>) -> Result<Self, CommitIdValidationError> {
         let value = value.into();
         validate_commit_id(&value)?;
         Ok(Self(value))
     }
 
+    /// Returns the serialized commit id.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Generates a valid random commit id.
     pub fn generate() -> Self {
         Self(generated_id("c"))
     }
@@ -271,40 +285,47 @@ fn name_key_error(value: &str, reason: &'static str) -> NameKeyValidationError {
 }
 
 impl ContentStoreId {
+    /// Generates a valid random content-store id.
     pub fn generate() -> Self {
         Self(generated_id("cs"))
     }
 
+    /// Parses and validates a content-store id.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, GeneratedIdValidationError> {
         let value = value.as_ref();
         validate_generated_id("cs", value)?;
         Ok(Self(value.to_owned()))
     }
 
+    /// Builds a content-store id from an owned string after validation.
     pub fn try_new(value: impl Into<String>) -> Result<Self, GeneratedIdValidationError> {
         let value = value.into();
         validate_generated_id("cs", &value)?;
         Ok(Self(value))
     }
 
+    /// Returns the serialized content-store id.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 impl NameKey {
+    /// Parses and validates a stored name key.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, NameKeyValidationError> {
         let value = value.as_ref();
         validate_name_key(value)?;
         Ok(Self(value.to_owned()))
     }
 
+    /// Builds a name key from an owned string after validation.
     pub fn try_new(value: impl Into<String>) -> Result<Self, NameKeyValidationError> {
         let value = value.into();
         validate_name_key(&value)?;
         Ok(Self(value))
     }
 
+    /// Computes the lookup key for a display name under a namespace name policy.
     pub fn for_display_name(policy: crate::NamePolicy, display_name: &crate::DisplayName) -> Self {
         Self(crate::name_key_for_display_name(
             policy,
@@ -312,6 +333,7 @@ impl NameKey {
         ))
     }
 
+    /// Returns the stored lookup key.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -490,14 +512,18 @@ impl<'de> Deserialize<'de> for NameKey {
 }
 
 /// Numeric identity of a file or directory within a namespace.
+///
+/// Inodes are stable across renames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InodeId(pub u64);
 
-/// Monotonically increasing file revision counter within an inode.
+/// Monotonically increasing file revision counter within one file inode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RevisionNo(pub u64);
 
 /// Monotonically increasing namespace commit sequence number.
+///
+/// This is the global visibility order for a namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChangeSeq(pub u64);
 
@@ -505,14 +531,20 @@ pub struct ChangeSeq(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FenceToken(pub u64);
 
-/// Name-policy-derived directory entry name used as a lookup key.
+/// Name-policy-derived directory entry key.
+///
+/// Use this for exact name preconditions. Keep user-facing spelling in
+/// `DisplayName`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NameKey(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// Filesystem item kind.
 pub enum InodeKind {
+    /// File with revision history.
     File,
+    /// Directory with child bindings.
     Dir,
 }
 
