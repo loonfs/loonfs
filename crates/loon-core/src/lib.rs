@@ -43,7 +43,7 @@ pub mod control {
 
 pub mod publish {
     pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
-    pub use crate::path::intent::PathMutationIntent;
+    pub use crate::path::write::PathMutationIntent;
     pub use crate::publisher::{
         BasisReuseEvent, DirectObjectStorePublisher, FlushPolicy, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, NamespaceMutationCandidate, PublishOptions,
@@ -58,4 +58,4 @@ pub use namespace::{list_namespaces, BootstrapNamespaceError};
 pub use options::{
     BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, ReadSource, WriteOptions,
 };
-pub use path::intent::PutFileBehavior;
+pub use path::write::PutFileBehavior;

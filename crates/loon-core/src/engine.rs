@@ -242,7 +242,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         bytes: impl AsRef<[u8]>,
         options: WriteOptions,
     ) -> CoreResult<MutationResult> {
-        crate::path::mutation::put_file_bytes(
+        crate::path::write::ops::put_file_bytes(
             &self.store,
             &self.namespace_id,
             path.as_ref(),
@@ -262,7 +262,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         content_ref: ContentRef,
         options: WriteOptions,
     ) -> CoreResult<MutationResult> {
-        crate::path::mutation::put_file_content_ref(
+        crate::path::write::ops::put_file_content_ref(
             &self.store,
             &self.namespace_id,
             path.as_ref(),
@@ -281,7 +281,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: impl AsRef<str>,
         options: WriteOptions,
     ) -> CoreResult<MutationResult> {
-        crate::path::mutation::create_dir_path(
+        crate::path::write::ops::create_dir_path(
             &self.store,
             &self.namespace_id,
             path.as_ref(),
@@ -303,7 +303,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .as_ref()
             .map(|commit_id| commit_id.as_str());
         if options.recursive_delete {
-            crate::path::mutation::delete_path(
+            crate::path::write::ops::delete_path(
                 &self.store,
                 &self.namespace_id,
                 path.as_ref(),
@@ -311,7 +311,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
                 commit_id,
             )
         } else {
-            crate::path::mutation::delete_path_non_recursive(
+            crate::path::write::ops::delete_path_non_recursive(
                 &self.store,
                 &self.namespace_id,
                 path.as_ref(),
@@ -327,7 +327,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         dest: impl AsRef<str>,
         options: WriteOptions,
     ) -> CoreResult<MutationResult> {
-        crate::path::mutation::move_path(
+        crate::path::write::ops::move_path(
             &self.store,
             &self.namespace_id,
             source.as_ref(),
@@ -346,7 +346,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         dest: impl AsRef<str>,
         options: WriteOptions,
     ) -> CoreResult<MutationResult> {
-        crate::path::mutation::copy_file_path(
+        crate::path::write::ops::copy_file_path(
             &self.store,
             &self.namespace_id,
             source.as_ref(),
@@ -365,7 +365,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         source_revision_no: RevisionNo,
         options: WriteOptions,
     ) -> CoreResult<MutationResult> {
-        crate::path::mutation::restore_file_revision(
+        crate::path::write::ops::restore_file_revision(
             &self.store,
             &self.namespace_id,
             path.as_ref(),

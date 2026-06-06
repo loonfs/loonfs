@@ -7,9 +7,8 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, ErrorCode};
 use crate::lease::acquire_or_renew_namespace_lease;
 use crate::loading::load_namespace_lease_control;
-use crate::path::intent::PathMutationIntent;
-use crate::path::planner::{
-    path_intent_fingerprint_for_path_intent, PathPlanner, PlannedPathMutation,
+use crate::path::write::{
+    path_intent_fingerprint_for_path_intent, PathMutationIntent, PathPlanner, PlannedPathMutation,
 };
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::wire::control::LeaseState;
