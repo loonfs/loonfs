@@ -3087,7 +3087,7 @@ mod tests {
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
         let compacted_run_prefix = format!(
-            "namespaces/{}/checkpoints/{:020}/runs/",
+            "namespaces/{}/compacted/checkpoints/{:020}/runs/",
             namespace_id.as_str(),
             compacted.checkpoint_seq.0
         );

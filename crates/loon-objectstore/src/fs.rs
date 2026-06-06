@@ -348,6 +348,7 @@ fn io_error(err: std::io::Error) -> ObjectStoreError {
 mod tests {
     use super::LocalFsStore;
     use super::{ObjectStore, PutMode};
+    use crate::keys::{namespace_head, namespace_lease};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -356,20 +357,20 @@ mod tests {
     fn overwrite_refreshes_head_and_visible_bytes() {
         let temp_dir = TestDir::new("overwrite");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = "namespaces/ns-1/head.json";
+        let key = namespace_head("ns-1");
 
         let first = store
-            .put(key, br#"{"seq":1}"#, PutMode::Overwrite)
+            .put(&key, br#"{"seq":1}"#, PutMode::Overwrite)
             .expect("seed first object");
         let second = store
-            .put(key, br#"{"seq":2}"#, PutMode::Overwrite)
+            .put(&key, br#"{"seq":2}"#, PutMode::Overwrite)
             .expect("overwrite object");
 
         assert_eq!(
-            store.get(key, None).expect("get object"),
+            store.get(&key, None).expect("get object"),
             Some(br#"{"seq":2}"#.to_vec())
         );
-        let head = store.head(key).expect("head object").expect("head exists");
+        let head = store.head(&key).expect("head object").expect("head exists");
         assert_eq!(head.etag, second.etag);
         assert_eq!(head.size_bytes, second.size_bytes);
         assert_ne!(first, second);
@@ -379,15 +380,15 @@ mod tests {
     fn delete_is_idempotent_and_head_reflects_removal() {
         let temp_dir = TestDir::new("delete");
         let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
-        let key = "namespaces/ns-1/lease.json";
+        let key = namespace_lease("ns-1");
 
         store
-            .put_if_absent(key, br#"{"holder":"writer-a"}"#)
+            .put_if_absent(&key, br#"{"holder":"writer-a"}"#)
             .expect("seed lease object");
-        assert!(store.head(key).expect("head before delete").is_some());
-        store.delete(key).expect("delete existing object");
-        store.delete(key).expect("delete missing object");
-        assert_eq!(store.head(key).expect("head after delete"), None);
+        assert!(store.head(&key).expect("head before delete").is_some());
+        store.delete(&key).expect("delete existing object");
+        store.delete(&key).expect("delete missing object");
+        assert_eq!(store.head(&key).expect("head after delete"), None);
     }
 
     struct TestDir {

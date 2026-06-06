@@ -1,6 +1,7 @@
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    checkpoint_manifest, checkpoint_run_table, wal_segment, CheckpointTableFamily,
+    checkpoint_manifest, checkpoint_run_table, namespace_head, namespace_lease, wal_segment,
+    CheckpointTableFamily,
 };
 use loon_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
@@ -18,11 +19,7 @@ fn records_put_success() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put(
-            "namespaces/ns-1/head.json",
-            b"head",
-            PutMode::CreateIfAbsent,
-        )
+        .put(&namespace_head("ns-1"), b"head", PutMode::CreateIfAbsent)
         .expect("put object");
 
     let samples = recorder.samples();
@@ -43,13 +40,13 @@ fn delegates_convenience_writes_to_inner_store() {
     let store = InstrumentedObjectStore::new(DelegatingWriteStore::default(), recorder.clone());
 
     store
-        .put_overwrite("namespaces/ns-1/head.json", b"overwrite")
+        .put_overwrite(&namespace_head("ns-1"), b"overwrite")
         .expect("put overwrite");
     store
-        .put_if_absent("namespaces/ns-1/head.json", b"create")
+        .put_if_absent(&namespace_head("ns-1"), b"create")
         .expect("put if absent");
     store
-        .compare_and_swap("namespaces/ns-1/head.json", "etag-old", b"swap")
+        .compare_and_swap(&namespace_head("ns-1"), "etag-old", b"swap")
         .expect("compare and swap");
 
     let inner = store.into_inner();
@@ -102,11 +99,11 @@ fn records_head_and_head_with_checksum_as_distinct_operations() {
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
 
     store
-        .put_overwrite("namespaces/ns-1/lease.json", b"lease")
+        .put_overwrite(&namespace_lease("ns-1"), b"lease")
         .expect("put object");
-    store.head("namespaces/ns-1/lease.json").expect("head");
+    store.head(&namespace_lease("ns-1")).expect("head");
     store
-        .head_with_checksum("namespaces/ns-1/lease.json")
+        .head_with_checksum(&namespace_lease("ns-1"))
         .expect("head with checksum");
 
     let samples = recorder.samples();
@@ -162,7 +159,7 @@ fn records_list_count() {
         .put_overwrite("namespaces/ns-1/descriptor.json", b"descriptor")
         .expect("put descriptor");
     store
-        .put_overwrite("namespaces/ns-1/head.json", b"head")
+        .put_overwrite(&namespace_head("ns-1"), b"head")
         .expect("put head");
     let keys = store
         .list_prefix("namespaces/ns-1/")
@@ -220,7 +217,7 @@ fn jsonl_recorder_writes_privacy_safe_samples() {
     let raw_key = "namespaces/ns-1/wal/secret-segment.cbor.zst";
 
     store
-        .put_overwrite("namespaces/ns-1/head.json", b"head")
+        .put_overwrite(&namespace_head("ns-1"), b"head")
         .expect("put object");
     assert!(store.get(raw_key, None).expect("get missing").is_none());
     recorder.flush().expect("flush metrics");

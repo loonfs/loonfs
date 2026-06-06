@@ -131,8 +131,11 @@ fn key_builders_cover_locked_object_families() {
         namespace_descriptor("ns-1"),
         "namespaces/ns-1/descriptor.json"
     );
-    assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/head.json");
-    assert_eq!(namespace_lease("ns-1"), "namespaces/ns-1/lease.json");
+    assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/control/head.json");
+    assert_eq!(
+        namespace_lease("ns-1"),
+        "namespaces/ns-1/control/lease.json"
+    );
     assert_eq!(
         content_store_descriptor("cs_00000000000000000000000000000001"),
         "content-stores/cs_00000000000000000000000000000001/descriptor.json"
@@ -151,7 +154,7 @@ fn key_builders_cover_locked_object_families() {
     );
     assert_eq!(
         checkpoint_manifest("ns-1", 420),
-        "namespaces/ns-1/checkpoints/00000000000000000420/manifest.json"
+        "namespaces/ns-1/compacted/checkpoints/00000000000000000420/manifest.json"
     );
     assert_eq!(
         checkpoint_run_table(
@@ -161,7 +164,7 @@ fn key_builders_cover_locked_object_families() {
             CheckpointTableFamily::Inodes,
             3
         ),
-        "namespaces/ns-1/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/inodes-00003.sst.zst"
+        "namespaces/ns-1/compacted/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/inodes/00003.sst.zst"
     );
     assert_eq!(
         checkpoint_run_table(
@@ -171,7 +174,7 @@ fn key_builders_cover_locked_object_families() {
             CheckpointTableFamily::DirentryChildBinds,
             4
         ),
-        "namespaces/ns-1/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/direntry-child-binds-00004.sst.zst"
+        "namespaces/ns-1/compacted/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/direntry-child-binds/00004.sst.zst"
     );
     assert_eq!(
         checkpoint_run_table(
@@ -181,7 +184,7 @@ fn key_builders_cover_locked_object_families() {
             CheckpointTableFamily::CommitReceipts,
             0
         ),
-        "namespaces/ns-1/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/commit-receipts-00000.sst.zst"
+        "namespaces/ns-1/compacted/checkpoints/00000000000000000420/runs/run_00000000000000000000000000000001/tables/commit-receipts/00000.sst.zst"
     );
     assert_eq!(
         derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder),

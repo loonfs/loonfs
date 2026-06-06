@@ -1804,7 +1804,7 @@ impl HeadCasFailureStore {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             head_key: namespace_head(namespace),
             wal_prefix: format!("namespaces/{namespace}/wal/"),
-            checkpoint_prefix: format!("namespaces/{namespace}/checkpoints/"),
+            checkpoint_prefix: format!("namespaces/{namespace}/compacted/checkpoints/"),
             fail_head_cas: AtomicBool::new(false),
             wal_get_count: AtomicUsize::new(0),
             checkpoint_get_count: AtomicUsize::new(0),
