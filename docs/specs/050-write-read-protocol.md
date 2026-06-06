@@ -236,15 +236,15 @@ The fork protocol is:
 1. Check the target namespace initialization state. A complete target is rejected as existing, and a partial target is rejected as partially initialized.
 2. Resolve and verify the source namespace descriptor, content-store descriptor, head, lease, checkpoint, and WAL basis.
 3. Create or reuse a verified source checkpoint at the current source head.
-4. Build the target head, fork provenance, lease, and descriptor using the source namespace's `content_store_id`.
+4. Build the target head, fork record, lease, and descriptor using the source namespace's `content_store_id`.
 5. Write the target `head.json` first to reserve the namespace.
 6. Rebuild checkpoint artifacts under the new namespace id with fresh checksums and object keys.
-7. Write target-local fork provenance to `control/fork.json`.
+7. Write `control/fork.json` with the source namespace id and fork sequence.
 8. Write the target `lease.json`.
 9. Write the target `descriptor.json` last as the publish/list marker.
 10. Start the new namespace WAL independently at `fork_seq + 1`.
 
-The fork copies namespace-local checkpoint metadata only. It does not copy content-store blobs. If initialization fails after the target head exists but before the descriptor is published, the target is partial. A successful fork has independent namespace history from the fork point. The target's `control/fork.json` records provenance for inspection, but recovery remains target-local because checkpoint artifacts are still copied into the target namespace.
+The fork copies namespace-local checkpoint metadata only. It does not copy content-store blobs. If initialization fails after the target head exists but before the descriptor is published, the target is partial. A successful fork has independent namespace history from the fork point. The target's `control/fork.json` is only a record of where the namespace came from; recovery remains target-local because checkpoint artifacts are copied into the target namespace.
 
 ## 10. Long-running operations
 

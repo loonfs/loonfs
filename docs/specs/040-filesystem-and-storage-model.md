@@ -188,9 +188,9 @@ Namespace deletion does not imply content-store deletion. In v0, content-store d
 
 ## 6. Forks
 
-Forking a namespace creates a new namespace with independent metadata history and the same `content_store_id` as the source namespace. The fork point is the source namespace's current head. The implementation creates or reuses a verified source checkpoint at that head, writes the target head first to reserve the namespace, rewrites checkpoint artifacts under the new namespace id and object keys, writes target-local fork provenance to `control/fork.json`, writes the target lease, and writes the namespace descriptor last as the publish/list marker.
+Forking a namespace creates a new namespace with independent metadata history and the same `content_store_id` as the source namespace. The fork point is the source namespace's current head. The implementation creates or reuses a verified source checkpoint at that head, reserves the target namespace by writing its head first, copies checkpoint metadata under the target namespace's object keys, writes `control/fork.json` to record where the fork came from, writes the target lease, and writes the namespace descriptor last as the publish/list marker.
 
-The `control/fork.json` object records provenance for inspection, but it is not recovery authority in v0. After fork, the clone must remain readable even if the source namespace metadata is deleted or corrupted. Source writes after the fork do not affect the clone, and clone writes do not affect the source.
+The `control/fork.json` object is informational. It records the source namespace and fork sequence so operators can see where the namespace came from. Normal reads and recovery do not load it in v0. After fork, the clone must remain readable even if the source namespace metadata is deleted or corrupted. Source writes after the fork do not affect the clone, and clone writes do not affect the source.
 
 ## 7. Mounts
 
