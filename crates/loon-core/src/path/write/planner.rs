@@ -1,8 +1,8 @@
 use super::intent::{PathMutationIntent, PutFileBehavior};
-use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::commit::{PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, ResolvedVisiblePath, VisiblePathError};
+use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::path::helpers::{
     final_component, lookup_path, parse_absolute_path_for_core, parse_mutation_path,
 };
@@ -778,7 +778,7 @@ mod tests {
     use crate::context::MutationContext;
     use crate::error::ErrorCode;
     use crate::metadata::{DirentryBindRecord, InodeRecord};
-    use crate::namespace::lifecycle::bootstrap_namespace;
+    use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{delete_path, put_file_bytes};
     use loon_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
     use loon_api::RevisionNo;

@@ -1,16 +1,12 @@
 #![forbid(unsafe_code)]
 
-mod basis;
 mod checkpoint;
 pub mod commit;
 pub mod content;
 mod context;
 mod engine;
 mod error;
-mod genesis;
 mod invariants;
-mod lease;
-mod loading;
 pub mod metadata;
 pub mod namespace;
 mod options;
@@ -20,20 +16,20 @@ mod publisher;
 mod wal;
 
 pub mod cache {
-    pub use crate::basis::{
+    pub use crate::checkpoint::{
+        CheckpointLoadError, CheckpointLoadErrorKind, MetadataLsmPolicy, MetadataTableCache,
+        MetadataTableCacheConfig, MetadataTableCacheStats,
+    };
+    pub use crate::namespace::basis::{
         load_namespace_head_summary, load_verified_namespace_basis,
         load_verified_namespace_basis_at_head, probe_namespace_head_etag, BasisLoadError,
         NamespaceHeadEtagProbe, NamespaceHeadSummary, VerifiedNamespaceBasis,
         VerifiedNamespaceBasisWeight,
     };
-    pub use crate::checkpoint::{
-        CheckpointLoadError, CheckpointLoadErrorKind, MetadataLsmPolicy, MetadataTableCache,
-        MetadataTableCacheConfig, MetadataTableCacheStats,
-    };
 }
 
 pub mod control {
-    pub use crate::loading::{
+    pub use crate::namespace::control::{
         load_content_store_descriptor_control, load_namespace_descriptor_control,
         load_namespace_head_control, load_namespace_lease_control, ControlObjectIdentity,
         ControlObjectLoadError, LoadedContentStoreDescriptorControl, LoadedHeadControl,

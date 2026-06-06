@@ -1,7 +1,7 @@
-use crate::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
 use crate::context::MutationContext;
 use crate::error::Result as CoreResult;
-use crate::namespace::{lifecycle, BootstrapNamespaceError};
+use crate::namespace::basis::{load_verified_namespace_basis, VerifiedNamespaceBasis};
+use crate::namespace::{bootstrap, catalog, fork, BootstrapNamespaceError};
 use crate::options::{
     BootstrapOptions, CommitOptions, ForkOptions, ReadOptions, ReadSource, WriteOptions,
 };
@@ -84,7 +84,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         options: BootstrapOptions,
     ) -> Result<NamespaceSummary, BootstrapNamespaceError> {
-        lifecycle::bootstrap_namespace(
+        bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
             &self.mutation_context(),
@@ -97,7 +97,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         target: &NamespaceId,
         _options: ForkOptions,
     ) -> CoreResult<NamespaceSummary> {
-        lifecycle::fork_namespace(
+        fork::fork_namespace(
             &self.store,
             &self.namespace_id,
             target,
@@ -106,7 +106,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     pub fn list_namespaces(&self) -> CoreResult<Vec<NamespaceSummary>> {
-        lifecycle::list_namespaces(&self.store)
+        catalog::list_namespaces(&self.store)
     }
 
     pub fn resolve_path(

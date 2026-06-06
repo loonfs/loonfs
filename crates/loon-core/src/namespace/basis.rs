@@ -2,13 +2,13 @@ use crate::checkpoint::{
     checkpoint_basis_head, load_verified_checkpoint_materialization, CheckpointLoadError,
 };
 use crate::error::CoreError;
-use crate::genesis::bootstrap_basis_metadata_state;
-use crate::loading::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::metadata::MetadataState;
+use crate::namespace::bootstrap::bootstrap_basis_metadata_state;
 use crate::namespace::catalog::{
     load_namespace_catalog_entry, namespace_initialization_state, NamespaceCatalogLoadError,
     NamespaceInitializationError, NamespaceInitializationState, VerifiedNamespaceCatalogEntry,
 };
+use crate::namespace::control::{read_head_object, read_lease_object, ControlObjectLoadError};
 use crate::wal::{
     load_validated_wal_chain, replay_validated_wal_tail_with_metadata, WalChainLoadError,
     WalChainLoadRequest, WalReplayError,
