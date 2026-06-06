@@ -1,0 +1,7 @@
+disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "use an explicit clock boundary so core behavior stays deterministic" },
+  { path = "std::time::Instant::now", reason = "use an explicit timing boundary so protocol code does not grow ambient time dependencies" },
+  { path = "std::thread::sleep", reason = "use deterministic coordination in tests and async timers in async code" },
+  { path = "tokio::time::sleep", reason = "use deterministic coordination where possible and isolate coalescing timers" },
+  { path = "rand::random", reason = "use explicit seeded randomness or generated IDs with named entropy boundaries" },
+]

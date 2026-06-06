@@ -2171,6 +2171,9 @@ fn validate_direntry_child_bind_index(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+    // These tests use panic in impossible match arms to preserve precise failure messages.
+
     use super::{
         advance_retention_floor, build_checkpoint_manifest_for_basis, build_checkpoint_tables,
         build_checkpoint_tables_from_rows, checkpoint_basis_head, checkpoint_rows_for_family,

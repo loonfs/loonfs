@@ -323,8 +323,8 @@ mod tests {
             error: CliError::new("client_error", "connection refused"),
         };
         assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
-            &json_error(&failure).unwrap()
+            &json_error(&failure).expect("json error renders")
         )
-        .unwrap());
+        .expect("rendered error is valid json"));
     }
 }

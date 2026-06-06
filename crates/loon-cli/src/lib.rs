@@ -5,6 +5,8 @@
 //! for humans and scripts.
 
 #![forbid(unsafe_code)]
+#![allow(unreachable_pub)]
+// The CLI is a binary crate with library-style internal modules; visibility cleanup is separate.
 
 mod args;
 mod backend;

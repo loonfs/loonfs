@@ -1,24 +1,28 @@
+#![allow(dead_code)]
+// This file is imported as a helper module by provider tests and also compiled as its own test target.
+
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const PROVIDER_ENV_EXAMPLE_RELATIVE_PATH: &str = "tests/provider-conformance.env.example";
+pub(crate) const PROVIDER_ENV_EXAMPLE_RELATIVE_PATH: &str =
+    "tests/provider-conformance.env.example";
 
-pub const AWS_S3_REQUIRED_VARS: &[&str] = &[
+pub(crate) const AWS_S3_REQUIRED_VARS: &[&str] = &[
     "LOON_TEST_S3_BUCKET",
     "LOON_TEST_S3_REGION",
     "LOON_TEST_S3_ACCESS_KEY_ID",
     "LOON_TEST_S3_SECRET_ACCESS_KEY",
 ];
 
-pub const AWS_S3_OPTIONAL_VARS: &[&str] = &[
+pub(crate) const AWS_S3_OPTIONAL_VARS: &[&str] = &[
     "LOON_TEST_S3_ENDPOINT",
     "LOON_TEST_S3_SESSION_TOKEN",
     "LOON_TEST_S3_PREFIX",
 ];
 
-pub const CLOUDFLARE_R2_REQUIRED_VARS: &[&str] = &[
+pub(crate) const CLOUDFLARE_R2_REQUIRED_VARS: &[&str] = &[
     "LOON_TEST_R2_BUCKET",
     "LOON_TEST_R2_ACCOUNT_ID",
     "LOON_TEST_R2_ENDPOINT",
@@ -26,10 +30,10 @@ pub const CLOUDFLARE_R2_REQUIRED_VARS: &[&str] = &[
     "LOON_TEST_R2_SECRET_ACCESS_KEY",
 ];
 
-pub const CLOUDFLARE_R2_OPTIONAL_VARS: &[&str] = &["LOON_TEST_R2_PREFIX"];
+pub(crate) const CLOUDFLARE_R2_OPTIONAL_VARS: &[&str] = &["LOON_TEST_R2_PREFIX"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AwsS3ConformanceConfig {
+pub(crate) struct AwsS3ConformanceConfig {
     pub bucket: String,
     pub region: String,
     pub endpoint: Option<String>,
@@ -40,7 +44,7 @@ pub struct AwsS3ConformanceConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloudflareR2ConformanceConfig {
+pub(crate) struct CloudflareR2ConformanceConfig {
     pub bucket: String,
     pub account_id: String,
     pub endpoint: String,
@@ -50,7 +54,7 @@ pub struct CloudflareR2ConformanceConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProviderEnvError {
+pub(crate) enum ProviderEnvError {
     MissingVar { name: &'static str },
     EmptyVar { name: &'static str },
     NonUnicodeVar { name: &'static str },
@@ -58,7 +62,7 @@ pub enum ProviderEnvError {
 }
 
 impl AwsS3ConformanceConfig {
-    pub fn from_env() -> Result<Self, ProviderEnvError> {
+    pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
         Ok(Self {
             bucket: required_env("LOON_TEST_S3_BUCKET")?,
             region: required_env("LOON_TEST_S3_REGION")?,
@@ -72,7 +76,7 @@ impl AwsS3ConformanceConfig {
 }
 
 impl CloudflareR2ConformanceConfig {
-    pub fn from_env() -> Result<Self, ProviderEnvError> {
+    pub(crate) fn from_env() -> Result<Self, ProviderEnvError> {
         Ok(Self {
             bucket: required_env("LOON_TEST_R2_BUCKET")?,
             account_id: required_env("LOON_TEST_R2_ACCOUNT_ID")?,
@@ -99,7 +103,7 @@ impl fmt::Display for ProviderEnvError {
     }
 }
 
-pub fn provider_env_example_contents() -> Result<String, ProviderEnvError> {
+pub(crate) fn provider_env_example_contents() -> Result<String, ProviderEnvError> {
     fs::read_to_string(provider_env_example_path())
         .map_err(|err| ProviderEnvError::ExampleFileRead(err.to_string()))
 }
@@ -124,7 +128,9 @@ fn optional_env(name: &'static str) -> Option<String> {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 fn default_prefix(provider: &str) -> String {
+    // Provider conformance prefixes need to be unique per ad hoc test run.
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

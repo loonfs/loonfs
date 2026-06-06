@@ -137,24 +137,24 @@ fn metadata_apply_matches_model_for_basic_commit_sequence() {
 
     let core_state = core_state
         .apply_committed_wal_deltas(ChangeSeq(1), &create_dir)
-        .unwrap()
+        .expect("core applies create-dir delta")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
-        .unwrap()
+        .expect("core applies create-file deltas")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
-        .unwrap()
+        .expect("core applies replace-file delta")
         .metadata_state;
 
     let model_state = model_state
         .apply_committed_wal_deltas(ChangeSeq(1), &create_dir)
-        .unwrap()
+        .expect("model applies create-dir delta")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
-        .unwrap()
+        .expect("model applies create-file deltas")
         .metadata_state
         .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
-        .unwrap()
+        .expect("model applies replace-file delta")
         .metadata_state;
 
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));

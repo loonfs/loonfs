@@ -317,7 +317,9 @@ fn prune_empty_parent_dirs(
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)]
 fn temp_path(path: &Path) -> PathBuf {
+    // Local atomic writes need a unique sibling name; this timestamp is not durable state.
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -393,7 +395,9 @@ mod tests {
     }
 
     impl TestDir {
+        #[allow(clippy::disallowed_methods)]
         fn new(label: &str) -> Self {
+            // Test-only unique paths are an entropy boundary, not protocol time.
             let stamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()

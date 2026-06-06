@@ -28,3 +28,6 @@ insta = { version = "1.39", features = ["json"] }
 loon-core = { path = "../loon-core" }
 tempfile.workspace = true
 ureq.workspace = true
+
+[lints]
+workspace = true

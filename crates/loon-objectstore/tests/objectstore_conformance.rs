@@ -545,7 +545,9 @@ struct TestDir {
 }
 
 impl TestDir {
+    #[allow(clippy::disallowed_methods)]
     fn new(label: &str) -> Self {
+        // Test-only unique paths are an entropy boundary, not protocol time.
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

@@ -15,6 +15,12 @@ const COALESCING_DELAY: Duration = Duration::from_millis(100);
 const MIN_NAMESPACE_CAS_INTERVAL: Duration = Duration::from_secs(1);
 const HEAD_CAS_RETRY_LIMIT: usize = 8;
 
+#[allow(clippy::disallowed_methods)]
+async fn coalescing_delay() {
+    // Publisher batching intentionally uses a short async timer to coalesce requests.
+    tokio::time::sleep(COALESCING_DELAY).await;
+}
+
 #[derive(Clone)]
 pub(crate) struct PublisherRegistry {
     inner: Arc<Mutex<HashMap<NamespaceId, NamespacePublisher>>>,
@@ -226,7 +232,7 @@ impl NamespacePublisher {
 
         if !already_full {
             tokio::select! {
-                _ = tokio::time::sleep(COALESCING_DELAY) => {}
+                _ = coalescing_delay() => {}
                 _ = notify.notified() => {}
             }
         }
@@ -511,6 +517,9 @@ fn usize_to_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+    // Publisher tests use panic in async result helpers for precise diagnostics.
+
     use super::*;
     use crate::config::{RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
     use loon_api::v0::{CommitOp, CommitRequest};

@@ -660,7 +660,9 @@ fn default_writer_version() -> String {
     format!("loon-core/{}", env!("CARGO_PKG_VERSION"))
 }
 
+#[allow(clippy::disallowed_methods)]
 fn current_time_ms() -> u64 {
+    // Engine wrappers set request timestamps at this API boundary; core replay remains deterministic.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

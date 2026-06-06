@@ -9,3 +9,6 @@ rust-version.workspace = true
 loon-api = { path = "../loon-api" }
 serde.workspace = true
 thiserror.workspace = true
+
+[lints]
+workspace = true

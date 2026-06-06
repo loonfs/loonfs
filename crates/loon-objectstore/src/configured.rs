@@ -221,7 +221,9 @@ mod tests {
         assert!(matches!(error, ObjectStoreError::InvalidKey(_)));
     }
 
+    #[allow(clippy::disallowed_methods)]
     fn unique_temp_dir(label: &str) -> PathBuf {
+        // Test-only unique paths are an entropy boundary, not protocol time.
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock after epoch")

@@ -810,6 +810,9 @@ impl IntoResponse for ApiResponseError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic, clippy::disallowed_methods)]
+    // HTTP smoke helpers use wall-clock lease timestamps and panic in unexpected match arms.
+
     use super::{app_with_store, build_fs_with_metrics_jsonl_path, SharedStore};
     use crate::config::RuntimeCacheConfigOverrides;
     use crate::{ServerConfig, StoreConfig};
