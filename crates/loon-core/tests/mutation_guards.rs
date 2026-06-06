@@ -2659,7 +2659,7 @@ fn fork_target_head_reservation_failure_writes_no_checkpoint_artifacts() {
     assert!(
         store
             .list_prefix(&format!(
-                "namespaces/{}/checkpoints/",
+                "namespaces/{}/compacted/checkpoints/",
                 clone_namespace_id.as_str()
             ))
             .expect("list target snapshots")
@@ -2678,7 +2678,7 @@ fn fork_failure_after_target_head_reserves_partial_namespace() {
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyMatcher::Prefix(format!(
-            "namespaces/{}/checkpoints/",
+            "namespaces/{}/compacted/checkpoints/",
             clone_namespace_id.as_str()
         )),
         InjectedCreateFailure::Transport {
@@ -2741,7 +2741,7 @@ fn fork_failure_after_target_checkpoint_artifacts_remains_partial() {
     );
     let target_snapshot_keys = store
         .list_prefix(&format!(
-            "namespaces/{}/checkpoints/",
+            "namespaces/{}/compacted/checkpoints/",
             clone_namespace_id.as_str()
         ))
         .expect("list target snapshots");
@@ -3776,7 +3776,7 @@ impl ReplayReadGuardStore {
             inner: LocalFsStore::new(root.as_ref()).expect("store"),
             guarded_prefixes: vec![
                 format!("namespaces/{namespace}/wal/"),
-                format!("namespaces/{namespace}/checkpoints/"),
+                format!("namespaces/{namespace}/compacted/checkpoints/"),
             ],
             guarded_gets: AtomicUsize::new(0),
         }
