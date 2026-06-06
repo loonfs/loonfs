@@ -230,7 +230,12 @@ mod tests {
         let parent = path.parent().expect("non-root path should have parent");
 
         assert_eq!(parent.as_str(), "/Docs");
-        assert_eq!(path.final_component().unwrap().as_str(), "ReadMe.TXT");
+        assert_eq!(
+            path.final_component()
+                .expect("non-root path has a final component")
+                .as_str(),
+            "ReadMe.TXT"
+        );
         assert_eq!(
             parent
                 .join(&DisplayName::parse("Child.TXT").expect("display name should parse"))

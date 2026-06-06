@@ -65,16 +65,18 @@ mod tests {
 
     #[test]
     fn tracing_is_disabled_without_env() {
-        assert!(trace_config_from_env(None, None).unwrap().is_none());
+        assert!(trace_config_from_env(None, None)
+            .expect("trace config parses")
+            .is_none());
         assert!(trace_config_from_env(Some(String::new()), None)
-            .unwrap()
+            .expect("blank trace config parses")
             .is_none());
     }
 
     #[test]
     fn json_tracing_uses_default_filter_when_rust_log_missing() {
         let config = trace_config_from_env(Some("json".to_owned()), None)
-            .unwrap()
+            .expect("trace config parses")
             .expect("enabled tracing config");
         assert_eq!(config.filter, DEFAULT_TRACE_FILTER);
     }
@@ -83,7 +85,7 @@ mod tests {
     fn json_tracing_uses_rust_log_when_present() {
         let config =
             trace_config_from_env(Some("json".to_owned()), Some("loon_core=debug".to_owned()))
-                .unwrap()
+                .expect("trace config parses")
                 .expect("enabled tracing config");
         assert_eq!(config.filter, "loon_core=debug");
     }

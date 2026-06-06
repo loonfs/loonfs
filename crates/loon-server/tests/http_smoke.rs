@@ -1,3 +1,6 @@
+#![allow(clippy::panic, clippy::disallowed_methods)]
+// Smoke tests use explicit polling and panic-heavy match assertions for readable diagnostics.
+
 use loon_api::{
     v0::{
         CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,

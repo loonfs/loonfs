@@ -404,7 +404,7 @@ impl UploadedContentProofCache {
         };
         let proof = UploadedContentProof {
             content_ref,
-            expires_at: SystemTime::now() + UPLOADED_CONTENT_PROOF_TTL,
+            expires_at: wall_clock_now() + UPLOADED_CONTENT_PROOF_TTL,
         };
         self.entries.insert(key.clone(), proof);
         self.order.retain(|existing| existing != &key);
@@ -423,7 +423,7 @@ impl UploadedContentProofCache {
             digest: digest.to_owned(),
         };
         let proof = self.entries.get(&key)?;
-        if SystemTime::now() > proof.expires_at {
+        if wall_clock_now() > proof.expires_at {
             self.entries.remove(&key);
             self.order.retain(|existing| existing != &key);
             return None;
@@ -434,9 +434,9 @@ impl UploadedContentProofCache {
 
 #[cfg(test)]
 mod proof_cache_tests {
-    use super::{UploadedContentProofCache, UploadedContentProofKey};
+    use super::{wall_clock_now, UploadedContentProofCache, UploadedContentProofKey};
     use loon_api::{ContentRef, NamespaceId};
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     #[test]
     fn uploaded_content_proof_expires_without_refresh_on_lookup() {
@@ -458,7 +458,7 @@ mod proof_cache_tests {
             .entries
             .get_mut(&key)
             .expect("proof exists")
-            .expires_at = SystemTime::now() - Duration::from_secs(1);
+            .expires_at = wall_clock_now() - Duration::from_secs(1);
 
         assert_eq!(cache.get(&namespace_id, &content_ref.digest), None);
         assert!(!cache.entries.contains_key(&key));
@@ -1864,7 +1864,7 @@ impl Fs {
                 | ControlObjectLoadError::MissingObjectAfterHead { .. },
             ) => {
                 self.inner.cache_stats.record_warm_basis_miss();
-                let started = std::time::Instant::now();
+                let started = monotonic_now();
                 let basis = load_verified_namespace_basis(self.store(), namespace_id)
                     .map_err(CoreError::from)?;
                 self.inner
@@ -1932,7 +1932,7 @@ impl Fs {
     fn basis_for_read(&self, namespace_id: &NamespaceId) -> Result<Arc<VerifiedNamespaceBasis>> {
         if !self.basis_cache_enabled() {
             self.inner.cache_stats.record_warm_basis_miss();
-            let started = std::time::Instant::now();
+            let started = monotonic_now();
             let basis = load_verified_namespace_basis(self.store(), namespace_id)
                 .map_err(CoreError::from)?;
             self.inner
@@ -1982,7 +1982,7 @@ impl Fs {
         }
 
         self.inner.cache_stats.record_warm_basis_miss();
-        let started = std::time::Instant::now();
+        let started = monotonic_now();
         let basis =
             load_verified_namespace_basis(self.store(), namespace_id).map_err(CoreError::from)?;
         self.inner
@@ -2018,7 +2018,7 @@ impl Fs {
         }
 
         self.inner.cache_stats.record_warm_basis_miss();
-        let started = std::time::Instant::now();
+        let started = monotonic_now();
         let basis = load_verified_namespace_basis_at_head(
             self.store(),
             namespace_id,
@@ -2281,10 +2281,22 @@ fn should_invalidate_after_result<T>(result: &Result<T>) -> bool {
 }
 
 fn current_time_ms() -> u64 {
-    SystemTime::now()
+    wall_clock_now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[allow(clippy::disallowed_methods)]
+fn wall_clock_now() -> SystemTime {
+    // Runtime cache TTLs and request timestamps are explicit wall-clock boundaries.
+    SystemTime::now()
+}
+
+#[allow(clippy::disallowed_methods)]
+fn monotonic_now() -> std::time::Instant {
+    // Runtime cache statistics intentionally measure elapsed wall time around cache misses.
+    std::time::Instant::now()
 }
 
 fn elapsed_ms_usize(started: std::time::Instant) -> usize {

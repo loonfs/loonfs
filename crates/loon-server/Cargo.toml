@@ -30,3 +30,6 @@ tracing-subscriber.workspace = true
 loon-client = { path = "../loon-client" }
 tempfile.workspace = true
 ureq.workspace = true
+
+[lints]
+workspace = true

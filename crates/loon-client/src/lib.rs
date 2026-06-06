@@ -859,10 +859,10 @@ auth_token = "dev-token"
 
         let error = ClientConfig::load(&path).expect_err("invalid server url");
 
-        match error {
-            ClientError::ConfigValidation { field, .. } => assert_eq!(field, "server_url"),
-            other => panic!("expected config validation error, got {other:?}"),
-        }
+        assert!(
+            matches!(error, ClientError::ConfigValidation { field, .. } if field == "server_url"),
+            "expected config validation error, got {error:?}"
+        );
     }
 
     #[test]
@@ -876,10 +876,10 @@ auth_token = "   "
 
         let error = ClientConfig::load(&path).expect_err("blank auth token");
 
-        match error {
-            ClientError::ConfigValidation { field, .. } => assert_eq!(field, "auth_token"),
-            other => panic!("expected config validation error, got {other:?}"),
-        }
+        assert!(
+            matches!(error, ClientError::ConfigValidation { field, .. } if field == "auth_token"),
+            "expected config validation error, got {error:?}"
+        );
     }
 
     #[test]
