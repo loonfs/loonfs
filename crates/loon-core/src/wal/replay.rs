@@ -58,8 +58,6 @@ pub(super) fn validate_decoded_replayed_wal(
         .map_err(|err| WalReplayError::Codec(err.to_string()))?;
     let expected_object_key = wal_segment(
         envelope.payload.namespace_id.as_str(),
-        envelope.payload.start_seq.0,
-        envelope.payload.end_seq.0,
         &envelope.payload.segment_id,
     );
 

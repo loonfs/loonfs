@@ -545,10 +545,10 @@ pub struct ChangeSeq(pub u64);
 
 /// Monotonically increasing namespace manifest identity.
 ///
-/// This is the durable file-set version identity for namespace manifests. It is
-/// intentionally separate from `ChangeSeq`: a manifest can advance because of
-/// checkpoint metadata, compaction, or fork/index metadata without a new
-/// namespace commit.
+/// This is the durable file-set version identity for namespace manifests.
+/// Initial/fork manifests may be seeded from the current head sequence, but
+/// later manifest ids can advance for checkpoint metadata, compaction, or
+/// fork/index metadata without a new namespace commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ManifestId(pub u64);
 

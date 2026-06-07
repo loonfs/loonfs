@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn validated_wal_chain_rejects_corrupt_visible_segments() {
         assert_wal_chain_corruption_rejected(|object_key, _envelope, pointer| {
-            *object_key = wal_segment("other", 1, 1, "seg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            *object_key = wal_segment("other", "seg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
             pointer.object_key = object_key.clone();
         });
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {
@@ -191,8 +191,6 @@ mod tests {
             rewrap_envelope(envelope);
             *object_key = wal_segment(
                 envelope.payload.namespace_id.as_str(),
-                envelope.payload.start_seq.0,
-                envelope.payload.end_seq.0,
                 &envelope.payload.segment_id,
             );
             *pointer = envelope.pointer(object_key.clone());
@@ -214,8 +212,6 @@ mod tests {
             rewrap_envelope(envelope);
             *object_key = wal_segment(
                 envelope.payload.namespace_id.as_str(),
-                envelope.payload.start_seq.0,
-                envelope.payload.end_seq.0,
                 &envelope.payload.segment_id,
             );
             *pointer = envelope.pointer(object_key.clone());
@@ -229,8 +225,6 @@ mod tests {
             rewrap_envelope(envelope);
             *object_key = wal_segment(
                 envelope.payload.namespace_id.as_str(),
-                envelope.payload.start_seq.0,
-                envelope.payload.end_seq.0,
                 &envelope.payload.segment_id,
             );
             *pointer = envelope.pointer(object_key.clone());
@@ -243,8 +237,6 @@ mod tests {
             rewrap_envelope(envelope);
             *object_key = wal_segment(
                 envelope.payload.namespace_id.as_str(),
-                envelope.payload.start_seq.0,
-                envelope.payload.end_seq.0,
                 &envelope.payload.segment_id,
             );
             *pointer = envelope.pointer(object_key.clone());

@@ -150,7 +150,7 @@ fn key_builders_cover_locked_object_families() {
         "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     );
     assert_eq!(
-        wal_segment("ns-1", 420, 420, "seg_00000000000000000000000000000001"),
+        wal_segment("ns-1", "seg_00000000000000000000000000000001"),
         "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
     );
     assert_eq!(
@@ -465,7 +465,7 @@ fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
 }
 
 fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
-    let key = wal_segment("ns-1", 420, 420, "seg_00000000000000000000000000000001");
+    let key = wal_segment("ns-1", "seg_00000000000000000000000000000001");
     let _ = store.delete(&key);
 
     store

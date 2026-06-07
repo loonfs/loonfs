@@ -565,8 +565,19 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
 
                     // `write_namespace_manifest` owns the idempotent "manifest
                     // already exists" path. It accepts a conflict only when the
-                    // existing manifest has the same payload checksum.
-                    write_namespace_manifest(store, &manifest).map_err(CoreError::Basis)?;
+                    // existing manifest has the same payload checksum. A
+                    // same-id/different-payload conflict means another writer
+                    // won this allocation slot, so try the next manifest id.
+                    match write_namespace_manifest(store, &manifest) {
+                        Ok(()) => {}
+                        Err(BasisLoadError::ManifestLoad(
+                            ManifestLoadError::ManifestConflict { .. },
+                        )) => {
+                            manifest_id = next_manifest_id_after(manifest_id)?;
+                            continue;
+                        }
+                        Err(error) => return Err(CoreError::Basis(error)),
+                    }
                     manifest_ready = true;
                     break;
                 }
@@ -2310,14 +2321,15 @@ mod tests {
 
     use super::{
         advance_retention_floor, build_manifest_tables, build_manifest_tables_from_rows,
-        build_namespace_manifest_for_basis, create_checkpoint, create_checkpoint_with_policy,
-        flatten_manifest_tables, load_manifest_materialization_from_manifest,
-        load_verified_manifest_materialization, manifest_basis_head, manifest_rows_for_family,
-        metadata_states_equivalent, publish_current_manifest_id, runs_from_metadata_files,
-        write_namespace_manifest, ManifestLoadError, ManifestPublicationOutcome, MetadataLsmPolicy,
-        MetadataRunManifest, MetadataTableCache, MetadataTableCacheConfig,
-        MetadataTableSegmentation, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
-        CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
+        build_namespace_manifest_for_basis, checkpoint_record_by_id, create_checkpoint,
+        create_checkpoint_with_policy, flatten_manifest_tables,
+        load_manifest_materialization_from_manifest, load_verified_manifest_materialization,
+        manifest_basis_head, manifest_rows_for_family, metadata_states_equivalent,
+        publish_current_manifest_id, runs_from_metadata_files, write_namespace_manifest,
+        ManifestLoadError, ManifestPublicationOutcome, MetadataLsmPolicy, MetadataRunManifest,
+        MetadataTableCache, MetadataTableCacheConfig, MetadataTableSegmentation,
+        CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
+        DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
     };
     use crate::error::CoreError;
     use crate::metadata::MetadataState;
@@ -3686,6 +3698,64 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        let raw_store = LocalFsStore::new(temp_dir.path()).expect("raw store");
+        bootstrap_namespace(&raw_store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &raw_store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+
+        let basis = load_verified_namespace_basis(&raw_store, &namespace_id).expect("basis");
+        let conflicting = build_namespace_manifest_for_basis(
+            &raw_store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build conflicting manifest");
+        let mut conflicting_payload = conflicting.payload;
+        conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
+        let conflicting =
+            NamespaceManifestEnvelope::from_payload(&context.writer_version, conflicting_payload)
+                .expect("rewrap conflicting manifest");
+        let conflicting_bytes =
+            encode_namespace_manifest_json(&conflicting).expect("encode conflicting manifest");
+        let store = ConflictOnManifestCreateStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            namespace_manifest(namespace_id.as_str(), ManifestId(1)),
+            conflicting_bytes,
+        );
+
+        let checkpoint = create_checkpoint_with_policy(
+            &store,
+            &namespace_id,
+            &context,
+            MetadataLsmPolicy::default(),
+        )
+        .expect("create checkpoint should retry allocation");
+
+        assert_eq!(checkpoint.manifest_id, ManifestId(2));
+        let retried =
+            load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+                .expect("load retried manifest");
+        assert!(checkpoint_record_by_id(&retried.manifest, &checkpoint.checkpoint_id).is_some());
+        let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        assert_eq!(basis_after.head.current_manifest_id, Some(ManifestId(2)));
     }
 
     #[test]

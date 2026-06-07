@@ -60,7 +60,7 @@ pub fn namespace_fork_state(namespace: &str) -> String {
         .into_string()
 }
 
-pub fn wal_segment(namespace: &str, _start_seq: u64, _end_seq: u64, segment_id: &str) -> String {
+pub fn wal_segment(namespace: &str, segment_id: &str) -> String {
     ObjectLayout::new()
         .wal_segment(namespace, segment_id)
         .into_string()
@@ -172,7 +172,7 @@ mod tests {
             "content-stores/cs_00000000000000000000000000000001/descriptor.json"
         );
         assert_eq!(
-            wal_segment("ns-1", 420, 425, "seg_00000000000000000000000000000001"),
+            wal_segment("ns-1", "seg_00000000000000000000000000000001"),
             "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
         );
         assert_eq!(

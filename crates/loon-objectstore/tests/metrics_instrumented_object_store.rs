@@ -182,7 +182,7 @@ fn classifies_wal_and_manifest_key_families() {
 
     store
         .put_overwrite(
-            &wal_segment("ns-1", 1, 2, "seg_00000000000000000000000000000001"),
+            &wal_segment("ns-1", "seg_00000000000000000000000000000001"),
             b"wal",
         )
         .expect("put wal");
