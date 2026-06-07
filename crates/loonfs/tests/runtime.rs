@@ -12,7 +12,7 @@ use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError,
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
     CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, Fs, FsConfig, InodeId,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MoveOptions, NamespaceId,
+    MaintenanceTickOptions, MaintenanceTickOutcome, ManifestId, MoveOptions, NamespaceId,
     NamespaceMutationCandidate, PathMutationIntent, PutFileBehavior, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceMode, TraceStoreKind,
 };
@@ -1507,7 +1507,7 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     let status = fs
         .namespace_status(&namespace_id)
         .expect("status after checkpoint");
-    assert_eq!(status.current_manifest_id, Some(ChangeSeq(1).into()));
+    assert_eq!(status.current_manifest_id, Some(ManifestId(1)));
     assert_eq!(status.wal_tail_segments, 0);
 }
 
@@ -1559,11 +1559,11 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     let status = fs
         .namespace_status(&namespace_id)
         .expect("status after l0 checkpoint");
-    assert_eq!(status.current_manifest_id, Some(ChangeSeq(2).into()));
+    assert_eq!(status.current_manifest_id, Some(ManifestId(2)));
     assert_eq!(status.wal_tail_segments, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let manifest_key = namespace_manifest(namespace_id.as_str(), 2);
+    let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(2));
     let manifest_bytes = raw_store
         .get(&manifest_key, None)
         .expect("read namespace manifest")

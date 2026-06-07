@@ -187,7 +187,7 @@ fn classifies_wal_and_manifest_key_families() {
         )
         .expect("put wal");
     store
-        .put_overwrite(&namespace_manifest("ns-1", 2), b"manifest")
+        .put_overwrite(&namespace_manifest("ns-1", ManifestId(2)), b"manifest")
         .expect("put manifest");
     store
         .put_overwrite(

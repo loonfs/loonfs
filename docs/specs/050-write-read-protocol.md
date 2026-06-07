@@ -84,7 +84,7 @@ The reader builds an in-memory metadata state from two kinds of durable object:
 
 1. Read the namespace descriptor and content-store descriptor to learn the namespace's immutable content-store relationship.
 2. Read the namespace **head** object to learn the current `seq`, `current_manifest_id`, `latest_checkpoint_id`, and visible WAL tip.
-3. If `current_manifest_id` is set, load and verify that namespace manifest. The manifest references one or more materialized metadata runs through its `head_seq`. It may also contain checkpoint records that pin manifest versions for retention, fork, or stable read workflows.
+3. If `current_manifest_id` is set, load and verify that namespace manifest. The manifest references one or more materialized metadata runs through its `head_seq`. It may also contain checkpoint records that pin manifest versions for retention, fork, or stable read workflows. Reads use `current_manifest_id`; `latest_checkpoint_id` is not recovery authority.
 4. Use the visible WAL tip named by the head to identify the visible segment chain after the manifest `head_seq` (or from genesis, if no current manifest exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends normalized rows to the same metadata tables.
 
 The result is a complete metadata state pinned to one `seq`.
@@ -227,7 +227,7 @@ Clients older than the retention floor must re-bootstrap from a fresh checkpoint
 
 The retention floor may advance only after the system has enough verified material to keep replay safe at or after that point.
 
-Creating a checkpoint pins the current durable namespace file-set version. If there is no manifest for the current head, the implementation first writes one as an internal materialization step. It then records a checkpoint id such as `chk_<32hex>` in the manifest and updates the head's `current_manifest_id` and `latest_checkpoint_id`. Repeating checkpoint creation for the same already-pinned manifest returns the existing checkpoint record.
+Creating a checkpoint pins the current durable namespace file-set version. If there is no manifest for the current head, the implementation first writes one as an internal materialization step. It then records a checkpoint id such as `chk_<32hex>` in manifest state and updates the head's `current_manifest_id` and `latest_checkpoint_id`. Repeating checkpoint creation for the same already-pinned manifest returns the existing checkpoint record. A live manifest does not need to be checkpoint-pinned; checkpoint records explain why a manifest version must be retained.
 
 ## 9. Namespace forks
 

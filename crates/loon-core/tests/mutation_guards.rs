@@ -2579,7 +2579,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_basis.head.current_manifest_id, Some(ManifestId(1)));
     assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
 
-    let target_manifest_key = namespace_manifest(clone_namespace_id.as_str(), 1);
+    let target_manifest_key = namespace_manifest(clone_namespace_id.as_str(), ManifestId(1));
     let target_manifest_bytes = store
         .get(&target_manifest_key, None)
         .expect("read target manifest")

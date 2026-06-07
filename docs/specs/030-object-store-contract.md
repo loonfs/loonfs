@@ -43,6 +43,10 @@ immutable metadata SSTs live under `compacted/metadata/`. Forks are copy-on-writ
 manifest may reference source-owned metadata SSTs through a source checkpoint-backed manifest,
 and the source records a GC pin for that checkpoint/manifest pair.
 
+WAL file ids are opaque generated ids. Recovery follows `head.visible_wal_tip`
+and the predecessor links inside verified WAL envelopes; prefix listing order is
+not recovery authority.
+
 The object layout also reserves these namespace-root file families for fork-aware materialization,
 derived indexes, compaction control, and garbage collection:
 
@@ -57,6 +61,10 @@ derived indexes, compaction control, and garbage collection:
 | **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
 | **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{manifest\|compactions}.boundary` |
 | **GC pins** | Written to protect source checkpoint/manifest references used by forked namespaces. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
+
+GC boundary files are sequenced cleanup cursors for manifest and compaction
+streams. WAL and metadata SST deletion is reachability-driven from the live
+manifest, checkpoint records, fork GC pins, and the retention floor.
 
 ## 4. Durable naming conventions
 

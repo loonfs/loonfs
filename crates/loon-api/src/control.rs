@@ -74,8 +74,13 @@ pub struct HeadState {
     pub next_inode_id: InodeId,
     #[serde(default)]
     pub name_policy: NamePolicy,
+    /// Live read/recovery pointer. If present, basis reconstruction loads this
+    /// manifest before replaying the visible WAL tail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_manifest_id: Option<ManifestId>,
+    /// Admin/provenance convenience pointer to the latest checkpoint record.
+    /// Reads do not use this as authority; checkpoints pin manifests for
+    /// retention, forks, stable reads, and restore workflows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_checkpoint_id: Option<String>,
     pub retention_floor_seq: ChangeSeq,

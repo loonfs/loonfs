@@ -616,12 +616,6 @@ impl fmt::Display for InodeId {
     }
 }
 
-impl From<ChangeSeq> for ManifestId {
-    fn from(value: ChangeSeq) -> Self {
-        Self(value.0)
-    }
-}
-
 impl From<u64> for ManifestId {
     fn from(value: u64) -> Self {
         Self(value)

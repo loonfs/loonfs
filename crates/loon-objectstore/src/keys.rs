@@ -98,9 +98,9 @@ pub fn upload_session_prefix(namespace: &str) -> String {
     ObjectLayout::new().upload_session_prefix(namespace)
 }
 
-pub fn namespace_manifest(namespace: &str, manifest_id: impl Into<ManifestId>) -> String {
+pub fn namespace_manifest(namespace: &str, manifest_id: ManifestId) -> String {
     ObjectLayout::new()
-        .namespace_manifest(namespace, manifest_id.into())
+        .namespace_manifest(namespace, manifest_id)
         .into_string()
 }
 
@@ -116,9 +116,9 @@ pub fn compacted_index_sst(namespace: &str, family: &str, table_id: &str) -> Str
         .into_string()
 }
 
-pub fn index_manifest(namespace: &str, family: &str, manifest_id: impl Into<ManifestId>) -> String {
+pub fn index_manifest(namespace: &str, family: &str, manifest_id: ManifestId) -> String {
     ObjectLayout::new()
-        .index_manifest(namespace, family, "default", manifest_id.into())
+        .index_manifest(namespace, family, "default", manifest_id)
         .into_string()
 }
 

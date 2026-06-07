@@ -235,6 +235,10 @@ The head summarizes the current visible boundary and replay hints, including at 
 - `retention_floor_seq`
 - `wal_tip_segment_id` or an equivalent visible tail pointer
 
+`current_manifest_id` is the live read/recovery pointer. `latest_checkpoint_id`
+is an admin/provenance convenience pointer to a checkpoint record; readers do
+not use it as the file-set authority.
+
 A checkpoint is a durable pin to a namespace manifest version. It is authoritative only when its checkpoint record and referenced namespace manifest have been verified against durable objects and namespace summary. If verification fails, readers must not treat that checkpoint as authoritative.
 
 A namespace manifest is the durable object for one namespace file-set version. It may reference one or more immutable metadata runs and may include checkpoint records that pin manifest versions for retention, fork, or stable read workflows. Each run is internally segmented without overlapping segment key ranges; different runs may overlap and readers apply the normal metadata visibility rules across all referenced runs. Readers load the referenced runs, then replay only the visible WAL chain after the manifest's `head_seq`.

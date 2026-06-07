@@ -1,5 +1,6 @@
 mod provider_env;
 
+use loon_api::ManifestId;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     content_blob, content_store_descriptor, derived_progress, metadata_sst, namespace_descriptor,
@@ -153,7 +154,7 @@ fn key_builders_cover_locked_object_families() {
         "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
     );
     assert_eq!(
-        namespace_manifest("ns-1", 420),
+        namespace_manifest("ns-1", ManifestId(420)),
         "namespaces/ns-1/manifest/00000000000000000420.manifest"
     );
     assert_eq!(

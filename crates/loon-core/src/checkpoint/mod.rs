@@ -42,7 +42,16 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
-const HEAD_UPDATE_RETRY_LIMIT: usize = 8;
+// Manifest id allocation can race with other manifest publishers. Exhausting
+// this loop means the candidate id range was already occupied.
+const MANIFEST_ALLOCATION_RETRY_LIMIT: usize = 8;
+// Checkpoint publication can race with another manifest update. Retrying here
+// preserves one checkpoint id while rebasing its checkpoint record onto the
+// newest current manifest.
+const CHECKPOINT_PUBLICATION_RETRY_LIMIT: usize = 8;
+// Mutable head CAS retries are about writer concurrency, not manifest id
+// allocation. Keep this separate so errors describe the failed phase.
+const HEAD_CAS_RETRY_LIMIT: usize = 8;
 // V1 does not require any derived work classes to be caught up before the
 // retention floor advances. This hook stays in place so future retention gates
 // can add progress requirements without restructuring the flow.
@@ -297,6 +306,13 @@ struct MetadataTableScanOutput<'a> {
     cache_mode: MetadataTableCacheMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ManifestPublicationOutcome {
+    Published(HeadState),
+    CurrentManifestMissingCheckpoint { current_manifest_id: ManifestId },
+    HeadCasRaceLost,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManifestLoadErrorKind {
     Corrupt,
@@ -472,116 +488,144 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     // This is distinct from metadata compaction: creating a checkpoint should
     // not rewrite SSTs unless a manifest must be materialized for an otherwise
     // unmanifested head or the L0 run policy requires a full materialization.
-    let basis = {
-        let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
-        load_verified_namespace_basis(store, namespace_id)
-    }?;
-    let head_seq = basis.head.seq;
-    if let Some(current_manifest_id) = basis.head.current_manifest_id {
-        let materialized =
-            load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
-                .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
-        if materialized.manifest.payload.head_seq == head_seq {
-            if let Some(checkpoint) = checkpoint_record_for_manifest(&materialized.manifest) {
+    let checkpoint_id = generate_checkpoint_id();
+    let mut saw_head_cas_race = false;
+    for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
+        let basis = {
+            let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
+            load_verified_namespace_basis(store, namespace_id)
+        }?;
+        let head_seq = basis.head.seq;
+        if let Some(current_manifest_id) = basis.head.current_manifest_id {
+            let materialized =
+                load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+            if materialized.manifest.payload.head_seq == head_seq {
+                if let Some(checkpoint) = checkpoint_record_for_manifest(&materialized.manifest) {
+                    return Ok(CreateCheckpointResponse {
+                        namespace_id: namespace_id.clone(),
+                        checkpoint_id: checkpoint.checkpoint_id.clone(),
+                        checkpoint_seq: checkpoint.head_seq,
+                        manifest_id: checkpoint.manifest_id,
+                        current_manifest_id: basis.head.current_manifest_id,
+                        latest_checkpoint_id: basis.head.latest_checkpoint_id.clone(),
+                    });
+                }
+            }
+        }
+
+        let mut manifest_id = next_manifest_id(&basis.head)?;
+        let mut manifest_ready = false;
+        for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
+            let checkpoint_record = NamespaceCheckpointRecord {
+                checkpoint_id: checkpoint_id.clone(),
+                manifest_id,
+                head_seq,
+                head_commit_id: basis.head.head_commit_id.clone(),
+                created_at_ms: context.now_ms,
+                expires_at_ms: None,
+                name: None,
+            };
+
+            match load_verified_manifest_materialization_if_present(
+                store,
+                namespace_id,
+                manifest_id,
+            ) {
+                Ok(Some(materialized)) => {
+                    if checkpoint_record_by_id(&materialized.manifest, &checkpoint_id).is_some() {
+                        manifest_ready = true;
+                        break;
+                    }
+                    manifest_id = next_manifest_id_after(manifest_id)?;
+                    continue;
+                }
+                Ok(None) => {
+                    let manifest = build_namespace_manifest_for_basis(
+                        store,
+                        namespace_id,
+                        &basis,
+                        &context.writer_version,
+                        policy,
+                        manifest_id,
+                        Some(checkpoint_record),
+                    )?;
+                    let materialized = load_manifest_materialization_from_manifest(
+                        store,
+                        namespace_id,
+                        &namespace_manifest(namespace_id.as_str(), manifest_id),
+                        &manifest,
+                    )
+                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+                    if !metadata_states_equivalent(&basis.metadata_state, &materialized) {
+                        return Err(CoreError::Basis(BasisLoadError::ManifestLoad(
+                            ManifestLoadError::MetadataMismatch,
+                        )));
+                    }
+
+                    // `write_namespace_manifest` owns the idempotent "manifest
+                    // already exists" path. It accepts a conflict only when the
+                    // existing manifest has the same payload checksum.
+                    write_namespace_manifest(store, &manifest).map_err(CoreError::Basis)?;
+                    manifest_ready = true;
+                    break;
+                }
+                Err(error) => return Err(CoreError::Basis(BasisLoadError::ManifestLoad(error))),
+            }
+        }
+        if !manifest_ready {
+            return Err(CoreError::Store(
+                "manifest id allocation retry exhausted".to_owned(),
+            ));
+        }
+
+        let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_id)
+            .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+        let checkpoint = checkpoint_record_by_id(&materialized.manifest, &checkpoint_id)
+            .ok_or_else(|| {
+                CoreError::CheckpointUnavailable(format!(
+                    "namespace `{}` manifest {:?} has no checkpoint record `{checkpoint_id}`",
+                    namespace_id.as_str(),
+                    manifest_id
+                ))
+            })?;
+        match publish_current_manifest_id(
+            store,
+            namespace_id,
+            manifest_id,
+            &checkpoint.checkpoint_id,
+            &context.writer_version,
+        )? {
+            ManifestPublicationOutcome::Published(resulting_head) => {
                 return Ok(CreateCheckpointResponse {
                     namespace_id: namespace_id.clone(),
                     checkpoint_id: checkpoint.checkpoint_id.clone(),
                     checkpoint_seq: checkpoint.head_seq,
                     manifest_id: checkpoint.manifest_id,
-                    current_manifest_id: basis.head.current_manifest_id,
-                    latest_checkpoint_id: basis.head.latest_checkpoint_id.clone(),
+                    current_manifest_id: resulting_head.current_manifest_id,
+                    latest_checkpoint_id: resulting_head.latest_checkpoint_id,
                 });
             }
-        }
-    }
-
-    let checkpoint_id = generate_checkpoint_id();
-    let mut manifest_id = next_manifest_id(&basis.head)?;
-    let mut manifest_ready = false;
-    for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
-        let checkpoint_record = NamespaceCheckpointRecord {
-            checkpoint_id: checkpoint_id.clone(),
-            manifest_id,
-            head_seq,
-            head_commit_id: basis.head.head_commit_id.clone(),
-            created_at_ms: context.now_ms,
-            expires_at_ms: None,
-            name: None,
-        };
-
-        match load_verified_manifest_materialization_if_present(store, namespace_id, manifest_id) {
-            Ok(Some(materialized)) => {
-                if checkpoint_record_for_manifest(&materialized.manifest).is_some() {
-                    manifest_ready = true;
-                    break;
-                }
-                manifest_id = next_manifest_id_after(manifest_id)?;
+            ManifestPublicationOutcome::CurrentManifestMissingCheckpoint { .. } => {
+                // Another manifest publisher won first. Rebuild the checkpoint
+                // record on top of the new current manifest using the same
+                // checkpoint id so the operation remains idempotent.
                 continue;
             }
-            Ok(None) => {
-                let manifest = build_namespace_manifest_for_basis(
-                    store,
-                    namespace_id,
-                    &basis,
-                    &context.writer_version,
-                    policy,
-                    manifest_id,
-                    Some(checkpoint_record),
-                )?;
-                let materialized = load_manifest_materialization_from_manifest(
-                    store,
-                    namespace_id,
-                    &namespace_manifest(namespace_id.as_str(), manifest_id),
-                    &manifest,
-                )
-                .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
-                if !metadata_states_equivalent(&basis.metadata_state, &materialized) {
-                    return Err(CoreError::Basis(BasisLoadError::ManifestLoad(
-                        ManifestLoadError::MetadataMismatch,
-                    )));
-                }
-
-                // `write_namespace_manifest` owns the idempotent "manifest
-                // already exists" path. It accepts a conflict only when the
-                // existing manifest has the same payload checksum.
-                write_namespace_manifest(store, &manifest).map_err(CoreError::Basis)?;
-                manifest_ready = true;
-                break;
+            ManifestPublicationOutcome::HeadCasRaceLost => {
+                saw_head_cas_race = true;
+                continue;
             }
-            Err(error) => return Err(CoreError::Basis(BasisLoadError::ManifestLoad(error))),
         }
     }
-    if !manifest_ready {
-        return Err(CoreError::Store(
-            "checkpoint manifest allocation retry exhausted".to_owned(),
-        ));
-    }
 
-    let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_id)
-        .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
-    let checkpoint = checkpoint_record_for_manifest(&materialized.manifest).ok_or_else(|| {
-        CoreError::CheckpointUnavailable(format!(
-            "namespace `{}` manifest {:?} has no checkpoint record",
-            namespace_id.as_str(),
-            manifest_id
+    if saw_head_cas_race {
+        Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
+    } else {
+        Err(CoreError::CheckpointUnavailable(
+            "checkpoint publication retry exhausted".to_owned(),
         ))
-    })?;
-    let resulting_head = publish_current_manifest_id(
-        store,
-        namespace_id,
-        manifest_id,
-        &checkpoint.checkpoint_id,
-        &context.writer_version,
-    )?;
-
-    Ok(CreateCheckpointResponse {
-        namespace_id: namespace_id.clone(),
-        checkpoint_id: checkpoint.checkpoint_id.clone(),
-        checkpoint_seq: checkpoint.head_seq,
-        manifest_id: checkpoint.manifest_id,
-        current_manifest_id: resulting_head.current_manifest_id,
-        latest_checkpoint_id: resulting_head.latest_checkpoint_id,
-    })
+    }
 }
 
 fn next_manifest_id(head: &HeadState) -> Result<ManifestId, CoreError> {
@@ -720,7 +764,7 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<AdvanceRetentionResponse, CoreError> {
-    for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
+    for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let head = loaded_head.envelope.state;
@@ -781,9 +825,8 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
 pub(crate) fn load_verified_manifest_materialization<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: impl Into<ManifestId>,
+    manifest_id: ManifestId,
 ) -> Result<LoadedManifestMaterialization, ManifestLoadError> {
-    let manifest_id = manifest_id.into();
     load_verified_manifest_materialization_if_present(store, namespace_id, manifest_id)?.ok_or_else(
         || ManifestLoadError::MissingManifest {
             object_key: namespace_manifest(namespace_id.as_str(), manifest_id),
@@ -795,9 +838,8 @@ pub(crate) fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore + ?Siz
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
     namespace_id: &NamespaceId,
-    manifest_id: impl Into<ManifestId>,
+    manifest_id: ManifestId,
 ) -> Result<VerifiedMetadataTables<'a, S>, ManifestLoadError> {
-    let manifest_id = manifest_id.into();
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
     let manifest = {
         let _span = tracing::info_span!(
@@ -860,9 +902,8 @@ pub(crate) fn manifest_basis_head(
 fn load_verified_manifest_materialization_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    manifest_id: impl Into<ManifestId>,
+    manifest_id: ManifestId,
 ) -> Result<Option<LoadedManifestMaterialization>, ManifestLoadError> {
-    let manifest_id = manifest_id.into();
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
     let manifest = load_namespace_manifest_envelope_if_present(
         store,
@@ -1255,8 +1296,8 @@ fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
     manifest_id: ManifestId,
     checkpoint_id: &str,
     writer_version: &str,
-) -> Result<HeadState, CoreError> {
-    for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
+) -> Result<ManifestPublicationOutcome, CoreError> {
+    for _attempt in 0..HEAD_CAS_RETRY_LIMIT {
         let loaded_head = read_head_object(store, namespace_id)
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let current_head = loaded_head.envelope.state;
@@ -1271,13 +1312,13 @@ fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
                 load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
                     .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
             if checkpoint_record_by_id(&current_manifest.manifest, checkpoint_id).is_some() {
-                return Ok(current_head);
+                return Ok(ManifestPublicationOutcome::Published(current_head));
             }
-            return Err(CoreError::CheckpointUnavailable(format!(
-                "namespace `{}` current manifest {:?} does not contain checkpoint `{checkpoint_id}`",
-                namespace_id.as_str(),
-                current_manifest_id
-            )));
+            return Ok(
+                ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
+                    current_manifest_id,
+                },
+            );
         }
 
         let next_head = HeadState {
@@ -1299,13 +1340,13 @@ fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
             writer_version,
             &next_head,
         ) {
-            Ok(()) => return Ok(next_head),
+            Ok(()) => return Ok(ManifestPublicationOutcome::Published(next_head)),
             Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => continue,
             Err(error) => return Err(CoreError::Store(error.to_string())),
         }
     }
 
-    Err(CoreError::HeadPublish(CommitHeadPublishError::StaleHead))
+    Ok(ManifestPublicationOutcome::HeadCasRaceLost)
 }
 
 fn compare_and_swap_head<S: ObjectStore + ?Sized>(
@@ -2273,17 +2314,17 @@ mod tests {
         flatten_manifest_tables, load_manifest_materialization_from_manifest,
         load_verified_manifest_materialization, manifest_basis_head, manifest_rows_for_family,
         metadata_states_equivalent, publish_current_manifest_id, runs_from_metadata_files,
-        write_namespace_manifest, ManifestLoadError, MetadataLsmPolicy, MetadataRunManifest,
-        MetadataTableCache, MetadataTableCacheConfig, MetadataTableSegmentation,
-        CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL, CHECKPOINT_TABLE_FAMILIES,
-        DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
+        write_namespace_manifest, ManifestLoadError, ManifestPublicationOutcome, MetadataLsmPolicy,
+        MetadataRunManifest, MetadataTableCache, MetadataTableCacheConfig,
+        MetadataTableSegmentation, CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
+        CHECKPOINT_TABLE_FAMILIES, DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT, MAX_CHECKPOINT_L0_RUNS,
     };
     use crate::error::CoreError;
     use crate::metadata::MetadataState;
     use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{move_path, put_file_bytes, write_file_bytes};
-    use crate::{ErrorCode, MutationContext, PutFileBehavior};
+    use crate::{MutationContext, PutFileBehavior};
     use loon_api::wire::manifest::{
         encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json, MetadataFileRef,
         MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
@@ -2338,7 +2379,10 @@ mod tests {
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
 
-        assert_eq!(after.head.current_manifest_id, Some(before.head.seq.into()));
+        assert_eq!(
+            after.head.current_manifest_id,
+            Some(ManifestId(before.head.seq.0))
+        );
         assert_eq!(before.head.seq, after.head.seq);
         assert!(metadata_states_equivalent(
             &before.metadata_state,
@@ -2397,15 +2441,15 @@ mod tests {
 
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
-        assert_eq!(basis.head.current_manifest_id, Some(ChangeSeq(0).into()));
+        assert_eq!(basis.head.current_manifest_id, Some(ManifestId(0)));
         let materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, ChangeSeq(0))
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(0))
                 .expect("load namespace manifest");
         assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
         let checkpoint = &materialized.manifest.payload.checkpoints[0];
         assert!(validate_checkpoint_id(&checkpoint.checkpoint_id).is_ok());
         assert_eq!(checkpoint.head_seq, ChangeSeq(0));
-        assert_eq!(checkpoint.manifest_id, ChangeSeq(0).into());
+        assert_eq!(checkpoint.manifest_id, ManifestId(0));
     }
 
     #[test]
@@ -2426,7 +2470,7 @@ mod tests {
         .expect("write hello");
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
 
-        let manifest_key = namespace_manifest(namespace_id.as_str(), 1);
+        let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(1));
         store
             .put_overwrite(&manifest_key, br#"{"bad":"json"}"#)
             .expect("corrupt manifest");
@@ -2442,7 +2486,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
-        let manifest_key = namespace_manifest(namespace_id.as_str(), 1);
+        let manifest_key = namespace_manifest(namespace_id.as_str(), ManifestId(1));
         let store = ConflictOnManifestCreateStore::new(
             LocalFsStore::new(temp_dir.path()).expect("store"),
             manifest_key,
@@ -2507,7 +2551,7 @@ mod tests {
             1
         );
         assert!(store
-            .head(&namespace_manifest(namespace_id.as_str(), 1))
+            .head(&namespace_manifest(namespace_id.as_str(), ManifestId(1)))
             .expect("manifest head")
             .is_some());
     }
@@ -2531,7 +2575,7 @@ mod tests {
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
 
         let materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, ChangeSeq(1))
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(1))
                 .expect("load materialized manifest");
         let current = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         let basis_head = manifest_basis_head(&current.head, &materialized.manifest);
@@ -2569,7 +2613,7 @@ mod tests {
         .expect("write hello");
         let first = create_checkpoint(&store, &namespace_id, &context).expect("first checkpoint");
         let first_materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, first.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
                 .expect("load first manifest");
 
         write_file_bytes(
@@ -2584,7 +2628,7 @@ mod tests {
         let second = create_checkpoint(&store, &namespace_id, &context).expect("second checkpoint");
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         let second_materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, second.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
                 .expect("load second manifest");
 
         assert_eq!(
@@ -2642,7 +2686,7 @@ mod tests {
         .expect("write second");
         let second = create_checkpoint(&store, &namespace_id, &context).expect("second checkpoint");
         let materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, second.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id)
                 .expect("load materialized manifest");
         let deleted_key = l0_runs(&materialized.manifest)[0]
             .tables
@@ -2654,7 +2698,7 @@ mod tests {
             .clone();
         store.delete(&deleted_key).expect("delete l0 segment");
 
-        match load_verified_manifest_materialization(&store, &namespace_id, second.checkpoint_seq) {
+        match load_verified_manifest_materialization(&store, &namespace_id, second.manifest_id) {
             Err(ManifestLoadError::MissingSegment { object_key }) => {
                 assert_eq!(object_key, deleted_key);
             }
@@ -2671,9 +2715,9 @@ mod tests {
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
         let first = write_file_and_checkpoint(&store, &namespace_id, &context, 1);
         let first_materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, first)
+            load_verified_manifest_materialization(&store, &namespace_id, manifest_id(first))
                 .expect("load first manifest");
-        let manifest_key = namespace_manifest(namespace_id.as_str(), first.0);
+        let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(first));
         let mut bad_base_manifest = first_materialized.manifest.clone();
         let expected_base_key = {
             let base_descriptor = bad_base_manifest
@@ -2707,9 +2751,9 @@ mod tests {
 
         let second = write_file_and_checkpoint(&store, &namespace_id, &context, 2);
         let second_materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, second)
+            load_verified_manifest_materialization(&store, &namespace_id, manifest_id(second))
                 .expect("load second manifest");
-        let manifest_key = namespace_manifest(namespace_id.as_str(), second.0);
+        let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id(second));
         let mut bad_l0_manifest = second_materialized.manifest.clone();
         let expected_l0_key = {
             let l0_descriptor = bad_l0_manifest
@@ -2788,7 +2832,7 @@ mod tests {
             &context.writer_version,
             NamespaceManifestPayload {
                 namespace_id: namespace_id.clone(),
-                manifest_id: basis.head.seq.into(),
+                manifest_id: manifest_id(basis.head.seq),
                 head_seq: basis.head.seq,
                 head_commit_id: basis.head.head_commit_id.clone(),
                 base_seq: first,
@@ -2808,7 +2852,7 @@ mod tests {
         match load_manifest_materialization_from_manifest(
             &store,
             &namespace_id,
-            &namespace_manifest(namespace_id.as_str(), basis.head.seq),
+            &namespace_manifest(namespace_id.as_str(), manifest_id(basis.head.seq)),
             &manifest,
         ) {
             Err(ManifestLoadError::SegmentDescriptorMismatch { message, .. }) => {
@@ -2831,7 +2875,7 @@ mod tests {
         }
 
         let materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, ChangeSeq(4))
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
                 .expect("load chained manifest");
         assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(1));
         let l0_runs = l0_runs(&materialized.manifest);
@@ -2871,13 +2915,14 @@ mod tests {
             write_file_and_checkpoint_with_policy(&store, &namespace_id, &context, index, policy);
         }
 
-        let capped = load_verified_manifest_materialization(&store, &namespace_id, ChangeSeq(3))
+        let capped = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(3))
             .expect("load capped manifest");
         assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
         assert_eq!(l0_runs(&capped.manifest).len(), 2);
 
-        let compacted = load_verified_manifest_materialization(&store, &namespace_id, ChangeSeq(4))
-            .expect("load compacted manifest");
+        let compacted =
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(4))
+                .expect("load compacted manifest");
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         assert_eq!(compacted.manifest.payload.base_seq, ChangeSeq(4));
         assert!(l0_runs(&compacted.manifest).is_empty());
@@ -2910,7 +2955,7 @@ mod tests {
 
         let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
         let materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, manifest.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
                 .expect("load manifest");
         let mut manifest = materialized.manifest;
         let descriptor = manifest
@@ -2962,7 +3007,7 @@ mod tests {
         let manifest = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("manifest");
         let materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, manifest.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
                 .expect("load manifest");
 
         let base = base_run(&materialized.manifest);
@@ -3026,7 +3071,7 @@ mod tests {
             &store,
             Some(&cache),
             &namespace_id,
-            manifest.checkpoint_seq,
+            manifest.manifest_id,
         )
         .expect("load tables");
 
@@ -3067,7 +3112,7 @@ mod tests {
             &store,
             Some(&cache),
             &namespace_id,
-            manifest.checkpoint_seq,
+            manifest.manifest_id,
         )
         .expect("load tables");
 
@@ -3115,7 +3160,7 @@ mod tests {
         let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("first checkpoint");
         let first_materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, first.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
                 .expect("load first manifest");
         let first_run_keys = run_segment_object_keys(&first_materialized.manifest);
 
@@ -3142,7 +3187,7 @@ mod tests {
         let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("compacted checkpoint");
         let compacted_materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, compacted.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
                 .expect("load compacted manifest");
         let basis_after = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         let compacted_run_keys = run_segment_object_keys(&compacted_materialized.manifest);
@@ -3194,7 +3239,7 @@ mod tests {
         let first = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("first checkpoint");
         let first_materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, first.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, first.manifest_id)
                 .expect("load first manifest");
         let revision_keys_before = base_segment_object_keys_for_family(
             &first_materialized.manifest,
@@ -3225,7 +3270,7 @@ mod tests {
         let compacted = create_checkpoint_with_policy(&store, &namespace_id, &context, policy)
             .expect("compacted checkpoint");
         let compacted_materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, compacted.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, compacted.manifest_id)
                 .expect("load compacted manifest");
         let revision_keys_after = base_segment_object_keys_for_family(
             &compacted_materialized.manifest,
@@ -3267,7 +3312,7 @@ mod tests {
 
         let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
         let materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, manifest.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
                 .expect("load manifest");
         let base = base_run(&materialized.manifest);
         let child_table = base
@@ -3284,8 +3329,7 @@ mod tests {
 
         let deleted_key = child_segment.object_key.clone();
         store.delete(&deleted_key).expect("delete child index");
-        match load_verified_manifest_materialization(&store, &namespace_id, manifest.checkpoint_seq)
-        {
+        match load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id) {
             Err(ManifestLoadError::MissingSegment { object_key }) => {
                 assert_eq!(object_key, deleted_key);
             }
@@ -3321,7 +3365,7 @@ mod tests {
 
         let manifest = create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
         let materialized =
-            load_verified_manifest_materialization(&store, &namespace_id, manifest.checkpoint_seq)
+            load_verified_manifest_materialization(&store, &namespace_id, manifest.manifest_id)
                 .expect("load manifest before corruption");
         let mut manifest = materialized.manifest;
         let mut child_index_rows = manifest_rows_for_family(
@@ -3502,13 +3546,13 @@ mod tests {
             write_file_and_checkpoint(&store, &namespace_id, &context, index);
         }
 
-        let capped = load_verified_manifest_materialization(&store, &namespace_id, ChangeSeq(9))
+        let capped = load_verified_manifest_materialization(&store, &namespace_id, ManifestId(9))
             .expect("load capped manifest");
         assert_eq!(capped.manifest.payload.base_seq, ChangeSeq(1));
         assert_eq!(l0_runs(&capped.manifest).len(), MAX_CHECKPOINT_L0_RUNS);
 
         let collapsed =
-            load_verified_manifest_materialization(&store, &namespace_id, ChangeSeq(10))
+            load_verified_manifest_materialization(&store, &namespace_id, ManifestId(10))
                 .expect("load collapsed manifest");
         assert_eq!(collapsed.manifest.payload.base_seq, ChangeSeq(10));
         assert!(l0_runs(&collapsed.manifest).is_empty());
@@ -3552,7 +3596,7 @@ mod tests {
             &basis_before,
             &context.writer_version,
             MetadataLsmPolicy::default(),
-            ChangeSeq(2).into(),
+            ManifestId(2),
             None,
         )
         .expect("build orphan manifest");
@@ -3781,7 +3825,7 @@ mod tests {
             &context.writer_version,
             NamespaceManifestPayload {
                 namespace_id: namespace_id.clone(),
-                manifest_id: basis_before.head.seq.into(),
+                manifest_id: ManifestId(basis_before.head.seq.0),
                 head_seq: basis_before.head.seq,
                 head_commit_id: basis_before.head.head_commit_id.clone(),
                 base_seq: basis_before.head.seq,
@@ -3810,23 +3854,28 @@ mod tests {
         .expect("write second");
         let later_checkpoint =
             create_checkpoint(&store, &namespace_id, &context).expect("later checkpoint");
-        assert!(later_checkpoint.manifest_id > basis_before.head.seq.into());
+        assert!(later_checkpoint.manifest_id > ManifestId(basis_before.head.seq.0));
 
         let checkpoint_id = "chk_00000000000000000000000000000099";
-        let error = publish_current_manifest_id(
+        let outcome = publish_current_manifest_id(
             &store,
             &namespace_id,
-            basis_before.head.seq.into(),
+            ManifestId(basis_before.head.seq.0),
             checkpoint_id,
             &context.writer_version,
         )
-        .expect_err("current manifest without checkpoint record must not be accepted");
+        .expect("manifest publication check should classify current manifest");
 
-        assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+        assert_eq!(
+            outcome,
+            ManifestPublicationOutcome::CurrentManifestMissingCheckpoint {
+                current_manifest_id: later_checkpoint.manifest_id
+            }
+        );
     }
 
     #[test]
-    fn current_manifest_cas_retry_exhaustion_is_stale_head() {
+    fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let context = test_context();
@@ -3837,16 +3886,16 @@ mod tests {
         bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
 
         store.fail_head_cas();
-        let error = publish_current_manifest_id(
+        let outcome = publish_current_manifest_id(
             &store,
             &namespace_id,
-            ChangeSeq(0).into(),
+            ManifestId(0),
             "chk_00000000000000000000000000000000",
             &context.writer_version,
         )
-        .expect_err("current manifest publication should exhaust CAS retries");
+        .expect("current manifest publication should report CAS race");
 
-        assert_eq!(error.code(), ErrorCode::StaleHead);
+        assert_eq!(outcome, ManifestPublicationOutcome::HeadCasRaceLost);
     }
 
     fn test_context() -> MutationContext {
@@ -3856,6 +3905,10 @@ mod tests {
             now_ms: 1_000,
             lease_duration_ms: 60_000,
         }
+    }
+
+    fn manifest_id(seq: ChangeSeq) -> ManifestId {
+        ManifestId(seq.0)
     }
 
     fn write_file_and_checkpoint(

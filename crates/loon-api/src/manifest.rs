@@ -312,6 +312,8 @@ pub struct NamespaceManifestPayload {
     pub fork: Option<NamespaceManifestFork>,
     #[serde(default)]
     pub checkpoints: Vec<NamespaceCheckpointRecord>,
+    // TODO: split this flat list into structured run/table/index roots when
+    // compaction and GC need richer reachability decisions.
     pub metadata_files: Vec<MetadataFileRef>,
 }
 

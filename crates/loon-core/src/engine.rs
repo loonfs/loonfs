@@ -511,6 +511,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     /// Creates or reuses a checkpoint for the current namespace head.
+    ///
+    /// A checkpoint pins a manifest version for retention/provenance. If the
+    /// current head has no manifest yet, this first publishes one for the
+    /// current durable namespace state; it is not a request to compact metadata.
     pub fn create_checkpoint(&self) -> CoreResult<CreateCheckpointResponse> {
         crate::checkpoint::create_checkpoint(
             &self.store,

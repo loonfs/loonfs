@@ -141,7 +141,7 @@ fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
 mod tests {
     use super::*;
     use loon_api::wire::wal::{WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload};
-    use loon_api::{CommitId, FenceToken, InodeId, NamespaceId};
+    use loon_api::{CommitId, FenceToken, InodeId, ManifestId, NamespaceId};
 
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
         HeadState {
@@ -152,7 +152,7 @@ mod tests {
             active_fence_token: FenceToken(1),
             next_inode_id: InodeId(10),
             name_policy: loon_api::NamePolicy::default(),
-            current_manifest_id: Some(ChangeSeq(0).into()),
+            current_manifest_id: Some(ManifestId(0)),
             latest_checkpoint_id: Some("chk_00000000000000000000000000000000".to_owned()),
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
