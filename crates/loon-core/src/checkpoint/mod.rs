@@ -25,11 +25,13 @@ use loon_api::wire::manifest::{
     encode_metadata_sst_envelope_zstd, encode_namespace_manifest_json,
     metadata_page_checksum_sha256, metadata_sst_payload_checksum_sha256, MetadataFileRef,
     MetadataPage, MetadataRow, MetadataSegmentKey, MetadataSstEnvelope, MetadataSstPayload,
-    MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MetadataTableFamily, NamespaceCheckpointRecord, NamespaceManifestEnvelope,
+    NamespaceManifestPayload,
 };
 use loon_api::{
-    generate_metadata_table_id, validate_metadata_table_id, AdvanceRetentionResponse, ChangeSeq,
-    CreateCheckpointResponse, InodeId, NamespaceId,
+    generate_checkpoint_id, generate_metadata_table_id, validate_checkpoint_id,
+    validate_metadata_table_id, AdvanceRetentionResponse, ChangeSeq, CreateCheckpointResponse,
+    InodeId, NamespaceId,
 };
 use loon_objectstore::keys::{
     derived_progress, metadata_sst, namespace_manifest, DerivedWorkClass,
@@ -457,6 +459,12 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
         load_verified_namespace_basis(store, namespace_id)
     }?;
     let manifest_seq = basis.head.seq;
+    let checkpoint_record = NamespaceCheckpointRecord {
+        checkpoint_id: generate_checkpoint_id(),
+        checkpoint_seq: manifest_seq,
+        manifest_seq,
+        created_at_ms: context.now_ms,
+    };
 
     match load_verified_manifest_materialization_if_present(store, namespace_id, manifest_seq) {
         Ok(Some(_)) => {}
@@ -467,6 +475,7 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
                 &basis,
                 &context.writer_version,
                 policy,
+                Some(checkpoint_record),
             )?;
             let materialized = load_manifest_materialization_from_manifest(
                 store,
@@ -488,11 +497,21 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
         Err(error) => return Err(CoreError::Basis(BasisLoadError::ManifestLoad(error))),
     }
 
+    let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_seq)
+        .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+    let checkpoint = checkpoint_record_for_manifest(&materialized.manifest).ok_or_else(|| {
+        CoreError::CheckpointUnavailable(format!(
+            "namespace `{}` manifest at seq {:?} has no checkpoint record",
+            namespace_id.as_str(),
+            manifest_seq
+        ))
+    })?;
     let resulting_head =
         publish_checkpoint_hint_seq(store, namespace_id, manifest_seq, &context.writer_version)?;
 
     Ok(CreateCheckpointResponse {
         namespace_id: namespace_id.clone(),
+        checkpoint_id: checkpoint.checkpoint_id.clone(),
         checkpoint_seq: manifest_seq,
         checkpoint_hint_seq: resulting_head.checkpoint_hint_seq,
         checkpoint_hint_points_at_checkpoint: resulting_head.checkpoint_hint_seq
@@ -513,6 +532,7 @@ fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
     basis: &crate::namespace::basis::VerifiedNamespaceBasis,
     writer_version: &str,
     policy: MetadataLsmPolicy,
+    checkpoint_to_add: Option<NamespaceCheckpointRecord>,
 ) -> Result<NamespaceManifestEnvelope, CoreError> {
     let manifest_seq = basis.head.seq;
     let previous_manifest = match basis.head.checkpoint_hint_seq {
@@ -522,6 +542,14 @@ fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
         ),
         _ => None,
     };
+
+    let mut checkpoints = previous_manifest
+        .as_ref()
+        .map(|previous| previous.manifest.payload.checkpoints.clone())
+        .unwrap_or_default();
+    if let Some(checkpoint) = checkpoint_to_add {
+        checkpoints.push(checkpoint);
+    }
 
     let (base_seq, metadata_files) = match previous_manifest {
         Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
@@ -574,10 +602,20 @@ fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
             retention_floor_seq: basis.head.retention_floor_seq,
             verified: true,
             fork: None,
+            checkpoints,
             metadata_files,
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))
+}
+
+fn checkpoint_record_for_manifest(
+    manifest: &NamespaceManifestEnvelope,
+) -> Option<&NamespaceCheckpointRecord> {
+    manifest.payload.checkpoints.iter().find(|checkpoint| {
+        checkpoint.checkpoint_seq == manifest.payload.manifest_seq
+            && checkpoint.manifest_seq == manifest.payload.manifest_seq
+    })
 }
 
 pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
@@ -1207,6 +1245,48 @@ fn validate_namespace_manifest(
         return Err(ManifestLoadError::ManifestNotVerified {
             object_key: object_key.to_owned(),
         });
+    }
+    validate_manifest_checkpoint_records(object_key, &manifest.payload)?;
+    Ok(())
+}
+
+fn validate_manifest_checkpoint_records(
+    object_key: &str,
+    payload: &NamespaceManifestPayload,
+) -> Result<(), ManifestLoadError> {
+    let mut seen_checkpoint_ids = Vec::new();
+    for checkpoint in &payload.checkpoints {
+        validate_checkpoint_id(&checkpoint.checkpoint_id).map_err(|error| {
+            ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: error.to_string(),
+            }
+        })?;
+        if seen_checkpoint_ids.contains(&checkpoint.checkpoint_id.as_str()) {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!("duplicate checkpoint id `{}`", checkpoint.checkpoint_id),
+            });
+        }
+        seen_checkpoint_ids.push(checkpoint.checkpoint_id.as_str());
+        if checkpoint.checkpoint_seq > checkpoint.manifest_seq {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!(
+                    "checkpoint `{}` seq {:?} is after manifest seq {:?}",
+                    checkpoint.checkpoint_id, checkpoint.checkpoint_seq, checkpoint.manifest_seq
+                ),
+            });
+        }
+        if checkpoint.manifest_seq > payload.manifest_seq {
+            return Err(ManifestLoadError::RunManifestMismatch {
+                object_key: object_key.to_owned(),
+                message: format!(
+                    "checkpoint `{}` references future manifest seq {:?}",
+                    checkpoint.checkpoint_id, checkpoint.manifest_seq
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -2065,7 +2145,7 @@ mod tests {
         MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
         NamespaceManifestPayload,
     };
-    use loon_api::{ChangeSeq, NamespaceId};
+    use loon_api::{validate_checkpoint_id, ChangeSeq, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -2173,6 +2253,14 @@ mod tests {
         create_checkpoint(&store, &namespace_id, &context).expect("create checkpoint");
         let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
         assert_eq!(basis.head.checkpoint_hint_seq, Some(ChangeSeq(0)));
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, ChangeSeq(0))
+                .expect("load namespace manifest");
+        assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
+        let checkpoint = &materialized.manifest.payload.checkpoints[0];
+        assert!(validate_checkpoint_id(&checkpoint.checkpoint_id).is_ok());
+        assert_eq!(checkpoint.checkpoint_seq, ChangeSeq(0));
+        assert_eq!(checkpoint.manifest_seq, ChangeSeq(0));
     }
 
     #[test]
@@ -2366,6 +2454,15 @@ mod tests {
         assert_eq!(l0_runs.len(), 1);
         assert_eq!(l0_runs[0].run_seq, second.checkpoint_seq);
         assert_eq!(l0_runs[0].level, CHECKPOINT_L0_RUN_LEVEL);
+        assert_eq!(second_materialized.manifest.payload.checkpoints.len(), 2);
+        assert_eq!(
+            second_materialized.manifest.payload.checkpoints[0].checkpoint_id,
+            first.checkpoint_id
+        );
+        assert_eq!(
+            second_materialized.manifest.payload.checkpoints[1].checkpoint_id,
+            second.checkpoint_id
+        );
         assert!(metadata_states_equivalent(
             &basis_after.metadata_state,
             &second_materialized.metadata_state
@@ -2553,6 +2650,7 @@ mod tests {
                 retention_floor_seq: basis.head.retention_floor_seq,
                 verified: true,
                 fork: None,
+                checkpoints: Vec::new(),
                 metadata_files,
             },
         )
@@ -3307,6 +3405,7 @@ mod tests {
             &basis_before,
             &context.writer_version,
             MetadataLsmPolicy::default(),
+            None,
         )
         .expect("build orphan manifest");
         write_namespace_manifest(&store, &orphan_manifest).expect("write orphan manifest");
@@ -3362,6 +3461,7 @@ mod tests {
                 retention_floor_seq: basis_before.head.retention_floor_seq,
                 verified: true,
                 fork: None,
+                checkpoints: Vec::new(),
                 metadata_files: flatten_manifest_tables(tables),
             },
         )

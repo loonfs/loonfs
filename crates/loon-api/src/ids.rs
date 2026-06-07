@@ -164,6 +164,10 @@ pub fn generate_gc_pin_id() -> String {
     generated_id("pin")
 }
 
+pub fn generate_checkpoint_id() -> String {
+    generated_id("chk")
+}
+
 pub fn validate_upload_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
     validate_generated_id("upl", value.as_ref())
 }
@@ -180,6 +184,10 @@ pub fn validate_metadata_table_id(
 
 pub fn validate_gc_pin_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
     validate_generated_id("pin", value.as_ref())
+}
+
+pub fn validate_checkpoint_id(value: impl AsRef<str>) -> Result<(), GeneratedIdValidationError> {
+    validate_generated_id("chk", value.as_ref())
 }
 
 pub fn validate_generated_id(
@@ -602,10 +610,10 @@ impl fmt::Display for InodeId {
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
-        generate_wal_segment_id, validate_gc_pin_id, validate_metadata_table_id,
-        validate_upload_id, validate_wal_segment_id, CommitId, ContentStoreId, NameKey,
-        NamespaceId,
+        generate_checkpoint_id, generate_gc_pin_id, generate_metadata_table_id, generate_upload_id,
+        generate_wal_segment_id, validate_checkpoint_id, validate_gc_pin_id,
+        validate_metadata_table_id, validate_upload_id, validate_wal_segment_id, CommitId,
+        ContentStoreId, NameKey, NamespaceId,
     };
     use std::collections::BTreeSet;
 
@@ -728,10 +736,12 @@ mod tests {
         assert!(validate_wal_segment_id("seg_00000000000000000000000000000001").is_ok());
         assert!(validate_metadata_table_id("tbl_00000000000000000000000000000001").is_ok());
         assert!(validate_gc_pin_id("pin_00000000000000000000000000000001").is_ok());
+        assert!(validate_checkpoint_id("chk_00000000000000000000000000000001").is_ok());
         assert!(validate_upload_id(["upl", "123"].join("-")).is_err());
         assert!(validate_wal_segment_id(["seg", "123"].join("-")).is_err());
         assert!(validate_metadata_table_id(["tbl", "123"].join("-")).is_err());
         assert!(validate_gc_pin_id(["pin", "123"].join("-")).is_err());
+        assert!(validate_checkpoint_id(["chk", "123"].join("-")).is_err());
     }
 
     #[test]
@@ -740,15 +750,18 @@ mod tests {
         let wal_segment_id = generate_wal_segment_id();
         let metadata_table_id = generate_metadata_table_id();
         let gc_pin_id = generate_gc_pin_id();
+        let checkpoint_id = generate_checkpoint_id();
 
         assert_generated_id_shape(&upload_id, "upl");
         assert_generated_id_shape(&wal_segment_id, "seg");
         assert_generated_id_shape(&metadata_table_id, "tbl");
         assert_generated_id_shape(&gc_pin_id, "pin");
+        assert_generated_id_shape(&checkpoint_id, "chk");
         assert!(validate_upload_id(&upload_id).is_ok());
         assert!(validate_wal_segment_id(&wal_segment_id).is_ok());
         assert!(validate_metadata_table_id(&metadata_table_id).is_ok());
         assert!(validate_gc_pin_id(&gc_pin_id).is_ok());
+        assert!(validate_checkpoint_id(&checkpoint_id).is_ok());
     }
 
     #[test]

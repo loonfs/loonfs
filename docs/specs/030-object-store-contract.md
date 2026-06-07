@@ -31,7 +31,7 @@ The required durable object families and standard key patterns are:
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{wal_file_id}.sst` |
-| **Namespace manifests** | Immutable | Record one checkpoint's verified recovery boundary and the immutable metadata SSTs that materialize metadata through that boundary. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, and checkpoint records that pin manifest versions. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
 | **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/compacted/metadata/{table_id}.sst` |
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
@@ -49,7 +49,7 @@ derived indexes, compaction control, and garbage collection:
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
 | **Namespace fork state** | Written for forked namespaces to record their source and fork sequence. | `namespaces/{namespace_id}/control/fork.json` |
-| **Namespace manifests** | Written as the durable descriptor for one namespace checkpoint. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
+| **Namespace manifests** | Written as the durable descriptor for one namespace file-set version and its checkpoint records. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
 | **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compactions/{compactions_id}.compactions` |
 | **Metadata SSTs** | Written as immutable metadata files referenced by manifests. | `namespaces/{namespace_id}/compacted/metadata/{table_id}.sst` |
 | **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/manifest/{manifest_seq}.manifest` |
@@ -63,7 +63,7 @@ derived indexes, compaction control, and garbage collection:
 LoonFS uses distinct naming conventions for distinct surfaces:
 
 - Fixed object-store path segments use lowercase words or lowercase-kebab, e.g. `content-stores`, `commit-receipts`, and `uploads`.
-- Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`, `tbl_2a31a7fd0c1a4c5f86eb89df8a8ed412`, and `pin_d7a8f496e3cb47b290a8c4c1c7c0ef13`.
+- Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`, `tbl_2a31a7fd0c1a4c5f86eb89df8a8ed412`, `chk_f3d6b97a7d394ddf84b621ddf36e5071`, and `pin_d7a8f496e3cb47b290a8c4c1c7c0ef13`.
 - Durable work-class names use lowercase-kebab, e.g. `manifest-builder`.
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs. They use the durable slug grammar: 1-128 bytes, no leading or trailing whitespace, not `.` or `..`, first character lowercase ASCII letter or digit, and remaining characters lowercase ASCII letters, digits, `.`, `_`, or `-`. Prefer lowercase kebab-case within that grammar.

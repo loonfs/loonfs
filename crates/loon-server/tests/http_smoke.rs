@@ -6,6 +6,7 @@ use loon_api::{
         CommitAnnotations, CommitDelta, CommitOp, CommitOpResult,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
+    validate_checkpoint_id,
     wire::control::{ControlObjectKind, LeaseStateEnvelope},
     AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
     InodeId, InodeKind, RevisionNo,
@@ -945,6 +946,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
             .expect("write file");
 
         let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
+        assert!(validate_checkpoint_id(&first.checkpoint_id).is_ok());
         assert_eq!(first.checkpoint_seq, ChangeSeq(1));
         assert_eq!(first.checkpoint_hint_seq, Some(ChangeSeq(1)));
         assert!(first.checkpoint_hint_points_at_checkpoint);

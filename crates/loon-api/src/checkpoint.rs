@@ -68,6 +68,14 @@ pub struct NamespaceManifestFork {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceCheckpointRecord {
+    pub checkpoint_id: String,
+    pub checkpoint_seq: ChangeSeq,
+    pub manifest_seq: ChangeSeq,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataPage {
     pub page_index: u32,
     pub min_key: String,
@@ -290,6 +298,8 @@ pub struct NamespaceManifestPayload {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<NamespaceManifestFork>,
+    #[serde(default)]
+    pub checkpoints: Vec<NamespaceCheckpointRecord>,
     pub metadata_files: Vec<MetadataFileRef>,
 }
 
@@ -451,8 +461,8 @@ pub fn decode_metadata_sst_envelope_zstd(
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef,
-        MetadataSegmentKey, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
-        NamespaceManifestPayload,
+        MetadataSegmentKey, MetadataTableFamily, NamespaceCheckpointRecord,
+        NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
     };
     use crate::{ChangeSeq, FenceToken, InodeId, NamespaceId};
 
@@ -469,6 +479,12 @@ mod tests {
                 retention_floor_seq: ChangeSeq(0),
                 verified: true,
                 fork: None,
+                checkpoints: vec![NamespaceCheckpointRecord {
+                    checkpoint_id: "chk_00000000000000000000000000000001".to_owned(),
+                    checkpoint_seq: ChangeSeq(10),
+                    manifest_seq: ChangeSeq(10),
+                    created_at_ms: 1_000,
+                }],
                 metadata_files: vec![metadata_file_ref(
                     "demo",
                     "tbl_00000000000000000000000000000001",
@@ -485,6 +501,11 @@ mod tests {
 
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.base_seq, ChangeSeq(10));
+        assert_eq!(decoded.payload.checkpoints.len(), 1);
+        assert_eq!(
+            decoded.payload.checkpoints[0].checkpoint_id,
+            "chk_00000000000000000000000000000001"
+        );
         assert_eq!(decoded.payload.metadata_files.len(), 1);
         assert_eq!(decoded.payload.metadata_files[0].run_seq, ChangeSeq(10));
     }
@@ -507,6 +528,7 @@ mod tests {
                     source_checkpoint_seq: ChangeSeq(10),
                     source_head_seq: ChangeSeq(12),
                 }),
+                checkpoints: Vec::new(),
                 metadata_files: vec![
                     metadata_file_ref(
                         "source",

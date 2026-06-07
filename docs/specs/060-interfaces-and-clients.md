@@ -76,6 +76,7 @@ A representative v0 binding is shown below.
 | Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
+| Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoint` |
 
 Long-running transfers may additionally expose session resources. Implementations may also expose workflow helper resources, but those helpers are outside the core semantics. Once a multi-request interaction begins, the server-issued identifier is the stable in-flight identifier of that interaction.
 
@@ -383,7 +384,7 @@ Representative response:
 }
 ```
 
-The server forks from the source namespace's current head. The new namespace shares the source namespace's content store, starts with independent namespace metadata, and records no durable parent/child relationship in v0.
+The server forks from the source namespace's current head. The new namespace shares the source namespace's content store and starts with independent future namespace metadata. The fork records provenance and source-file GC pins so source-owned immutable metadata files remain available while the target manifest references them.
 
 ## 4. Client profiles
 

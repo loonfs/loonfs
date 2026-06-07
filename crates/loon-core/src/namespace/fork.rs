@@ -14,9 +14,12 @@ use loon_api::wire::control::{
     NamespaceForkStateEnvelope, NamespaceGcPinState, NamespaceGcPinStateEnvelope,
 };
 use loon_api::wire::manifest::{
-    NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
+    NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestFork,
+    NamespaceManifestPayload,
 };
-use loon_api::{generate_gc_pin_id, FenceToken, NamespaceId, NamespaceSummary};
+use loon_api::{
+    generate_checkpoint_id, generate_gc_pin_id, FenceToken, NamespaceId, NamespaceSummary,
+};
 use loon_objectstore::keys::{
     gc_pin, namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
 };
@@ -122,6 +125,12 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
                 source_checkpoint_seq: source_manifest.manifest.payload.manifest_seq,
                 source_head_seq: source_basis.head.seq,
             }),
+            checkpoints: vec![NamespaceCheckpointRecord {
+                checkpoint_id: generate_checkpoint_id(),
+                checkpoint_seq: fork_seq,
+                manifest_seq: fork_seq,
+                created_at_ms: context.now_ms,
+            }],
             metadata_files: source_manifest.manifest.payload.metadata_files.clone(),
         },
     )

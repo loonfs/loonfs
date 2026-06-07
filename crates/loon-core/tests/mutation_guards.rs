@@ -2586,6 +2586,15 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let target_manifest =
         decode_namespace_manifest_json(&target_manifest_bytes).expect("decode target manifest");
     assert!(target_manifest.payload.fork.is_some());
+    assert_eq!(target_manifest.payload.checkpoints.len(), 1);
+    assert_eq!(
+        target_manifest.payload.checkpoints[0].checkpoint_seq,
+        ChangeSeq(1)
+    );
+    assert_eq!(
+        target_manifest.payload.checkpoints[0].manifest_seq,
+        ChangeSeq(1)
+    );
     assert!(
         target_manifest
             .payload

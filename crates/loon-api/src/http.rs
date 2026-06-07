@@ -145,6 +145,8 @@ pub struct RestoreFileRevisionRequest {
 pub struct CreateCheckpointResponse {
     /// Namespace that was checkpointed.
     pub namespace_id: NamespaceId,
+    /// Durable checkpoint id.
+    pub checkpoint_id: String,
     /// Sequence covered by the checkpoint.
     pub checkpoint_seq: ChangeSeq,
     /// Head's current checkpoint hint after the operation.
