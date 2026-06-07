@@ -1,0 +1,549 @@
+use crate::fault::{FaultSchedule, ObjectStoreFault, ScheduledFault};
+use crate::object_op::{ObjectOp, ObjectOpKind};
+use crate::trace::{RunId, SharedSimTrace, SimEventResult, SimTrace, SimTraceEvent};
+use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+pub struct FaultInjectingObjectStore<S> {
+    inner: S,
+    schedule: FaultSchedule,
+    trace: SharedSimTrace,
+    next_step: AtomicU64,
+    stale_values: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    recent_writes: Mutex<Vec<String>>,
+}
+
+impl<S> FaultInjectingObjectStore<S> {
+    pub fn new(inner: S, schedule: FaultSchedule) -> Self {
+        let trace = SharedSimTrace::new(SimTrace::new(
+            RunId(format!("sim-{:016x}", schedule.seed.0)),
+            schedule.seed,
+        ));
+        Self::with_trace(inner, schedule, trace)
+    }
+
+    pub fn with_trace(inner: S, schedule: FaultSchedule, trace: SharedSimTrace) -> Self {
+        Self {
+            inner,
+            schedule,
+            trace,
+            next_step: AtomicU64::new(1),
+            stale_values: Mutex::new(HashMap::new()),
+            recent_writes: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn trace(&self) -> SharedSimTrace {
+        self.trace.clone()
+    }
+
+    pub fn inner(&self) -> &S {
+        &self.inner
+    }
+
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+
+    fn next_object_op(&self, kind: ObjectOpKind, key: &str) -> ObjectOp {
+        ObjectOp {
+            step: self.next_step.fetch_add(1, Ordering::SeqCst),
+            kind,
+            key: key.to_owned(),
+        }
+    }
+
+    fn push_trace(
+        &self,
+        op: ObjectOp,
+        operation: impl Into<String>,
+        fault: Option<ObjectStoreFault>,
+        result: SimEventResult,
+    ) {
+        self.trace.push(SimTraceEvent {
+            step: op.step,
+            actor: None,
+            operation: operation.into(),
+            object_op: Some(op),
+            injected_fault: fault,
+            result,
+            model_hash: None,
+            core_hash: None,
+        });
+    }
+
+    fn scheduled_fault(&self, op: &ObjectOp) -> Option<ScheduledFault> {
+        self.schedule.fault_for(op).cloned()
+    }
+
+    fn remember_current_value(&self, key: &str)
+    where
+        S: ObjectStore,
+    {
+        if let Ok(Some(bytes)) = self.inner.get(key, None) {
+            self.stale_values
+                .lock()
+                .expect("stale value lock poisoned")
+                .entry(key.to_owned())
+                .or_default()
+                .push(bytes);
+        }
+    }
+
+    fn remember_successful_write(&self, key: &str) {
+        self.recent_writes
+            .lock()
+            .expect("recent writes lock poisoned")
+            .push(key.to_owned());
+    }
+
+    fn stale_value(&self, key: &str) -> Option<Vec<u8>> {
+        self.stale_values
+            .lock()
+            .expect("stale value lock poisoned")
+            .get(key)
+            .and_then(|values| values.last().cloned())
+    }
+
+    fn put_with<F>(
+        &self,
+        key: &str,
+        kind: ObjectOpKind,
+        write: F,
+    ) -> Result<ObjectMetadata, ObjectStoreError>
+    where
+        F: FnOnce(&S) -> Result<ObjectMetadata, ObjectStoreError>,
+        S: ObjectStore,
+    {
+        let op = self.next_object_op(kind, key);
+        let scheduled = self.scheduled_fault(&op);
+        match scheduled.as_ref().map(|fault| &fault.fault) {
+            Some(ObjectStoreFault::PutReturnsTransientError) => {
+                self.push_trace(
+                    op,
+                    "put_transient_error",
+                    Some(ObjectStoreFault::PutReturnsTransientError),
+                    SimEventResult::Error {
+                        class: "transport".to_owned(),
+                    },
+                );
+                Err(ObjectStoreError::Transport(
+                    "simulated transient put failure".to_owned(),
+                ))
+            }
+            Some(ObjectStoreFault::PutSucceedsButResponseLost) => {
+                self.remember_current_value(key);
+                let result = write(&self.inner);
+                if result.is_ok() {
+                    self.remember_successful_write(key);
+                    self.push_trace(
+                        op,
+                        "put_lost_success",
+                        Some(ObjectStoreFault::PutSucceedsButResponseLost),
+                        SimEventResult::Error {
+                            class: "transport".to_owned(),
+                        },
+                    );
+                    Err(ObjectStoreError::Transport(
+                        "simulated lost put response".to_owned(),
+                    ))
+                } else {
+                    self.push_trace(
+                        op,
+                        "put_lost_success_inner_failed",
+                        Some(ObjectStoreFault::PutSucceedsButResponseLost),
+                        result_class(&result),
+                    );
+                    result
+                }
+            }
+            Some(ObjectStoreFault::CompareAndSwapStale) if kind == ObjectOpKind::CompareAndSwap => {
+                self.push_trace(
+                    op,
+                    "compare_and_swap_stale",
+                    Some(ObjectStoreFault::CompareAndSwapStale),
+                    SimEventResult::Error {
+                        class: "precondition_failed".to_owned(),
+                    },
+                );
+                Err(ObjectStoreError::PreconditionFailed)
+            }
+            Some(incompatible) => {
+                let fault = incompatible.clone();
+                self.remember_current_value(key);
+                let result = write(&self.inner);
+                if result.is_ok() {
+                    self.remember_successful_write(key);
+                }
+                self.push_trace(
+                    op,
+                    "put_fault_skipped",
+                    Some(fault),
+                    SimEventResult::Skipped {
+                        reason: "fault_not_applicable_to_operation".to_owned(),
+                    },
+                );
+                result
+            }
+            None => {
+                self.remember_current_value(key);
+                let result = write(&self.inner);
+                if result.is_ok() {
+                    self.remember_successful_write(key);
+                }
+                self.push_trace(op, "put", None, result_class(&result));
+                result
+            }
+        }
+    }
+}
+
+impl<S> ObjectStore for FaultInjectingObjectStore<S>
+where
+    S: ObjectStore,
+{
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOpKind::Head, key);
+        let result = self.inner.head(key);
+        self.push_trace(op, "head", None, result_class(&result));
+        result
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOpKind::HeadWithChecksum, key);
+        let result = self.inner.head_with_checksum(key);
+        self.push_trace(op, "head_with_checksum", None, result_class(&result));
+        result
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOpKind::Get, key);
+        let scheduled = self.scheduled_fault(&op);
+        match scheduled.as_ref().map(|fault| &fault.fault) {
+            Some(ObjectStoreFault::GetReturnsStaleValue) => {
+                if let Some(bytes) = self.stale_value(key) {
+                    self.push_trace(
+                        op,
+                        "get_stale_value",
+                        Some(ObjectStoreFault::GetReturnsStaleValue),
+                        SimEventResult::Ok,
+                    );
+                    return Ok(Some(apply_range(bytes, range)?));
+                }
+                let result = self.inner.get(key, range);
+                self.push_trace(
+                    op,
+                    "get_stale_value_skipped",
+                    Some(ObjectStoreFault::GetReturnsStaleValue),
+                    SimEventResult::Skipped {
+                        reason: "no_stale_value_recorded".to_owned(),
+                    },
+                );
+                result
+            }
+            Some(ObjectStoreFault::CorruptObjectBytes) => {
+                let mut result = self.inner.get(key, range);
+                if let Ok(Some(bytes)) = &mut result {
+                    if let Some(first) = bytes.first_mut() {
+                        *first ^= 0x01;
+                    }
+                }
+                self.push_trace(
+                    op,
+                    "get_corrupt_bytes",
+                    Some(ObjectStoreFault::CorruptObjectBytes),
+                    result_class(&result),
+                );
+                result
+            }
+            Some(incompatible) => {
+                let result = self.inner.get(key, range);
+                self.push_trace(
+                    op,
+                    "get_fault_skipped",
+                    Some(incompatible.clone()),
+                    SimEventResult::Skipped {
+                        reason: "fault_not_applicable_to_operation".to_owned(),
+                    },
+                );
+                result
+            }
+            None => {
+                let result = self.inner.get(key, range);
+                self.push_trace(op, "get", None, result_class(&result));
+                result
+            }
+        }
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let kind = put_mode_kind(&mode);
+        self.put_with(key, kind, |inner| inner.put(key, bytes, mode))
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        let op = self.next_object_op(ObjectOpKind::Delete, key);
+        let scheduled = self.scheduled_fault(&op);
+        match scheduled.as_ref().map(|fault| &fault.fault) {
+            Some(ObjectStoreFault::DeleteReturnsTransientError) => {
+                self.push_trace(
+                    op,
+                    "delete_transient_error",
+                    Some(ObjectStoreFault::DeleteReturnsTransientError),
+                    SimEventResult::Error {
+                        class: "transport".to_owned(),
+                    },
+                );
+                Err(ObjectStoreError::Transport(
+                    "simulated transient delete failure".to_owned(),
+                ))
+            }
+            Some(incompatible) => {
+                let result = self.inner.delete(key);
+                self.push_trace(
+                    op,
+                    "delete_fault_skipped",
+                    Some(incompatible.clone()),
+                    SimEventResult::Skipped {
+                        reason: "fault_not_applicable_to_operation".to_owned(),
+                    },
+                );
+                result
+            }
+            None => {
+                let result = self.inner.delete(key);
+                self.push_trace(op, "delete", None, result_class(&result));
+                result
+            }
+        }
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOpKind::ListPrefix, prefix);
+        let scheduled = self.scheduled_fault(&op);
+        match scheduled.as_ref().map(|fault| &fault.fault) {
+            Some(ObjectStoreFault::ListOmitsRecentObject) => {
+                let mut result = self.inner.list_prefix(prefix);
+                if let Ok(keys) = &mut result {
+                    keys.sort();
+                    if let Some(index) = recent_key_to_omit(
+                        keys,
+                        prefix,
+                        &self
+                            .recent_writes
+                            .lock()
+                            .expect("recent writes lock poisoned"),
+                    ) {
+                        keys.remove(index);
+                    }
+                }
+                self.push_trace(
+                    op,
+                    "list_omits_recent_object",
+                    Some(ObjectStoreFault::ListOmitsRecentObject),
+                    result_class(&result),
+                );
+                result
+            }
+            Some(incompatible) => {
+                let result = self.inner.list_prefix(prefix);
+                self.push_trace(
+                    op,
+                    "list_fault_skipped",
+                    Some(incompatible.clone()),
+                    SimEventResult::Skipped {
+                        reason: "fault_not_applicable_to_operation".to_owned(),
+                    },
+                );
+                result
+            }
+            None => {
+                let result = self.inner.list_prefix(prefix);
+                self.push_trace(op, "list_prefix", None, result_class(&result));
+                result
+            }
+        }
+    }
+
+    fn put_overwrite(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put_with(key, ObjectOpKind::Put, |inner| {
+            inner.put_overwrite(key, bytes)
+        })
+    }
+
+    fn put_if_absent(&self, key: &str, bytes: &[u8]) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put_with(key, ObjectOpKind::PutIfAbsent, |inner| {
+            inner.put_if_absent(key, bytes)
+        })
+    }
+
+    fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: &[u8],
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.put_with(key, ObjectOpKind::CompareAndSwap, |inner| {
+            inner.compare_and_swap(key, expected_etag, bytes)
+        })
+    }
+}
+
+fn put_mode_kind(mode: &PutMode) -> ObjectOpKind {
+    match mode {
+        PutMode::Overwrite => ObjectOpKind::Put,
+        PutMode::CreateIfAbsent => ObjectOpKind::PutIfAbsent,
+        PutMode::CompareAndSwap { .. } => ObjectOpKind::CompareAndSwap,
+    }
+}
+
+fn apply_range(bytes: Vec<u8>, range: Option<ByteRange>) -> Result<Vec<u8>, ObjectStoreError> {
+    let Some(range) = range else {
+        return Ok(bytes);
+    };
+    let start =
+        usize::try_from(range.start_inclusive).map_err(|_| ObjectStoreError::InvalidRange)?;
+    let end = usize::try_from(range.end_exclusive).map_err(|_| ObjectStoreError::InvalidRange)?;
+    if start > end || end > bytes.len() {
+        return Err(ObjectStoreError::InvalidRange);
+    }
+    Ok(bytes[start..end].to_vec())
+}
+
+fn recent_key_to_omit(keys: &[String], prefix: &str, recent_writes: &[String]) -> Option<usize> {
+    recent_writes
+        .iter()
+        .rev()
+        .find(|key| key.starts_with(prefix))
+        .and_then(|recent| keys.iter().position(|key| key == recent))
+}
+
+fn result_class<T>(result: &Result<T, ObjectStoreError>) -> SimEventResult {
+    match result {
+        Ok(_) => SimEventResult::Ok,
+        Err(ObjectStoreError::NotFound) => SimEventResult::Error {
+            class: "not_found".to_owned(),
+        },
+        Err(ObjectStoreError::InvalidKey(_)) => SimEventResult::Error {
+            class: "invalid_key".to_owned(),
+        },
+        Err(ObjectStoreError::InvalidRange) => SimEventResult::Error {
+            class: "invalid_range".to_owned(),
+        },
+        Err(ObjectStoreError::PreconditionFailed) => SimEventResult::Error {
+            class: "precondition_failed".to_owned(),
+        },
+        Err(ObjectStoreError::Conflict) => SimEventResult::Error {
+            class: "conflict".to_owned(),
+        },
+        Err(ObjectStoreError::Unsupported(_)) => SimEventResult::Error {
+            class: "unsupported".to_owned(),
+        },
+        Err(ObjectStoreError::Transport(_)) => SimEventResult::Error {
+            class: "transport".to_owned(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fault::ScheduledFault;
+    use crate::rng::SimSeed;
+    use loon_objectstore::fs::LocalFsStore;
+
+    fn temp_store() -> (tempfile::TempDir, LocalFsStore) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+        (temp_dir, store)
+    }
+
+    #[test]
+    fn fault_store_records_trace() {
+        let (_temp_dir, store) = temp_store();
+        let schedule = FaultSchedule::empty(SimSeed(1));
+        let store = FaultInjectingObjectStore::new(store, schedule);
+
+        store.put_overwrite("a", b"abc").expect("put");
+        store.get("a", None).expect("get");
+
+        let trace = store.trace().snapshot();
+        assert_eq!(trace.events.len(), 2);
+        assert_eq!(trace.events[0].object_op.as_ref().unwrap().step, 1);
+        assert_eq!(trace.events[1].object_op.as_ref().unwrap().step, 2);
+    }
+
+    #[test]
+    fn lost_success_fault_performs_inner_write_and_returns_error() {
+        let (_temp_dir, store) = temp_store();
+        let schedule = FaultSchedule {
+            seed: SimSeed(1),
+            faults: vec![ScheduledFault {
+                step: 1,
+                op_kind: Some(ObjectOpKind::Put),
+                key_contains: None,
+                fault: ObjectStoreFault::PutSucceedsButResponseLost,
+            }],
+        };
+        let store = FaultInjectingObjectStore::new(store, schedule);
+
+        assert!(matches!(
+            store.put_overwrite("a", b"abc"),
+            Err(ObjectStoreError::Transport(_))
+        ));
+        assert_eq!(store.inner().get("a", None).unwrap(), Some(b"abc".to_vec()));
+    }
+
+    #[test]
+    fn transient_put_fault_does_not_perform_inner_write() {
+        let (_temp_dir, store) = temp_store();
+        let schedule = FaultSchedule {
+            seed: SimSeed(1),
+            faults: vec![ScheduledFault {
+                step: 1,
+                op_kind: Some(ObjectOpKind::Put),
+                key_contains: None,
+                fault: ObjectStoreFault::PutReturnsTransientError,
+            }],
+        };
+        let store = FaultInjectingObjectStore::new(store, schedule);
+
+        assert!(matches!(
+            store.put_overwrite("a", b"abc"),
+            Err(ObjectStoreError::Transport(_))
+        ));
+        assert_eq!(store.inner().get("a", None).unwrap(), None);
+    }
+
+    #[test]
+    fn list_omission_fault_is_deterministic() {
+        let (_temp_dir, store) = temp_store();
+        let schedule = FaultSchedule {
+            seed: SimSeed(1),
+            faults: vec![ScheduledFault {
+                step: 3,
+                op_kind: Some(ObjectOpKind::ListPrefix),
+                key_contains: Some("prefix/".to_owned()),
+                fault: ObjectStoreFault::ListOmitsRecentObject,
+            }],
+        };
+        let store = FaultInjectingObjectStore::new(store, schedule);
+
+        store.put_overwrite("prefix/a", b"a").expect("put a");
+        store.put_overwrite("prefix/b", b"b").expect("put b");
+        let keys = store.list_prefix("prefix/").expect("list");
+
+        assert_eq!(keys, vec!["prefix/a".to_owned()]);
+    }
+}
