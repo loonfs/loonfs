@@ -62,7 +62,10 @@ impl ReadOptions {
         table_cache: Option<Arc<MetadataTableCache>>,
     ) -> Self {
         Self {
-            source: ReadSource::MaterializedTablesAtHead { head, table_cache },
+            source: ReadSource::MaterializedTablesAtHead {
+                head: Box::new(head),
+                table_cache,
+            },
         }
     }
 
@@ -94,7 +97,7 @@ pub enum ReadSource {
     /// Use materialized tables for a specific already-loaded head.
     MaterializedTablesAtHead {
         /// The namespace head to read against.
-        head: HeadState,
+        head: Box<HeadState>,
         /// Optional decoded table cache.
         table_cache: Option<Arc<MetadataTableCache>>,
     },

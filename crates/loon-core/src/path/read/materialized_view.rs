@@ -115,18 +115,14 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                 head.namespace_id, namespace_id
             )));
         }
-        let Some(manifest_seq) = head.checkpoint_hint_seq else {
+        let Some(manifest_id) = head.current_manifest_id else {
             return Ok(None);
         };
         let _catalog_entry =
             load_namespace_catalog_entry(store, namespace_id).map_err(BasisLoadError::from)?;
-        let tables = load_verified_manifest_tables_with_cache(
-            store,
-            table_cache,
-            namespace_id,
-            manifest_seq,
-        )
-        .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+        let tables =
+            load_verified_manifest_tables_with_cache(store, table_cache, namespace_id, manifest_id)
+                .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
         let manifest_head = manifest_basis_head(&head, tables.manifest());
         let wal_chain = load_validated_wal_chain(
             store,

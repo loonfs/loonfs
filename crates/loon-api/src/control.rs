@@ -1,5 +1,8 @@
 use crate::digest::sha256_hex;
-use crate::{ChangeSeq, ContentRef, ContentStoreId, FenceToken, InodeId, NamePolicy, NamespaceId};
+use crate::{
+    ChangeSeq, CommitId, ContentRef, ContentStoreId, FenceToken, InodeId, ManifestId, NamePolicy,
+    NamespaceId,
+};
 use serde::{Deserialize, Serialize};
 
 pub const CONTROL_OBJECT_FORMAT_VERSION: u32 = 1;
@@ -34,7 +37,8 @@ pub struct NamespaceForkState {
     pub namespace_id: NamespaceId,
     pub source_namespace_id: NamespaceId,
     pub fork_seq: ChangeSeq,
-    pub source_checkpoint_seq: ChangeSeq,
+    pub source_checkpoint_id: String,
+    pub source_manifest_id: ManifestId,
     pub source_head_seq: ChangeSeq,
     pub created_at_ms: u64,
 }
@@ -44,9 +48,11 @@ pub struct NamespaceGcPinState {
     pub pin_id: String,
     pub source_namespace_id: NamespaceId,
     pub target_namespace_id: NamespaceId,
-    pub source_checkpoint_seq: ChangeSeq,
+    pub source_checkpoint_id: String,
+    pub source_manifest_id: ManifestId,
     pub source_head_seq: ChangeSeq,
-    pub referenced_metadata_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_metadata_files_debug: Vec<String>,
     pub created_at_ms: u64,
 }
 
@@ -63,11 +69,15 @@ pub struct WalSegmentPointer {
 pub struct HeadState {
     pub namespace_id: NamespaceId,
     pub seq: ChangeSeq,
+    pub head_commit_id: CommitId,
     pub active_fence_token: FenceToken,
     pub next_inode_id: InodeId,
     #[serde(default)]
     pub name_policy: NamePolicy,
-    pub checkpoint_hint_seq: Option<ChangeSeq>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_manifest_id: Option<ManifestId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_checkpoint_id: Option<String>,
     pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
@@ -78,10 +88,13 @@ impl HeadState {
         Self {
             namespace_id,
             seq: ChangeSeq(0),
+            head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
+                .expect("genesis commit id is valid"),
             active_fence_token: FenceToken(0),
             next_inode_id: InodeId(2),
             name_policy: NamePolicy::default(),
-            checkpoint_hint_seq: None,
+            current_manifest_id: None,
+            latest_checkpoint_id: None,
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
         }

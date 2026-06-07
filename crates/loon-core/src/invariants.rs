@@ -101,7 +101,7 @@ define_invariant_ids! {
 
     // Namespace core manifest replay invariants.
     (NamespaceManifestChecksumMatchesPayload, "namespace_manifest_checksum_matches_payload"),
-    (NamespaceManifestKeyMatchesSeq, "namespace_manifest_key_matches_seq"),
+    (NamespaceManifestKeyMatchesId, "namespace_manifest_key_matches_id"),
     (NamespaceManifestMustBeVerified, "namespace_manifest_must_be_verified"),
     (ManifestReplayRequiresAllManifestSegments, "manifest_replay_requires_all_manifest_segments"),
     (MetadataFileRefMatchesPayload, "manifest_segment_descriptor_matches_payload"),
@@ -132,7 +132,7 @@ define_invariant_ids! {
 
     // Background work checkpoint head publish invariants.
     (CheckpointPublishRequiresVerifiedManifest, "checkpoint_publish_requires_verified_manifest"),
-    (CheckpointHintSeqAdvancesMonotonically, "checkpoint_hint_seq_advances_monotonically"),
+    (CurrentManifestIdAdvancesMonotonically, "current_manifest_id_advances_monotonically"),
     (RetentionFloorSeqAdvancesMonotonically, "retention_floor_seq_advances_monotonically"),
     (RetentionFloorSeqRequiresCheckpointCoverage, "retention_floor_seq_requires_checkpoint_coverage"),
     (RetentionFloorSeqRequiresDerivedProgress, "retention_floor_seq_requires_derived_progress"),

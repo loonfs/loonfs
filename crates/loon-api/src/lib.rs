@@ -5,7 +5,6 @@ mod control;
 mod digest;
 mod http;
 mod ids;
-#[path = "checkpoint.rs"]
 mod manifest;
 mod name_policy;
 mod path;
@@ -40,8 +39,8 @@ pub use ids::{
     generate_wal_segment_id, generated_id, validate_checkpoint_id, validate_gc_pin_id,
     validate_generated_id, validate_metadata_table_id, validate_upload_id, validate_wal_segment_id,
     ChangeSeq, CommitId, CommitIdValidationError, ConflictDisposition, ContentStoreId, FenceToken,
-    GeneratedIdValidationError, Identity, InodeId, InodeKind, NameKey, NameKeyValidationError,
-    NamespaceId, NamespaceIdValidationError, RevisionNo,
+    GeneratedIdValidationError, Identity, InodeId, InodeKind, ManifestId, NameKey,
+    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo,
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};

@@ -46,10 +46,12 @@ pub fn next_takeover_head(current_head: &HeadState) -> Result<HeadState, HeadFen
     Ok(HeadState {
         namespace_id: current_head.namespace_id.clone(),
         seq: current_head.seq,
+        head_commit_id: current_head.head_commit_id.clone(),
         active_fence_token: FenceToken(next_fence),
         next_inode_id: current_head.next_inode_id,
         name_policy: current_head.name_policy,
-        checkpoint_hint_seq: current_head.checkpoint_hint_seq,
+        current_manifest_id: current_head.current_manifest_id,
+        latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: current_head.visible_wal_tip.clone(),
     })

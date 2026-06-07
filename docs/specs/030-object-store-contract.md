@@ -30,8 +30,8 @@ The required durable object families and standard key patterns are:
 | **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/control/lease.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
-| **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{wal_file_id}.sst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, and checkpoint records that pin manifest versions. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
+| **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{wal_file_id}.wal.zst` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata SST references, head summary, fork references, and checkpoint records that pin manifest versions. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
 | **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/compacted/metadata/{table_id}.sst` |
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
@@ -40,8 +40,8 @@ Namespace object keys are built through the central object layout API in `loon-o
 The namespace root remains `namespaces/{namespace_id}/`; mutable control objects live under
 `control/`, WAL files live under `wal/`, namespace manifests live under `manifest/`, and
 immutable metadata SSTs live under `compacted/metadata/`. Forks are copy-on-write: the target
-manifest may reference source-owned metadata SSTs, and the source records a GC pin for those
-referenced files.
+manifest may reference source-owned metadata SSTs through a source checkpoint-backed manifest,
+and the source records a GC pin for that checkpoint/manifest pair.
 
 The object layout also reserves these namespace-root file families for fork-aware materialization,
 derived indexes, compaction control, and garbage collection:
@@ -49,14 +49,14 @@ derived indexes, compaction control, and garbage collection:
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
 | **Namespace fork state** | Written for forked namespaces to record their source and fork sequence. | `namespaces/{namespace_id}/control/fork.json` |
-| **Namespace manifests** | Written as the durable descriptor for one namespace file-set version and its checkpoint records. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
+| **Namespace manifests** | Written as the durable descriptor for one namespace file-set version and its checkpoint records. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
 | **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compactions/{compactions_id}.compactions` |
 | **Metadata SSTs** | Written as immutable metadata files referenced by manifests. | `namespaces/{namespace_id}/compacted/metadata/{table_id}.sst` |
-| **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/manifest/{manifest_seq}.manifest` |
-| **Compacted index SSTs** | Reserved for immutable derived-index files referenced by index manifests. | `namespaces/{namespace_id}/indexes/{index_family}/compacted/{table_id}.sst` |
-| **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/gc/manifest.boundary` |
+| **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/manifest/{manifest_id}.manifest` |
+| **Compacted index SSTs** | Reserved for immutable derived-index files referenced by index manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/compacted/{table_id}.sst` |
+| **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
 | **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{manifest\|compactions}.boundary` |
-| **GC pins** | Written to protect cross-namespace immutable metadata SST references. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
+| **GC pins** | Written to protect source checkpoint/manifest references used by forked namespaces. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
 
 ## 4. Durable naming conventions
 
@@ -99,7 +99,7 @@ The content model has four rules.
 
 In v0, file content is stored as one whole-file object whose `content_ref.kind` is `whole_file_v0`. The digest remains serialized as `sha256:<64hex>`, while the object key partitions the hex as `sha256/ab/cd/<hex>`.
 
-Checkpoint materialization tables include canonical metadata families and validated secondary indexes. The canonical families are `inodes`, `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and `commit-receipts`. The `direntry-child-binds` family is a secondary index over the same direntry bind rows, keyed by child inode, and must be present and verified before a checkpoint is trusted.
+Metadata materialization tables include canonical metadata families and validated secondary indexes. The canonical families are `inodes`, `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and `commit-receipts`. The `direntry-child-binds` family is a secondary index over the same direntry bind rows, keyed by child inode, and must be present and verified before a namespace manifest is trusted.
 
 ETags remain opaque compare tokens. They may be used for object freshness or compare-and-swap, but they are not content digests unless a provider-specific behavior is separately exposed and verified through this contract.
 

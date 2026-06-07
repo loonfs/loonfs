@@ -948,8 +948,12 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
         assert!(validate_checkpoint_id(&first.checkpoint_id).is_ok());
         assert_eq!(first.checkpoint_seq, ChangeSeq(1));
-        assert_eq!(first.checkpoint_hint_seq, Some(ChangeSeq(1)));
-        assert!(first.checkpoint_hint_points_at_checkpoint);
+        assert_eq!(first.manifest_id, ChangeSeq(1).into());
+        assert_eq!(first.current_manifest_id, Some(first.manifest_id));
+        assert_eq!(
+            first.latest_checkpoint_id,
+            Some(first.checkpoint_id.clone())
+        );
 
         let repeated = post_checkpoint(&server_url, namespace).expect("repeat checkpoint");
         assert_eq!(repeated, first);

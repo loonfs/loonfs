@@ -1,5 +1,6 @@
 use crate::layout::{self, ObjectLayout};
 use crate::ObjectStoreError;
+use loon_api::ManifestId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataTableFamily {
@@ -97,9 +98,9 @@ pub fn upload_session_prefix(namespace: &str) -> String {
     ObjectLayout::new().upload_session_prefix(namespace)
 }
 
-pub fn namespace_manifest(namespace: &str, seq: u64) -> String {
+pub fn namespace_manifest(namespace: &str, manifest_id: impl Into<ManifestId>) -> String {
     ObjectLayout::new()
-        .namespace_manifest(namespace, seq)
+        .namespace_manifest(namespace, manifest_id.into())
         .into_string()
 }
 
@@ -111,13 +112,13 @@ pub fn metadata_sst(namespace: &str, table_id: &str) -> String {
 
 pub fn compacted_index_sst(namespace: &str, family: &str, table_id: &str) -> String {
     ObjectLayout::new()
-        .compacted_index_sst(namespace, family, table_id)
+        .compacted_index_sst(namespace, family, "default", table_id)
         .into_string()
 }
 
-pub fn index_manifest(namespace: &str, family: &str, seq: u64) -> String {
+pub fn index_manifest(namespace: &str, family: &str, manifest_id: impl Into<ManifestId>) -> String {
     ObjectLayout::new()
-        .index_manifest(namespace, family, seq)
+        .index_manifest(namespace, family, "default", manifest_id.into())
         .into_string()
 }
 
@@ -149,6 +150,7 @@ mod tests {
         namespace_lease, namespace_manifest, queue_shard, sha256_hex_from_digest, upload_session,
         upload_session_prefix, wal_segment, DerivedWorkClass,
     };
+    use loon_api::ManifestId;
 
     #[test]
     fn key_builders_match_spec_examples() {
@@ -171,10 +173,10 @@ mod tests {
         );
         assert_eq!(
             wal_segment("ns-1", 420, 425, "seg_00000000000000000000000000000001"),
-            "namespaces/ns-1/wal/seg_00000000000000000000000000000001.sst"
+            "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
         );
         assert_eq!(
-            namespace_manifest("ns-1", 400),
+            namespace_manifest("ns-1", ManifestId(400)),
             "namespaces/ns-1/manifest/00000000000000000400.manifest"
         );
         assert_eq!(

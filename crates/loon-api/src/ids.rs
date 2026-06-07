@@ -543,6 +543,15 @@ pub struct RevisionNo(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChangeSeq(pub u64);
 
+/// Monotonically increasing namespace manifest identity.
+///
+/// This is the durable file-set version identity for namespace manifests. It is
+/// intentionally separate from `ChangeSeq`: a manifest can advance because of
+/// checkpoint metadata, compaction, or fork/index metadata without a new
+/// namespace commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ManifestId(pub u64);
+
 /// Fencing token for write-lease concurrency control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FenceToken(pub u64);
@@ -604,6 +613,24 @@ impl fmt::Display for NameKey {
 impl fmt::Display for InodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "inode-{}", self.0)
+    }
+}
+
+impl From<ChangeSeq> for ManifestId {
+    fn from(value: ChangeSeq) -> Self {
+        Self(value.0)
+    }
+}
+
+impl From<u64> for ManifestId {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Display for ManifestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "manifest-{}", self.0)
     }
 }
 

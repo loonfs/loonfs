@@ -1,7 +1,8 @@
 use crate::digest::sha256_hex;
 use crate::v0::CommitOpResult;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, NamespaceId, RevisionNo,
+    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, ManifestId, NamespaceId,
+    RevisionNo,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
@@ -63,16 +64,22 @@ pub struct MetadataFileRef {
 pub struct NamespaceManifestFork {
     pub source_namespace_id: NamespaceId,
     pub fork_seq: ChangeSeq,
-    pub source_checkpoint_seq: ChangeSeq,
+    pub source_checkpoint_id: String,
+    pub source_manifest_id: ManifestId,
     pub source_head_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceCheckpointRecord {
     pub checkpoint_id: String,
-    pub checkpoint_seq: ChangeSeq,
-    pub manifest_seq: ChangeSeq,
+    pub manifest_id: ManifestId,
+    pub head_seq: ChangeSeq,
+    pub head_commit_id: CommitId,
     pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,11 +297,13 @@ impl MetadataSstEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceManifestPayload {
     pub namespace_id: NamespaceId,
-    pub manifest_seq: ChangeSeq,
+    pub manifest_id: ManifestId,
+    pub head_seq: ChangeSeq,
     pub base_seq: ChangeSeq,
     pub active_fence_token: FenceToken,
     pub next_inode_id: InodeId,
     pub retention_floor_seq: ChangeSeq,
+    pub initialized: bool,
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<NamespaceManifestFork>,
@@ -464,7 +473,7 @@ mod tests {
         MetadataSegmentKey, MetadataTableFamily, NamespaceCheckpointRecord,
         NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
     };
-    use crate::{ChangeSeq, FenceToken, InodeId, NamespaceId};
+    use crate::{ChangeSeq, CommitId, FenceToken, InodeId, ManifestId, NamespaceId};
 
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
@@ -472,18 +481,24 @@ mod tests {
             "test-writer",
             NamespaceManifestPayload {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-                manifest_seq: ChangeSeq(10),
+                manifest_id: ManifestId(10),
+                head_seq: ChangeSeq(10),
                 base_seq: ChangeSeq(10),
                 active_fence_token: FenceToken(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
+                initialized: true,
                 verified: true,
                 fork: None,
                 checkpoints: vec![NamespaceCheckpointRecord {
                     checkpoint_id: "chk_00000000000000000000000000000001".to_owned(),
-                    checkpoint_seq: ChangeSeq(10),
-                    manifest_seq: ChangeSeq(10),
+                    manifest_id: ManifestId(10),
+                    head_seq: ChangeSeq(10),
+                    head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
+                        .expect("commit id"),
                     created_at_ms: 1_000,
+                    expires_at_ms: None,
+                    name: None,
                 }],
                 metadata_files: vec![metadata_file_ref(
                     "demo",
@@ -516,16 +531,19 @@ mod tests {
             "test-writer",
             NamespaceManifestPayload {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-                manifest_seq: ChangeSeq(12),
+                manifest_id: ManifestId(12),
+                head_seq: ChangeSeq(12),
                 base_seq: ChangeSeq(10),
                 active_fence_token: FenceToken(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
+                initialized: true,
                 verified: true,
                 fork: Some(NamespaceManifestFork {
                     source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                     fork_seq: ChangeSeq(12),
-                    source_checkpoint_seq: ChangeSeq(10),
+                    source_checkpoint_id: "chk_00000000000000000000000000000002".to_owned(),
+                    source_manifest_id: ManifestId(10),
                     source_head_seq: ChangeSeq(12),
                 }),
                 checkpoints: Vec::new(),
@@ -562,8 +580,8 @@ mod tests {
                 .fork
                 .as_ref()
                 .expect("fork")
-                .source_checkpoint_seq,
-            ChangeSeq(10)
+                .source_manifest_id,
+            ManifestId(10)
         );
     }
 

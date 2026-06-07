@@ -15,7 +15,7 @@ use loon_api::{
     wire::manifest::decode_namespace_manifest_json,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, FenceToken, InodeId, InodeKind,
-    NameKey, NamespaceId, RevisionNo,
+    ManifestId, NameKey, NamespaceId, RevisionNo,
 };
 use loon_core::cache::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use loon_core::commit::{
@@ -445,7 +445,7 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
     let head = load_namespace_head_control(store, namespace_id)
         .map_err(BasisLoadError::LoadHead)?
         .state;
-    if head.checkpoint_hint_seq.is_some() {
+    if head.current_manifest_id.is_some() {
         let value = engine.resolve_path(
             absolute_path,
             ReadOptions::materialized_tables_at_head(head.clone(), None),
@@ -471,7 +471,7 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
     let head = load_namespace_head_control(store, namespace_id)
         .map_err(BasisLoadError::LoadHead)?
         .state;
-    if head.checkpoint_hint_seq.is_some() {
+    if head.current_manifest_id.is_some() {
         let value = engine.list_path(
             absolute_path,
             ReadOptions::materialized_tables_at_head(head.clone(), None),
@@ -1807,7 +1807,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
     }
     store
         .put_if_absent(
-            "namespaces/demo/wal/seg_99999999999999999999999999999999.sst",
+            "namespaces/demo/wal/seg_99999999999999999999999999999999.wal.zst",
             &wal_bytes,
         )
         .expect("write unreachable orphan");
@@ -1846,7 +1846,7 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 }
 
 #[test]
-fn change_feed_validates_wal_chain_before_checkpoint_hint() {
+fn change_feed_validates_wal_chain_before_current_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -2558,7 +2558,8 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(fork_state.state.namespace_id, clone_namespace_id);
     assert_eq!(fork_state.state.source_namespace_id, source_namespace_id);
     assert_eq!(fork_state.state.fork_seq, ChangeSeq(1));
-    assert_eq!(fork_state.state.source_checkpoint_seq, ChangeSeq(1));
+    assert!(fork_state.state.source_checkpoint_id.starts_with("chk_"));
+    assert_eq!(fork_state.state.source_manifest_id, ManifestId(1));
     assert_eq!(fork_state.state.source_head_seq, ChangeSeq(1));
     assert!(fork_state.state.created_at_ms > 0);
     assert!(fork_state.has_valid_payload_checksum().expect("checksum"));
@@ -2575,7 +2576,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         load_verified_namespace_basis(&store, &clone_namespace_id).expect("clone basis");
     assert_eq!(clone_basis.content_store_id, content_store_id);
     assert_eq!(clone_basis.head.seq, ChangeSeq(1));
-    assert_eq!(clone_basis.head.checkpoint_hint_seq, Some(ChangeSeq(1)));
+    assert_eq!(clone_basis.head.current_manifest_id, Some(ManifestId(1)));
     assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
 
     let target_manifest_key = namespace_manifest(clone_namespace_id.as_str(), 1);
@@ -2588,12 +2589,12 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert!(target_manifest.payload.fork.is_some());
     assert_eq!(target_manifest.payload.checkpoints.len(), 1);
     assert_eq!(
-        target_manifest.payload.checkpoints[0].checkpoint_seq,
+        target_manifest.payload.checkpoints[0].head_seq,
         ChangeSeq(1)
     );
     assert_eq!(
-        target_manifest.payload.checkpoints[0].manifest_seq,
-        ChangeSeq(1)
+        target_manifest.payload.checkpoints[0].manifest_id,
+        ManifestId(1)
     );
     assert!(
         target_manifest
@@ -2634,17 +2635,21 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(pin.kind, ControlObjectKind::NamespaceGcPinState);
     assert_eq!(pin.state.source_namespace_id, source_namespace_id);
     assert_eq!(pin.state.target_namespace_id, clone_namespace_id);
-    assert_eq!(pin.state.source_checkpoint_seq, ChangeSeq(1));
+    assert_eq!(
+        pin.state.source_checkpoint_id,
+        fork_state.state.source_checkpoint_id
+    );
+    assert_eq!(pin.state.source_manifest_id, ManifestId(1));
     assert_eq!(pin.state.source_head_seq, ChangeSeq(1));
-    let referenced_metadata_files = target_manifest
+    let referenced_metadata_files_debug = target_manifest
         .payload
         .metadata_files
         .iter()
         .map(|metadata_file| metadata_file.object_key.clone())
         .collect::<Vec<_>>();
     assert_eq!(
-        pin.state.referenced_metadata_files,
-        referenced_metadata_files
+        pin.state.referenced_metadata_files_debug,
+        referenced_metadata_files_debug
     );
     assert!(store
         .head(&gc_pin(source_namespace_id.as_str(), &pin.state.pin_id))
@@ -2754,7 +2759,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         b"clone-after-fork"
     );
 
-    let referenced_sst = referenced_metadata_files
+    let referenced_sst = referenced_metadata_files_debug
         .first()
         .expect("fork should reference source metadata SST")
         .clone();
@@ -3902,10 +3907,12 @@ fn validation_context(
     let head = HeadState {
         namespace_id: namespace_id.clone(),
         seq,
+        head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
         active_fence_token: FenceToken(1),
         next_inode_id,
         name_policy: loon_api::NamePolicy::default(),
-        checkpoint_hint_seq: Some(ChangeSeq(0)),
+        current_manifest_id: Some(ManifestId(0)),
+        latest_checkpoint_id: Some("chk_00000000000000000000000000000000".to_owned()),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
     };

@@ -18,7 +18,8 @@ use loon_api::wire::manifest::{
     NamespaceManifestPayload,
 };
 use loon_api::{
-    generate_checkpoint_id, generate_gc_pin_id, FenceToken, NamespaceId, NamespaceSummary,
+    generate_checkpoint_id, generate_gc_pin_id, FenceToken, ManifestId, NamespaceId,
+    NamespaceSummary,
 };
 use loon_objectstore::keys::{
     gc_pin, namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
@@ -51,16 +52,20 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     let fork_seq = checkpoint.checkpoint_seq;
     let source_basis = load_verified_namespace_basis(store, source_namespace_id)?;
     let source_manifest =
-        load_verified_manifest_materialization(store, source_namespace_id, fork_seq)
+        load_verified_manifest_materialization(store, source_namespace_id, checkpoint.manifest_id)
             .map_err(|err| CoreError::Basis(BasisLoadError::ManifestLoad(err)))?;
+    let target_manifest_id = ManifestId(fork_seq.0);
+    let target_checkpoint_id = generate_checkpoint_id();
 
     let initial_head = HeadState {
         namespace_id: new_namespace_id.clone(),
         seq: fork_seq,
+        head_commit_id: source_basis.head.head_commit_id.clone(),
         active_fence_token: FenceToken(0),
         next_inode_id: source_manifest.manifest.payload.next_inode_id,
         name_policy: source_basis.head.name_policy,
-        checkpoint_hint_seq: Some(fork_seq),
+        current_manifest_id: Some(target_manifest_id),
+        latest_checkpoint_id: Some(target_checkpoint_id.clone()),
         retention_floor_seq: fork_seq,
         visible_wal_tip: None,
     };
@@ -98,7 +103,8 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             namespace_id: new_namespace_id.clone(),
             source_namespace_id: source_namespace_id.clone(),
             fork_seq,
-            source_checkpoint_seq: source_manifest.manifest.payload.manifest_seq,
+            source_checkpoint_id: checkpoint.checkpoint_id.clone(),
+            source_manifest_id: checkpoint.manifest_id,
             source_head_seq: source_basis.head.seq,
             created_at_ms: context.now_ms,
         },
@@ -113,29 +119,35 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
         &context.writer_version,
         NamespaceManifestPayload {
             namespace_id: new_namespace_id.clone(),
-            manifest_seq: fork_seq,
+            manifest_id: target_manifest_id,
+            head_seq: fork_seq,
             base_seq: source_manifest.manifest.payload.base_seq,
             active_fence_token: FenceToken(0),
             next_inode_id: source_manifest.manifest.payload.next_inode_id,
             retention_floor_seq: fork_seq,
+            initialized: true,
             verified: true,
             fork: Some(NamespaceManifestFork {
                 source_namespace_id: source_namespace_id.clone(),
                 fork_seq,
-                source_checkpoint_seq: source_manifest.manifest.payload.manifest_seq,
+                source_checkpoint_id: checkpoint.checkpoint_id.clone(),
+                source_manifest_id: checkpoint.manifest_id,
                 source_head_seq: source_basis.head.seq,
             }),
             checkpoints: vec![NamespaceCheckpointRecord {
-                checkpoint_id: generate_checkpoint_id(),
-                checkpoint_seq: fork_seq,
-                manifest_seq: fork_seq,
+                checkpoint_id: target_checkpoint_id.clone(),
+                manifest_id: target_manifest_id,
+                head_seq: fork_seq,
+                head_commit_id: source_basis.head.head_commit_id.clone(),
                 created_at_ms: context.now_ms,
+                expires_at_ms: None,
+                name: None,
             }],
             metadata_files: source_manifest.manifest.payload.metadata_files.clone(),
         },
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
-    let referenced_metadata_files = target_manifest
+    let referenced_metadata_files_debug = target_manifest
         .payload
         .metadata_files
         .iter()
@@ -149,9 +161,10 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             pin_id: generate_gc_pin_id(),
             source_namespace_id: source_namespace_id.clone(),
             target_namespace_id: new_namespace_id.clone(),
-            source_checkpoint_seq: source_manifest.manifest.payload.manifest_seq,
+            source_checkpoint_id: checkpoint.checkpoint_id,
+            source_manifest_id: checkpoint.manifest_id,
             source_head_seq: source_basis.head.seq,
-            referenced_metadata_files,
+            referenced_metadata_files_debug,
             created_at_ms: context.now_ms,
         },
     )

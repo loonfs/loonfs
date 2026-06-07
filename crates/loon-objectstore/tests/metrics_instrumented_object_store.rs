@@ -1,3 +1,4 @@
+use loon_api::ManifestId;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     metadata_sst, namespace_head, namespace_lease, namespace_manifest, wal_segment,
@@ -118,7 +119,7 @@ fn records_not_found_without_key_leak() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let raw_key = "namespaces/ns-1/wal/seg_secret.sst";
+    let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
 
     assert!(store.get(raw_key, None).expect("get missing").is_none());
 
@@ -210,7 +211,9 @@ fn classifies_reserved_namespace_layout_families() {
 
     store
         .put_overwrite(
-            &layout.namespace_manifest("ns-1", 1).into_string(),
+            &layout
+                .namespace_manifest("ns-1", ManifestId(1))
+                .into_string(),
             b"manifest",
         )
         .expect("put namespace manifest");
@@ -231,14 +234,21 @@ fn classifies_reserved_namespace_layout_families() {
     store
         .put_overwrite(
             &layout
-                .compacted_index_sst("ns-1", "grep", "tbl_00000000000000000000000000000002")
+                .compacted_index_sst(
+                    "ns-1",
+                    "grep",
+                    "default",
+                    "tbl_00000000000000000000000000000002",
+                )
                 .into_string(),
             b"index",
         )
         .expect("put index sst");
     store
         .put_overwrite(
-            &layout.index_manifest("ns-1", "grep", 1).into_string(),
+            &layout
+                .index_manifest("ns-1", "grep", "default", ManifestId(1))
+                .into_string(),
             b"index manifest",
         )
         .expect("put index manifest");
@@ -267,7 +277,7 @@ fn jsonl_recorder_writes_privacy_safe_samples() {
     let recorder =
         Arc::new(JsonlObjectStoreMetricsRecorder::create(&metrics_path).expect("recorder"));
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let raw_key = "namespaces/ns-1/wal/seg_secret.sst";
+    let raw_key = "namespaces/ns-1/wal/seg_secret.wal.zst";
 
     store
         .put_overwrite(&namespace_head("ns-1"), b"head")

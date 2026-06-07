@@ -25,7 +25,7 @@ Content staging is idempotent and has no effect on the visible tree. If the call
 
 ### 1.2 Basis reconstruction
 
-Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the checkpoint (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
+Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the current manifest (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
 
 ### 1.3 Validation and logical commits
 
@@ -83,13 +83,13 @@ A read reconstructs the visible filesystem state from durable artifacts on objec
 The reader builds an in-memory metadata state from two kinds of durable object:
 
 1. Read the namespace descriptor and content-store descriptor to learn the namespace's immutable content-store relationship.
-2. Read the namespace **head** object to learn the current `seq`, `checkpoint_hint_seq`, and visible WAL tip.
-3. If `checkpoint_hint_seq` is set, load the **verified manifest** at that `seq` and verify it contains a checkpoint record for that manifest version. The namespace manifest references one or more materialized metadata runs through that `seq`. A run may be a full materialization or a WAL-derived run, and each run is internally segmented without overlapping segment key ranges.
-4. Use the visible WAL tip named by the head to identify the visible segment chain after the manifest `seq` (or from genesis, if no checkpoint is hinted), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends normalized rows to the same metadata tables.
+2. Read the namespace **head** object to learn the current `seq`, `current_manifest_id`, `latest_checkpoint_id`, and visible WAL tip.
+3. If `current_manifest_id` is set, load and verify that namespace manifest. The manifest references one or more materialized metadata runs through its `head_seq`. It may also contain checkpoint records that pin manifest versions for retention, fork, or stable read workflows.
+4. Use the visible WAL tip named by the head to identify the visible segment chain after the manifest `head_seq` (or from genesis, if no current manifest exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends normalized rows to the same metadata tables.
 
 The result is a complete metadata state pinned to one `seq`.
 
-For latest path `stat` and directory `list`, an implementation may avoid hydrating the complete metadata state when `checkpoint_hint_seq` is present. The reader may query verified metadata run tables and the visible WAL tail overlay directly, provided it applies the same visibility rules and treats missing or corrupt manifest/WAL objects as hard errors. If no checkpoint is published, latest stat/list falls back to full basis reconstruction.
+For latest path `stat` and directory `list`, an implementation may avoid hydrating the complete metadata state when `current_manifest_id` is present. The reader may query verified metadata run tables and the visible WAL tail overlay directly, provided it applies the same visibility rules and treats missing or corrupt manifest/WAL objects as hard errors. If no current manifest is published, latest stat/list falls back to full basis reconstruction.
 
 ### 2.2 Visibility rules
 
@@ -227,7 +227,7 @@ Clients older than the retention floor must re-bootstrap from a fresh checkpoint
 
 The retention floor may advance only after the system has enough verified material to keep replay safe at or after that point.
 
-Creating a checkpoint pins the current durable namespace file-set version. If there is no manifest for the current head, the implementation first writes one as an internal materialization step, then records a checkpoint id such as `chk_<32hex>` in that manifest and updates the head checkpoint hint. Repeating checkpoint creation for the same already-pinned manifest returns the existing checkpoint record.
+Creating a checkpoint pins the current durable namespace file-set version. If there is no manifest for the current head, the implementation first writes one as an internal materialization step. It then records a checkpoint id such as `chk_<32hex>` in the manifest and updates the head's `current_manifest_id` and `latest_checkpoint_id`. Repeating checkpoint creation for the same already-pinned manifest returns the existing checkpoint record.
 
 ## 9. Namespace forks
 
@@ -241,7 +241,7 @@ The fork protocol is:
 4. Build the target head, fork record, lease, and descriptor using the source namespace's `content_store_id`.
 5. Write the target `head.json` first to reserve the namespace.
 6. Write a target namespace manifest that references the source-owned immutable metadata files for the source checkpoint.
-7. Write a source-local GC pin for the exact source metadata files referenced by the target namespace manifest.
+7. Write a source-local GC pin for the source checkpoint/manifest pair referenced by the target namespace manifest.
 8. Write `control/fork.json` with the source namespace id and fork sequence.
 9. Write the target `lease.json`.
 10. Write the target `descriptor.json` last as the publish/list marker.

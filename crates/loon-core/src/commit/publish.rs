@@ -77,10 +77,12 @@ pub fn prepare_commit_head_publish(
     let resulting_head = HeadState {
         namespace_id: current_head.namespace_id.clone(),
         seq: plan.assigned_seq,
+        head_commit_id: plan.commit_id.clone(),
         active_fence_token: current_head.active_fence_token,
         next_inode_id: plan.resulting_next_inode_id,
         name_policy: current_head.name_policy,
-        checkpoint_hint_seq: current_head.checkpoint_hint_seq,
+        current_manifest_id: current_head.current_manifest_id,
+        latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: Some(wal.envelope.pointer(wal.object_key.clone())),
     };
@@ -145,10 +147,13 @@ mod tests {
         HeadState {
             namespace_id,
             seq,
+            head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
+                .expect("commit id"),
             active_fence_token: FenceToken(1),
             next_inode_id: InodeId(10),
             name_policy: loon_api::NamePolicy::default(),
-            checkpoint_hint_seq: Some(ChangeSeq(0)),
+            current_manifest_id: Some(ChangeSeq(0).into()),
+            latest_checkpoint_id: Some("chk_00000000000000000000000000000000".to_owned()),
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
         }
@@ -206,7 +211,10 @@ mod tests {
         };
         let envelope = WalSegmentEnvelope::from_payload("test", payload).expect("wal envelope");
         PreparedWalSegment {
-            object_key: format!("namespaces/{}/wal/{segment_id}.sst", namespace_id.as_str(),),
+            object_key: format!(
+                "namespaces/{}/wal/{segment_id}.wal.zst",
+                namespace_id.as_str(),
+            ),
             segment_id,
             envelope,
             encoded_bytes: Vec::new(),

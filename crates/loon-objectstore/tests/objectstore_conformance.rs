@@ -150,7 +150,7 @@ fn key_builders_cover_locked_object_families() {
     );
     assert_eq!(
         wal_segment("ns-1", 420, 420, "seg_00000000000000000000000000000001"),
-        "namespaces/ns-1/wal/seg_00000000000000000000000000000001.sst"
+        "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
     );
     assert_eq!(
         namespace_manifest("ns-1", 420),

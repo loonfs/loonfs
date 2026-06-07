@@ -1,5 +1,6 @@
 use crate::keys::DerivedWorkClass;
 use crate::ObjectStoreError;
+use loon_api::ManifestId;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ObjectLayout;
@@ -153,7 +154,7 @@ impl ObjectLayout {
 
     pub fn wal_segment(&self, namespace: &str, wal_file_id: &str) -> WalSegmentKey {
         WalSegmentKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/wal/{wal_file_id}.sst"
+            "namespaces/{namespace}/wal/{wal_file_id}.wal.zst"
         )))
     }
 
@@ -197,9 +198,14 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/uploads/")
     }
 
-    pub fn namespace_manifest(&self, namespace: &str, manifest_id: u64) -> NamespaceManifestKey {
+    pub fn namespace_manifest(
+        &self,
+        namespace: &str,
+        manifest_id: ManifestId,
+    ) -> NamespaceManifestKey {
         NamespaceManifestKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/manifest/{manifest_id:020}.manifest"
+            "namespaces/{namespace}/manifest/{:020}.manifest",
+            manifest_id.0
         )))
     }
 
@@ -233,10 +239,11 @@ impl ObjectLayout {
         &self,
         namespace: &str,
         family: &str,
+        instance: &str,
         table_id: &str,
     ) -> CompactedIndexSstKey {
         CompactedIndexSstKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/indexes/{family}/compacted/{table_id}.sst"
+            "namespaces/{namespace}/indexes/{family}/{instance}/compacted/{table_id}.sst"
         )))
     }
 
@@ -244,16 +251,23 @@ impl ObjectLayout {
         &self,
         namespace: &str,
         family: &str,
-        manifest_id: u64,
+        instance: &str,
+        manifest_id: ManifestId,
     ) -> IndexManifestKey {
         IndexManifestKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/indexes/{family}/manifest/{manifest_id:020}.manifest"
+            "namespaces/{namespace}/indexes/{family}/{instance}/manifest/{:020}.manifest",
+            manifest_id.0
         )))
     }
 
-    pub fn index_gc_boundary(&self, namespace: &str, family: &str) -> IndexGcBoundaryKey {
+    pub fn index_gc_boundary(
+        &self,
+        namespace: &str,
+        family: &str,
+        instance: &str,
+    ) -> IndexGcBoundaryKey {
         IndexGcBoundaryKey(ObjectKey::new(format!(
-            "namespaces/{namespace}/indexes/{family}/gc/manifest.boundary"
+            "namespaces/{namespace}/indexes/{family}/{instance}/gc/manifest.boundary"
         )))
     }
 
@@ -334,15 +348,17 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "compacted", "metadata", table] if table.ends_with(".sst") => {
             parsed(DurableObjectFamily::CompactedMetadataSst, Some(namespace))
         }
-        ["namespaces", namespace, "indexes", _, "compacted", table] if table.ends_with(".sst") => {
+        ["namespaces", namespace, "indexes", _, _, "compacted", table]
+            if table.ends_with(".sst") =>
+        {
             parsed(DurableObjectFamily::CompactedIndexSst, Some(namespace))
         }
-        ["namespaces", namespace, "indexes", _, "manifest", manifest]
+        ["namespaces", namespace, "indexes", _, _, "manifest", manifest]
             if manifest.ends_with(".manifest") =>
         {
             parsed(DurableObjectFamily::IndexManifest, Some(namespace))
         }
-        ["namespaces", namespace, "indexes", _, "gc", "manifest.boundary"] => {
+        ["namespaces", namespace, "indexes", _, _, "gc", "manifest.boundary"] => {
             parsed(DurableObjectFamily::IndexGcBoundary, Some(namespace))
         }
         ["namespaces", namespace, "gc", boundary]
@@ -393,6 +409,7 @@ mod tests {
         ObjectLayout,
     };
     use crate::keys::DerivedWorkClass;
+    use loon_api::ManifestId;
 
     #[test]
     fn layout_golden_tree_matches_expected_paths() {
@@ -425,14 +442,14 @@ mod tests {
             layout
                 .wal_segment("ns-1", "seg_00000000000000000000000000000001")
                 .as_str(),
-            "namespaces/ns-1/wal/seg_00000000000000000000000000000001.sst"
+            "namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst"
         );
         assert_eq!(
-            layout.namespace_manifest("ns-1", 400).as_str(),
+            layout.namespace_manifest("ns-1", ManifestId(400)).as_str(),
             "namespaces/ns-1/manifest/00000000000000000400.manifest"
         );
         assert_eq!(
-            layout.namespace_manifest("ns-1", 42).as_str(),
+            layout.namespace_manifest("ns-1", ManifestId(42)).as_str(),
             "namespaces/ns-1/manifest/00000000000000000042.manifest"
         );
         assert_eq!(
@@ -453,17 +470,24 @@ mod tests {
         );
         assert_eq!(
             layout
-                .compacted_index_sst("ns-1", "grep", "tbl_00000000000000000000000000000002")
+                .compacted_index_sst(
+                    "ns-1",
+                    "grep",
+                    "default",
+                    "tbl_00000000000000000000000000000002",
+                )
                 .as_str(),
-            "namespaces/ns-1/indexes/grep/compacted/tbl_00000000000000000000000000000002.sst"
+            "namespaces/ns-1/indexes/grep/default/compacted/tbl_00000000000000000000000000000002.sst"
         );
         assert_eq!(
-            layout.index_manifest("ns-1", "grep", 17).as_str(),
-            "namespaces/ns-1/indexes/grep/manifest/00000000000000000017.manifest"
+            layout
+                .index_manifest("ns-1", "grep", "default", ManifestId(17))
+                .as_str(),
+            "namespaces/ns-1/indexes/grep/default/manifest/00000000000000000017.manifest"
         );
         assert_eq!(
-            layout.index_gc_boundary("ns-1", "grep").as_str(),
-            "namespaces/ns-1/indexes/grep/gc/manifest.boundary"
+            layout.index_gc_boundary("ns-1", "grep", "default").as_str(),
+            "namespaces/ns-1/indexes/grep/default/gc/manifest.boundary"
         );
         assert_eq!(
             layout
@@ -535,7 +559,9 @@ mod tests {
                 DurableObjectFamily::ConflictArtifact,
             ),
             (
-                layout.namespace_manifest("ns-1", 1).into_string(),
+                layout
+                    .namespace_manifest("ns-1", ManifestId(1))
+                    .into_string(),
                 DurableObjectFamily::NamespaceManifest,
             ),
             (
@@ -556,16 +582,20 @@ mod tests {
             ),
             (
                 layout
-                    .compacted_index_sst("ns-1", "grep", "tbl_abc")
+                    .compacted_index_sst("ns-1", "grep", "default", "tbl_abc")
                     .into_string(),
                 DurableObjectFamily::CompactedIndexSst,
             ),
             (
-                layout.index_manifest("ns-1", "grep", 1).into_string(),
+                layout
+                    .index_manifest("ns-1", "grep", "default", ManifestId(1))
+                    .into_string(),
                 DurableObjectFamily::IndexManifest,
             ),
             (
-                layout.index_gc_boundary("ns-1", "grep").into_string(),
+                layout
+                    .index_gc_boundary("ns-1", "grep", "default")
+                    .into_string(),
                 DurableObjectFamily::IndexGcBoundary,
             ),
             (

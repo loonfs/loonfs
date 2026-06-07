@@ -1379,7 +1379,7 @@ fn namespace_status_reports_wal_tail_segments() {
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
-    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.current_manifest_id, None);
     assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
@@ -1395,7 +1395,7 @@ fn namespace_status_reports_wal_tail_segments() {
         .namespace_status(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
-    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.current_manifest_id, None);
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 }
@@ -1507,7 +1507,7 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     let status = fs
         .namespace_status(&namespace_id)
         .expect("status after checkpoint");
-    assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(1)));
+    assert_eq!(status.current_manifest_id, Some(ChangeSeq(1).into()));
     assert_eq!(status.wal_tail_segments, 0);
 }
 
@@ -1559,7 +1559,7 @@ fn maintenance_tick_after_existing_checkpoint_writes_l0_manifest() {
     let status = fs
         .namespace_status(&namespace_id)
         .expect("status after l0 checkpoint");
-    assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(2)));
+    assert_eq!(status.current_manifest_id, Some(ChangeSeq(2).into()));
     assert_eq!(status.wal_tail_segments, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1689,7 +1689,7 @@ fn maintenance_tick_rejects_zero_threshold() {
 }
 
 #[test]
-fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
+fn maintenance_tick_treats_current_manifest_cas_loss_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -1720,7 +1720,7 @@ fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
                 max_wal_tail_segments: 1,
             },
         )
-        .expect("maintenance tick should not fail on checkpoint hint race");
+        .expect("maintenance tick should not fail on current manifest publish race");
 
     assert_eq!(
         tick.outcome,
@@ -1731,7 +1731,7 @@ fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
     let status = fs
         .namespace_status(&namespace_id)
         .expect("status after lost race");
-    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.current_manifest_id, None);
     assert_eq!(status.wal_tail_segments, 1);
 }
 

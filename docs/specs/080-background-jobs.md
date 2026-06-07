@@ -8,9 +8,9 @@ Background work reduces read cost, supports safe retention, and cleans up durabl
 
 ### 2.1 Manifest publication and checkpoint verification
 
-A namespace manifest summarizes namespace files at one chosen manifest sequence. It records metadata SSTs, fork references, head summary, and checkpoint records.
+A namespace manifest summarizes namespace files at one chosen manifest id. It records metadata SSTs, fork references, head summary, and checkpoint records.
 
-A checkpoint is a durable record that pins one manifest version. A checkpoint is useful only after both the checkpoint record and its referenced manifest are verified. Readers must prefer verified checkpoints plus the visible WAL segment chain over unverified or partial checkpoint artifacts.
+A checkpoint is a durable record that pins one manifest version. A checkpoint is useful only after both the checkpoint record and its referenced manifest are verified. Readers must prefer the current verified manifest plus the visible WAL segment chain over unverified or partial manifest artifacts.
 
 The namespace manifest may reference one or more immutable metadata runs. Runs are not a second source of truth; they are rebuildable metadata rows used to keep normal basis reconstruction from replaying an unbounded WAL tail.
 
