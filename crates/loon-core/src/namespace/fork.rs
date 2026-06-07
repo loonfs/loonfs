@@ -1,10 +1,9 @@
 use super::bootstrap::BootstrapNamespaceError;
-use crate::checkpoint::{
-    create_checkpoint, load_verified_checkpoint_materialization,
-    write_verified_checkpoint_from_metadata, CheckpointMetadataWriteRequest,
-};
 use crate::context::MutationContext;
 use crate::error::CoreError;
+use crate::manifest::{
+    create_manifest, load_verified_manifest_materialization, write_namespace_manifest,
+};
 use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
@@ -12,11 +11,14 @@ use crate::namespace::catalog::{
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
     NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkState,
-    NamespaceForkStateEnvelope,
+    NamespaceForkStateEnvelope, NamespaceGcPinState, NamespaceGcPinStateEnvelope,
 };
-use loon_api::{FenceToken, NamespaceId, NamespaceSummary};
+use loon_api::wire::manifest::{
+    NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
+};
+use loon_api::{generate_gc_pin_id, FenceToken, NamespaceId, NamespaceSummary};
 use loon_objectstore::keys::{
-    namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
+    gc_pin, namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
 };
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 
@@ -42,20 +44,20 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
         }
     }
 
-    let checkpoint = create_checkpoint(store, source_namespace_id, context)?;
-    let fork_seq = checkpoint.checkpoint_seq;
+    let manifest = create_manifest(store, source_namespace_id, context)?;
+    let fork_seq = manifest.manifest_seq;
     let source_basis = load_verified_namespace_basis(store, source_namespace_id)?;
-    let source_checkpoint =
-        load_verified_checkpoint_materialization(store, source_namespace_id, fork_seq)
-            .map_err(|err| CoreError::Basis(BasisLoadError::CheckpointLoad(err)))?;
+    let source_manifest =
+        load_verified_manifest_materialization(store, source_namespace_id, fork_seq)
+            .map_err(|err| CoreError::Basis(BasisLoadError::ManifestLoad(err)))?;
 
     let initial_head = HeadState {
         namespace_id: new_namespace_id.clone(),
         seq: fork_seq,
         active_fence_token: FenceToken(0),
-        next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
+        next_inode_id: source_manifest.manifest.payload.next_inode_id,
         name_policy: source_basis.head.name_policy,
-        checkpoint_hint_seq: Some(fork_seq),
+        manifest_hint_seq: Some(fork_seq),
         retention_floor_seq: fork_seq,
         visible_wal_tip: None,
     };
@@ -93,8 +95,8 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             namespace_id: new_namespace_id.clone(),
             source_namespace_id: source_namespace_id.clone(),
             fork_seq,
-            source_checkpoint_seq: fork_seq,
-            source_head_seq: fork_seq,
+            source_manifest_seq: source_manifest.manifest.payload.manifest_seq,
+            source_head_seq: source_basis.head.seq,
             created_at_ms: context.now_ms,
         },
     )
@@ -104,23 +106,59 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     let fork_state_key = namespace_fork_state(new_namespace_id.as_str());
     let lease_key = namespace_lease(new_namespace_id.as_str());
     let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
+    let target_manifest = NamespaceManifestEnvelope::from_payload(
+        &context.writer_version,
+        NamespaceManifestPayload {
+            namespace_id: new_namespace_id.clone(),
+            manifest_seq: fork_seq,
+            base_seq: source_manifest.manifest.payload.base_seq,
+            active_fence_token: FenceToken(0),
+            next_inode_id: source_manifest.manifest.payload.next_inode_id,
+            retention_floor_seq: fork_seq,
+            verified: true,
+            fork: Some(NamespaceManifestFork {
+                source_namespace_id: source_namespace_id.clone(),
+                fork_seq,
+                source_manifest_seq: source_manifest.manifest.payload.manifest_seq,
+                source_head_seq: source_basis.head.seq,
+            }),
+            metadata_files: source_manifest.manifest.payload.metadata_files.clone(),
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    let referenced_metadata_files = target_manifest
+        .payload
+        .metadata_files
+        .iter()
+        .filter(|metadata_file| metadata_file.owner_namespace_id == *source_namespace_id)
+        .map(|metadata_file| metadata_file.object_key.clone())
+        .collect::<Vec<_>>();
+    let gc_pin_envelope = NamespaceGcPinStateEnvelope::from_state(
+        ControlObjectKind::NamespaceGcPinState,
+        &context.writer_version,
+        NamespaceGcPinState {
+            pin_id: generate_gc_pin_id(),
+            source_namespace_id: source_namespace_id.clone(),
+            target_namespace_id: new_namespace_id.clone(),
+            source_manifest_seq: source_manifest.manifest.payload.manifest_seq,
+            source_head_seq: source_basis.head.seq,
+            referenced_metadata_files,
+            created_at_ms: context.now_ms,
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
+    let gc_pin_key = gc_pin(source_namespace_id.as_str(), &gc_pin_envelope.state.pin_id);
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &head_key,
         &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
     )?;
-    write_verified_checkpoint_from_metadata(
+    write_namespace_manifest(store, &target_manifest).map_err(CoreError::Basis)?;
+    write_source_gc_pin(
         store,
-        CheckpointMetadataWriteRequest {
-            namespace_id: new_namespace_id,
-            checkpoint_seq: fork_seq,
-            active_fence_token: FenceToken(0),
-            next_inode_id: source_checkpoint.manifest.payload.next_inode_id,
-            retention_floor_seq: fork_seq,
-            metadata_state: &source_checkpoint.metadata_state,
-            writer_version: &context.writer_version,
-        },
+        &gc_pin_key,
+        &serde_json::to_vec(&gc_pin_envelope).map_err(|err| CoreError::Store(err.to_string()))?,
     )?;
     put_target_namespace_control_object(
         store,
@@ -145,6 +183,17 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     Ok(NamespaceSummary {
         namespace_id: new_namespace_id.clone(),
     })
+}
+
+fn write_source_gc_pin<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<(), CoreError> {
+    match store.put_if_absent(object_key, bytes) {
+        Ok(_) | Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => Ok(()),
+        Err(err) => Err(CoreError::Store(err.to_string())),
+    }
 }
 
 fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(

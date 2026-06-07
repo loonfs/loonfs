@@ -31,13 +31,14 @@
 
 #![forbid(unsafe_code)]
 
-mod checkpoint;
 pub mod commit;
 pub mod content;
 mod context;
 mod engine;
 mod error;
 mod invariants;
+#[path = "checkpoint/mod.rs"]
+mod manifest;
 pub mod metadata;
 pub mod namespace;
 mod options;
@@ -48,8 +49,8 @@ mod storage;
 mod wal;
 
 pub mod cache {
-    pub use crate::checkpoint::{
-        CheckpointLoadError, CheckpointLoadErrorKind, MetadataLsmPolicy, MetadataTableCache,
+    pub use crate::manifest::{
+        ManifestLoadError, ManifestLoadErrorKind, MetadataLsmPolicy, MetadataTableCache,
         MetadataTableCacheConfig, MetadataTableCacheStats,
     };
     pub use crate::namespace::basis::{

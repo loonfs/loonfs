@@ -1,11 +1,11 @@
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
-use loon_api::wire::checkpoint::decode_checkpoint_manifest_json;
+use loon_api::wire::manifest::decode_namespace_manifest_json;
 use loon_core::cache::load_verified_namespace_basis;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    checkpoint_manifest, namespace_descriptor, namespace_head, namespace_lease,
+    namespace_descriptor, namespace_head, namespace_lease, namespace_manifest,
 };
 use loon_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -971,7 +971,7 @@ fn disabled_runtime_cache_still_uses_memory_proof_without_blob_validation_call()
 }
 
 #[test]
-fn stat_and_list_record_full_basis_fallback_without_checkpoint() {
+fn stat_and_list_record_full_basis_fallback_without_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let fs = runtime(temp_dir.path(), "read-fallback-test");
@@ -990,7 +990,7 @@ fn stat_and_list_record_full_basis_fallback_without_checkpoint() {
 }
 
 #[test]
-fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads() {
+fn stat_and_list_use_materialized_tables_after_manifest_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
@@ -1009,7 +1009,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
         PutFileOptions::default(),
     )
     .expect("put file");
-    fs.create_checkpoint(&namespace_id).expect("checkpoint");
+    fs.create_manifest(&namespace_id).expect("manifest");
 
     raw_store.reset_content_blob_counters();
     fs.stat_path(&namespace_id, "/docs/file.txt")
@@ -1039,7 +1039,7 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
         PutFileOptions::default(),
     )
     .expect("put file");
-    fs.create_checkpoint(&namespace_id).expect("checkpoint");
+    fs.create_manifest(&namespace_id).expect("manifest");
 
     fs.stat_path(&namespace_id, "/docs/file.txt")
         .expect("first materialized stat");
@@ -1104,7 +1104,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         PutFileOptions::default(),
     )
     .expect("put file");
-    fs.create_checkpoint(&namespace_id).expect("checkpoint");
+    fs.create_manifest(&namespace_id).expect("manifest");
     fs.put_file_bytes(
         &namespace_id,
         "/docs/hello.txt",
@@ -1121,7 +1121,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
     fs.begin_upload(&namespace_id).expect("second begin upload");
 
     assert_eq!(raw_store.wal_get_count(), 0);
-    assert_eq!(raw_store.checkpoint_get_count(), 0);
+    assert_eq!(raw_store.manifest_get_count(), 0);
 }
 
 #[test]
@@ -1379,7 +1379,7 @@ fn namespace_status_reports_wal_tail_segments() {
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
-    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.manifest_hint_seq, None);
     assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
@@ -1395,7 +1395,7 @@ fn namespace_status_reports_wal_tail_segments() {
         .namespace_status(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
-    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.manifest_hint_seq, None);
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 }
@@ -1473,7 +1473,7 @@ fn maintenance_tick_below_threshold_is_not_needed() {
 }
 
 #[test]
-fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
+fn maintenance_tick_at_segment_threshold_publishes_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-publish-test");
     let namespace_id = namespace();
@@ -1499,20 +1499,20 @@ fn maintenance_tick_at_segment_threshold_publishes_checkpoint() {
     assert_eq!(tick.status_before.head_seq, ChangeSeq(1));
     assert_eq!(
         tick.outcome,
-        MaintenanceTickOutcome::CheckpointPublished {
-            checkpoint_seq: ChangeSeq(1)
+        MaintenanceTickOutcome::ManifestPublished {
+            manifest_seq: ChangeSeq(1)
         }
     );
 
     let status = fs
         .namespace_status(&namespace_id)
-        .expect("status after checkpoint");
-    assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(1)));
+        .expect("status after manifest");
+    assert_eq!(status.manifest_hint_seq, Some(ChangeSeq(1)));
     assert_eq!(status.wal_tail_segments, 0);
 }
 
 #[test]
-fn maintenance_tick_after_existing_checkpoint_publishes_l0_run_checkpoint() {
+fn maintenance_tick_after_existing_manifest_publishes_l0_run_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-l0-run-publish-test");
     let namespace_id = namespace();
@@ -1551,33 +1551,35 @@ fn maintenance_tick_after_existing_checkpoint_publishes_l0_run_checkpoint() {
         .expect("second maintenance tick");
     assert_eq!(
         tick.outcome,
-        MaintenanceTickOutcome::CheckpointPublished {
-            checkpoint_seq: ChangeSeq(2)
+        MaintenanceTickOutcome::ManifestPublished {
+            manifest_seq: ChangeSeq(2)
         }
     );
 
     let status = fs
         .namespace_status(&namespace_id)
-        .expect("status after l0 run checkpoint");
-    assert_eq!(status.checkpoint_hint_seq, Some(ChangeSeq(2)));
+        .expect("status after l0 run manifest");
+    assert_eq!(status.manifest_hint_seq, Some(ChangeSeq(2)));
     assert_eq!(status.wal_tail_segments, 0);
 
     let raw_store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let manifest_key = checkpoint_manifest(namespace_id.as_str(), 2);
+    let manifest_key = namespace_manifest(namespace_id.as_str(), 2);
     let manifest_bytes = raw_store
         .get(&manifest_key, None)
-        .expect("read checkpoint manifest")
-        .expect("checkpoint manifest exists");
-    let manifest = decode_checkpoint_manifest_json(&manifest_bytes).expect("decode manifest");
+        .expect("read namespace manifest")
+        .expect("namespace manifest exists");
+    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
     assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
-    let l0_runs = manifest
+    let l0_files = manifest
         .payload
-        .runs
+        .metadata_files
         .iter()
-        .filter(|run| run.level == 0)
+        .filter(|metadata_file| metadata_file.level == 0)
         .collect::<Vec<_>>();
-    assert_eq!(l0_runs.len(), 1);
-    assert_eq!(l0_runs[0].run_seq, ChangeSeq(2));
+    assert!(!l0_files.is_empty());
+    assert!(l0_files
+        .iter()
+        .all(|metadata_file| metadata_file.run_seq == ChangeSeq(2)));
 }
 
 #[test]
@@ -1658,8 +1660,8 @@ fn maintenance_tick_counts_segments_not_commits() {
     assert_eq!(tick.status_before.wal_tail_segments, 2);
     assert_eq!(
         tick.outcome,
-        MaintenanceTickOutcome::CheckpointPublished {
-            checkpoint_seq: ChangeSeq(3)
+        MaintenanceTickOutcome::ManifestPublished {
+            manifest_seq: ChangeSeq(3)
         }
     );
 }
@@ -1687,7 +1689,7 @@ fn maintenance_tick_rejects_zero_threshold() {
 }
 
 #[test]
-fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
+fn maintenance_tick_treats_manifest_hint_cas_loss_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace();
     let raw_store = Arc::new(HeadCasFailureStore::new(
@@ -1718,23 +1720,23 @@ fn maintenance_tick_treats_checkpoint_hint_cas_loss_as_benign_race() {
                 max_wal_tail_segments: 1,
             },
         )
-        .expect("maintenance tick should not fail on checkpoint hint race");
+        .expect("maintenance tick should not fail on manifest hint race");
 
     assert_eq!(
         tick.outcome,
-        MaintenanceTickOutcome::CheckpointPublishRaceLost {
+        MaintenanceTickOutcome::ManifestPublishRaceLost {
             observed_head_seq: ChangeSeq(1)
         }
     );
     let status = fs
         .namespace_status(&namespace_id)
         .expect("status after lost race");
-    assert_eq!(status.checkpoint_hint_seq, None);
+    assert_eq!(status.manifest_hint_seq, None);
     assert_eq!(status.wal_tail_segments, 1);
 }
 
 #[test]
-fn checkpoint_and_retention_hooks_are_available() {
+fn manifest_and_retention_hooks_are_available() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "maintenance-test");
     let namespace_id = namespace();
@@ -1749,13 +1751,11 @@ fn checkpoint_and_retention_hooks_are_available() {
     )
     .expect("put file");
 
-    let checkpoint = fs
-        .create_checkpoint(&namespace_id)
-        .expect("create checkpoint");
+    let manifest = fs.create_manifest(&namespace_id).expect("create manifest");
     let retention = fs
         .advance_retention_floor(&namespace_id)
         .expect("advance retention");
-    assert_eq!(retention.retention_floor_seq, checkpoint.checkpoint_seq);
+    assert_eq!(retention.retention_floor_seq, manifest.manifest_seq);
 }
 
 #[test]
@@ -1791,10 +1791,10 @@ struct HeadCasFailureStore {
     inner: LocalFsStore,
     head_key: String,
     wal_prefix: String,
-    checkpoint_prefix: String,
+    manifest_prefix: String,
     fail_head_cas: AtomicBool,
     wal_get_count: AtomicUsize,
-    checkpoint_get_count: AtomicUsize,
+    manifest_get_count: AtomicUsize,
     head_get_count: AtomicUsize,
 }
 
@@ -1804,10 +1804,10 @@ impl HeadCasFailureStore {
             inner: LocalFsStore::new(root).expect("create local-fs store"),
             head_key: namespace_head(namespace),
             wal_prefix: format!("namespaces/{namespace}/wal/"),
-            checkpoint_prefix: format!("namespaces/{namespace}/compacted/checkpoints/"),
+            manifest_prefix: format!("namespaces/{namespace}/manifest/"),
             fail_head_cas: AtomicBool::new(false),
             wal_get_count: AtomicUsize::new(0),
-            checkpoint_get_count: AtomicUsize::new(0),
+            manifest_get_count: AtomicUsize::new(0),
             head_get_count: AtomicUsize::new(0),
         }
     }
@@ -1825,7 +1825,7 @@ impl HeadCasFailureStore {
     }
 
     fn reset_control_get_counts(&self) {
-        self.checkpoint_get_count.store(0, Ordering::SeqCst);
+        self.manifest_get_count.store(0, Ordering::SeqCst);
         self.head_get_count.store(0, Ordering::SeqCst);
         self.reset_wal_get_count();
     }
@@ -1834,8 +1834,8 @@ impl HeadCasFailureStore {
         self.wal_get_count.load(Ordering::SeqCst)
     }
 
-    fn checkpoint_get_count(&self) -> usize {
-        self.checkpoint_get_count.load(Ordering::SeqCst)
+    fn manifest_get_count(&self) -> usize {
+        self.manifest_get_count.load(Ordering::SeqCst)
     }
 
     fn head_get_count(&self) -> usize {
@@ -1856,8 +1856,8 @@ impl ObjectStore for HeadCasFailureStore {
         if key.starts_with(&self.wal_prefix) {
             self.wal_get_count.fetch_add(1, Ordering::SeqCst);
         }
-        if key.starts_with(&self.checkpoint_prefix) {
-            self.checkpoint_get_count.fetch_add(1, Ordering::SeqCst);
+        if key.starts_with(&self.manifest_prefix) {
+            self.manifest_get_count.fetch_add(1, Ordering::SeqCst);
         }
         if key == self.head_key {
             self.head_get_count.fetch_add(1, Ordering::SeqCst);

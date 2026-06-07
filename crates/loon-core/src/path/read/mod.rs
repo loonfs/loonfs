@@ -1,5 +1,6 @@
-mod checkpoint_index;
 mod listing;
+#[path = "checkpoint_index.rs"]
+mod manifest_index;
 mod materialized_view;
 mod resolver;
 mod revision_reader;

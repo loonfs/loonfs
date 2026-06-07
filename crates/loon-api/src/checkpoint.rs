@@ -7,24 +7,24 @@ use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const CHECKPOINT_MANIFEST_FORMAT_VERSION: u32 = 4;
-pub const CHECKPOINT_SEGMENT_FORMAT_VERSION: u32 = 4;
+pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 4;
+pub const METADATA_SST_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CheckpointManifestKind {
-    NamespaceCheckpointManifest,
+pub enum NamespaceManifestKind {
+    NamespaceManifest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CheckpointSegmentKind {
-    NamespaceCheckpointSegment,
+pub enum MetadataSstKind {
+    MetadataSst,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CheckpointTableFamily {
+pub enum MetadataTableFamily {
     Inodes,
     DirentryBinds,
     DirentryChildBinds,
@@ -36,18 +36,22 @@ pub enum CheckpointTableFamily {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CheckpointSegmentKey {
+pub enum MetadataSegmentKey {
     Full,
     DirentryParent { parent_inode_id: InodeId },
     RowKeyRange { shard: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointSegmentDescriptor {
+pub struct MetadataFileRef {
+    pub owner_namespace_id: NamespaceId,
+    pub table_id: String,
     pub object_key: String,
-    pub segment_seq: ChangeSeq,
+    pub run_seq: ChangeSeq,
+    pub level: u32,
+    pub family: MetadataTableFamily,
     pub segment_index: u32,
-    pub segment_key: CheckpointSegmentKey,
+    pub segment_key: MetadataSegmentKey,
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
@@ -56,33 +60,27 @@ pub struct CheckpointSegmentDescriptor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointTableManifest {
-    pub family: CheckpointTableFamily,
-    pub segments: Vec<CheckpointSegmentDescriptor>,
+pub struct NamespaceManifestFork {
+    pub source_namespace_id: NamespaceId,
+    pub fork_seq: ChangeSeq,
+    pub source_manifest_seq: ChangeSeq,
+    pub source_head_seq: ChangeSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointRunManifest {
-    pub run_id: String,
-    pub run_seq: ChangeSeq,
-    pub level: u32,
-    pub tables: Vec<CheckpointTableManifest>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointPage {
+pub struct MetadataPage {
     pub page_index: u32,
     pub min_key: String,
     pub max_key: String,
     #[serde(default)]
     pub row_keys: Vec<String>,
     #[serde(default)]
-    pub rows: Vec<CheckpointRow>,
+    pub rows: Vec<MetadataRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "row_kind", rename_all = "snake_case")]
-pub enum CheckpointRow {
+pub enum MetadataRow {
     Inode {
         inode_id: InodeId,
         inode_kind: InodeKind,
@@ -125,19 +123,19 @@ pub enum CheckpointRow {
     },
 }
 
-impl CheckpointRow {
+impl MetadataRow {
     pub fn row_key(&self) -> String {
         self.row_key_for_family(match self {
-            Self::Inode { .. } => CheckpointTableFamily::Inodes,
-            Self::DirentryBind { .. } => CheckpointTableFamily::DirentryBinds,
-            Self::DirentryUnbind { .. } => CheckpointTableFamily::DirentryUnbinds,
-            Self::Revision { .. } => CheckpointTableFamily::Revisions,
-            Self::Tombstone { .. } => CheckpointTableFamily::Tombstones,
-            Self::CommitReceipt { .. } => CheckpointTableFamily::CommitReceipts,
+            Self::Inode { .. } => MetadataTableFamily::Inodes,
+            Self::DirentryBind { .. } => MetadataTableFamily::DirentryBinds,
+            Self::DirentryUnbind { .. } => MetadataTableFamily::DirentryUnbinds,
+            Self::Revision { .. } => MetadataTableFamily::Revisions,
+            Self::Tombstone { .. } => MetadataTableFamily::Tombstones,
+            Self::CommitReceipt { .. } => MetadataTableFamily::CommitReceipts,
         })
     }
 
-    pub fn row_key_for_family(&self, family: CheckpointTableFamily) -> String {
+    pub fn row_key_for_family(&self, family: MetadataTableFamily) -> String {
         match self {
             Self::Inode { inode_id, .. } => format!("inode-{:020}", inode_id.0),
             Self::DirentryBind {
@@ -148,7 +146,7 @@ impl CheckpointRow {
                 bind_delta_index,
                 ..
             } => match family {
-                CheckpointTableFamily::DirentryChildBinds => {
+                MetadataTableFamily::DirentryChildBinds => {
                     let name_key = hex_encode_row_key_component(name_key);
                     format!(
                         "direntry-child-{:020}-{:020}-{:010}-{:020}-{name_key}",
@@ -226,187 +224,186 @@ pub fn hex_encode_row_key_component(value: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointSegmentPayload {
+pub struct MetadataSstPayload {
     pub namespace_id: NamespaceId,
-    pub segment_seq: ChangeSeq,
-    pub family: CheckpointTableFamily,
+    pub table_id: String,
+    pub run_seq: ChangeSeq,
+    pub level: u32,
+    pub family: MetadataTableFamily,
     pub segment_index: u32,
-    pub segment_key: CheckpointSegmentKey,
+    pub segment_key: MetadataSegmentKey,
     pub row_count: u64,
     pub min_key: String,
     pub max_key: String,
-    pub pages: Vec<CheckpointPage>,
+    pub pages: Vec<MetadataPage>,
 }
 
-impl CheckpointSegmentPayload {
-    pub fn page_checksums_sha256(&self) -> Result<Vec<String>, CheckpointSegmentCodecError> {
+impl MetadataSstPayload {
+    pub fn page_checksums_sha256(&self) -> Result<Vec<String>, MetadataSstCodecError> {
         self.pages
             .iter()
-            .map(checkpoint_page_checksum_sha256)
+            .map(metadata_page_checksum_sha256)
             .collect()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointSegmentEnvelope {
-    pub kind: CheckpointSegmentKind,
+pub struct MetadataSstEnvelope {
+    pub kind: MetadataSstKind,
     pub format_version: u32,
     pub writer_version: String,
     pub payload_checksum_sha256: String,
-    pub payload: CheckpointSegmentPayload,
+    pub payload: MetadataSstPayload,
 }
 
-impl CheckpointSegmentEnvelope {
+impl MetadataSstEnvelope {
     pub fn from_payload(
         writer_version: impl Into<String>,
-        payload: CheckpointSegmentPayload,
-    ) -> Result<Self, CheckpointSegmentCodecError> {
+        payload: MetadataSstPayload,
+    ) -> Result<Self, MetadataSstCodecError> {
         Ok(Self {
-            kind: CheckpointSegmentKind::NamespaceCheckpointSegment,
-            format_version: CHECKPOINT_SEGMENT_FORMAT_VERSION,
+            kind: MetadataSstKind::MetadataSst,
+            format_version: METADATA_SST_FORMAT_VERSION,
             writer_version: writer_version.into(),
-            payload_checksum_sha256: checkpoint_segment_payload_checksum_sha256(&payload)?,
+            payload_checksum_sha256: metadata_sst_payload_checksum_sha256(&payload)?,
             payload,
         })
     }
 
-    pub fn has_valid_payload_checksum(&self) -> Result<bool, CheckpointSegmentCodecError> {
-        Ok(self.payload_checksum_sha256
-            == checkpoint_segment_payload_checksum_sha256(&self.payload)?)
+    pub fn has_valid_payload_checksum(&self) -> Result<bool, MetadataSstCodecError> {
+        Ok(self.payload_checksum_sha256 == metadata_sst_payload_checksum_sha256(&self.payload)?)
     }
 
-    pub fn page_checksums_sha256(&self) -> Result<Vec<String>, CheckpointSegmentCodecError> {
+    pub fn page_checksums_sha256(&self) -> Result<Vec<String>, MetadataSstCodecError> {
         self.payload.page_checksums_sha256()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointManifestPayload {
+pub struct NamespaceManifestPayload {
     pub namespace_id: NamespaceId,
-    pub checkpoint_seq: ChangeSeq,
+    pub manifest_seq: ChangeSeq,
     pub base_seq: ChangeSeq,
     pub active_fence_token: FenceToken,
     pub next_inode_id: InodeId,
     pub retention_floor_seq: ChangeSeq,
     pub verified: bool,
-    pub runs: Vec<CheckpointRunManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<NamespaceManifestFork>,
+    pub metadata_files: Vec<MetadataFileRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointManifestEnvelope {
-    pub kind: CheckpointManifestKind,
+pub struct NamespaceManifestEnvelope {
+    pub kind: NamespaceManifestKind,
     pub format_version: u32,
     pub writer_version: String,
     pub payload_checksum_sha256: String,
-    pub payload: CheckpointManifestPayload,
+    pub payload: NamespaceManifestPayload,
 }
 
-impl CheckpointManifestEnvelope {
+impl NamespaceManifestEnvelope {
     pub fn from_payload(
         writer_version: impl Into<String>,
-        payload: CheckpointManifestPayload,
-    ) -> Result<Self, CheckpointManifestCodecError> {
+        payload: NamespaceManifestPayload,
+    ) -> Result<Self, NamespaceManifestCodecError> {
         Ok(Self {
-            kind: CheckpointManifestKind::NamespaceCheckpointManifest,
-            format_version: CHECKPOINT_MANIFEST_FORMAT_VERSION,
+            kind: NamespaceManifestKind::NamespaceManifest,
+            format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
             writer_version: writer_version.into(),
-            payload_checksum_sha256: checkpoint_manifest_payload_checksum_sha256(&payload)?,
+            payload_checksum_sha256: namespace_manifest_payload_checksum_sha256(&payload)?,
             payload,
         })
     }
 
-    pub fn has_valid_payload_checksum(&self) -> Result<bool, CheckpointManifestCodecError> {
+    pub fn has_valid_payload_checksum(&self) -> Result<bool, NamespaceManifestCodecError> {
         Ok(self.payload_checksum_sha256
-            == checkpoint_manifest_payload_checksum_sha256(&self.payload)?)
+            == namespace_manifest_payload_checksum_sha256(&self.payload)?)
     }
 }
 
 #[derive(Debug, Error)]
-pub enum CheckpointManifestCodecError {
-    #[error("failed to encode checkpoint manifest payload to JSON: {0}")]
+pub enum NamespaceManifestCodecError {
+    #[error("failed to encode namespace manifest payload to JSON: {0}")]
     PayloadEncode(String),
-    #[error("failed to encode checkpoint manifest envelope to JSON: {0}")]
+    #[error("failed to encode namespace manifest envelope to JSON: {0}")]
     EnvelopeEncode(String),
-    #[error("failed to decode checkpoint manifest envelope from JSON: {0}")]
+    #[error("failed to decode namespace manifest envelope from JSON: {0}")]
     EnvelopeDecode(String),
-    #[error("checkpoint manifest payload checksum mismatch: expected {expected}, actual {actual}")]
+    #[error("namespace manifest payload checksum mismatch: expected {expected}, actual {actual}")]
     ChecksumMismatch { expected: String, actual: String },
 }
 
 #[derive(Debug, Error)]
-pub enum CheckpointSegmentCodecError {
-    #[error("failed to encode checkpoint page to CBOR: {0}")]
+pub enum MetadataSstCodecError {
+    #[error("failed to encode manifest page to CBOR: {0}")]
     PageEncode(String),
-    #[error("failed to encode checkpoint segment payload to CBOR: {0}")]
+    #[error("failed to encode metadata SST payload to CBOR: {0}")]
     PayloadEncode(String),
-    #[error("failed to encode checkpoint segment envelope to CBOR: {0}")]
+    #[error("failed to encode metadata SST envelope to CBOR: {0}")]
     EnvelopeEncode(String),
-    #[error("failed to decode checkpoint segment envelope from CBOR: {0}")]
+    #[error("failed to decode metadata SST envelope from CBOR: {0}")]
     EnvelopeDecode(String),
-    #[error("failed to compress checkpoint segment envelope: {0}")]
+    #[error("failed to compress metadata SST envelope: {0}")]
     Compress(String),
-    #[error("failed to decompress checkpoint segment envelope: {0}")]
+    #[error("failed to decompress metadata SST envelope: {0}")]
     Decompress(String),
-    #[error("checkpoint segment payload checksum mismatch: expected {expected}, actual {actual}")]
+    #[error("metadata SST payload checksum mismatch: expected {expected}, actual {actual}")]
     ChecksumMismatch { expected: String, actual: String },
 }
 
-pub fn checkpoint_manifest_payload_checksum_sha256(
-    payload: &CheckpointManifestPayload,
-) -> Result<String, CheckpointManifestCodecError> {
+pub fn namespace_manifest_payload_checksum_sha256(
+    payload: &NamespaceManifestPayload,
+) -> Result<String, NamespaceManifestCodecError> {
     let bytes = serde_json::to_vec(payload)
-        .map_err(|err| CheckpointManifestCodecError::PayloadEncode(err.to_string()))?;
+        .map_err(|err| NamespaceManifestCodecError::PayloadEncode(err.to_string()))?;
     Ok(sha256_hex(&bytes))
 }
 
-pub fn encode_checkpoint_manifest_json(
-    envelope: &CheckpointManifestEnvelope,
-) -> Result<Vec<u8>, CheckpointManifestCodecError> {
+pub fn encode_namespace_manifest_json(
+    envelope: &NamespaceManifestEnvelope,
+) -> Result<Vec<u8>, NamespaceManifestCodecError> {
     serde_json::to_vec(envelope)
-        .map_err(|err| CheckpointManifestCodecError::EnvelopeEncode(err.to_string()))
+        .map_err(|err| NamespaceManifestCodecError::EnvelopeEncode(err.to_string()))
 }
 
-pub fn checkpoint_page_checksum_sha256(
-    page: &CheckpointPage,
-) -> Result<String, CheckpointSegmentCodecError> {
+pub fn metadata_page_checksum_sha256(page: &MetadataPage) -> Result<String, MetadataSstCodecError> {
     let mut encoded = Vec::new();
     into_writer(page, &mut encoded)
-        .map_err(|err| CheckpointSegmentCodecError::PageEncode(err.to_string()))?;
+        .map_err(|err| MetadataSstCodecError::PageEncode(err.to_string()))?;
     Ok(sha256_hex(&encoded))
 }
 
-pub fn checkpoint_segment_payload_checksum_sha256(
-    payload: &CheckpointSegmentPayload,
-) -> Result<String, CheckpointSegmentCodecError> {
-    Ok(sha256_hex(&encode_checkpoint_segment_payload_cbor(
-        payload,
-    )?))
+pub fn metadata_sst_payload_checksum_sha256(
+    payload: &MetadataSstPayload,
+) -> Result<String, MetadataSstCodecError> {
+    Ok(sha256_hex(&encode_metadata_sst_payload_cbor(payload)?))
 }
 
-pub fn encode_checkpoint_segment_payload_cbor(
-    payload: &CheckpointSegmentPayload,
-) -> Result<Vec<u8>, CheckpointSegmentCodecError> {
+pub fn encode_metadata_sst_payload_cbor(
+    payload: &MetadataSstPayload,
+) -> Result<Vec<u8>, MetadataSstCodecError> {
     let mut encoded = Vec::new();
     into_writer(payload, &mut encoded)
-        .map_err(|err| CheckpointSegmentCodecError::PayloadEncode(err.to_string()))?;
+        .map_err(|err| MetadataSstCodecError::PayloadEncode(err.to_string()))?;
     Ok(encoded)
 }
 
-pub fn decode_checkpoint_manifest_json(
+pub fn decode_namespace_manifest_json(
     bytes: &[u8],
-) -> Result<CheckpointManifestEnvelope, CheckpointManifestCodecError> {
-    let envelope: CheckpointManifestEnvelope = serde_json::from_slice(bytes)
-        .map_err(|err| CheckpointManifestCodecError::EnvelopeDecode(err.to_string()))?;
-    if envelope.format_version != CHECKPOINT_MANIFEST_FORMAT_VERSION {
-        return Err(CheckpointManifestCodecError::EnvelopeDecode(format!(
-            "unsupported checkpoint manifest format version `{}`",
+) -> Result<NamespaceManifestEnvelope, NamespaceManifestCodecError> {
+    let envelope: NamespaceManifestEnvelope = serde_json::from_slice(bytes)
+        .map_err(|err| NamespaceManifestCodecError::EnvelopeDecode(err.to_string()))?;
+    if envelope.format_version != NAMESPACE_MANIFEST_FORMAT_VERSION {
+        return Err(NamespaceManifestCodecError::EnvelopeDecode(format!(
+            "unsupported namespace manifest format version `{}`",
             envelope.format_version
         )));
     }
-    let actual = checkpoint_manifest_payload_checksum_sha256(&envelope.payload)?;
+    let actual = namespace_manifest_payload_checksum_sha256(&envelope.payload)?;
 
     if actual != envelope.payload_checksum_sha256 {
-        return Err(CheckpointManifestCodecError::ChecksumMismatch {
+        return Err(NamespaceManifestCodecError::ChecksumMismatch {
             expected: envelope.payload_checksum_sha256.clone(),
             actual,
         });
@@ -415,33 +412,33 @@ pub fn decode_checkpoint_manifest_json(
     Ok(envelope)
 }
 
-pub fn encode_checkpoint_segment_envelope_zstd(
-    envelope: &CheckpointSegmentEnvelope,
-) -> Result<Vec<u8>, CheckpointSegmentCodecError> {
+pub fn encode_metadata_sst_envelope_zstd(
+    envelope: &MetadataSstEnvelope,
+) -> Result<Vec<u8>, MetadataSstCodecError> {
     let mut encoded = Vec::new();
     into_writer(envelope, &mut encoded)
-        .map_err(|err| CheckpointSegmentCodecError::EnvelopeEncode(err.to_string()))?;
+        .map_err(|err| MetadataSstCodecError::EnvelopeEncode(err.to_string()))?;
     zstd::stream::encode_all(encoded.as_slice(), 0)
-        .map_err(|err| CheckpointSegmentCodecError::Compress(err.to_string()))
+        .map_err(|err| MetadataSstCodecError::Compress(err.to_string()))
 }
 
-pub fn decode_checkpoint_segment_envelope_zstd(
+pub fn decode_metadata_sst_envelope_zstd(
     bytes: &[u8],
-) -> Result<CheckpointSegmentEnvelope, CheckpointSegmentCodecError> {
+) -> Result<MetadataSstEnvelope, MetadataSstCodecError> {
     let decompressed = zstd::stream::decode_all(bytes)
-        .map_err(|err| CheckpointSegmentCodecError::Decompress(err.to_string()))?;
-    let envelope: CheckpointSegmentEnvelope = from_reader(decompressed.as_slice())
-        .map_err(|err| CheckpointSegmentCodecError::EnvelopeDecode(err.to_string()))?;
-    if envelope.format_version != CHECKPOINT_SEGMENT_FORMAT_VERSION {
-        return Err(CheckpointSegmentCodecError::EnvelopeDecode(format!(
-            "unsupported checkpoint segment format version `{}`",
+        .map_err(|err| MetadataSstCodecError::Decompress(err.to_string()))?;
+    let envelope: MetadataSstEnvelope = from_reader(decompressed.as_slice())
+        .map_err(|err| MetadataSstCodecError::EnvelopeDecode(err.to_string()))?;
+    if envelope.format_version != METADATA_SST_FORMAT_VERSION {
+        return Err(MetadataSstCodecError::EnvelopeDecode(format!(
+            "unsupported metadata SST format version `{}`",
             envelope.format_version
         )));
     }
 
-    let actual = checkpoint_segment_payload_checksum_sha256(&envelope.payload)?;
+    let actual = metadata_sst_payload_checksum_sha256(&envelope.payload)?;
     if actual != envelope.payload_checksum_sha256 {
-        return Err(CheckpointSegmentCodecError::ChecksumMismatch {
+        return Err(MetadataSstCodecError::ChecksumMismatch {
             expected: envelope.payload_checksum_sha256.clone(),
             actual,
         });
@@ -453,86 +450,104 @@ pub fn decode_checkpoint_segment_envelope_zstd(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_checkpoint_manifest_json, encode_checkpoint_manifest_json,
-        CheckpointManifestEnvelope, CheckpointManifestPayload, CheckpointRunManifest,
-        CheckpointSegmentDescriptor, CheckpointSegmentKey, CheckpointTableFamily,
-        CheckpointTableManifest,
+        decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef,
+        MetadataSegmentKey, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
+        NamespaceManifestPayload,
     };
     use crate::{ChangeSeq, FenceToken, InodeId, NamespaceId};
 
     #[test]
-    fn checkpoint_manifest_codec_round_trips_base_only_materialization() {
-        let envelope = CheckpointManifestEnvelope::from_payload(
+    fn namespace_manifest_codec_round_trips_base_only_materialization() {
+        let envelope = NamespaceManifestEnvelope::from_payload(
             "test-writer",
-            CheckpointManifestPayload {
+            NamespaceManifestPayload {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-                checkpoint_seq: ChangeSeq(10),
+                manifest_seq: ChangeSeq(10),
                 base_seq: ChangeSeq(10),
                 active_fence_token: FenceToken(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
                 verified: true,
-                runs: vec![CheckpointRunManifest {
-                    run_id: "run_00000000000000000000000000000001".to_owned(),
-                    run_seq: ChangeSeq(10),
-                    level: 1,
-                    tables: vec![table_manifest("run/inodes.sst.zst", ChangeSeq(10))],
-                }],
+                fork: None,
+                metadata_files: vec![metadata_file_ref(
+                    "demo",
+                    "tbl_00000000000000000000000000000001",
+                    ChangeSeq(10),
+                    1,
+                    "namespaces/demo/compacted/metadata/tbl_00000000000000000000000000000001.sst",
+                )],
             },
         )
         .expect("manifest");
 
-        let encoded = encode_checkpoint_manifest_json(&envelope).expect("encode manifest");
-        let decoded = decode_checkpoint_manifest_json(&encoded).expect("decode manifest");
+        let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
+        let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.payload.base_seq, ChangeSeq(10));
-        assert_eq!(decoded.payload.runs.len(), 1);
-        assert_eq!(decoded.payload.runs[0].run_seq, ChangeSeq(10));
+        assert_eq!(decoded.payload.metadata_files.len(), 1);
+        assert_eq!(decoded.payload.metadata_files[0].run_seq, ChangeSeq(10));
     }
 
     #[test]
-    fn checkpoint_manifest_codec_round_trips_multi_run_materialization() {
-        let envelope = CheckpointManifestEnvelope::from_payload(
+    fn namespace_manifest_codec_round_trips_fork_materialization() {
+        let envelope = NamespaceManifestEnvelope::from_payload(
             "test-writer",
-            CheckpointManifestPayload {
+            NamespaceManifestPayload {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-                checkpoint_seq: ChangeSeq(12),
+                manifest_seq: ChangeSeq(12),
                 base_seq: ChangeSeq(10),
                 active_fence_token: FenceToken(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
                 verified: true,
-                runs: vec![
-                    CheckpointRunManifest {
-                        run_id: "run_00000000000000000000000000000001".to_owned(),
-                        run_seq: ChangeSeq(10),
-                        level: 1,
-                        tables: vec![table_manifest("base/inodes.sst.zst", ChangeSeq(10))],
-                    },
-                    CheckpointRunManifest {
-                        run_id: "run_00000000000000000000000000000002".to_owned(),
-                        run_seq: ChangeSeq(12),
-                        level: 0,
-                        tables: vec![table_manifest("l0/inodes.sst.zst", ChangeSeq(12))],
-                    },
+                fork: Some(NamespaceManifestFork {
+                    source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
+                    fork_seq: ChangeSeq(12),
+                    source_manifest_seq: ChangeSeq(10),
+                    source_head_seq: ChangeSeq(12),
+                }),
+                metadata_files: vec![
+                    metadata_file_ref(
+                        "source",
+                        "tbl_00000000000000000000000000000001",
+                        ChangeSeq(10),
+                        1,
+                        "namespaces/source/compacted/metadata/tbl_00000000000000000000000000000001.sst",
+                    ),
+                    metadata_file_ref(
+                        "demo",
+                        "tbl_00000000000000000000000000000002",
+                        ChangeSeq(12),
+                        0,
+                        "namespaces/demo/compacted/metadata/tbl_00000000000000000000000000000002.sst",
+                    ),
                 ],
             },
         )
         .expect("manifest");
 
-        let encoded = encode_checkpoint_manifest_json(&envelope).expect("encode manifest");
-        let decoded = decode_checkpoint_manifest_json(&encoded).expect("decode manifest");
+        let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
+        let decoded = decode_namespace_manifest_json(&encoded).expect("decode manifest");
 
         assert_eq!(decoded, envelope);
-        assert_eq!(decoded.payload.runs[0].level, 1);
-        assert_eq!(decoded.payload.runs[1].level, 0);
-        assert_eq!(decoded.payload.runs[1].run_seq, ChangeSeq(12));
+        assert_eq!(decoded.payload.metadata_files[0].level, 1);
+        assert_eq!(decoded.payload.metadata_files[1].level, 0);
+        assert_eq!(decoded.payload.metadata_files[1].run_seq, ChangeSeq(12));
+        assert_eq!(
+            decoded
+                .payload
+                .fork
+                .as_ref()
+                .expect("fork")
+                .source_manifest_seq,
+            ChangeSeq(10)
+        );
     }
 
     #[test]
     fn direntry_bind_row_key_supports_parent_and_child_indexes() {
-        let row = super::CheckpointRow::DirentryBind {
+        let row = super::MetadataRow::DirentryBind {
             parent_inode_id: InodeId(9),
             name_key: "report.txt".to_owned(),
             display_name: "Report.txt".to_owned(),
@@ -542,18 +557,18 @@ mod tests {
         };
 
         assert_eq!(
-            row.row_key_for_family(CheckpointTableFamily::DirentryBinds),
+            row.row_key_for_family(MetadataTableFamily::DirentryBinds),
             "direntry-00000000000000000009-7265706f72742e747874-00000000000000000017-0000000003"
         );
         assert_eq!(
-            row.row_key_for_family(CheckpointTableFamily::DirentryChildBinds),
+            row.row_key_for_family(MetadataTableFamily::DirentryChildBinds),
             "direntry-child-00000000000000000042-00000000000000000017-0000000003-00000000000000000009-7265706f72742e747874"
         );
     }
 
     #[test]
     fn row_keys_hex_encode_dash_containing_variable_components() {
-        let row = super::CheckpointRow::DirentryBind {
+        let row = super::MetadataRow::DirentryBind {
             parent_inode_id: InodeId(9),
             name_key: "report-2024".to_owned(),
             display_name: "report-2024".to_owned(),
@@ -563,25 +578,32 @@ mod tests {
         };
 
         assert_eq!(
-            row.row_key_for_family(CheckpointTableFamily::DirentryBinds),
+            row.row_key_for_family(MetadataTableFamily::DirentryBinds),
             "direntry-00000000000000000009-7265706f72742d32303234-00000000000000000017-0000000003"
         );
     }
 
-    fn table_manifest(object_key: &str, segment_seq: ChangeSeq) -> CheckpointTableManifest {
-        CheckpointTableManifest {
-            family: CheckpointTableFamily::Inodes,
-            segments: vec![CheckpointSegmentDescriptor {
-                object_key: object_key.to_owned(),
-                segment_seq,
-                segment_index: 0,
-                segment_key: CheckpointSegmentKey::Full,
-                row_count: 0,
-                min_key: String::new(),
-                max_key: String::new(),
-                payload_checksum_sha256: "sha256:unused".to_owned(),
-                page_checksums_sha256: Vec::new(),
-            }],
+    fn metadata_file_ref(
+        owner_namespace_id: &str,
+        table_id: &str,
+        run_seq: ChangeSeq,
+        level: u32,
+        object_key: &str,
+    ) -> MetadataFileRef {
+        MetadataFileRef {
+            owner_namespace_id: NamespaceId::parse(owner_namespace_id).expect("valid namespace id"),
+            table_id: table_id.to_owned(),
+            object_key: object_key.to_owned(),
+            run_seq,
+            level,
+            family: MetadataTableFamily::Inodes,
+            segment_index: 0,
+            segment_key: MetadataSegmentKey::Full,
+            row_count: 0,
+            min_key: String::new(),
+            max_key: String::new(),
+            payload_checksum_sha256: "sha256:unused".to_owned(),
+            page_checksums_sha256: Vec::new(),
         }
     }
 }

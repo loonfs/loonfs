@@ -141,16 +141,16 @@ pub struct RestoreFileRevisionRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// Result of creating or reusing a checkpoint.
-pub struct CreateCheckpointResponse {
-    /// Namespace that was checkpointed.
+/// Result of creating or reusing a manifest.
+pub struct CreateManifestResponse {
+    /// Namespace that was manifested.
     pub namespace_id: NamespaceId,
-    /// Sequence covered by the checkpoint.
-    pub checkpoint_seq: ChangeSeq,
-    /// Head's current checkpoint hint after the operation.
-    pub checkpoint_hint_seq: Option<ChangeSeq>,
-    /// Whether the head now points at this checkpoint.
-    pub checkpoint_hint_points_at_checkpoint: bool,
+    /// Sequence covered by the manifest.
+    pub manifest_seq: ChangeSeq,
+    /// Head's current manifest hint after the operation.
+    pub manifest_hint_seq: Option<ChangeSeq>,
+    /// Whether the head now points at this manifest.
+    pub manifest_hint_points_at_manifest: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

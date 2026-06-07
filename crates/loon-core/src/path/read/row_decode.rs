@@ -1,11 +1,11 @@
 use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
-use loon_api::wire::checkpoint::CheckpointRow;
+use loon_api::wire::manifest::MetadataRow;
 
-pub(super) fn inode_from_checkpoint_row(row: CheckpointRow) -> Option<InodeRecord> {
+pub(super) fn inode_from_manifest_row(row: MetadataRow) -> Option<InodeRecord> {
     match row {
-        CheckpointRow::Inode {
+        MetadataRow::Inode {
             inode_id,
             inode_kind,
             created_seq,
@@ -18,9 +18,9 @@ pub(super) fn inode_from_checkpoint_row(row: CheckpointRow) -> Option<InodeRecor
     }
 }
 
-pub(super) fn direntry_bind_from_checkpoint_row(row: CheckpointRow) -> Option<DirentryBindRecord> {
+pub(super) fn direntry_bind_from_manifest_row(row: MetadataRow) -> Option<DirentryBindRecord> {
     match row {
-        CheckpointRow::DirentryBind {
+        MetadataRow::DirentryBind {
             parent_inode_id,
             name_key,
             display_name,
@@ -39,11 +39,9 @@ pub(super) fn direntry_bind_from_checkpoint_row(row: CheckpointRow) -> Option<Di
     }
 }
 
-pub(super) fn direntry_unbind_from_checkpoint_row(
-    row: CheckpointRow,
-) -> Option<DirentryUnbindRecord> {
+pub(super) fn direntry_unbind_from_manifest_row(row: MetadataRow) -> Option<DirentryUnbindRecord> {
     match row {
-        CheckpointRow::DirentryUnbind {
+        MetadataRow::DirentryUnbind {
             parent_inode_id,
             name_key,
             child_inode_id,
@@ -64,9 +62,9 @@ pub(super) fn direntry_unbind_from_checkpoint_row(
     }
 }
 
-pub(super) fn revision_from_checkpoint_row(row: CheckpointRow) -> Option<RevisionRecord> {
+pub(super) fn revision_from_manifest_row(row: MetadataRow) -> Option<RevisionRecord> {
     match row {
-        CheckpointRow::Revision {
+        MetadataRow::Revision {
             inode_id,
             revision_no,
             committed_seq,
@@ -83,9 +81,9 @@ pub(super) fn revision_from_checkpoint_row(row: CheckpointRow) -> Option<Revisio
     }
 }
 
-pub(super) fn tombstone_from_checkpoint_row(row: CheckpointRow) -> Option<SubtreeTombstoneRecord> {
+pub(super) fn tombstone_from_manifest_row(row: MetadataRow) -> Option<SubtreeTombstoneRecord> {
     match row {
-        CheckpointRow::Tombstone {
+        MetadataRow::Tombstone {
             root_inode_id,
             tombstone_seq,
             tombstone_delta_index,

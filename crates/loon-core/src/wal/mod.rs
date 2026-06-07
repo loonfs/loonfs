@@ -182,7 +182,7 @@ mod tests {
     #[test]
     fn validated_wal_chain_rejects_corrupt_visible_segments() {
         assert_wal_chain_corruption_rejected(|object_key, _envelope, pointer| {
-            *object_key = wal_segment("demo", 1, 1, "seg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            *object_key = wal_segment("other", 1, 1, "seg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
             pointer.object_key = object_key.clone();
         });
         assert_wal_chain_corruption_rejected(|object_key, envelope, pointer| {

@@ -12,7 +12,7 @@ use loon_api::v0::{
 };
 use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    ContentRef, CreateCheckpointResponse, InodeId, ListFileRevisionsResponse, MutationResult,
+    ContentRef, CreateManifestResponse, InodeId, ListFileRevisionsResponse, MutationResult,
     NamespaceId, NamespaceSummary, RevisionNo,
 };
 use loon_objectstore::ObjectStore;
@@ -27,7 +27,7 @@ const DEFAULT_LEASE_DURATION_MS: u64 = 5_000;
 ///
 /// `NamespaceEngine` owns an object store handle plus the writer identity used
 /// for mutations. It is the main entrypoint for direct reads, path writes,
-/// explicit commits, uploads, checkpoints, and retention work.
+/// explicit commits, uploads, manifests, and retention work.
 pub struct NamespaceEngine<S> {
     store: S,
     namespace_id: NamespaceId,
@@ -510,18 +510,14 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         )
     }
 
-    /// Writes or reuses a checkpoint for the current namespace head.
-    pub fn create_checkpoint(&self) -> CoreResult<CreateCheckpointResponse> {
-        crate::checkpoint::create_checkpoint(
-            &self.store,
-            &self.namespace_id,
-            &self.mutation_context(),
-        )
+    /// Writes or reuses a manifest for the current namespace head.
+    pub fn create_manifest(&self) -> CoreResult<CreateManifestResponse> {
+        crate::manifest::create_manifest(&self.store, &self.namespace_id, &self.mutation_context())
     }
 
-    /// Advances the retention floor when a verified checkpoint makes it safe.
+    /// Advances the retention floor when a verified manifest makes it safe.
     pub fn advance_retention_floor(&self) -> CoreResult<AdvanceRetentionResponse> {
-        crate::checkpoint::advance_retention_floor(
+        crate::manifest::advance_retention_floor(
             &self.store,
             &self.namespace_id,
             &self.mutation_context(),

@@ -22,7 +22,7 @@ pub use loon_api::v0::{
 use loon_api::wire::control::HeadState;
 pub use loon_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, CommitId,
-    ContentRef, ContentRefKind, CreateCheckpointResponse, DisplayName, FileRevision,
+    ContentRef, ContentRefKind, CreateManifestResponse, DisplayName, FileRevision,
     FilesystemOperationResponse, InodeId, InodeKind, ListFileRevisionsResponse, MutationResult,
     NameKey, NamePolicy, NamespaceId, NamespaceSummary, RevisionNo,
 };
@@ -918,9 +918,9 @@ pub struct NamespaceStatus {
     pub namespace_id: NamespaceId,
     /// Current visible namespace sequence.
     pub head_seq: ChangeSeq,
-    /// Checkpoint currently hinted by the head.
-    pub checkpoint_hint_seq: Option<ChangeSeq>,
-    /// Number of visible WAL segments after the checkpoint basis.
+    /// Manifest currently hinted by the head.
+    pub manifest_hint_seq: Option<ChangeSeq>,
+    /// Number of visible WAL segments after the manifest basis.
     pub wal_tail_segments: u64,
     /// Oldest sequence still promised for incremental replay.
     pub retention_floor_seq: ChangeSeq,
@@ -929,7 +929,7 @@ pub struct NamespaceStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Options for one maintenance tick.
 pub struct MaintenanceTickOptions {
-    /// Publish a checkpoint when the visible WAL tail reaches this many segments.
+    /// Publish a manifest when the visible WAL tail reaches this many segments.
     pub max_wal_tail_segments: u64,
 }
 
@@ -944,17 +944,17 @@ impl Default for MaintenanceTickOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Outcome of one maintenance tick.
 pub enum MaintenanceTickOutcome {
-    /// No checkpoint was needed.
+    /// No manifest was needed.
     NotNeeded,
-    /// A checkpoint was published.
-    CheckpointPublished { checkpoint_seq: ChangeSeq },
-    /// Another checkpoint already covered the attempted sequence.
-    CheckpointSuperseded {
+    /// A manifest was published.
+    ManifestPublished { manifest_seq: ChangeSeq },
+    /// Another manifest already covered the attempted sequence.
+    ManifestSuperseded {
         attempted_seq: ChangeSeq,
-        checkpoint_hint_seq: ChangeSeq,
+        manifest_hint_seq: ChangeSeq,
     },
     /// A concurrent head update won the race.
-    CheckpointPublishRaceLost { observed_head_seq: ChangeSeq },
+    ManifestPublishRaceLost { observed_head_seq: ChangeSeq },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1191,7 +1191,7 @@ impl Fs {
         Ok(NamespaceStatus {
             namespace_id: summary.namespace_id,
             head_seq: summary.head_seq,
-            checkpoint_hint_seq: summary.checkpoint_hint_seq,
+            manifest_hint_seq: summary.manifest_hint_seq,
             wal_tail_segments: summary.wal_tail_segments,
             retention_floor_seq: summary.retention_floor_seq,
         })
@@ -1231,33 +1231,31 @@ impl Fs {
             });
         }
 
-        let checkpoint = match self.create_checkpoint(namespace_id) {
-            Ok(checkpoint) => checkpoint,
+        let manifest = match self.create_manifest(namespace_id) {
+            Ok(manifest) => manifest,
             Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
                     status_before,
-                    outcome: MaintenanceTickOutcome::CheckpointPublishRaceLost {
-                        observed_head_seq,
-                    },
+                    outcome: MaintenanceTickOutcome::ManifestPublishRaceLost { observed_head_seq },
                 });
             }
             Err(error) => return Err(error),
         };
 
-        let outcome = if checkpoint.checkpoint_hint_points_at_checkpoint {
-            MaintenanceTickOutcome::CheckpointPublished {
-                checkpoint_seq: checkpoint.checkpoint_seq,
+        let outcome = if manifest.manifest_hint_points_at_manifest {
+            MaintenanceTickOutcome::ManifestPublished {
+                manifest_seq: manifest.manifest_seq,
             }
         } else {
-            let Some(checkpoint_hint_seq) = checkpoint.checkpoint_hint_seq else {
+            let Some(manifest_hint_seq) = manifest.manifest_hint_seq else {
                 return Err(RuntimeError::Core(CoreError::Store(
-                    "checkpoint hint publication returned no checkpoint hint".to_owned(),
+                    "manifest hint publication returned no manifest hint".to_owned(),
                 )));
             };
-            MaintenanceTickOutcome::CheckpointSuperseded {
-                attempted_seq: checkpoint.checkpoint_seq,
-                checkpoint_hint_seq,
+            MaintenanceTickOutcome::ManifestSuperseded {
+                attempted_seq: manifest.manifest_seq,
+                manifest_hint_seq,
             }
         };
 
@@ -1289,7 +1287,7 @@ impl Fs {
         self.record_trace_context(&span);
         let head = self.head_for_metadata_read(namespace_id)?;
         let engine = self.namespace_engine(namespace_id);
-        if head.state.checkpoint_hint_seq.is_some() {
+        if head.state.manifest_hint_seq.is_some() {
             let entry = engine.resolve_path(
                 absolute_path,
                 loon_core::ReadOptions::materialized_tables_at_head(
@@ -1322,7 +1320,7 @@ impl Fs {
     ) -> Result<Vec<AuthoritativePathEntry>> {
         let head = self.head_for_metadata_read(namespace_id)?;
         let engine = self.namespace_engine(namespace_id);
-        if head.state.checkpoint_hint_seq.is_some() {
+        if head.state.manifest_hint_seq.is_some() {
             let entries = engine.list_path(
                 absolute_path,
                 loon_core::ReadOptions::materialized_tables_at_head(
@@ -1767,15 +1765,12 @@ impl Fs {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub fn create_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<CreateCheckpointResponse> {
+    pub fn create_manifest(&self, namespace_id: &NamespaceId) -> Result<CreateManifestResponse> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         let result = self
             .namespace_engine(namespace_id)
-            .create_checkpoint()
+            .create_manifest()
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
     }

@@ -10,10 +10,10 @@ A conforming object-store layer must provide the following behavior.
 
 | Guarantee | Rationale |
 | --- | --- |
-| **Create-if-absent** for immutable objects | File content objects, WAL segments, and checkpoints must never be silently overwritten. |
+| **Create-if-absent** for immutable objects | File content objects, WAL segments, and manifests must never be silently overwritten. |
 | **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
 | **Strong consistency** | A successful put/delete operation must become authoritative immediately after it succeeds. |
-| **Prefix enumeration** | Checkpoint discovery, WAL segment discovery for repair and cleanup, and general namespace inspection need a reliable way to enumerate objects by prefix. |
+| **Prefix enumeration** | Manifest discovery, WAL segment discovery for repair and cleanup, and general namespace inspection need a reliable way to enumerate objects by prefix. |
 | **Deterministic key scoping** | Providers must not allow objects outside the configured namespace or tenant prefix to leak into operations. |
 | **Consistent error signaling for failed preconditions** | Higher layers need one generic way to detect stale writes and retry or fail safely. |
 
@@ -30,40 +30,41 @@ The required durable object families and standard key patterns are:
 | **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/control/lease.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
-| **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq}-{end_seq}-{segment_id}.cbor.zst` |
-| **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced materialization tables. | `namespaces/{namespace_id}/compacted/checkpoints/{checkpoint_seq}/manifest.json` |
-| **Checkpoint run tables** | Immutable | Store one verified metadata materialization run. Runs may be full materializations or WAL-derived runs, and a checkpoint manifest may reference multiple runs. | `namespaces/{namespace_id}/compacted/checkpoints/{run_seq}/runs/{run_id}/tables/{family}/{segment_index}.sst.zst` |
+| **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{wal_file_id}.sst` |
+| **Namespace manifests** | Immutable | Record the verified recovery boundary and the immutable metadata SSTs that materialize metadata through that boundary. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
+| **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/compacted/metadata/{table_id}.sst` |
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
 
 Namespace object keys are built through the central object layout API in `loon-objectstore`.
 The namespace root remains `namespaces/{namespace_id}/`; mutable control objects live under
-`control/`, WAL segments live under `wal/`, and checkpoint materialization files live under
-`compacted/checkpoints/`. Fork-aware copy-on-write manifests and GC pins are planned under the
-same namespace-root model, not under a separate top-level `histories/` root.
+`control/`, WAL files live under `wal/`, namespace manifests live under `manifest/`, and
+immutable metadata SSTs live under `compacted/metadata/`. Forks are copy-on-write: the target
+manifest may reference source-owned metadata SSTs, and the source records a GC pin for those
+referenced files.
 
 The object layout also reserves these namespace-root file families for fork-aware materialization,
 derived indexes, compaction control, and garbage collection:
 
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
-| **Namespace fork state** | Written for forked namespaces to record which namespace was copied and at which sequence. | `namespaces/{namespace_id}/control/fork.json` |
-| **Namespace manifests** | Reserved for namespace-root manifest snapshots. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
+| **Namespace fork state** | Written for forked namespaces to record their source and fork sequence. | `namespaces/{namespace_id}/control/fork.json` |
+| **Namespace manifests** | Written as the recovery authority for a namespace. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
 | **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compactions/{compactions_id}.compactions` |
-| **Compacted metadata SSTs** | Reserved for immutable metadata file sets referenced by manifests. | `namespaces/{namespace_id}/compacted/metadata/{table_id}.sst` |
-| **Compacted index SSTs** | Reserved for immutable derived-index file sets referenced by index manifests. | `namespaces/{namespace_id}/compacted/indexes/{index_family}/{index_instance}/{table_id}.sst` |
-| **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/manifest/{manifest_id}.manifest` |
-| **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
-| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{manifest\|compactions\|wal\|compacted}.boundary` |
-| **GC pins** | Reserved for protecting cross-namespace immutable file references. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
+| **Metadata SSTs** | Written as immutable metadata files referenced by manifests. | `namespaces/{namespace_id}/compacted/metadata/{table_id}.sst` |
+| **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/manifest/{manifest_seq}.manifest` |
+| **Compacted index SSTs** | Reserved for immutable derived-index files referenced by index manifests. | `namespaces/{namespace_id}/indexes/{index_family}/compacted/{table_id}.sst` |
+| **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/gc/manifest.boundary` |
+| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{manifest\|compactions}.boundary` |
+| **GC pins** | Written to protect cross-namespace immutable metadata SST references. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
 
 ## 4. Durable naming conventions
 
 LoonFS uses distinct naming conventions for distinct surfaces:
 
 - Fixed object-store path segments use lowercase words or lowercase-kebab, e.g. `content-stores`, `commit-receipts`, and `uploads`.
-- Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, and `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`.
-- Durable work-class names use lowercase-kebab, e.g. `checkpoint-builder`.
+- Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`, `tbl_2a31a7fd0c1a4c5f86eb89df8a8ed412`, and `pin_d7a8f496e3cb47b290a8c4c1c7c0ef13`.
+- Durable work-class names use lowercase-kebab, e.g. `manifest-builder`.
 - JSON enum values use snake_case.
 - Namespace IDs are human/operator slugs. They use the durable slug grammar: 1-128 bytes, no leading or trailing whitespace, not `.` or `..`, first character lowercase ASCII letter or digit, and remaining characters lowercase ASCII letters, digits, `.`, `_`, or `-`. Prefer lowercase kebab-case within that grammar.
 
@@ -98,7 +99,7 @@ The content model has four rules.
 
 In v0, file content is stored as one whole-file object whose `content_ref.kind` is `whole_file_v0`. The digest remains serialized as `sha256:<64hex>`, while the object key partitions the hex as `sha256/ab/cd/<hex>`.
 
-Checkpoint materialization tables include canonical metadata families and validated secondary indexes. The canonical families are `inodes`, `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and `commit-receipts`. The `direntry-child-binds` family is a secondary index over the same direntry bind rows, keyed by child inode, and must be present and verified before a checkpoint is trusted.
+Manifest materialization tables include canonical metadata families and validated secondary indexes. The canonical families are `inodes`, `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and `commit-receipts`. The `direntry-child-binds` family is a secondary index over the same direntry bind rows, keyed by child inode, and must be present and verified before a manifest is trusted.
 
 ETags remain opaque compare tokens. They may be used for object freshness or compare-and-swap, but they are not content digests unless a provider-specific behavior is separately exposed and verified through this contract.
 

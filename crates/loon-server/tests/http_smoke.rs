@@ -7,11 +7,11 @@ use loon_api::{
         CommitRequest as ApiCommitRequest, CompleteUploadRequest,
     },
     wire::control::{ControlObjectKind, LeaseStateEnvelope},
-    AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateCheckpointResponse,
+    AdvanceRetentionResponse, ApiError, ChangeSeq, CommitId, ContentRef, CreateManifestResponse,
     InodeId, InodeKind, RevisionNo,
 };
 use loon_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loon_objectstore::keys::{checkpoint_manifest, namespace_lease};
+use loon_objectstore::keys::{namespace_lease, namespace_manifest};
 use loon_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loon_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
@@ -922,7 +922,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
+async fn http_admin_manifest_and_retention_are_idempotent_and_soft() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -944,12 +944,12 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
             .write_file_bytes(&target, b"hello admin\n")
             .expect("write file");
 
-        let first = post_checkpoint(&server_url, namespace).expect("first checkpoint");
-        assert_eq!(first.checkpoint_seq, ChangeSeq(1));
-        assert_eq!(first.checkpoint_hint_seq, Some(ChangeSeq(1)));
-        assert!(first.checkpoint_hint_points_at_checkpoint);
+        let first = post_manifest(&server_url, namespace).expect("first manifest");
+        assert_eq!(first.manifest_seq, ChangeSeq(1));
+        assert_eq!(first.manifest_hint_seq, Some(ChangeSeq(1)));
+        assert!(first.manifest_hint_points_at_manifest);
 
-        let repeated = post_checkpoint(&server_url, namespace).expect("repeat checkpoint");
+        let repeated = post_manifest(&server_url, namespace).expect("repeat manifest");
         assert_eq!(repeated, first);
 
         let advanced = post_retention_advance(&server_url, namespace).expect("advance retention");
@@ -979,12 +979,12 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_retention_advance_preserves_checkpoint_unavailable_error() {
+async fn http_admin_retention_advance_preserves_manifest_unavailable_error() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
-        "loon-server-admin-missing-checkpoint",
-        "http-admin-missing-checkpoint",
+        "loon-server-admin-missing-manifest",
+        "http-admin-missing-manifest",
         60_000,
     ))
     .await;
@@ -998,8 +998,8 @@ async fn http_admin_retention_advance_preserves_checkpoint_unavailable_error() {
             .expect("create namespace");
 
         match post_retention_advance(&server_url, namespace) {
-            Err(ApiError { code, .. }) => assert_eq!(code, "checkpoint_unavailable"),
-            other => panic!("expected checkpoint_unavailable, got {other:?}"),
+            Err(ApiError { code, .. }) => assert_eq!(code, "manifest_unavailable"),
+            other => panic!("expected manifest_unavailable, got {other:?}"),
         }
     })
     .await
@@ -1009,7 +1009,7 @@ async fn http_admin_retention_advance_preserves_checkpoint_unavailable_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
+async fn http_manifest_consumption_is_strict_when_manifest_is_corrupted() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -1032,12 +1032,12 @@ async fn http_checkpoint_consumption_is_strict_when_manifest_is_corrupted() {
         client
             .write_file_bytes(&target, b"hello\n")
             .expect("write file");
-        post_checkpoint(&server_url, namespace).expect("checkpoint");
+        post_manifest(&server_url, namespace).expect("manifest");
 
         let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
             .expect("construct store");
         store
-            .put_overwrite(&checkpoint_manifest(namespace, 1), br#"{"bad":"json"}"#)
+            .put_overwrite(&namespace_manifest(namespace, 1), br#"{"bad":"json"}"#)
             .expect("corrupt manifest");
 
         match client.stat_path(&target) {
@@ -1164,12 +1164,9 @@ fn test_config(
     }
 }
 
-fn post_checkpoint(
-    server_url: &str,
-    namespace: &str,
-) -> Result<CreateCheckpointResponse, ApiError> {
+fn post_manifest(server_url: &str, namespace: &str) -> Result<CreateManifestResponse, ApiError> {
     post_admin_json(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/checkpoint"),
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/manifest"),
         "test-token",
     )
 }

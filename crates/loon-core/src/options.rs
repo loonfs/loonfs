@@ -1,5 +1,5 @@
 use crate::{
-    checkpoint::MetadataTableCache, namespace::basis::VerifiedNamespaceBasis,
+    manifest::MetadataTableCache, namespace::basis::VerifiedNamespaceBasis,
     path::write::PutFileBehavior,
 };
 use loon_api::wire::control::HeadState;
@@ -23,7 +23,7 @@ pub struct ForkOptions {}
 #[derive(Debug, Clone)]
 /// Controls where read operations get their namespace view.
 ///
-/// The default prefers materialized checkpoint tables when they are available,
+/// The default prefers materialized metadata tables when they are available,
 /// then falls back to rebuilding the full verified basis.
 pub struct ReadOptions {
     source: ReadSource,

@@ -80,7 +80,7 @@ pub fn prepare_commit_head_publish(
         active_fence_token: current_head.active_fence_token,
         next_inode_id: plan.resulting_next_inode_id,
         name_policy: current_head.name_policy,
-        checkpoint_hint_seq: current_head.checkpoint_hint_seq,
+        manifest_hint_seq: current_head.manifest_hint_seq,
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: Some(wal.envelope.pointer(wal.object_key.clone())),
     };
@@ -148,7 +148,7 @@ mod tests {
             active_fence_token: FenceToken(1),
             next_inode_id: InodeId(10),
             name_policy: loon_api::NamePolicy::default(),
-            checkpoint_hint_seq: Some(ChangeSeq(0)),
+            manifest_hint_seq: Some(ChangeSeq(0)),
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
         }
@@ -206,12 +206,7 @@ mod tests {
         };
         let envelope = WalSegmentEnvelope::from_payload("test", payload).expect("wal envelope");
         PreparedWalSegment {
-            object_key: format!(
-                "namespaces/{}/wal/{}-{}-{segment_id}.cbor.zst",
-                namespace_id.as_str(),
-                start_seq.0,
-                end_seq.0
-            ),
+            object_key: format!("namespaces/{}/wal/{segment_id}.sst", namespace_id.as_str(),),
             segment_id,
             envelope,
             encoded_bytes: Vec::new(),

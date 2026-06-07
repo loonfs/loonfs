@@ -49,7 +49,7 @@ pub fn next_takeover_head(current_head: &HeadState) -> Result<HeadState, HeadFen
         active_fence_token: FenceToken(next_fence),
         next_inode_id: current_head.next_inode_id,
         name_policy: current_head.name_policy,
-        checkpoint_hint_seq: current_head.checkpoint_hint_seq,
+        manifest_hint_seq: current_head.manifest_hint_seq,
         retention_floor_seq: current_head.retention_floor_seq,
         visible_wal_tip: current_head.visible_wal_tip.clone(),
     })

@@ -25,7 +25,7 @@ Content staging is idempotent and has no effect on the visible tree. If the call
 
 ### 1.2 Basis reconstruction
 
-Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the checkpoint (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
+Before evaluating commit requests, the server reconstructs the current metadata state using the same procedure described in §2.1: load the head, load the manifest (if any), and replay the visible WAL segment chain. The server never trusts caller-supplied metadata.
 
 ### 1.3 Validation and logical commits
 
@@ -83,13 +83,13 @@ A read reconstructs the visible filesystem state from durable artifacts on objec
 The reader builds an in-memory metadata state from two kinds of durable object:
 
 1. Read the namespace descriptor and content-store descriptor to learn the namespace's immutable content-store relationship.
-2. Read the namespace **head** object to learn the current `seq`, `checkpoint_hint_seq`, and visible WAL tip.
-3. If `checkpoint_hint_seq` is set, load the **verified checkpoint** at that `seq`. The checkpoint manifest references one or more materialized metadata runs through that `seq`. A run may be a full materialization or a WAL-derived run, and each run is internally segmented without overlapping segment key ranges.
-4. Use the visible WAL tip named by the head to identify the visible segment chain after the checkpoint `seq` (or from genesis, if no checkpoint exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends normalized rows to the same metadata tables.
+2. Read the namespace **head** object to learn the current `seq`, `manifest_hint_seq`, and visible WAL tip.
+3. If `manifest_hint_seq` is set, load the **verified manifest** at that `seq`. The namespace manifest references one or more materialized metadata runs through that `seq`. A run may be a full materialization or a WAL-derived run, and each run is internally segmented without overlapping segment key ranges.
+4. Use the visible WAL tip named by the head to identify the visible segment chain after the manifest `seq` (or from genesis, if no manifest exists), then replay the logical commit records in ascending `seq` order through `head.seq`. Each logical commit appends normalized rows to the same metadata tables.
 
 The result is a complete metadata state pinned to one `seq`.
 
-For latest path `stat` and directory `list`, an implementation may avoid hydrating the complete metadata state when `checkpoint_hint_seq` is present. The reader may query verified checkpoint run tables and the visible WAL tail overlay directly, provided it applies the same visibility rules and treats missing or corrupt checkpoint/WAL objects as hard errors. If no checkpoint is published, latest stat/list falls back to full basis reconstruction.
+For latest path `stat` and directory `list`, an implementation may avoid hydrating the complete metadata state when `manifest_hint_seq` is present. The reader may query verified metadata run tables and the visible WAL tail overlay directly, provided it applies the same visibility rules and treats missing or corrupt manifest/WAL objects as hard errors. If no manifest is published, latest stat/list falls back to full basis reconstruction.
 
 ### 2.2 Visibility rules
 
@@ -223,7 +223,7 @@ A namespace may advance a retention floor to say:
 
 > Incremental replay older than this point is no longer promised.
 
-Clients older than the retention floor must re-bootstrap from a fresh checkpoint instead of replaying from an obsolete cursor.
+Clients older than the retention floor must re-bootstrap from a fresh manifest instead of replaying from an obsolete cursor.
 
 The retention floor may advance only after the system has enough verified material to keep replay safe at or after that point.
 
@@ -234,17 +234,17 @@ A fork creates a new namespace from the source namespace's current head. The req
 The fork protocol is:
 
 1. Check the target namespace initialization state. A complete target is rejected as existing, and a partial target is rejected as partially initialized.
-2. Resolve and verify the source namespace descriptor, content-store descriptor, head, lease, checkpoint, and WAL basis.
-3. Create or reuse a verified source checkpoint at the current source head.
+2. Resolve and verify the source namespace descriptor, content-store descriptor, head, lease, manifest, and WAL basis.
+3. Create or reuse a verified source manifest at the current source head.
 4. Build the target head, fork record, lease, and descriptor using the source namespace's `content_store_id`.
 5. Write the target `head.json` first to reserve the namespace.
-6. Rebuild checkpoint artifacts under the new namespace id with fresh checksums and object keys.
+6. Rebuild manifest artifacts under the new namespace id with fresh checksums and object keys.
 7. Write `control/fork.json` with the source namespace id and fork sequence.
 8. Write the target `lease.json`.
 9. Write the target `descriptor.json` last as the publish/list marker.
 10. Start the new namespace WAL independently at `fork_seq + 1`.
 
-The fork copies namespace-local checkpoint metadata only. It does not copy content-store blobs. If initialization fails after the target head exists but before the descriptor is published, the target is partial. A successful fork has independent namespace history from the fork point. The target's `control/fork.json` is only a record of where the namespace came from; recovery remains target-local because checkpoint artifacts are copied into the target namespace.
+The fork copies namespace-local manifest metadata only. It does not copy content-store blobs. If initialization fails after the target head exists but before the descriptor is published, the target is partial. A successful fork has independent namespace history from the fork point. The target's `control/fork.json` is only a record of where the namespace came from; recovery remains target-local because manifest artifacts are copied into the target namespace.
 
 ## 10. Long-running operations
 

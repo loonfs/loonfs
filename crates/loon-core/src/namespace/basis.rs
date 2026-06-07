@@ -1,7 +1,7 @@
-use crate::checkpoint::{
-    checkpoint_basis_head, load_verified_checkpoint_materialization, CheckpointLoadError,
-};
 use crate::error::CoreError;
+use crate::manifest::{
+    load_verified_manifest_materialization, manifest_basis_head, ManifestLoadError,
+};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_basis_metadata_state;
 use crate::namespace::catalog::{
@@ -91,7 +91,7 @@ fn wal_tip_decoded_bytes(pointer: Option<&loon_api::wire::control::WalSegmentPoi
 pub struct NamespaceHeadSummary {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
-    pub checkpoint_hint_seq: Option<ChangeSeq>,
+    pub manifest_hint_seq: Option<ChangeSeq>,
     pub wal_tail_segments: u64,
     pub retention_floor_seq: ChangeSeq,
 }
@@ -121,7 +121,7 @@ pub enum BasisLoadError {
     #[error(transparent)]
     WalChainLoad(#[from] WalChainLoadError),
     #[error(transparent)]
-    CheckpointLoad(#[from] CheckpointLoadError),
+    ManifestLoad(#[from] ManifestLoadError),
     #[error("wal replay failed: {0:?}")]
     WalReplay(WalReplayError),
     #[error(
@@ -213,13 +213,12 @@ fn load_verified_namespace_basis_at_head_with_catalog<S: ObjectStore + ?Sized>(
     let loaded_lease =
         read_lease_object(store, expected_namespace).map_err(BasisLoadError::LoadLease)?;
 
-    let (initial_head, initial_metadata_state) = if let Some(checkpoint_seq) =
-        head.checkpoint_hint_seq
+    let (initial_head, initial_metadata_state) = if let Some(manifest_seq) = head.manifest_hint_seq
     {
         let materialized =
-            load_verified_checkpoint_materialization(store, expected_namespace, checkpoint_seq)?;
+            load_verified_manifest_materialization(store, expected_namespace, manifest_seq)?;
         (
-            checkpoint_basis_head(&head, &materialized.manifest),
+            manifest_basis_head(&head, &materialized.manifest),
             materialized.metadata_state,
         )
     } else {
@@ -283,12 +282,12 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     let loaded_head = read_head_object(store, expected_namespace)
         .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
     let head = loaded_head.envelope.state;
-    let checkpoint_basis_seq = head.checkpoint_hint_seq.unwrap_or(ChangeSeq(0));
+    let manifest_basis_seq = head.manifest_hint_seq.unwrap_or(ChangeSeq(0));
     let wal_chain = load_validated_wal_chain(
         store,
         WalChainLoadRequest {
             namespace_id: expected_namespace,
-            chain_base_seq: checkpoint_basis_seq,
+            chain_base_seq: manifest_basis_seq,
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
@@ -300,7 +299,7 @@ pub fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     Ok(NamespaceHeadSummary {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
-        checkpoint_hint_seq: head.checkpoint_hint_seq,
+        manifest_hint_seq: head.manifest_hint_seq,
         wal_tail_segments,
         retention_floor_seq: head.retention_floor_seq,
     })
@@ -370,7 +369,7 @@ fn ensure_reconstructed_head_matches(
         || current_head.seq != reconstructed.seq
         || current_head.next_inode_id != reconstructed.next_inode_id
         || current_head.name_policy != reconstructed.name_policy
-        || current_head.checkpoint_hint_seq != reconstructed.checkpoint_hint_seq
+        || current_head.manifest_hint_seq != reconstructed.manifest_hint_seq
         || current_head.retention_floor_seq != reconstructed.retention_floor_seq
         || (reconstructed.visible_wal_tip.is_some()
             && current_head.visible_wal_tip != reconstructed.visible_wal_tip)

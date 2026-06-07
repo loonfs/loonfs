@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
-mod checkpoint;
 mod content;
 mod control;
 mod digest;
 mod http;
 mod ids;
+#[path = "checkpoint.rs"]
+mod manifest;
 mod name_policy;
 mod path;
 mod server;
@@ -13,8 +14,8 @@ pub mod v0;
 mod wal;
 
 pub mod wire {
-    pub mod checkpoint {
-        pub use crate::checkpoint::*;
+    pub mod manifest {
+        pub use crate::manifest::*;
     }
 
     pub mod control {
@@ -29,17 +30,18 @@ pub mod wire {
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
 pub use http::{
-    AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
+    AdvanceRetentionResponse, ApiError, CreateManifestResponse, CreateNamespaceRequest,
     FileRevision, FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, ListFileRevisionsResponse, ListNamespacesResponse,
     MutationResult, NamespaceSummary, RestoreFileRevisionRequest,
 };
 pub use ids::{
-    generate_checkpoint_run_id, generate_upload_id, generate_wal_segment_id, generated_id,
-    validate_checkpoint_run_id, validate_generated_id, validate_upload_id, validate_wal_segment_id,
-    ChangeSeq, CommitId, CommitIdValidationError, ConflictDisposition, ContentStoreId, FenceToken,
-    GeneratedIdValidationError, Identity, InodeId, InodeKind, NameKey, NameKeyValidationError,
-    NamespaceId, NamespaceIdValidationError, RevisionNo,
+    generate_gc_pin_id, generate_metadata_table_id, generate_upload_id, generate_wal_segment_id,
+    generated_id, validate_gc_pin_id, validate_generated_id, validate_metadata_table_id,
+    validate_upload_id, validate_wal_segment_id, ChangeSeq, CommitId, CommitIdValidationError,
+    ConflictDisposition, ContentStoreId, FenceToken, GeneratedIdValidationError, Identity, InodeId,
+    InodeKind, NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError,
+    RevisionNo,
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError};
@@ -74,7 +76,7 @@ mod tests {
             delta_index: 0,
             root_inode: InodeId(1),
         };
-        let _checkpoint_row = wire::checkpoint::CheckpointRow::Tombstone {
+        let _manifest_row = wire::manifest::MetadataRow::Tombstone {
             root_inode_id: InodeId(1),
             tombstone_seq: ChangeSeq(1),
             tombstone_delta_index: 0,

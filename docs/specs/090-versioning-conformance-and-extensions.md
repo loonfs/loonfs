@@ -24,7 +24,7 @@ A conforming server must:
 4. preserve `(namespace_id, inode_id)` as canonical identity;
 5. resolve namespace content through the immutable `content_store_id` in the namespace descriptor;
 6. implement tombstone-first delete;
-7. serve replay from verified checkpoints plus the visible WAL segment chain, replayed as logical commits;
+7. serve replay from verified manifests plus the visible WAL segment chain, replayed as logical commits;
 8. honor the namespace's `NamePolicy`;
 9. keep control-plane sessions and any implementation-specific coordinators out of namespace history and the change feed; and
 10. preserve per-commit idempotency, ordering, and change-feed identity even when physically batching logical commits in a WAL segment.

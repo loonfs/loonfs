@@ -1,9 +1,9 @@
-use super::{checkpoint_index, row_decode::unbind_matches_binding};
-use crate::checkpoint::{
-    checkpoint_basis_head, load_verified_checkpoint_tables_with_cache, MetadataTableCache,
-    VerifiedCheckpointTables,
-};
+use super::{manifest_index, row_decode::unbind_matches_binding};
 use crate::error::CoreError;
+use crate::manifest::{
+    load_verified_manifest_tables_with_cache, manifest_basis_head, MetadataTableCache,
+    VerifiedMetadataTables,
+};
 use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, ResolvedVisiblePath,
     RevisionRecord, SubtreeTombstoneRecord,
@@ -84,7 +84,7 @@ pub(crate) fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
 struct MaterializedLatestView<'a, S: ObjectStore + ?Sized> {
     namespace_id: NamespaceId,
     head: HeadState,
-    tables: VerifiedCheckpointTables<'a, S>,
+    tables: VerifiedMetadataTables<'a, S>,
     wal_tail_rows: MetadataState,
 }
 
@@ -115,24 +115,24 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                 head.namespace_id, namespace_id
             )));
         }
-        let Some(checkpoint_seq) = head.checkpoint_hint_seq else {
+        let Some(manifest_seq) = head.manifest_hint_seq else {
             return Ok(None);
         };
         let _catalog_entry =
             load_namespace_catalog_entry(store, namespace_id).map_err(BasisLoadError::from)?;
-        let tables = load_verified_checkpoint_tables_with_cache(
+        let tables = load_verified_manifest_tables_with_cache(
             store,
             table_cache,
             namespace_id,
-            checkpoint_seq,
+            manifest_seq,
         )
-        .map_err(|error| CoreError::Basis(BasisLoadError::CheckpointLoad(error)))?;
-        let checkpoint_head = checkpoint_basis_head(&head, tables.manifest());
+        .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+        let manifest_head = manifest_basis_head(&head, tables.manifest());
         let wal_chain = load_validated_wal_chain(
             store,
             WalChainLoadRequest {
                 namespace_id,
-                chain_base_seq: checkpoint_head.seq,
+                chain_base_seq: manifest_head.seq,
                 head_seq: head.seq,
                 visible_tip: head.visible_wal_tip.clone(),
                 stop_after_seq: None,
@@ -143,7 +143,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
             let _span =
                 tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
             replay_validated_wal_tail_with_metadata(
-                &checkpoint_head,
+                &manifest_head,
                 &MetadataState::default(),
                 wal_chain.segments(),
             )
@@ -411,7 +411,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         {
             return Ok(Some(inode));
         }
-        checkpoint_index::inode_at_seq(&self.tables, inode_id)
+        manifest_index::inode_at_seq(&self.tables, inode_id)
     }
 
     fn latest_revision_head(&self, inode_id: InodeId) -> Result<Option<RevisionRecord>, CoreError> {
@@ -534,7 +534,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         &self,
         parent_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        checkpoint_index::direntry_binds_for_parent(&self.tables, parent_inode_id)
+        manifest_index::direntry_binds_for_parent(&self.tables, parent_inode_id)
     }
 
     fn direntry_binds_for_parent_name(
@@ -542,32 +542,32 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
         parent_inode_id: InodeId,
         name_key: &str,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        checkpoint_index::direntry_binds_for_parent_name(&self.tables, parent_inode_id, name_key)
+        manifest_index::direntry_binds_for_parent_name(&self.tables, parent_inode_id, name_key)
     }
 
     fn direntry_binds_for_child(
         &self,
         child_inode_id: InodeId,
     ) -> Result<Vec<DirentryBindRecord>, CoreError> {
-        checkpoint_index::direntry_binds_for_child(&self.tables, child_inode_id)
+        manifest_index::direntry_binds_for_child(&self.tables, child_inode_id)
     }
 
     fn direntry_unbinds_for_binding(
         &self,
         direntry: &DirentryBindRecord,
     ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
-        checkpoint_index::direntry_unbinds_for_binding(&self.tables, direntry)
+        manifest_index::direntry_unbinds_for_binding(&self.tables, direntry)
     }
 
     fn revisions_for_inode(&self, inode_id: InodeId) -> Result<Vec<RevisionRecord>, CoreError> {
-        checkpoint_index::revisions_for_inode(&self.tables, inode_id)
+        manifest_index::revisions_for_inode(&self.tables, inode_id)
     }
 
     fn tombstones_for_root(
         &self,
         root_inode_id: InodeId,
     ) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
-        checkpoint_index::tombstones_for_root(&self.tables, root_inode_id)
+        manifest_index::tombstones_for_root(&self.tables, root_inode_id)
     }
 }
 
