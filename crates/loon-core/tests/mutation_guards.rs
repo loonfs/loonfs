@@ -2804,6 +2804,61 @@ fn fork_target_head_reservation_failure_writes_no_manifest_artifacts() {
 }
 
 #[test]
+fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Prefix(format!(
+            "namespaces/{}/gc/pins/",
+            source_namespace_id.as_str()
+        )),
+        InjectedCreateFailure::Transport {
+            message: "injected source gc pin failure",
+        },
+    );
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("source GC pin failure should abort fork before target publication");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert!(
+        store
+            .head(&namespace_head(clone_namespace_id.as_str()))
+            .expect("head target head")
+            .is_none(),
+        "target head must not be reserved before source retention is pinned"
+    );
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .expect("head target descriptor")
+            .is_none(),
+        "target descriptor must remain unpublished"
+    );
+    assert!(
+        store
+            .list_prefix(&format!(
+                "namespaces/{}/manifest/",
+                clone_namespace_id.as_str()
+            ))
+            .expect("list target manifests")
+            .is_empty(),
+        "target manifest must not be written before source retention is pinned"
+    );
+    assert_eq!(
+        list_namespaces(&store)
+            .expect("list namespaces")
+            .into_iter()
+            .map(|summary| summary.namespace_id)
+            .collect::<Vec<_>>(),
+        vec![source_namespace_id]
+    );
+}
+
+#[test]
 fn fork_failure_after_target_head_reserves_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();

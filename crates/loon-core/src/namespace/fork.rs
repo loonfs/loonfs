@@ -18,8 +18,7 @@ use loon_api::wire::manifest::{
     NamespaceManifestPayload,
 };
 use loon_api::{
-    generate_checkpoint_id, generate_gc_pin_id, FenceToken, ManifestId, NamespaceId,
-    NamespaceSummary,
+    generate_checkpoint_id, sha256_digest, FenceToken, ManifestId, NamespaceId, NamespaceSummary,
 };
 use loon_objectstore::keys::{
     gc_pin, namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
@@ -158,7 +157,13 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
         ControlObjectKind::NamespaceGcPinState,
         &context.writer_version,
         NamespaceGcPinState {
-            pin_id: generate_gc_pin_id(),
+            pin_id: deterministic_gc_pin_id(
+                source_namespace_id,
+                new_namespace_id,
+                &checkpoint.checkpoint_id,
+                checkpoint.manifest_id,
+                source_basis.head.seq,
+            ),
             source_namespace_id: source_namespace_id.clone(),
             target_namespace_id: new_namespace_id.clone(),
             source_checkpoint_id: checkpoint.checkpoint_id,
@@ -170,6 +175,7 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
     let gc_pin_key = gc_pin(source_namespace_id.as_str(), &gc_pin_envelope.state.pin_id);
+    write_source_gc_pin(store, &gc_pin_key, &gc_pin_envelope)?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
@@ -177,11 +183,6 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
         &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
     )?;
     write_namespace_manifest(store, &target_manifest).map_err(CoreError::Basis)?;
-    write_source_gc_pin(
-        store,
-        &gc_pin_key,
-        &serde_json::to_vec(&gc_pin_envelope).map_err(|err| CoreError::Store(err.to_string()))?,
-    )?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
@@ -210,12 +211,85 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
 fn write_source_gc_pin<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
-    bytes: &[u8],
+    expected: &NamespaceGcPinStateEnvelope,
 ) -> Result<(), CoreError> {
-    match store.put_if_absent(object_key, bytes) {
-        Ok(_) | Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => Ok(()),
+    let bytes = serde_json::to_vec(expected).map_err(|err| CoreError::Store(err.to_string()))?;
+    match store.put_if_absent(object_key, &bytes) {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
+            verify_existing_gc_pin(store, object_key, expected)
+        }
         Err(err) => Err(CoreError::Store(err.to_string())),
     }
+}
+
+fn deterministic_gc_pin_id(
+    source_namespace_id: &NamespaceId,
+    target_namespace_id: &NamespaceId,
+    source_checkpoint_id: &str,
+    source_manifest_id: ManifestId,
+    source_head_seq: loon_api::ChangeSeq,
+) -> String {
+    let identity = format!(
+        "loonfs.gc-pin.v0\0source={}\0target={}\0checkpoint={}\0manifest={}\0seq={}",
+        source_namespace_id.as_str(),
+        target_namespace_id.as_str(),
+        source_checkpoint_id,
+        source_manifest_id.0,
+        source_head_seq.0,
+    );
+    let digest = sha256_digest(identity.as_bytes());
+    let hex = digest
+        .strip_prefix("sha256:")
+        .expect("sha256_digest returns a sha256-prefixed digest");
+    format!("pin_{}", &hex[..32])
+}
+
+fn verify_existing_gc_pin<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+    expected: &NamespaceGcPinStateEnvelope,
+) -> Result<(), CoreError> {
+    let Some(bytes) = store
+        .get(object_key, None)
+        .map_err(|err| CoreError::Store(err.to_string()))?
+    else {
+        return Err(CoreError::Store(format!(
+            "GC pin `{object_key}` write conflicted, but the existing object is missing"
+        )));
+    };
+    let existing: NamespaceGcPinStateEnvelope = serde_json::from_slice(&bytes).map_err(|err| {
+        CoreError::NamespaceCorrupt(format!("GC pin `{object_key}` is not valid JSON: {err}"))
+    })?;
+    if !existing
+        .has_valid_payload_checksum()
+        .map_err(|err| CoreError::NamespaceCorrupt(err.to_string()))?
+    {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "GC pin `{object_key}` payload checksum is invalid"
+        )));
+    }
+    if gc_pin_matches(expected, &existing) {
+        Ok(())
+    } else {
+        Err(CoreError::NamespaceCorrupt(format!(
+            "GC pin `{object_key}` conflicts with expected fork provenance"
+        )))
+    }
+}
+
+fn gc_pin_matches(
+    expected: &NamespaceGcPinStateEnvelope,
+    existing: &NamespaceGcPinStateEnvelope,
+) -> bool {
+    existing.kind == ControlObjectKind::NamespaceGcPinState
+        && existing.format_version == expected.format_version
+        && existing.state.pin_id == expected.state.pin_id
+        && existing.state.source_namespace_id == expected.state.source_namespace_id
+        && existing.state.target_namespace_id == expected.state.target_namespace_id
+        && existing.state.source_checkpoint_id == expected.state.source_checkpoint_id
+        && existing.state.source_manifest_id == expected.state.source_manifest_id
+        && existing.state.source_head_seq == expected.state.source_head_seq
 }
 
 fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
@@ -253,5 +327,113 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
             CoreError::InvalidNamespaceId(error)
         }
         other => CoreError::Store(BootstrapNamespaceError::from(other).to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{deterministic_gc_pin_id, write_source_gc_pin};
+    use crate::error::CoreError;
+    use loon_api::wire::control::{
+        ControlObjectKind, NamespaceGcPinState, NamespaceGcPinStateEnvelope,
+    };
+    use loon_api::{validate_gc_pin_id, ChangeSeq, ManifestId, NamespaceId};
+    use loon_objectstore::fs::LocalFsStore;
+    use loon_objectstore::keys::gc_pin;
+    use loon_objectstore::ObjectStore;
+    use tempfile::tempdir;
+
+    #[test]
+    fn gc_pin_id_is_deterministic_for_same_source_target_checkpoint_manifest() {
+        let source = NamespaceId::parse("source").expect("source namespace");
+        let target = NamespaceId::parse("target").expect("target namespace");
+        let first = deterministic_gc_pin_id(
+            &source,
+            &target,
+            "chk_00000000000000000000000000000001",
+            ManifestId(42),
+            ChangeSeq(7),
+        );
+        let second = deterministic_gc_pin_id(
+            &source,
+            &target,
+            "chk_00000000000000000000000000000001",
+            ManifestId(42),
+            ChangeSeq(7),
+        );
+
+        assert_eq!(first, second);
+        validate_gc_pin_id(&first).expect("valid deterministic pin id");
+    }
+
+    #[test]
+    fn gc_pin_conflict_same_payload_is_idempotent() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let expected = gc_pin_envelope("source", "target", 1_000);
+        let object_key = gc_pin("source", &expected.state.pin_id);
+
+        write_source_gc_pin(&store, &object_key, &expected).expect("first write");
+        write_source_gc_pin(&store, &object_key, &expected).expect("conflict is idempotent");
+    }
+
+    #[test]
+    fn gc_pin_conflict_different_payload_is_error() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let expected = gc_pin_envelope("source", "target", 1_000);
+        let mut conflicting = gc_pin_envelope("source", "other-target", 1_000);
+        conflicting.state.pin_id = expected.state.pin_id.clone();
+        let conflicting = NamespaceGcPinStateEnvelope::from_state(
+            ControlObjectKind::NamespaceGcPinState,
+            "test-writer/0.1.0",
+            conflicting.state,
+        )
+        .expect("conflicting envelope");
+        let object_key = gc_pin("source", &expected.state.pin_id);
+        store
+            .put_if_absent(
+                &object_key,
+                &serde_json::to_vec(&conflicting).expect("encode conflicting pin"),
+            )
+            .expect("write conflicting pin");
+
+        let error = write_source_gc_pin(&store, &object_key, &expected)
+            .expect_err("conflicting pin should fail");
+
+        assert!(matches!(error, CoreError::NamespaceCorrupt(_)));
+    }
+
+    fn gc_pin_envelope(
+        source_namespace_id: &str,
+        target_namespace_id: &str,
+        created_at_ms: u64,
+    ) -> NamespaceGcPinStateEnvelope {
+        let source = NamespaceId::parse(source_namespace_id).expect("source namespace");
+        let target = NamespaceId::parse(target_namespace_id).expect("target namespace");
+        let checkpoint_id = "chk_00000000000000000000000000000001";
+        let source_manifest_id = ManifestId(42);
+        let source_head_seq = ChangeSeq(7);
+        NamespaceGcPinStateEnvelope::from_state(
+            ControlObjectKind::NamespaceGcPinState,
+            "test-writer/0.1.0",
+            NamespaceGcPinState {
+                pin_id: deterministic_gc_pin_id(
+                    &source,
+                    &target,
+                    checkpoint_id,
+                    source_manifest_id,
+                    source_head_seq,
+                ),
+                source_namespace_id: source,
+                target_namespace_id: target,
+                source_checkpoint_id: checkpoint_id.to_owned(),
+                source_manifest_id,
+                source_head_seq,
+                referenced_metadata_files_debug: Vec::new(),
+                created_at_ms,
+            },
+        )
+        .expect("pin envelope")
     }
 }

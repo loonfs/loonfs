@@ -327,6 +327,15 @@ pub enum ManifestLoadError {
         expected: ManifestId,
         actual: ManifestId,
     },
+    #[error(
+        "namespace manifest conflict for `{object_key}` manifest `{manifest_id:?}`: expected payload checksum `{expected_payload_checksum_sha256}`, actual `{actual_payload_checksum_sha256}`"
+    )]
+    ManifestConflict {
+        object_key: String,
+        manifest_id: ManifestId,
+        expected_payload_checksum_sha256: String,
+        actual_payload_checksum_sha256: String,
+    },
     #[error("namespace manifest `{object_key}` is not verified")]
     ManifestNotVerified { object_key: String },
     #[error("namespace manifest `{object_key}` is missing table family `{family:?}`")]
@@ -434,7 +443,9 @@ pub enum ManifestLoadError {
 impl ManifestLoadError {
     pub fn kind(&self) -> ManifestLoadErrorKind {
         match self {
-            Self::ReadManifest { .. } | Self::ReadSegment { .. } => ManifestLoadErrorKind::Store,
+            Self::ReadManifest { .. }
+            | Self::ReadSegment { .. }
+            | Self::ManifestConflict { .. } => ManifestLoadErrorKind::Store,
             _ => ManifestLoadErrorKind::Corrupt,
         }
     }
@@ -454,6 +465,13 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     policy: MetadataLsmPolicy,
 ) -> Result<CreateCheckpointResponse, CoreError> {
+    // Checkpoint creation pins a manifest version. If the current head does not
+    // yet have a manifest, this first publishes a manifest for the current
+    // durable namespace file set, then records the checkpoint in manifest state.
+    //
+    // This is distinct from metadata compaction: creating a checkpoint should
+    // not rewrite SSTs unless a manifest must be materialized for an otherwise
+    // unmanifested head or the L0 run policy requires a full materialization.
     let basis = {
         let _span = tracing::info_span!("loon.phase", phase = "scan_namespace_state").entered();
         load_verified_namespace_basis(store, namespace_id)
@@ -477,47 +495,66 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
         }
     }
 
-    let manifest_id = next_manifest_id(&basis.head)?;
-    let checkpoint_record = NamespaceCheckpointRecord {
-        checkpoint_id: generate_checkpoint_id(),
-        manifest_id,
-        head_seq,
-        head_commit_id: basis.head.head_commit_id.clone(),
-        created_at_ms: context.now_ms,
-        expires_at_ms: None,
-        name: None,
-    };
+    let checkpoint_id = generate_checkpoint_id();
+    let mut manifest_id = next_manifest_id(&basis.head)?;
+    let mut manifest_ready = false;
+    for _attempt in 0..HEAD_UPDATE_RETRY_LIMIT {
+        let checkpoint_record = NamespaceCheckpointRecord {
+            checkpoint_id: checkpoint_id.clone(),
+            manifest_id,
+            head_seq,
+            head_commit_id: basis.head.head_commit_id.clone(),
+            created_at_ms: context.now_ms,
+            expires_at_ms: None,
+            name: None,
+        };
 
-    match load_verified_manifest_materialization_if_present(store, namespace_id, manifest_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            let manifest = build_namespace_manifest_for_basis(
-                store,
-                namespace_id,
-                &basis,
-                &context.writer_version,
-                policy,
-                manifest_id,
-                Some(checkpoint_record),
-            )?;
-            let materialized = load_manifest_materialization_from_manifest(
-                store,
-                namespace_id,
-                &namespace_manifest(namespace_id.as_str(), manifest_id),
-                &manifest,
-            )
-            .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
-            if !metadata_states_equivalent(&basis.metadata_state, &materialized) {
-                return Err(CoreError::Basis(BasisLoadError::ManifestLoad(
-                    ManifestLoadError::MetadataMismatch,
-                )));
+        match load_verified_manifest_materialization_if_present(store, namespace_id, manifest_id) {
+            Ok(Some(materialized)) => {
+                if checkpoint_record_for_manifest(&materialized.manifest).is_some() {
+                    manifest_ready = true;
+                    break;
+                }
+                manifest_id = next_manifest_id_after(manifest_id)?;
+                continue;
             }
+            Ok(None) => {
+                let manifest = build_namespace_manifest_for_basis(
+                    store,
+                    namespace_id,
+                    &basis,
+                    &context.writer_version,
+                    policy,
+                    manifest_id,
+                    Some(checkpoint_record),
+                )?;
+                let materialized = load_manifest_materialization_from_manifest(
+                    store,
+                    namespace_id,
+                    &namespace_manifest(namespace_id.as_str(), manifest_id),
+                    &manifest,
+                )
+                .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+                if !metadata_states_equivalent(&basis.metadata_state, &materialized) {
+                    return Err(CoreError::Basis(BasisLoadError::ManifestLoad(
+                        ManifestLoadError::MetadataMismatch,
+                    )));
+                }
 
-            // `write_namespace_manifest` owns the idempotent "manifest already
-            // exists" path. Any manifest load error it returns must surface.
-            write_namespace_manifest(store, &manifest).map_err(CoreError::Basis)?;
+                // `write_namespace_manifest` owns the idempotent "manifest
+                // already exists" path. It accepts a conflict only when the
+                // existing manifest has the same payload checksum.
+                write_namespace_manifest(store, &manifest).map_err(CoreError::Basis)?;
+                manifest_ready = true;
+                break;
+            }
+            Err(error) => return Err(CoreError::Basis(BasisLoadError::ManifestLoad(error))),
         }
-        Err(error) => return Err(CoreError::Basis(BasisLoadError::ManifestLoad(error))),
+    }
+    if !manifest_ready {
+        return Err(CoreError::Store(
+            "checkpoint manifest allocation retry exhausted".to_owned(),
+        ));
     }
 
     let materialized = load_verified_manifest_materialization(store, namespace_id, manifest_id)
@@ -549,14 +586,16 @@ pub(crate) fn create_checkpoint_with_policy<S: ObjectStore + ?Sized>(
 
 fn next_manifest_id(head: &HeadState) -> Result<ManifestId, CoreError> {
     head.current_manifest_id
-        .map(|current| {
-            current
-                .0
-                .checked_add(1)
-                .map(ManifestId)
-                .ok_or_else(|| CoreError::Store("manifest id overflow".to_owned()))
-        })
+        .map(next_manifest_id_after)
         .unwrap_or_else(|| Ok(ManifestId(head.seq.0)))
+}
+
+fn next_manifest_id_after(current: ManifestId) -> Result<ManifestId, CoreError> {
+    current
+        .0
+        .checked_add(1)
+        .map(ManifestId)
+        .ok_or_else(|| CoreError::Store("manifest id overflow".to_owned()))
 }
 
 #[tracing::instrument(
@@ -815,41 +854,53 @@ fn load_verified_manifest_materialization_if_present<S: ObjectStore + ?Sized>(
 ) -> Result<Option<LoadedManifestMaterialization>, ManifestLoadError> {
     let manifest_id = manifest_id.into();
     let manifest_key = namespace_manifest(namespace_id.as_str(), manifest_id);
-    let manifest = {
-        let _span = tracing::info_span!(
-            "loon.phase",
-            phase = "load_namespace_manifest",
-            key_class = "manifest_table"
-        )
-        .entered();
-        let Some(manifest_bytes) =
-            store
-                .get(&manifest_key, None)
-                .map_err(|err| ManifestLoadError::ReadManifest {
-                    object_key: manifest_key.clone(),
-                    message: err.to_string(),
-                })?
-        else {
-            return Ok(None);
-        };
-        let manifest = decode_namespace_manifest_json(&manifest_bytes).map_err(|err| {
-            ManifestLoadError::ManifestCodec {
-                object_key: manifest_key.clone(),
-                message: err.to_string(),
-            }
-        })?;
-        Ok(Some(manifest))
-    }?;
+    let manifest = load_namespace_manifest_envelope_if_present(
+        store,
+        namespace_id,
+        manifest_id,
+        &manifest_key,
+    )?;
     let Some(manifest) = manifest else {
         return Ok(None);
     };
-    validate_namespace_manifest(namespace_id, manifest_id, &manifest_key, &manifest)?;
     let metadata_state =
         load_manifest_materialization_from_manifest(store, namespace_id, &manifest_key, &manifest)?;
     Ok(Some(LoadedManifestMaterialization {
         manifest,
         metadata_state,
     }))
+}
+
+fn load_namespace_manifest_envelope_if_present<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_id: ManifestId,
+    manifest_key: &str,
+) -> Result<Option<NamespaceManifestEnvelope>, ManifestLoadError> {
+    let _span = tracing::info_span!(
+        "loon.phase",
+        phase = "load_namespace_manifest",
+        key_class = "manifest_table"
+    )
+    .entered();
+    let Some(manifest_bytes) =
+        store
+            .get(manifest_key, None)
+            .map_err(|err| ManifestLoadError::ReadManifest {
+                object_key: manifest_key.to_owned(),
+                message: err.to_string(),
+            })?
+    else {
+        return Ok(None);
+    };
+    let manifest = decode_namespace_manifest_json(&manifest_bytes).map_err(|err| {
+        ManifestLoadError::ManifestCodec {
+            object_key: manifest_key.to_owned(),
+            message: err.to_string(),
+        }
+    })?;
+    validate_namespace_manifest(namespace_id, manifest_id, manifest_key, &manifest)?;
+    Ok(Some(manifest))
 }
 
 fn build_manifest_tables<S: ObjectStore + ?Sized>(
@@ -1145,10 +1196,11 @@ pub(crate) fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     match store.put_if_absent(&manifest_key, &manifest_bytes) {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed | ObjectStoreError::Conflict) => {
-            let Some(existing) = load_verified_manifest_materialization_if_present(
+            let Some(existing) = load_namespace_manifest_envelope_if_present(
                 store,
                 &manifest.payload.namespace_id,
                 manifest.payload.manifest_id,
+                &manifest_key,
             )
             .map_err(BasisLoadError::ManifestLoad)?
             else {
@@ -1158,14 +1210,15 @@ pub(crate) fn write_namespace_manifest<S: ObjectStore + ?Sized>(
                     },
                 ));
             };
-            if existing.manifest.payload.manifest_id == manifest.payload.manifest_id {
+            if existing.payload_checksum_sha256 == manifest.payload_checksum_sha256 {
                 Ok(())
             } else {
                 Err(BasisLoadError::ManifestLoad(
-                    ManifestLoadError::ManifestIdMismatch {
+                    ManifestLoadError::ManifestConflict {
                         object_key: manifest_key,
-                        expected: manifest.payload.manifest_id,
-                        actual: existing.manifest.payload.manifest_id,
+                        manifest_id: manifest.payload.manifest_id,
+                        expected_payload_checksum_sha256: manifest.payload_checksum_sha256.clone(),
+                        actual_payload_checksum_sha256: existing.payload_checksum_sha256,
                     },
                 ))
             }
@@ -2211,7 +2264,7 @@ mod tests {
         MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
         NamespaceManifestPayload,
     };
-    use loon_api::{validate_checkpoint_id, ChangeSeq, NamespaceId};
+    use loon_api::{validate_checkpoint_id, ChangeSeq, InodeId, ManifestId, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -3487,6 +3540,143 @@ mod tests {
             &basis_before.metadata_state,
             &basis_after.metadata_state
         ));
+    }
+
+    #[test]
+    fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let manifest = build_namespace_manifest_for_basis(
+            &store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build manifest");
+
+        write_namespace_manifest(&store, &manifest).expect("first manifest write");
+        write_namespace_manifest(&store, &manifest).expect("same manifest write is idempotent");
+    }
+
+    #[test]
+    fn write_namespace_manifest_conflict_different_payload_is_error() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let manifest = build_namespace_manifest_for_basis(
+            &store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build manifest");
+        let mut conflicting_payload = manifest.payload.clone();
+        conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
+        let conflicting_manifest =
+            NamespaceManifestEnvelope::from_payload(&context.writer_version, conflicting_payload)
+                .expect("build conflicting manifest");
+
+        write_namespace_manifest(&store, &manifest).expect("first manifest write");
+        let error = write_namespace_manifest(&store, &conflicting_manifest)
+            .expect_err("different same-id manifest must conflict");
+
+        match error {
+            BasisLoadError::ManifestLoad(ManifestLoadError::ManifestConflict {
+                manifest_id,
+                expected_payload_checksum_sha256,
+                actual_payload_checksum_sha256,
+                ..
+            }) => {
+                assert_eq!(manifest_id, ManifestId(1));
+                assert_eq!(
+                    expected_payload_checksum_sha256,
+                    conflicting_manifest.payload_checksum_sha256
+                );
+                assert_eq!(
+                    actual_payload_checksum_sha256,
+                    manifest.payload_checksum_sha256
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_checkpoint_adds_record_when_current_manifest_exists_without_it() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let manifest_without_checkpoint = build_namespace_manifest_for_basis(
+            &store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build manifest");
+        let original_files = manifest_without_checkpoint.payload.metadata_files.clone();
+        write_namespace_manifest(&store, &manifest_without_checkpoint).expect("write manifest");
+        publish_current_manifest_id(
+            &store,
+            &namespace_id,
+            ManifestId(1),
+            "chk_00000000000000000000000000000099",
+            &context.writer_version,
+        )
+        .expect("publish manifest without checkpoint");
+
+        let checkpoint = create_checkpoint_with_policy(
+            &store,
+            &namespace_id,
+            &context,
+            MetadataLsmPolicy::default(),
+        )
+        .expect("create checkpoint");
+
+        assert_eq!(checkpoint.manifest_id, ManifestId(2));
+        let materialized =
+            load_verified_manifest_materialization(&store, &namespace_id, checkpoint.manifest_id)
+                .expect("load new manifest");
+        assert_eq!(materialized.manifest.payload.metadata_files, original_files);
+        assert_eq!(materialized.manifest.payload.checkpoints.len(), 1);
+        assert_eq!(
+            materialized.manifest.payload.checkpoints[0].checkpoint_id,
+            checkpoint.checkpoint_id
+        );
+        assert_eq!(
+            materialized.manifest.payload.checkpoints[0].manifest_id,
+            checkpoint.manifest_id
+        );
     }
 
     #[test]
