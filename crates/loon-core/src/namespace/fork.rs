@@ -1,9 +1,9 @@
 use super::bootstrap::BootstrapNamespaceError;
+use crate::checkpoint::{
+    create_checkpoint, load_verified_manifest_materialization, write_namespace_manifest,
+};
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::manifest::{
-    create_manifest, load_verified_manifest_materialization, write_namespace_manifest,
-};
 use crate::namespace::basis::{load_verified_namespace_basis, BasisLoadError};
 use crate::namespace::catalog::{
     namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
@@ -44,8 +44,8 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
         }
     }
 
-    let manifest = create_manifest(store, source_namespace_id, context)?;
-    let fork_seq = manifest.manifest_seq;
+    let checkpoint = create_checkpoint(store, source_namespace_id, context)?;
+    let fork_seq = checkpoint.checkpoint_seq;
     let source_basis = load_verified_namespace_basis(store, source_namespace_id)?;
     let source_manifest =
         load_verified_manifest_materialization(store, source_namespace_id, fork_seq)
@@ -57,7 +57,7 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
         active_fence_token: FenceToken(0),
         next_inode_id: source_manifest.manifest.payload.next_inode_id,
         name_policy: source_basis.head.name_policy,
-        manifest_hint_seq: Some(fork_seq),
+        checkpoint_hint_seq: Some(fork_seq),
         retention_floor_seq: fork_seq,
         visible_wal_tip: None,
     };
@@ -95,7 +95,7 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             namespace_id: new_namespace_id.clone(),
             source_namespace_id: source_namespace_id.clone(),
             fork_seq,
-            source_manifest_seq: source_manifest.manifest.payload.manifest_seq,
+            source_checkpoint_seq: source_manifest.manifest.payload.manifest_seq,
             source_head_seq: source_basis.head.seq,
             created_at_ms: context.now_ms,
         },
@@ -119,7 +119,7 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             fork: Some(NamespaceManifestFork {
                 source_namespace_id: source_namespace_id.clone(),
                 fork_seq,
-                source_manifest_seq: source_manifest.manifest.payload.manifest_seq,
+                source_checkpoint_seq: source_manifest.manifest.payload.manifest_seq,
                 source_head_seq: source_basis.head.seq,
             }),
             metadata_files: source_manifest.manifest.payload.metadata_files.clone(),
@@ -140,7 +140,7 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             pin_id: generate_gc_pin_id(),
             source_namespace_id: source_namespace_id.clone(),
             target_namespace_id: new_namespace_id.clone(),
-            source_manifest_seq: source_manifest.manifest.payload.manifest_seq,
+            source_checkpoint_seq: source_manifest.manifest.payload.manifest_seq,
             source_head_seq: source_basis.head.seq,
             referenced_metadata_files,
             created_at_ms: context.now_ms,

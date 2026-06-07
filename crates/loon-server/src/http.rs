@@ -12,7 +12,7 @@ use loon_api::{
         CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         UploadContentResponse,
     },
-    AdvanceRetentionResponse, ApiError, CreateManifestResponse, CreateNamespaceRequest,
+    AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, InodeId, ListFileRevisionsResponse,
     ListNamespacesResponse, NamespaceId, NamespaceIdValidationError, RestoreFileRevisionRequest,
@@ -133,8 +133,8 @@ fn app_with_fs(config: ServerConfig, fs: Arc<Fs>) -> Router {
             get(list_changes_handler),
         )
         .route(
-            "/v0/admin/namespaces/:namespace/manifest",
-            post(create_manifest_handler),
+            "/v0/admin/namespaces/:namespace/checkpoint",
+            post(create_checkpoint_handler),
         )
         .route(
             "/v0/admin/namespaces/:namespace/retention/advance",
@@ -588,16 +588,16 @@ async fn list_changes_handler(
     Ok(Json(response))
 }
 
-async fn create_manifest_handler(
+async fn create_checkpoint_handler(
     State(state): State<AppState>,
     AxumPath(namespace): AxumPath<String>,
     headers: HeaderMap,
-) -> Result<Json<CreateManifestResponse>, ApiResponseError> {
+) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let fs = state.fs.clone();
     let namespace_id = parse_namespace_id(namespace)?;
     let response = run_blocking(move || {
-        fs.create_manifest(&namespace_id)
+        fs.create_checkpoint(&namespace_id)
             .map_err(ApiResponseError::runtime)
     })
     .await?;
@@ -795,7 +795,7 @@ fn status_for_core_error_code(code: ErrorCode) -> StatusCode {
         | ErrorCode::LeaseConflict
         | ErrorCode::WouldCycle
         | ErrorCode::CommitIdReuseConflict
-        | ErrorCode::ManifestUnavailable
+        | ErrorCode::CheckpointUnavailable
         | ErrorCode::UploadAlreadyCompleted
         | ErrorCode::UploadContentConflict
         | ErrorCode::RebootstrapRequired => StatusCode::CONFLICT,

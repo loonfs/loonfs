@@ -176,12 +176,12 @@ fn list_changes_after<S: ObjectStore + ?Sized>(
     namespace_engine(store, namespace_id, &mutation_context()).list_changes_after(after_seq)
 }
 
-fn create_manifest<S: ObjectStore + ?Sized>(
+fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<loon_api::CreateManifestResponse, CoreError> {
-    namespace_engine(store, namespace_id, context).create_manifest()
+) -> Result<loon_api::CreateCheckpointResponse, CoreError> {
+    namespace_engine(store, namespace_id, context).create_checkpoint()
 }
 
 fn write_options(commit_id: Option<&str>, behavior: PutFileBehavior) -> WriteOptions {
@@ -445,7 +445,7 @@ fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
     let head = load_namespace_head_control(store, namespace_id)
         .map_err(BasisLoadError::LoadHead)?
         .state;
-    if head.manifest_hint_seq.is_some() {
+    if head.checkpoint_hint_seq.is_some() {
         let value = engine.resolve_path(
             absolute_path,
             ReadOptions::materialized_tables_at_head(head.clone(), None),
@@ -471,7 +471,7 @@ fn list_path_with_read_source<S: ObjectStore + ?Sized>(
     let head = load_namespace_head_control(store, namespace_id)
         .map_err(BasisLoadError::LoadHead)?
         .state;
-    if head.manifest_hint_seq.is_some() {
+    if head.checkpoint_hint_seq.is_some() {
         let value = engine.list_path(
             absolute_path,
             ReadOptions::materialized_tables_at_head(head.clone(), None),
@@ -1202,7 +1202,7 @@ fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
         Some("upload-guard-create"),
     )
     .expect("create file");
-    create_manifest(&setup_store, &namespace_id, &context).expect("manifest");
+    create_checkpoint(&setup_store, &namespace_id, &context).expect("checkpoint");
     put_file_bytes(
         &setup_store,
         &namespace_id,
@@ -1499,7 +1499,7 @@ fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
         Some("put-dead"),
     )
     .expect("put dead");
-    create_manifest(&store, &namespace_id, &context).expect("base manifest");
+    create_checkpoint(&store, &namespace_id, &context).expect("base checkpoint");
 
     move_path(
         &store,
@@ -1528,7 +1528,7 @@ fn query_driven_stat_and_list_match_full_basis_with_l0_run_and_wal_overlay() {
         Some("delete-dead"),
     )
     .expect("delete dead");
-    create_manifest(&store, &namespace_id, &context).expect("l0 run manifest");
+    create_checkpoint(&store, &namespace_id, &context).expect("l0 checkpoint");
 
     put_file_bytes(
         &store,
@@ -1607,7 +1607,7 @@ fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         Some("put-report-2024"),
     )
     .expect("put report-2024");
-    create_manifest(&store, &namespace_id, &context).expect("manifest");
+    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
     let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
     let expected = resolve_path_using_basis_option(&basis, "/docs/report").expect("basis stat");
@@ -1846,14 +1846,14 @@ fn batch_commit_writes_one_segment_and_expands_change_feed() {
 }
 
 #[test]
-fn change_feed_validates_wal_chain_before_manifest_hint() {
+fn change_feed_validates_wal_chain_before_checkpoint_hint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
     create_dir_path(&store, &namespace_id, "/docs", &context, None).expect("create docs");
-    create_manifest(&store, &namespace_id, &context).expect("manifest");
+    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
 
     let wal_keys = store.list_prefix("namespaces/demo/wal/").expect("list wal");
     assert_eq!(wal_keys.len(), 1);
@@ -1862,7 +1862,7 @@ fn change_feed_validates_wal_chain_before_manifest_hint() {
         .expect("corrupt wal");
 
     load_verified_namespace_basis(&store, &namespace_id)
-        .expect("manifest-backed basis should not read pre-manifest wal");
+        .expect("checkpoint-backed basis should not read pre-checkpoint wal");
     let error =
         list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect_err("corrupt wal chain");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
@@ -2558,7 +2558,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(fork_state.state.namespace_id, clone_namespace_id);
     assert_eq!(fork_state.state.source_namespace_id, source_namespace_id);
     assert_eq!(fork_state.state.fork_seq, ChangeSeq(1));
-    assert_eq!(fork_state.state.source_manifest_seq, ChangeSeq(1));
+    assert_eq!(fork_state.state.source_checkpoint_seq, ChangeSeq(1));
     assert_eq!(fork_state.state.source_head_seq, ChangeSeq(1));
     assert!(fork_state.state.created_at_ms > 0);
     assert!(fork_state.has_valid_payload_checksum().expect("checksum"));
@@ -2575,7 +2575,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         load_verified_namespace_basis(&store, &clone_namespace_id).expect("clone basis");
     assert_eq!(clone_basis.content_store_id, content_store_id);
     assert_eq!(clone_basis.head.seq, ChangeSeq(1));
-    assert_eq!(clone_basis.head.manifest_hint_seq, Some(ChangeSeq(1)));
+    assert_eq!(clone_basis.head.checkpoint_hint_seq, Some(ChangeSeq(1)));
     assert_eq!(clone_basis.head.retention_floor_seq, ChangeSeq(1));
 
     let target_manifest_key = namespace_manifest(clone_namespace_id.as_str(), 1);
@@ -2625,7 +2625,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(pin.kind, ControlObjectKind::NamespaceGcPinState);
     assert_eq!(pin.state.source_namespace_id, source_namespace_id);
     assert_eq!(pin.state.target_namespace_id, clone_namespace_id);
-    assert_eq!(pin.state.source_manifest_seq, ChangeSeq(1));
+    assert_eq!(pin.state.source_checkpoint_seq, ChangeSeq(1));
     assert_eq!(pin.state.source_head_seq, ChangeSeq(1));
     let referenced_metadata_files = target_manifest
         .payload
@@ -3896,7 +3896,7 @@ fn validation_context(
         active_fence_token: FenceToken(1),
         next_inode_id,
         name_policy: loon_api::NamePolicy::default(),
-        manifest_hint_seq: Some(ChangeSeq(0)),
+        checkpoint_hint_seq: Some(ChangeSeq(0)),
         retention_floor_seq: ChangeSeq(0),
         visible_wal_tip: None,
     };

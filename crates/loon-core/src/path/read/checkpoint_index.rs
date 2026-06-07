@@ -2,8 +2,8 @@ use super::row_decode::{
     direntry_bind_from_manifest_row, direntry_unbind_from_manifest_row, inode_from_manifest_row,
     revision_from_manifest_row, tombstone_from_manifest_row, unbind_matches_binding,
 };
+use crate::checkpoint::{ManifestLoadError, VerifiedMetadataTables};
 use crate::error::CoreError;
-use crate::manifest::{ManifestLoadError, VerifiedMetadataTables};
 use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };

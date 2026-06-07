@@ -1,9 +1,9 @@
 use super::{manifest_index, row_decode::unbind_matches_binding};
-use crate::error::CoreError;
-use crate::manifest::{
+use crate::checkpoint::{
     load_verified_manifest_tables_with_cache, manifest_basis_head, MetadataTableCache,
     VerifiedMetadataTables,
 };
+use crate::error::CoreError;
 use crate::metadata::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, ResolvedVisiblePath,
     RevisionRecord, SubtreeTombstoneRecord,
@@ -115,7 +115,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
                 head.namespace_id, namespace_id
             )));
         }
-        let Some(manifest_seq) = head.manifest_hint_seq else {
+        let Some(manifest_seq) = head.checkpoint_hint_seq else {
             return Ok(None);
         };
         let _catalog_entry =

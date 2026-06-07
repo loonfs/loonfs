@@ -31,7 +31,7 @@ The required durable object families and standard key patterns are:
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL files** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{wal_file_id}.sst` |
-| **Namespace manifests** | Immutable | Record the verified recovery boundary and the immutable metadata SSTs that materialize metadata through that boundary. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
+| **Namespace manifests** | Immutable | Record one checkpoint's verified recovery boundary and the immutable metadata SSTs that materialize metadata through that boundary. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
 | **Metadata SSTs** | Immutable | Store metadata rows referenced by namespace manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/compacted/metadata/{table_id}.sst` |
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
@@ -49,7 +49,7 @@ derived indexes, compaction control, and garbage collection:
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
 | **Namespace fork state** | Written for forked namespaces to record their source and fork sequence. | `namespaces/{namespace_id}/control/fork.json` |
-| **Namespace manifests** | Written as the recovery authority for a namespace. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
+| **Namespace manifests** | Written as the durable descriptor for one namespace checkpoint. | `namespaces/{namespace_id}/manifest/{manifest_seq}.manifest` |
 | **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compactions/{compactions_id}.compactions` |
 | **Metadata SSTs** | Written as immutable metadata files referenced by manifests. | `namespaces/{namespace_id}/compacted/metadata/{table_id}.sst` |
 | **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/manifest/{manifest_seq}.manifest` |
@@ -99,7 +99,7 @@ The content model has four rules.
 
 In v0, file content is stored as one whole-file object whose `content_ref.kind` is `whole_file_v0`. The digest remains serialized as `sha256:<64hex>`, while the object key partitions the hex as `sha256/ab/cd/<hex>`.
 
-Manifest materialization tables include canonical metadata families and validated secondary indexes. The canonical families are `inodes`, `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and `commit-receipts`. The `direntry-child-binds` family is a secondary index over the same direntry bind rows, keyed by child inode, and must be present and verified before a manifest is trusted.
+Checkpoint materialization tables include canonical metadata families and validated secondary indexes. The canonical families are `inodes`, `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and `commit-receipts`. The `direntry-child-binds` family is a secondary index over the same direntry bind rows, keyed by child inode, and must be present and verified before a checkpoint is trusted.
 
 ETags remain opaque compare tokens. They may be used for object freshness or compare-and-swap, but they are not content digests unless a provider-specific behavior is separately exposed and verified through this contract.
 

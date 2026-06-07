@@ -30,7 +30,7 @@ pub mod wire {
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
 pub use http::{
-    AdvanceRetentionResponse, ApiError, CreateManifestResponse, CreateNamespaceRequest,
+    AdvanceRetentionResponse, ApiError, CreateCheckpointResponse, CreateNamespaceRequest,
     FileRevision, FilesystemOperation, FilesystemOperationRequest, FilesystemOperationResponse,
     FilesystemPutBehavior, ForkNamespaceRequest, ListFileRevisionsResponse, ListNamespacesResponse,
     MutationResult, NamespaceSummary, RestoreFileRevisionRequest,

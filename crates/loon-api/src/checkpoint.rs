@@ -63,7 +63,7 @@ pub struct MetadataFileRef {
 pub struct NamespaceManifestFork {
     pub source_namespace_id: NamespaceId,
     pub fork_seq: ChangeSeq,
-    pub source_manifest_seq: ChangeSeq,
+    pub source_checkpoint_seq: ChangeSeq,
     pub source_head_seq: ChangeSeq,
 }
 
@@ -504,7 +504,7 @@ mod tests {
                 fork: Some(NamespaceManifestFork {
                     source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
                     fork_seq: ChangeSeq(12),
-                    source_manifest_seq: ChangeSeq(10),
+                    source_checkpoint_seq: ChangeSeq(10),
                     source_head_seq: ChangeSeq(12),
                 }),
                 metadata_files: vec![
@@ -540,7 +540,7 @@ mod tests {
                 .fork
                 .as_ref()
                 .expect("fork")
-                .source_manifest_seq,
+                .source_checkpoint_seq,
             ChangeSeq(10)
         );
     }

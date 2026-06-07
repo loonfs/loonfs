@@ -64,7 +64,7 @@ pub enum ErrorCode {
     UnsupportedRenameMode,
     CommitIdReuseConflict,
     CommitQueueFull,
-    ManifestUnavailable,
+    CheckpointUnavailable,
     UploadNotFound,
     UploadAlreadyCompleted,
     UploadContentConflict,
@@ -128,7 +128,7 @@ pub enum CoreError {
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
     #[error("{0}")]
-    ManifestUnavailable(String),
+    CheckpointUnavailable(String),
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: String },
     #[error("upload session `{upload_id}` is already completed")]
@@ -235,7 +235,7 @@ impl CoreError {
             CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,
             CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
-            CoreError::ManifestUnavailable(_) => ErrorCode::ManifestUnavailable,
+            CoreError::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
@@ -271,7 +271,7 @@ impl ErrorCode {
             | ErrorCode::UploadNotFound => ErrorKind::NotFound,
             ErrorCode::NamespaceExists => ErrorKind::AlreadyExists,
             ErrorCode::StaleRevision => ErrorKind::PreconditionFailed,
-            ErrorCode::CommitQueueFull | ErrorCode::ManifestUnavailable => ErrorKind::Unavailable,
+            ErrorCode::CommitQueueFull | ErrorCode::CheckpointUnavailable => ErrorKind::Unavailable,
             ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
             ErrorCode::ServerError => ErrorKind::Internal,
             ErrorCode::NamespacePartial
@@ -309,7 +309,7 @@ impl ErrorCode {
             ErrorCode::UnsupportedRenameMode => "unsupported_rename_mode",
             ErrorCode::CommitIdReuseConflict => "commit_id_reuse_conflict",
             ErrorCode::CommitQueueFull => "commit_queue_full",
-            ErrorCode::ManifestUnavailable => "manifest_unavailable",
+            ErrorCode::CheckpointUnavailable => "checkpoint_unavailable",
             ErrorCode::UploadNotFound => "upload_not_found",
             ErrorCode::UploadAlreadyCompleted => "upload_already_completed",
             ErrorCode::UploadContentConflict => "upload_content_conflict",
@@ -353,8 +353,8 @@ fn classify_basis_load_error(error: &BasisLoadError) -> ErrorCode {
             ErrorCode::NamespaceCorrupt
         }
         BasisLoadError::ManifestLoad(error) => match error.kind() {
-            crate::manifest::ManifestLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
-            crate::manifest::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
+            crate::checkpoint::ManifestLoadErrorKind::Corrupt => ErrorCode::NamespaceCorrupt,
+            crate::checkpoint::ManifestLoadErrorKind::Store => ErrorCode::ServerError,
         },
         BasisLoadError::MissingHeadEtag { .. } => ErrorCode::ServerError,
     }

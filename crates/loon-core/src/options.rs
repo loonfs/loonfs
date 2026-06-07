@@ -1,5 +1,5 @@
 use crate::{
-    manifest::MetadataTableCache, namespace::basis::VerifiedNamespaceBasis,
+    checkpoint::MetadataTableCache, namespace::basis::VerifiedNamespaceBasis,
     path::write::PutFileBehavior,
 };
 use loon_api::wire::control::HeadState;

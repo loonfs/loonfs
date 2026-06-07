@@ -106,8 +106,8 @@ define_invariant_ids! {
     (ManifestReplayRequiresAllManifestSegments, "manifest_replay_requires_all_manifest_segments"),
     (MetadataFileRefMatchesPayload, "manifest_segment_descriptor_matches_payload"),
     (MetadataSstRowsRestoreBasisMetadata, "manifest_segment_rows_restore_basis_metadata"),
-    (ManifestPlusWalTailReproducesHead, "manifest_plus_wal_tail_reproduces_head"),
-    (ManifestPlusWalTailReproducesMetadata, "manifest_plus_wal_tail_reproduces_metadata"),
+    (CheckpointPlusWalTailReproducesHead, "checkpoint_plus_wal_tail_reproduces_head"),
+    (CheckpointPlusWalTailReproducesMetadata, "checkpoint_plus_wal_tail_reproduces_metadata"),
 
     // Background work progress invariants.
     (ProgressObjectChecksumMatchesPayload, "progress_object_checksum_matches_payload"),
@@ -130,11 +130,11 @@ define_invariant_ids! {
     (StaleClaimTokenCannotComplete, "stale_claim_token_cannot_complete"),
     (StolenJobCompletesOnce, "stolen_job_completes_once"),
 
-    // Background work manifest head publish invariants.
-    (ManifestPublishRequiresVerifiedManifest, "manifest_publish_requires_verified_manifest"),
-    (ManifestHintSeqAdvancesMonotonically, "manifest_hint_seq_advances_monotonically"),
+    // Background work checkpoint head publish invariants.
+    (CheckpointPublishRequiresVerifiedManifest, "checkpoint_publish_requires_verified_manifest"),
+    (CheckpointHintSeqAdvancesMonotonically, "checkpoint_hint_seq_advances_monotonically"),
     (RetentionFloorSeqAdvancesMonotonically, "retention_floor_seq_advances_monotonically"),
-    (RetentionFloorSeqRequiresManifestCoverage, "retention_floor_seq_requires_manifest_coverage"),
+    (RetentionFloorSeqRequiresCheckpointCoverage, "retention_floor_seq_requires_checkpoint_coverage"),
     (RetentionFloorSeqRequiresDerivedProgress, "retention_floor_seq_requires_derived_progress"),
     (RetentionFloorSeqRespectsPolicyGate, "retention_floor_seq_respects_policy_gate"),
 
@@ -255,10 +255,10 @@ define_invariant_ids! {
     (SimTraceOrderIsSeedStable, "sim_trace_order_is_seed_stable"),
     (StaleWriterPublishRemainsFencedAfterHandover, "stale_writer_publish_remains_fenced_after_handover"),
     (StaleWriterFenceSurvivesInflightClientRequest, "stale_writer_fence_survives_inflight_client_request"),
-    (ManifestPublishWaitsForRequiredProgressUnderInterleaving, "manifest_publish_waits_for_required_progress_under_interleaving"),
-    (ManifestPublishPreservesMonotonicHeadSummaryUnderInterleaving, "manifest_publish_preserves_monotonic_head_summary_under_interleaving"),
+    (CheckpointPublishWaitsForRequiredProgressUnderInterleaving, "checkpoint_publish_waits_for_required_progress_under_interleaving"),
+    (CheckpointPublishPreservesMonotonicHeadSummaryUnderInterleaving, "checkpoint_publish_preserves_monotonic_head_summary_under_interleaving"),
     (RepairLostEnqueueTracksLatestVisibleHeadSeq, "repair_lost_enqueue_tracks_latest_visible_head_seq"),
-    (ManifestPublishUsesLatestVisibleHeadAfterClientServerAdvance, "manifest_publish_uses_latest_visible_head_after_client_server_advance"),
+    (CheckpointPublishUsesLatestVisibleHeadAfterClientServerAdvance, "checkpoint_publish_uses_latest_visible_head_after_client_server_advance"),
     (RepairLostEnqueueTracksLatestVisibleHeadAfterClientServerAdvance, "repair_lost_enqueue_tracks_latest_visible_head_after_client_server_advance"),
     (QueueSimTraceOrderIsSeedStable, "queue_sim_trace_order_is_seed_stable"),
     (BackgroundSimTraceOrderIsSeedStable, "background_sim_trace_order_is_seed_stable"),

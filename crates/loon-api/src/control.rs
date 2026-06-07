@@ -34,7 +34,7 @@ pub struct NamespaceForkState {
     pub namespace_id: NamespaceId,
     pub source_namespace_id: NamespaceId,
     pub fork_seq: ChangeSeq,
-    pub source_manifest_seq: ChangeSeq,
+    pub source_checkpoint_seq: ChangeSeq,
     pub source_head_seq: ChangeSeq,
     pub created_at_ms: u64,
 }
@@ -44,7 +44,7 @@ pub struct NamespaceGcPinState {
     pub pin_id: String,
     pub source_namespace_id: NamespaceId,
     pub target_namespace_id: NamespaceId,
-    pub source_manifest_seq: ChangeSeq,
+    pub source_checkpoint_seq: ChangeSeq,
     pub source_head_seq: ChangeSeq,
     pub referenced_metadata_files: Vec<String>,
     pub created_at_ms: u64,
@@ -67,7 +67,7 @@ pub struct HeadState {
     pub next_inode_id: InodeId,
     #[serde(default)]
     pub name_policy: NamePolicy,
-    pub manifest_hint_seq: Option<ChangeSeq>,
+    pub checkpoint_hint_seq: Option<ChangeSeq>,
     pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
@@ -81,7 +81,7 @@ impl HeadState {
             active_fence_token: FenceToken(0),
             next_inode_id: InodeId(2),
             name_policy: NamePolicy::default(),
-            manifest_hint_seq: None,
+            checkpoint_hint_seq: None,
             retention_floor_seq: ChangeSeq(0),
             visible_wal_tip: None,
         }
