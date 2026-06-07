@@ -679,9 +679,11 @@ fn build_namespace_manifest_for_basis<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
             manifest_id,
             head_seq,
+            head_commit_id: basis.head.head_commit_id.clone(),
             base_seq,
             active_fence_token: basis.head.active_fence_token,
             next_inode_id: basis.head.next_inode_id,
+            name_policy: basis.head.name_policy,
             retention_floor_seq: basis.head.retention_floor_seq,
             initialized: true,
             verified: true,
@@ -702,6 +704,17 @@ fn checkpoint_record_for_manifest(
     })
 }
 
+fn checkpoint_record_by_id<'a>(
+    manifest: &'a NamespaceManifestEnvelope,
+    checkpoint_id: &str,
+) -> Option<&'a NamespaceCheckpointRecord> {
+    manifest
+        .payload
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+}
+
 pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -713,7 +726,7 @@ pub(crate) fn advance_retention_floor<S: ObjectStore + ?Sized>(
         let head = loaded_head.envelope.state;
         let Some(current_manifest_id) = head.current_manifest_id else {
             return Err(CoreError::CheckpointUnavailable(format!(
-                "namespace `{}` has no published checkpoint",
+                "namespace `{}` has no published manifest",
                 namespace_id.as_str()
             )));
         };
@@ -828,18 +841,15 @@ pub(crate) fn manifest_basis_head(
     current_head: &HeadState,
     manifest: &NamespaceManifestEnvelope,
 ) -> HeadState {
-    let head_commit_id = checkpoint_record_for_manifest(manifest)
-        .map(|checkpoint| checkpoint.head_commit_id.clone())
-        .unwrap_or_else(|| current_head.head_commit_id.clone());
     HeadState {
         namespace_id: current_head.namespace_id.clone(),
         seq: manifest.payload.head_seq,
-        head_commit_id,
+        head_commit_id: manifest.payload.head_commit_id.clone(),
         // The manifest records the manifest-time fence token. That may lag the
         // live head if lease takeover advanced the fence without any WAL replay.
         active_fence_token: manifest.payload.active_fence_token,
         next_inode_id: manifest.payload.next_inode_id,
-        name_policy: current_head.name_policy,
+        name_policy: manifest.payload.name_policy,
         current_manifest_id: current_head.current_manifest_id,
         latest_checkpoint_id: current_head.latest_checkpoint_id.clone(),
         retention_floor_seq: current_head.retention_floor_seq,
@@ -1251,7 +1261,23 @@ fn publish_current_manifest_id<S: ObjectStore + ?Sized>(
             .map_err(|error| CoreError::Basis(BasisLoadError::LoadHead(error)))?;
         let current_head = loaded_head.envelope.state;
         if current_head.current_manifest_id >= Some(manifest_id) {
-            return Ok(current_head);
+            let current_manifest_id = current_head.current_manifest_id.ok_or_else(|| {
+                CoreError::CheckpointUnavailable(format!(
+                    "namespace `{}` has no published manifest",
+                    namespace_id.as_str()
+                ))
+            })?;
+            let current_manifest =
+                load_verified_manifest_materialization(store, namespace_id, current_manifest_id)
+                    .map_err(|error| CoreError::Basis(BasisLoadError::ManifestLoad(error)))?;
+            if checkpoint_record_by_id(&current_manifest.manifest, checkpoint_id).is_some() {
+                return Ok(current_head);
+            }
+            return Err(CoreError::CheckpointUnavailable(format!(
+                "namespace `{}` current manifest {:?} does not contain checkpoint `{checkpoint_id}`",
+                namespace_id.as_str(),
+                current_manifest_id
+            )));
         }
 
         let next_head = HeadState {
@@ -2264,7 +2290,7 @@ mod tests {
         MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
         NamespaceManifestPayload,
     };
-    use loon_api::{validate_checkpoint_id, ChangeSeq, InodeId, ManifestId, NamespaceId};
+    use loon_api::{validate_checkpoint_id, ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
@@ -2764,9 +2790,11 @@ mod tests {
                 namespace_id: namespace_id.clone(),
                 manifest_id: basis.head.seq.into(),
                 head_seq: basis.head.seq,
+                head_commit_id: basis.head.head_commit_id.clone(),
                 base_seq: first,
                 active_fence_token: basis.head.active_fence_token,
                 next_inode_id: basis.head.next_inode_id,
+                name_policy: basis.head.name_policy,
                 retention_floor_seq: basis.head.retention_floor_seq,
                 initialized: true,
                 verified: true,
@@ -3680,7 +3708,49 @@ mod tests {
     }
 
     #[test]
-    fn older_checkpoint_can_publish_after_head_advances() {
+    fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = test_context();
+        bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/hello.txt",
+            b"hello\n",
+            &context,
+            None,
+        )
+        .expect("write hello");
+
+        let basis = load_verified_namespace_basis(&store, &namespace_id).expect("basis");
+        let manifest = build_namespace_manifest_for_basis(
+            &store,
+            &namespace_id,
+            &basis,
+            &context.writer_version,
+            MetadataLsmPolicy::default(),
+            ManifestId(1),
+            None,
+        )
+        .expect("build manifest without checkpoint");
+        assert!(manifest.payload.checkpoints.is_empty());
+        let mut newer_live_head = basis.head.clone();
+        newer_live_head.head_commit_id =
+            CommitId::parse("c_00000000000000000000000000000099").expect("commit id");
+
+        let reconstructed = manifest_basis_head(&newer_live_head, &manifest);
+
+        assert_eq!(
+            reconstructed.head_commit_id,
+            manifest.payload.head_commit_id
+        );
+        assert_ne!(reconstructed.head_commit_id, newer_live_head.head_commit_id);
+    }
+
+    #[test]
+    fn current_manifest_advance_without_checkpoint_record_is_not_success() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3713,9 +3783,11 @@ mod tests {
                 namespace_id: namespace_id.clone(),
                 manifest_id: basis_before.head.seq.into(),
                 head_seq: basis_before.head.seq,
+                head_commit_id: basis_before.head.head_commit_id.clone(),
                 base_seq: basis_before.head.seq,
                 active_fence_token: basis_before.head.active_fence_token,
                 next_inode_id: basis_before.head.next_inode_id,
+                name_policy: basis_before.head.name_policy,
                 retention_floor_seq: basis_before.head.retention_floor_seq,
                 initialized: true,
                 verified: true,
@@ -3736,26 +3808,21 @@ mod tests {
             None,
         )
         .expect("write second");
+        let later_checkpoint =
+            create_checkpoint(&store, &namespace_id, &context).expect("later checkpoint");
+        assert!(later_checkpoint.manifest_id > basis_before.head.seq.into());
+
         let checkpoint_id = "chk_00000000000000000000000000000099";
-        let published = publish_current_manifest_id(
+        let error = publish_current_manifest_id(
             &store,
             &namespace_id,
             basis_before.head.seq.into(),
             checkpoint_id,
             &context.writer_version,
         )
-        .expect("publish current manifest");
+        .expect_err("current manifest without checkpoint record must not be accepted");
 
-        assert_eq!(published.seq, ChangeSeq(2));
-        assert_eq!(published.current_manifest_id, Some(ChangeSeq(1).into()));
-        assert_eq!(
-            published.latest_checkpoint_id.as_deref(),
-            Some(checkpoint_id)
-        );
-
-        let after = load_verified_namespace_basis(&store, &namespace_id).expect("basis after");
-        assert_eq!(after.head.seq, ChangeSeq(2));
-        assert_eq!(after.head.current_manifest_id, Some(ChangeSeq(1).into()));
+        assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
     }
 
     #[test]

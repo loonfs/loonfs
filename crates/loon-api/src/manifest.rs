@@ -1,14 +1,14 @@
 use crate::digest::sha256_hex;
 use crate::v0::CommitOpResult;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, ManifestId, NamespaceId,
-    RevisionNo,
+    ChangeSeq, CommitId, ContentRef, FenceToken, InodeId, InodeKind, ManifestId, NamePolicy,
+    NamespaceId, RevisionNo,
 };
 use ciborium::{de::from_reader, ser::into_writer};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 4;
+pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 5;
 pub const METADATA_SST_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,9 +299,12 @@ pub struct NamespaceManifestPayload {
     pub namespace_id: NamespaceId,
     pub manifest_id: ManifestId,
     pub head_seq: ChangeSeq,
+    pub head_commit_id: CommitId,
     pub base_seq: ChangeSeq,
     pub active_fence_token: FenceToken,
     pub next_inode_id: InodeId,
+    #[serde(default)]
+    pub name_policy: NamePolicy,
     pub retention_floor_seq: ChangeSeq,
     pub initialized: bool,
     pub verified: bool,
@@ -473,7 +476,7 @@ mod tests {
         MetadataSegmentKey, MetadataTableFamily, NamespaceCheckpointRecord,
         NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
     };
-    use crate::{ChangeSeq, CommitId, FenceToken, InodeId, ManifestId, NamespaceId};
+    use crate::{ChangeSeq, CommitId, FenceToken, InodeId, ManifestId, NamePolicy, NamespaceId};
 
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
@@ -483,9 +486,12 @@ mod tests {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(10),
                 head_seq: ChangeSeq(10),
+                head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
+                    .expect("commit id"),
                 base_seq: ChangeSeq(10),
                 active_fence_token: FenceToken(2),
                 next_inode_id: InodeId(42),
+                name_policy: NamePolicy::default(),
                 retention_floor_seq: ChangeSeq(0),
                 initialized: true,
                 verified: true,
@@ -533,9 +539,12 @@ mod tests {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(12),
                 head_seq: ChangeSeq(12),
+                head_commit_id: CommitId::parse("c_00000000000000000000000000000002")
+                    .expect("commit id"),
                 base_seq: ChangeSeq(10),
                 active_fence_token: FenceToken(2),
                 next_inode_id: InodeId(42),
+                name_policy: NamePolicy::default(),
                 retention_floor_seq: ChangeSeq(0),
                 initialized: true,
                 verified: true,

@@ -2772,7 +2772,7 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 }
 
 #[test]
-fn fork_target_head_reservation_failure_writes_no_manifest_artifacts() {
+fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -2791,14 +2791,21 @@ fn fork_target_head_reservation_failure_writes_no_manifest_artifacts() {
         .expect_err("target head precondition should re-check partial namespace");
     assert_eq!(error.code(), ErrorCode::NamespacePartial);
     assert!(
-        store
+        !store
             .list_prefix(&format!(
                 "namespaces/{}/manifest/",
                 clone_namespace_id.as_str()
             ))
             .expect("list target manifests")
             .is_empty(),
-        "target manifests must not be written before target head reservation"
+        "target manifest should be written before target head reservation"
+    );
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .expect("head target descriptor")
+            .is_none(),
+        "descriptor must remain unpublished"
     );
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }
@@ -2859,7 +2866,7 @@ fn fork_source_gc_pin_failure_leaves_target_namespace_absent() {
 }
 
 #[test]
-fn fork_failure_after_target_head_reserves_partial_namespace() {
+fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
@@ -2883,8 +2890,8 @@ fn fork_failure_after_target_head_reserves_partial_namespace() {
         store
             .head(&namespace_head(clone_namespace_id.as_str()))
             .expect("head target head")
-            .is_some(),
-        "target head should reserve namespace before target manifest writes"
+            .is_none(),
+        "target head must not be reserved before target manifest exists"
     );
     assert!(
         store
@@ -2893,7 +2900,24 @@ fn fork_failure_after_target_head_reserves_partial_namespace() {
             .is_none(),
         "descriptor must remain unpublished"
     );
-    assert_namespace_partial(&store, &clone_namespace_id, &context);
+    assert!(
+        store
+            .list_prefix(&format!(
+                "namespaces/{}/manifest/",
+                clone_namespace_id.as_str()
+            ))
+            .expect("list target manifests")
+            .is_empty(),
+        "target manifest should not exist after injected manifest write failure"
+    );
+    assert_eq!(
+        list_namespaces(&store)
+            .expect("list namespaces")
+            .into_iter()
+            .map(|summary| summary.namespace_id)
+            .collect::<Vec<_>>(),
+        vec![source_namespace_id]
+    );
 }
 
 #[test]

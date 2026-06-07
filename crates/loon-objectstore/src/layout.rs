@@ -337,7 +337,7 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         ["namespaces", namespace, "manifest", manifest] if manifest.ends_with(".manifest") => {
             parsed(DurableObjectFamily::NamespaceManifest, Some(namespace))
         }
-        ["namespaces", namespace, "wal", _] => {
+        ["namespaces", namespace, "wal", wal] if wal.ends_with(".wal.zst") => {
             parsed(DurableObjectFamily::WalSegment, Some(namespace))
         }
         ["namespaces", namespace, "compactions", compactions]
@@ -623,6 +623,21 @@ mod tests {
             assert_eq!(parsed.family(), family);
             assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
         }
+    }
+
+    #[test]
+    fn parse_wal_segment_requires_current_wal_suffix() {
+        let parsed =
+            parse_object_key("namespaces/ns-1/wal/seg_00000000000000000000000000000001.wal.zst")
+                .expect("current WAL key parses");
+        assert_eq!(parsed.family(), DurableObjectFamily::WalSegment);
+        assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
+
+        assert!(
+            parse_object_key("namespaces/ns-1/wal/seg_00000000000000000000000000000001.sst")
+                .is_none()
+        );
+        assert!(parse_object_key("namespaces/ns-1/wal/random.tmp").is_none());
     }
 
     #[test]

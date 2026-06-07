@@ -48,21 +48,27 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     }
 
     let checkpoint = create_checkpoint(store, source_namespace_id, context)?;
-    let fork_seq = checkpoint.checkpoint_seq;
-    let source_basis = load_verified_namespace_basis(store, source_namespace_id)?;
     let source_manifest =
         load_verified_manifest_materialization(store, source_namespace_id, checkpoint.manifest_id)
             .map_err(|err| CoreError::Basis(BasisLoadError::ManifestLoad(err)))?;
+    let source_checkpoint =
+        checkpoint_record_by_id(&source_manifest.manifest, &checkpoint.checkpoint_id)?;
+    let fork_seq = source_checkpoint.head_seq;
+    let source_head_seq = source_checkpoint.head_seq;
+    let source_head_commit_id = source_checkpoint.head_commit_id.clone();
+    let source_manifest_id = source_checkpoint.manifest_id;
+    let source_checkpoint_id = source_checkpoint.checkpoint_id.clone();
+    let source_basis = load_verified_namespace_basis(store, source_namespace_id)?;
     let target_manifest_id = ManifestId(fork_seq.0);
     let target_checkpoint_id = generate_checkpoint_id();
 
     let initial_head = HeadState {
         namespace_id: new_namespace_id.clone(),
         seq: fork_seq,
-        head_commit_id: source_basis.head.head_commit_id.clone(),
+        head_commit_id: source_head_commit_id.clone(),
         active_fence_token: FenceToken(0),
         next_inode_id: source_manifest.manifest.payload.next_inode_id,
-        name_policy: source_basis.head.name_policy,
+        name_policy: source_manifest.manifest.payload.name_policy,
         current_manifest_id: Some(target_manifest_id),
         latest_checkpoint_id: Some(target_checkpoint_id.clone()),
         retention_floor_seq: fork_seq,
@@ -102,9 +108,9 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             namespace_id: new_namespace_id.clone(),
             source_namespace_id: source_namespace_id.clone(),
             fork_seq,
-            source_checkpoint_id: checkpoint.checkpoint_id.clone(),
-            source_manifest_id: checkpoint.manifest_id,
-            source_head_seq: source_basis.head.seq,
+            source_checkpoint_id: source_checkpoint_id.clone(),
+            source_manifest_id,
+            source_head_seq,
             created_at_ms: context.now_ms,
         },
     )
@@ -120,24 +126,26 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             namespace_id: new_namespace_id.clone(),
             manifest_id: target_manifest_id,
             head_seq: fork_seq,
+            head_commit_id: source_head_commit_id.clone(),
             base_seq: source_manifest.manifest.payload.base_seq,
             active_fence_token: FenceToken(0),
             next_inode_id: source_manifest.manifest.payload.next_inode_id,
+            name_policy: source_manifest.manifest.payload.name_policy,
             retention_floor_seq: fork_seq,
             initialized: true,
             verified: true,
             fork: Some(NamespaceManifestFork {
                 source_namespace_id: source_namespace_id.clone(),
                 fork_seq,
-                source_checkpoint_id: checkpoint.checkpoint_id.clone(),
-                source_manifest_id: checkpoint.manifest_id,
-                source_head_seq: source_basis.head.seq,
+                source_checkpoint_id: source_checkpoint_id.clone(),
+                source_manifest_id,
+                source_head_seq,
             }),
             checkpoints: vec![NamespaceCheckpointRecord {
                 checkpoint_id: target_checkpoint_id.clone(),
                 manifest_id: target_manifest_id,
                 head_seq: fork_seq,
-                head_commit_id: source_basis.head.head_commit_id.clone(),
+                head_commit_id: source_head_commit_id.clone(),
                 created_at_ms: context.now_ms,
                 expires_at_ms: None,
                 name: None,
@@ -160,15 +168,15 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             pin_id: deterministic_gc_pin_id(
                 source_namespace_id,
                 new_namespace_id,
-                &checkpoint.checkpoint_id,
-                checkpoint.manifest_id,
-                source_basis.head.seq,
+                &source_checkpoint_id,
+                source_manifest_id,
+                source_head_seq,
             ),
             source_namespace_id: source_namespace_id.clone(),
             target_namespace_id: new_namespace_id.clone(),
-            source_checkpoint_id: checkpoint.checkpoint_id,
-            source_manifest_id: checkpoint.manifest_id,
-            source_head_seq: source_basis.head.seq,
+            source_checkpoint_id,
+            source_manifest_id,
+            source_head_seq,
             referenced_metadata_files_debug,
             created_at_ms: context.now_ms,
         },
@@ -176,13 +184,13 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
     .map_err(|err| CoreError::Store(err.to_string()))?;
     let gc_pin_key = gc_pin(source_namespace_id.as_str(), &gc_pin_envelope.state.pin_id);
     write_source_gc_pin(store, &gc_pin_key, &gc_pin_envelope)?;
+    write_namespace_manifest(store, &target_manifest).map_err(CoreError::Basis)?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
         &head_key,
         &serde_json::to_vec(&head).map_err(|err| CoreError::Store(err.to_string()))?,
     )?;
-    write_namespace_manifest(store, &target_manifest).map_err(CoreError::Basis)?;
     put_target_namespace_control_object(
         store,
         new_namespace_id,
@@ -221,6 +229,23 @@ fn write_source_gc_pin<S: ObjectStore + ?Sized>(
         }
         Err(err) => Err(CoreError::Store(err.to_string())),
     }
+}
+
+fn checkpoint_record_by_id<'a>(
+    manifest: &'a NamespaceManifestEnvelope,
+    checkpoint_id: &str,
+) -> Result<&'a NamespaceCheckpointRecord, CoreError> {
+    manifest
+        .payload
+        .checkpoints
+        .iter()
+        .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+        .ok_or_else(|| {
+            CoreError::NamespaceCorrupt(format!(
+                "manifest {:?} does not contain checkpoint `{checkpoint_id}`",
+                manifest.payload.manifest_id
+            ))
+        })
 }
 
 fn deterministic_gc_pin_id(
@@ -332,12 +357,18 @@ fn map_namespace_initialization_error_to_core(error: NamespaceInitializationErro
 
 #[cfg(test)]
 mod tests {
-    use super::{deterministic_gc_pin_id, write_source_gc_pin};
+    use super::{checkpoint_record_by_id, deterministic_gc_pin_id, write_source_gc_pin};
     use crate::error::CoreError;
     use loon_api::wire::control::{
         ControlObjectKind, NamespaceGcPinState, NamespaceGcPinStateEnvelope,
     };
-    use loon_api::{validate_gc_pin_id, ChangeSeq, ManifestId, NamespaceId};
+    use loon_api::wire::manifest::{
+        NamespaceCheckpointRecord, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    };
+    use loon_api::{
+        validate_gc_pin_id, ChangeSeq, CommitId, FenceToken, InodeId, ManifestId, NamePolicy,
+        NamespaceId,
+    };
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::gc_pin;
     use loon_objectstore::ObjectStore;
@@ -364,6 +395,26 @@ mod tests {
 
         assert_eq!(first, second);
         validate_gc_pin_id(&first).expect("valid deterministic pin id");
+    }
+
+    #[test]
+    fn checkpoint_record_by_id_returns_fork_base_record() {
+        let manifest = namespace_manifest_with_checkpoint(
+            "chk_00000000000000000000000000000001",
+            ManifestId(42),
+            ChangeSeq(7),
+            "c_00000000000000000000000000000007",
+        );
+
+        let checkpoint = checkpoint_record_by_id(&manifest, "chk_00000000000000000000000000000001")
+            .expect("checkpoint record");
+
+        assert_eq!(checkpoint.manifest_id, ManifestId(42));
+        assert_eq!(checkpoint.head_seq, ChangeSeq(7));
+        assert_eq!(
+            checkpoint.head_commit_id,
+            CommitId::parse("c_00000000000000000000000000000007").expect("commit id")
+        );
     }
 
     #[test]
@@ -435,5 +486,43 @@ mod tests {
             },
         )
         .expect("pin envelope")
+    }
+
+    fn namespace_manifest_with_checkpoint(
+        checkpoint_id: &str,
+        manifest_id: ManifestId,
+        head_seq: ChangeSeq,
+        head_commit_id: &str,
+    ) -> NamespaceManifestEnvelope {
+        let namespace_id = NamespaceId::parse("source").expect("source namespace");
+        let commit_id = CommitId::parse(head_commit_id).expect("commit id");
+        NamespaceManifestEnvelope::from_payload(
+            "test-writer/0.1.0",
+            NamespaceManifestPayload {
+                namespace_id,
+                manifest_id,
+                head_seq,
+                head_commit_id: commit_id.clone(),
+                base_seq: head_seq,
+                active_fence_token: FenceToken(1),
+                next_inode_id: InodeId(2),
+                name_policy: NamePolicy::default(),
+                retention_floor_seq: head_seq,
+                initialized: true,
+                verified: true,
+                fork: None,
+                checkpoints: vec![NamespaceCheckpointRecord {
+                    checkpoint_id: checkpoint_id.to_owned(),
+                    manifest_id,
+                    head_seq,
+                    head_commit_id: commit_id,
+                    created_at_ms: 1_000,
+                    expires_at_ms: None,
+                    name: None,
+                }],
+                metadata_files: Vec::new(),
+            },
+        )
+        .expect("manifest")
     }
 }

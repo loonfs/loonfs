@@ -240,8 +240,8 @@ The fork protocol is:
 3. Create or reuse a verified source checkpoint at the current source head.
 4. Build the target head, fork record, lease, and descriptor using the source namespace's `content_store_id`.
 5. Write or verify a source-local GC pin for the source checkpoint/manifest pair referenced by the target namespace manifest.
-6. Write the target `head.json` to reserve the namespace.
-7. Write a target namespace manifest that references the source-owned immutable metadata files for the source checkpoint.
+6. Write a target namespace manifest that references the source-owned immutable metadata files for the source checkpoint.
+7. Write the target `head.json` to reserve the namespace and point at the target manifest.
 8. Write `control/fork.json` with the source namespace id and fork sequence.
 9. Write the target `lease.json`.
 10. Write the target `descriptor.json` last as the publish/list marker.
