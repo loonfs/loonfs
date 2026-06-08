@@ -9,7 +9,7 @@ use loon_api::{
     },
     wire::control::{
         ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState, LeaseState,
-        NamespaceDescriptorEnvelope, NamespaceDescriptorState,
+        NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkStateEnvelope,
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, FenceToken, InodeId, InodeKind,
@@ -33,8 +33,8 @@ use loon_core::{
 };
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
-    content_blob, content_store_descriptor, namespace_descriptor, namespace_head, namespace_lease,
-    upload_session_prefix,
+    content_blob, content_store_descriptor, namespace_descriptor, namespace_fork_state,
+    namespace_head, namespace_lease, upload_session_prefix,
 };
 use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use std::path::Path;
@@ -1075,6 +1075,13 @@ fn namespace_creation_writes_descriptors_and_listing_uses_completion_marker() {
     assert_eq!(descriptor.state.namespace_id, namespace_id);
     assert_eq!(descriptor.state.content_store_id, basis.content_store_id);
     assert!(descriptor.has_valid_payload_checksum().expect("checksum"));
+    assert!(
+        store
+            .head(&namespace_fork_state(namespace_id.as_str()))
+            .expect("head root fork state")
+            .is_none(),
+        "root namespace creation must not write fork provenance"
+    );
 
     let content_descriptor_key = content_store_descriptor(basis.content_store_id.as_str());
     let content_descriptor_bytes = store
@@ -2538,6 +2545,22 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .expect("fork namespace");
 
+    let fork_state_key = namespace_fork_state(clone_namespace_id.as_str());
+    let fork_state_bytes = store
+        .get(&fork_state_key, None)
+        .expect("read fork state")
+        .expect("fork state exists");
+    let fork_state: NamespaceForkStateEnvelope =
+        serde_json::from_slice(&fork_state_bytes).expect("decode fork state");
+    assert_eq!(fork_state.kind, ControlObjectKind::NamespaceForkState);
+    assert_eq!(fork_state.state.namespace_id, clone_namespace_id);
+    assert_eq!(fork_state.state.source_namespace_id, source_namespace_id);
+    assert_eq!(fork_state.state.fork_seq, ChangeSeq(1));
+    assert_eq!(fork_state.state.source_checkpoint_seq, ChangeSeq(1));
+    assert_eq!(fork_state.state.source_head_seq, ChangeSeq(1));
+    assert!(fork_state.state.created_at_ms > 0);
+    assert!(fork_state.has_valid_payload_checksum().expect("checksum"));
+
     let blobs_after = store
         .list_prefix(&format!(
             "content-stores/{}/blobs/",
@@ -2566,6 +2589,22 @@ fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
             .expect("read clone")
+            .bytes,
+        b"base"
+    );
+    store.delete(&fork_state_key).expect("delete fork state");
+    assert_eq!(
+        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .expect("read clone without fork state")
+            .bytes,
+        b"base"
+    );
+    store
+        .put_overwrite(&fork_state_key, b"not-json")
+        .expect("corrupt fork state");
+    assert_eq!(
+        read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .expect("read clone with corrupt fork state")
             .bytes,
         b"base"
     );
@@ -2703,6 +2742,58 @@ fn fork_failure_after_target_head_reserves_partial_namespace() {
             .expect("head target descriptor")
             .is_none(),
         "descriptor must remain unpublished"
+    );
+    assert_namespace_partial(&store, &clone_namespace_id, &context);
+}
+
+#[test]
+fn fork_failure_after_target_checkpoint_before_fork_state_remains_partial() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source_namespace_id = namespace_id();
+    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
+    let context = mutation_context();
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Exact(namespace_fork_state(clone_namespace_id.as_str())),
+        InjectedCreateFailure::Transport {
+            message: "injected target fork state failure",
+        },
+    );
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+
+    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("target fork-state write should fail");
+    assert_eq!(error.code(), ErrorCode::ServerError);
+    assert!(
+        store
+            .head(&namespace_head(clone_namespace_id.as_str()))
+            .expect("head target head")
+            .is_some(),
+        "target head should still reserve namespace"
+    );
+    assert!(
+        store
+            .head(&namespace_descriptor(clone_namespace_id.as_str()))
+            .expect("head target descriptor")
+            .is_none(),
+        "descriptor must remain unpublished"
+    );
+    let target_snapshot_keys = store
+        .list_prefix(&format!(
+            "namespaces/{}/compacted/checkpoints/",
+            clone_namespace_id.as_str()
+        ))
+        .expect("list target snapshots");
+    assert!(
+        !target_snapshot_keys.is_empty(),
+        "target checkpoint artifacts should have been written before fork-state failure"
+    );
+    assert!(
+        store
+            .head(&namespace_fork_state(clone_namespace_id.as_str()))
+            .expect("head target fork state")
+            .is_none(),
+        "fork state should not be durable after injected fork-state failure"
     );
     assert_namespace_partial(&store, &clone_namespace_id, &context);
 }

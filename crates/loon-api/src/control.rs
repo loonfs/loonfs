@@ -11,6 +11,7 @@ pub enum ControlObjectKind {
     ContentStoreDescriptor,
     NamespaceHead,
     NamespaceLease,
+    NamespaceForkState,
     NamespaceProgress,
     UploadSession,
     QueueShard,
@@ -25,6 +26,16 @@ pub struct NamespaceDescriptorState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentStoreDescriptorState {
     pub content_store_id: ContentStoreId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceForkState {
+    pub namespace_id: NamespaceId,
+    pub source_namespace_id: NamespaceId,
+    pub fork_seq: ChangeSeq,
+    pub source_checkpoint_seq: ChangeSeq,
+    pub source_head_seq: ChangeSeq,
+    pub created_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +151,7 @@ pub type ProgressStateEnvelope = ControlObjectEnvelope<ProgressState>;
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
 pub type NamespaceDescriptorEnvelope = ControlObjectEnvelope<NamespaceDescriptorState>;
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
+pub type NamespaceForkStateEnvelope = ControlObjectEnvelope<NamespaceForkState>;
 
 pub fn payload_checksum_sha256<T>(value: &T) -> Result<String, serde_json::Error>
 where

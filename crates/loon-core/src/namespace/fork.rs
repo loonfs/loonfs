@@ -11,10 +11,13 @@ use crate::namespace::catalog::{
 };
 use loon_api::wire::control::{
     ControlObjectKind, HeadState, HeadStateEnvelope, LeaseState, LeaseStateEnvelope,
-    NamespaceDescriptorEnvelope, NamespaceDescriptorState,
+    NamespaceDescriptorEnvelope, NamespaceDescriptorState, NamespaceForkState,
+    NamespaceForkStateEnvelope,
 };
 use loon_api::{FenceToken, NamespaceId, NamespaceSummary};
-use loon_objectstore::keys::{namespace_descriptor, namespace_head, namespace_lease};
+use loon_objectstore::keys::{
+    namespace_descriptor, namespace_fork_state, namespace_head, namespace_lease,
+};
 use loon_objectstore::{ObjectStore, ObjectStoreError};
 
 pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -83,8 +86,22 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
         initial_lease,
     )
     .map_err(|err| CoreError::Store(err.to_string()))?;
+    let fork_state = NamespaceForkStateEnvelope::from_state(
+        ControlObjectKind::NamespaceForkState,
+        &context.writer_version,
+        NamespaceForkState {
+            namespace_id: new_namespace_id.clone(),
+            source_namespace_id: source_namespace_id.clone(),
+            fork_seq,
+            source_checkpoint_seq: fork_seq,
+            source_head_seq: fork_seq,
+            created_at_ms: context.now_ms,
+        },
+    )
+    .map_err(|err| CoreError::Store(err.to_string()))?;
 
     let head_key = namespace_head(new_namespace_id.as_str());
+    let fork_state_key = namespace_fork_state(new_namespace_id.as_str());
     let lease_key = namespace_lease(new_namespace_id.as_str());
     let descriptor_key = namespace_descriptor(new_namespace_id.as_str());
     put_target_namespace_control_object(
@@ -104,6 +121,12 @@ pub(crate) fn fork_namespace<S: ObjectStore + ?Sized>(
             metadata_state: &source_checkpoint.metadata_state,
             writer_version: &context.writer_version,
         },
+    )?;
+    put_target_namespace_control_object(
+        store,
+        new_namespace_id,
+        &fork_state_key,
+        &serde_json::to_vec(&fork_state).map_err(|err| CoreError::Store(err.to_string()))?,
     )?;
     put_target_namespace_control_object(
         store,

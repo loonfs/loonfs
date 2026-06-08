@@ -53,6 +53,12 @@ pub fn namespace_lease(namespace: &str) -> String {
     ObjectLayout::new().namespace_lease(namespace).into_string()
 }
 
+pub fn namespace_fork_state(namespace: &str) -> String {
+    ObjectLayout::new()
+        .namespace_fork_state(namespace)
+        .into_string()
+}
+
 pub fn wal_segment(namespace: &str, start_seq: u64, end_seq: u64, segment_id: &str) -> String {
     ObjectLayout::new()
         .wal_segment(namespace, start_seq, end_seq, segment_id)
@@ -128,8 +134,9 @@ mod tests {
     use super::{
         checkpoint_manifest, checkpoint_run_table, conflict_artifact, conflict_artifact_prefix,
         content_blob, content_store_descriptor, derived_progress, namespace_descriptor,
-        namespace_head, namespace_lease, queue_shard, sha256_hex_from_digest, upload_session,
-        upload_session_prefix, wal_segment, CheckpointTableFamily, DerivedWorkClass,
+        namespace_fork_state, namespace_head, namespace_lease, queue_shard, sha256_hex_from_digest,
+        upload_session, upload_session_prefix, wal_segment, CheckpointTableFamily,
+        DerivedWorkClass,
     };
 
     #[test]
@@ -142,6 +149,10 @@ mod tests {
         assert_eq!(
             namespace_lease("ns-1"),
             "namespaces/ns-1/control/lease.json"
+        );
+        assert_eq!(
+            namespace_fork_state("ns-1"),
+            "namespaces/ns-1/control/fork.json"
         );
         assert_eq!(
             content_store_descriptor("cs_00000000000000000000000000000001"),

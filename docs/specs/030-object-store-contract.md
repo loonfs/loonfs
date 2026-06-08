@@ -47,7 +47,7 @@ derived indexes, compaction control, and garbage collection:
 
 | Family | Current status | Standard object key pattern |
 | --- | --- | --- |
-| **Namespace fork state** | Reserved for fork provenance/debug control. | `namespaces/{namespace_id}/control/fork.json` |
+| **Namespace fork state** | Written for forked namespaces to record which namespace was copied and at which sequence. | `namespaces/{namespace_id}/control/fork.json` |
 | **Namespace manifests** | Reserved for namespace-root manifest snapshots. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
 | **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compactions/{compactions_id}.compactions` |
 | **Compacted metadata SSTs** | Reserved for immutable metadata file sets referenced by manifests. | `namespaces/{namespace_id}/compacted/metadata/{table_id}.sst` |
