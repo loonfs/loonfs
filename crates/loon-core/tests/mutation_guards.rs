@@ -38,7 +38,9 @@ use loon_objectstore::keys::{
     content_blob, content_store_descriptor, gc_pin, namespace_descriptor, namespace_fork_state,
     namespace_head, namespace_lease, namespace_manifest, upload_session_prefix,
 };
-use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use loon_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2079,6 +2081,73 @@ fn direct_publisher_retries_after_wal_orphaned_by_stale_head_cas() {
 }
 
 #[test]
+fn direct_publisher_retries_after_stale_head_get_during_basis_load() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let store = StaleHeadGetStore::new(temp_dir.path(), &namespace_id);
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    create_dir_path(
+        &store,
+        &namespace_id,
+        "/parent",
+        &context,
+        Some("mkdir-parent"),
+    )
+    .expect("create parent");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/file.txt",
+        b"first contents",
+        PutFileBehavior::CreateOnly,
+        &context,
+        Some("write-first"),
+    )
+    .expect("write first revision");
+    put_file_bytes(
+        &store,
+        &namespace_id,
+        "/file.txt",
+        b"second contents win",
+        PutFileBehavior::ReplaceExisting,
+        &context,
+        Some("write-second"),
+    )
+    .expect("write second revision");
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/file.txt")
+            .expect("read before stale get")
+            .bytes,
+        b"second contents win"
+    );
+
+    store.inject_stale_head_get_after(1);
+    let result = create_dir_path(
+        &store,
+        &namespace_id,
+        "/parent/child",
+        &context,
+        Some("mkdir-child"),
+    )
+    .expect("path intent retries stale head get");
+
+    assert_eq!(result.committed_seq, ChangeSeq(4));
+    assert!(store.injected_stale_head_get());
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/file.txt")
+            .expect("read after stale get")
+            .bytes,
+        b"second contents win"
+    );
+    resolve_path(&store, &namespace_id, "/parent/child").expect("child directory remains visible");
+
+    let basis = load_verified_namespace_basis(&store, &namespace_id).expect("load basis");
+    assert_eq!(basis.head.seq, ChangeSeq(4));
+}
+
+#[test]
 fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -3168,7 +3237,7 @@ fn metadata_only_commit_does_not_validate_content_store_refs() {
         .expect("resolve seeded file")
         .inode_id;
 
-    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 2);
+    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 1);
     let response = commit_operations(
         &guarded_store,
         &namespace_id(),
@@ -3186,8 +3255,8 @@ fn metadata_only_commit_does_not_validate_content_store_refs() {
     assert_eq!(response.committed_seq, ChangeSeq(2));
     assert_eq!(
         guarded_store.content_store_access_count(),
-        2,
-        "basis loading performs one content-store descriptor head/get; metadata-only validation must not add another lookup",
+        1,
+        "basis loading performs one content-store descriptor full read; metadata-only validation must not add another lookup",
     );
 }
 
@@ -3917,6 +3986,10 @@ impl ObjectStore for InjectCreateFailureStore {
         self.inner.get(key, range)
     }
 
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key)
+    }
+
     fn put(
         &self,
         key: &str,
@@ -4082,6 +4155,11 @@ impl ObjectStore for ReplayReadGuardStore {
         self.inner.get(key, range)
     }
 
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.reject_replay_read(key)?;
+        self.inner.get_with_metadata(key)
+    }
+
     fn put(
         &self,
         key: &str,
@@ -4144,6 +4222,11 @@ impl ObjectStore for ContentBlobGetCountingStore {
     ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
         self.record_content_blob_get(key);
         self.inner.get(key, range)
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.record_content_blob_get(key);
+        self.inner.get_with_metadata(key)
     }
 
     fn put(
@@ -4213,6 +4296,11 @@ impl ObjectStore for ContentStoreAccessLimitStore {
         self.inner.get(key, range)
     }
 
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.record_content_store_access(key)?;
+        self.inner.get_with_metadata(key)
+    }
+
     fn put(
         &self,
         key: &str,
@@ -4220,6 +4308,133 @@ impl ObjectStore for ContentStoreAccessLimitStore {
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.inner.put(key, bytes, mode)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key)
+    }
+
+    fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix)
+    }
+}
+
+struct StaleHeadGetStore {
+    inner: LocalFsStore,
+    head_key: String,
+    state: Mutex<StaleHeadGetState>,
+}
+
+struct StaleHeadGetState {
+    stale_head_body: Option<ObjectBody>,
+    clean_head_gets_before_injection: Option<usize>,
+    injected_stale_head_get: bool,
+}
+
+impl StaleHeadGetStore {
+    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("store"),
+            head_key: namespace_head(namespace_id.as_str()),
+            state: Mutex::new(StaleHeadGetState {
+                stale_head_body: None,
+                clean_head_gets_before_injection: None,
+                injected_stale_head_get: false,
+            }),
+        }
+    }
+
+    fn inject_stale_head_get_after(&self, clean_head_gets: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            state.stale_head_body.is_some(),
+            "stale head body should be captured before injection"
+        );
+        state.clean_head_gets_before_injection = Some(clean_head_gets);
+        state.injected_stale_head_get = false;
+    }
+
+    fn injected_stale_head_get(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .injected_stale_head_get
+    }
+
+    fn record_head_write(&self, previous_head: Option<ObjectBody>) {
+        if let Some(previous_head) = previous_head {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .stale_head_body = Some(previous_head);
+        }
+    }
+}
+
+impl ObjectStore for StaleHeadGetStore {
+    fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key)
+    }
+
+    fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head_with_checksum(key)
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        if key == self.head_key {
+            let stale_head = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match state.clean_head_gets_before_injection {
+                    Some(0) => {
+                        state.clean_head_gets_before_injection = None;
+                        state.injected_stale_head_get = true;
+                        state.stale_head_body.clone()
+                    }
+                    Some(remaining) => {
+                        state.clean_head_gets_before_injection = Some(remaining - 1);
+                        None
+                    }
+                    None => None,
+                }
+            };
+            if let Some(stale_head) = stale_head {
+                return Ok(Some(stale_head));
+            }
+        }
+
+        self.inner.get_with_metadata(key)
+    }
+
+    fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        self.inner.get(key, range)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let previous_head = if key == self.head_key {
+            self.inner.get_with_metadata(key)?
+        } else {
+            None
+        };
+        let metadata = self.inner.put(key, bytes, mode)?;
+        if key == self.head_key {
+            self.record_head_write(previous_head);
+        }
+        Ok(metadata)
     }
 
     fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
@@ -4265,6 +4480,10 @@ impl ObjectStore for StaleHeadAfterWalWriteStore {
         range: Option<ByteRange>,
     ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
         self.inner.get(key, range)
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key)
     }
 
     fn put(

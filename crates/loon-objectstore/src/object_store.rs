@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
-/// Metadata returned by a successful `head` or `put` call.
+/// Metadata returned by a successful `head`, full-object `get`, or `put` call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMetadata {
     /// Opaque compare token for one object version.
@@ -16,6 +16,13 @@ pub struct ObjectMetadata {
     /// This is part of the object-store contract only when present. Callers must fall back to
     /// reading and hashing object bytes if this field is absent.
     pub checksum_sha256: Option<String>,
+}
+
+/// Full object bytes returned with metadata from the same read operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectBody {
+    pub metadata: ObjectMetadata,
+    pub bytes: Vec<u8>,
 }
 
 /// Controls the write semantics of a `put` call.
@@ -61,6 +68,7 @@ pub trait ObjectStore {
     fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.head(key)
     }
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError>;
     fn get(&self, key: &str, range: Option<ByteRange>)
         -> Result<Option<Vec<u8>>, ObjectStoreError>;
     fn put(
@@ -106,6 +114,10 @@ where
 
     fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         (*self).head_with_checksum(key)
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        (*self).get_with_metadata(key)
     }
 
     fn get(
@@ -161,6 +173,10 @@ where
 
     fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.as_ref().head_with_checksum(key)
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.as_ref().get_with_metadata(key)
     }
 
     fn get(

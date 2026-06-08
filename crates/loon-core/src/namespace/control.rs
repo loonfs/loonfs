@@ -129,18 +129,7 @@ pub(crate) fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
 ) -> Result<LoadedNamespaceDescriptorObject, ControlObjectLoadError> {
     validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_descriptor(expected_namespace.as_str());
-    let metadata = store
-        .head(&object_key)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObject {
-            object_key: object_key.clone(),
-        })?;
-    let encoded_bytes = store
-        .get(&object_key, None)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObjectAfterHead {
-            object_key: object_key.clone(),
-        })?;
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key)?;
     let envelope: NamespaceDescriptorEnvelope =
         serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -160,18 +149,7 @@ pub(crate) fn read_content_store_descriptor_object<S: ObjectStore + ?Sized>(
     expected_content_store: &ContentStoreId,
 ) -> Result<LoadedContentStoreDescriptorObject, ControlObjectLoadError> {
     let object_key = content_store_descriptor(expected_content_store.as_str());
-    let metadata = store
-        .head(&object_key)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObject {
-            object_key: object_key.clone(),
-        })?;
-    let encoded_bytes = store
-        .get(&object_key, None)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObjectAfterHead {
-            object_key: object_key.clone(),
-        })?;
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key)?;
     let envelope: ContentStoreDescriptorEnvelope =
         serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -192,18 +170,7 @@ pub(crate) fn read_head_object<S: ObjectStore + ?Sized>(
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
     validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_head(expected_namespace.as_str());
-    let metadata = store
-        .head(&object_key)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObject {
-            object_key: object_key.clone(),
-        })?;
-    let encoded_bytes = store
-        .get(&object_key, None)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObjectAfterHead {
-            object_key: object_key.clone(),
-        })?;
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key)?;
     let envelope: HeadStateEnvelope =
         serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -224,18 +191,7 @@ pub(crate) fn read_lease_object<S: ObjectStore + ?Sized>(
 ) -> Result<LoadedLeaseObject, ControlObjectLoadError> {
     validate_namespace_id_for_control_key(expected_namespace)?;
     let object_key = namespace_lease(expected_namespace.as_str());
-    let metadata = store
-        .head(&object_key)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObject {
-            object_key: object_key.clone(),
-        })?;
-    let encoded_bytes = store
-        .get(&object_key, None)
-        .map_err(map_store_load_error)?
-        .ok_or_else(|| ControlObjectLoadError::MissingObjectAfterHead {
-            object_key: object_key.clone(),
-        })?;
+    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key)?;
     let envelope: LeaseStateEnvelope =
         serde_json::from_slice(&encoded_bytes).map_err(|err| ControlObjectLoadError::Codec {
             object_key: object_key.clone(),
@@ -310,6 +266,19 @@ fn control_identity(
         ControlObjectLoadError::Store(format!("missing control object etag for `{object_key}`"))
     })?;
     Ok(ControlObjectIdentity { etag })
+}
+
+fn read_control_object_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    object_key: &str,
+) -> Result<(ObjectMetadata, Vec<u8>), ControlObjectLoadError> {
+    let body = store
+        .get_with_metadata(object_key)
+        .map_err(map_store_load_error)?
+        .ok_or_else(|| ControlObjectLoadError::MissingObject {
+            object_key: object_key.to_owned(),
+        })?;
+    Ok((body.metadata, body.bytes))
 }
 
 fn validate_namespace_id_for_control_key(

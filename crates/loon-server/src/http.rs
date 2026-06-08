@@ -821,7 +821,9 @@ mod tests {
     use loon_core::{BootstrapOptions, MutationContext, NamespaceEngine, WriteOptions};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
-    use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use loon_objectstore::{
+        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    };
     use loonfs::{
         CreateNamespaceOptions, Fs, FsConfig, PutFileBehavior, PutFileOptions, RuntimeCacheConfig,
         TraceMode, TraceStoreKind,
@@ -860,6 +862,10 @@ mod tests {
             range: Option<ByteRange>,
         ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
             self.inner.get(key, range)
+        }
+
+        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key)
         }
 
         fn put(

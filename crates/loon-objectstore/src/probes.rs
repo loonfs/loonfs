@@ -30,6 +30,9 @@ pub fn run_contract_probes<S: ObjectStore + ?Sized>(
     probe_compare_and_swap(store, run_id)?;
     checks.push("compare_and_swap".to_owned());
 
+    probe_get_with_metadata(store, run_id)?;
+    checks.push("get_with_metadata".to_owned());
+
     probe_visibility_after_write(store, run_id)?;
     checks.push("visibility_after_write".to_owned());
 
@@ -77,6 +80,48 @@ fn probe_create_if_absent<S: ObjectStore + ?Sized>(
     }
 
     cleanup_key(store, "create_if_absent", &key);
+    Ok(())
+}
+
+fn probe_get_with_metadata<S: ObjectStore + ?Sized>(
+    store: &S,
+    run_id: &str,
+) -> Result<(), ContractProbeError> {
+    let key = namespace_head(&probe_namespace(run_id, "get-with-metadata"));
+    let _ = store.delete(&key);
+    let bytes = br#"{"seq":41,"read":"full"}"#;
+
+    let written = store
+        .put_if_absent(&key, bytes)
+        .map_err(|err| probe_error("get_with_metadata", err))?;
+    let loaded = store
+        .get_with_metadata(&key)
+        .map_err(|err| probe_error("get_with_metadata", err))?
+        .ok_or_else(|| ContractProbeError::Probe {
+            probe: "get_with_metadata",
+            message: "expected full-object read to find written object".to_owned(),
+        })?;
+
+    if loaded.bytes != bytes {
+        return Err(ContractProbeError::Probe {
+            probe: "get_with_metadata",
+            message: "full-object read returned unexpected bytes".to_owned(),
+        });
+    }
+    if loaded.metadata.size_bytes != bytes.len() as u64 {
+        return Err(ContractProbeError::Probe {
+            probe: "get_with_metadata",
+            message: "full-object read returned unexpected size metadata".to_owned(),
+        });
+    }
+    if loaded.metadata.etag != written.etag {
+        return Err(ContractProbeError::Probe {
+            probe: "get_with_metadata",
+            message: "full-object read returned unexpected object identity".to_owned(),
+        });
+    }
+
+    cleanup_key(store, "get_with_metadata", &key);
     Ok(())
 }
 

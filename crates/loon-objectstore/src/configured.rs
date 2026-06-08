@@ -1,4 +1,4 @@
-use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::fs::LocalFsStore;
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
@@ -82,6 +82,16 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::AwsS3(store) => store.head_with_checksum(key),
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.head_with_checksum(key),
+        }
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        match &self.inner {
+            ConfiguredObjectStoreInner::LocalFs { store, key_prefix } => {
+                store.get_with_metadata(&scope_object_key(key_prefix.as_deref(), key)?)
+            }
+            ConfiguredObjectStoreInner::AwsS3(store) => store.get_with_metadata(key),
+            ConfiguredObjectStoreInner::CloudflareR2(store) => store.get_with_metadata(key),
         }
     }
 

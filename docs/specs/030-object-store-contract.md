@@ -12,6 +12,7 @@ A conforming object-store layer must provide the following behavior.
 | --- | --- |
 | **Create-if-absent** for immutable objects | File content objects, WAL segments, and manifests must never be silently overwritten. |
 | **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
+| **Full-object reads with identity metadata** | Mutable control-object readers must receive object bytes and the opaque compare token for those same bytes from one read operation, so one observation's payload cannot be paired with another observation's compare token. |
 | **Strong consistency** | A successful put/delete operation must become authoritative immediately after it succeeds. |
 | **Prefix enumeration** | Manifest discovery, WAL segment discovery for repair and cleanup, and general namespace inspection need a reliable way to enumerate objects by prefix. |
 | **Deterministic key scoping** | Providers must not allow objects outside the configured namespace or tenant prefix to leak into operations. |
@@ -116,6 +117,8 @@ A reader or writer resolves content through the namespace descriptor: `namespace
 ## 7. Mutable control-object rules
 
 Small mutable objects such as the namespace head or a lease must use compare-and-swap semantics. These objects must remain small enough that guarded rewrite is practical.
+
+Readers of small mutable control objects must use a full-object read that returns bytes and the object identity metadata for those same bytes. This does not by itself guarantee freshness; it guarantees self-consistency. A reader must not separately load identity metadata and bytes, then use the identity from one observation with the payload from another observation.
 
 The live namespace lease object must not be physically deleted to represent ordinary expiry. Lease expiry is represented in the payload, and acquisition or transfer rewrites the existing `lease.json` object. In v0, the head `active_fence_token` and lease `fence_token` are the monotonic lease-epoch equivalent: each successful writer takeover advances the fence token, and a writer that observes a higher active fence token than its own must stop publishing.
 

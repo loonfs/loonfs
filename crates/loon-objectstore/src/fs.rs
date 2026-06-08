@@ -1,4 +1,4 @@
-use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::checksum;
 use crate::keyspace::validate_segments;
 use crate::ObjectStoreError;
@@ -42,6 +42,18 @@ impl LocalFsStore {
         include_checksum: bool,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let metadata = fs::metadata(path).map_err(io_error)?;
+        let checksum_sha256 = include_checksum
+            .then(|| fs::read(path).map(|bytes| checksum::sha256_digest(&bytes)))
+            .transpose()
+            .map_err(io_error)?;
+        Self::metadata_from_fs_metadata(&metadata, checksum_sha256, path)
+    }
+
+    fn metadata_from_fs_metadata(
+        metadata: &fs::Metadata,
+        checksum_sha256: Option<String>,
+        path: &Path,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         if !metadata.is_file() {
             return Err(ObjectStoreError::Transport(format!(
                 "object path is not a file: {}",
@@ -59,10 +71,7 @@ impl LocalFsStore {
         Ok(ObjectMetadata {
             etag: Some(format!("{:x}-{:x}", metadata.len(), modified_nanos)),
             size_bytes: metadata.len(),
-            checksum_sha256: include_checksum
-                .then(|| fs::read(path).map(|bytes| checksum::sha256_digest(&bytes)))
-                .transpose()
-                .map_err(io_error)?,
+            checksum_sha256,
         })
     }
 
@@ -140,6 +149,26 @@ impl ObjectStore for LocalFsStore {
         }
 
         Self::metadata_for_path(&path, true).map(Some)
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        let path = self.resolve_key(key)?;
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(io_error(err)),
+        };
+        let fs_metadata = file.metadata().map_err(io_error)?;
+
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(io_error)?;
+
+        let metadata = Self::metadata_from_fs_metadata(
+            &fs_metadata,
+            Some(checksum::sha256_digest(&bytes)),
+            &path,
+        )?;
+        Ok(Some(ObjectBody { metadata, bytes }))
     }
 
     fn get(

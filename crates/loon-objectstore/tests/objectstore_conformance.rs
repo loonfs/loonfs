@@ -32,6 +32,10 @@ fn provider_profiles_exist() {
         Expectation::VerifyByConformance
     );
     assert_eq!(
+        LOCAL_FS.active_contract.full_object_read_identity,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
         LOCAL_FS.active_contract.overwrite,
         Expectation::VerifyByConformance
     );
@@ -61,6 +65,10 @@ fn provider_profiles_exist() {
         AWS_S3.active_contract.opaque_compare_token_for_cas,
         Expectation::ExpectedYes
     );
+    assert_eq!(
+        AWS_S3.active_contract.full_object_read_identity,
+        Expectation::ExpectedYes
+    );
     assert_eq!(AWS_S3.active_contract.overwrite, Expectation::ExpectedYes);
     assert_eq!(
         AWS_S3.active_contract.delete_idempotent,
@@ -84,6 +92,10 @@ fn provider_profiles_exist() {
     );
     assert_eq!(
         CLOUDFLARE_R2.active_contract.opaque_compare_token_for_cas,
+        Expectation::VerifyByConformance
+    );
+    assert_eq!(
+        CLOUDFLARE_R2.active_contract.full_object_read_identity,
         Expectation::VerifyByConformance
     );
     assert_eq!(
@@ -211,6 +223,7 @@ fn local_fs_overwrite_visibility_and_delete_idempotence() {
     let temp_dir = TestDir::new("overwrite-delete");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_overwrite_updates_head_and_body(&store);
+    assert_get_with_metadata_returns_body_and_identity(&store);
     assert_delete_missing_is_idempotent(&store);
 }
 
@@ -253,6 +266,7 @@ fn local_fs_contract_probes_match_doctor_surface() {
         vec![
             "create_if_absent",
             "compare_and_swap",
+            "get_with_metadata",
             "visibility_after_write",
             "visibility_after_delete",
             "sorted_listing",
@@ -305,11 +319,33 @@ fn assert_provider_conformance<S: ObjectStore>(store: &S) {
     assert_compare_and_swap_rejects_stale_writer(store);
     assert_compare_and_swap_missing_object_rejects_writer(store);
     assert_overwrite_updates_head_and_body(store);
+    assert_get_with_metadata_returns_body_and_identity(store);
     assert_delete_missing_is_idempotent(store);
     assert_lists_immediately_after_write_and_delete(store);
     assert_sorted_list_prefix(store);
     assert_supports_range_reads(store);
     assert_rejects_invalid_keys_consistently(store);
+}
+
+fn assert_get_with_metadata_returns_body_and_identity<S: ObjectStore>(store: &S) {
+    let key = namespace_head("ns-1");
+    let _ = store.delete(&key);
+
+    let written = store
+        .put_overwrite(&key, br#"{"seq":41,"source":"get-with-metadata"}"#)
+        .expect("write object for get_with_metadata");
+    let loaded = store
+        .get_with_metadata(&key)
+        .expect("get_with_metadata")
+        .expect("object should exist");
+
+    assert_eq!(loaded.bytes, br#"{"seq":41,"source":"get-with-metadata"}"#);
+    assert_eq!(loaded.metadata.size_bytes, loaded.bytes.len() as u64);
+    assert_eq!(loaded.metadata.etag, written.etag);
+
+    store
+        .delete(&key)
+        .expect("cleanup get_with_metadata object");
 }
 
 fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {

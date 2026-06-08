@@ -322,7 +322,9 @@ mod tests {
     use loon_api::{ContentRef, ContentRefKind, ContentStoreId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::content_blob;
-    use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use loon_objectstore::{
+        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    };
     use std::cell::Cell;
     use tempfile::tempdir;
 
@@ -486,6 +488,18 @@ mod tests {
                     .set(self.content_blob_gets.get().saturating_add(1));
             }
             self.inner.get(key, range)
+        }
+
+        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            if key.starts_with("content-stores/") && key.contains("/blobs/") {
+                self.content_blob_gets
+                    .set(self.content_blob_gets.get().saturating_add(1));
+            }
+            let mut body = self.inner.get_with_metadata(key)?;
+            if let Some(body) = &mut body {
+                body.metadata.checksum_sha256 = None;
+            }
+            Ok(body)
         }
 
         fn put(

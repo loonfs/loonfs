@@ -1,4 +1,4 @@
-use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::checksum;
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
@@ -306,6 +306,50 @@ impl ObjectStore for S3CompatibleStore {
     fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let scoped_key = self.scoped_key(key)?;
         self.run_async(async { self.head_scoped(&scoped_key, true).await })
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        let scoped_key = self.scoped_key(key)?;
+        self.run_async(async {
+            let mut request = self
+                .client()
+                .get_object()
+                .bucket(&self.bucket)
+                .key(&scoped_key);
+            if self.sha256_checksum_metadata {
+                request = request.checksum_mode(ChecksumMode::Enabled);
+            }
+
+            match request.send().await {
+                Ok(output) => {
+                    let checksum_sha256 = if self.sha256_checksum_metadata {
+                        output
+                            .checksum_sha256()
+                            .map(checksum::sha256_digest_from_base64)
+                            .transpose()
+                            .map_err(ObjectStoreError::Transport)?
+                    } else {
+                        None
+                    };
+                    let metadata = ObjectMetadata {
+                        etag: output.e_tag().map(ToOwned::to_owned),
+                        size_bytes: output.content_length().try_into().unwrap_or_default(),
+                        checksum_sha256,
+                    };
+                    let collected = output
+                        .body
+                        .collect()
+                        .await
+                        .map_err(|err| ObjectStoreError::Transport(err.to_string()))?;
+                    Ok(Some(ObjectBody {
+                        metadata,
+                        bytes: collected.into_bytes().to_vec(),
+                    }))
+                }
+                Err(err) if is_not_found(&err) => Ok(None),
+                Err(err) => Err(map_sdk_error(err)),
+            }
+        })
     }
 
     fn get(
