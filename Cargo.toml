@@ -9,6 +9,7 @@ members = [
   "crates/loon-server",
   "crates/loon-client",
   "crates/loon-cli",
+  "crates/loon-sim",
 ]
 
 [workspace.package]

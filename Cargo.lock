@@ -1431,6 +1431,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "loon-sim"
+version = "0.1.1"
+dependencies = [
+ "loon-api",
+ "loon-core",
+ "loon-objectstore",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "loonfs"
 version = "0.1.1"
 dependencies = [
