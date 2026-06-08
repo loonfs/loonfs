@@ -89,6 +89,7 @@ mod tests {
         normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
         validate_segments,
     };
+    use crate::keys::namespace_head;
     use crate::ObjectStoreError;
 
     #[test]
@@ -114,20 +115,24 @@ mod tests {
 
     #[test]
     fn scoped_key_helpers_keep_prefix_isolation() {
+        let head_key = namespace_head("ns-1");
         assert!(matches!(
-            scope_object_key(Some("tenant-a"), "namespaces/ns-1/head.json"),
-            Ok(scoped) if scoped == "tenant-a/namespaces/ns-1/head.json"
+            scope_object_key(Some("tenant-a"), &head_key),
+            Ok(scoped) if scoped == format!("tenant-a/{head_key}")
         ));
         assert!(matches!(
             scope_list_prefix(Some("tenant-a"), "namespaces/ns-1/"),
             Ok(scoped) if scoped == "tenant-a/namespaces/ns-1/"
         ));
         assert_eq!(
-            unscope_listed_key(Some("tenant-a"), "tenant-a/namespaces/ns-1/head.json"),
-            Some("namespaces/ns-1/head.json".to_owned())
+            unscope_listed_key(Some("tenant-a"), &format!("tenant-a/{head_key}")),
+            Some(head_key)
         );
         assert_eq!(
-            unscope_listed_key(Some("tenant-a"), "tenant-b/namespaces/ns-1/head.json"),
+            unscope_listed_key(
+                Some("tenant-a"),
+                "tenant-b/namespaces/ns-1/control/head.json"
+            ),
             None
         );
     }

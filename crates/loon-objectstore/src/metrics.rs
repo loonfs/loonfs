@@ -400,11 +400,15 @@ fn classify_key(key: &str) -> KeyClass {
     match segments.as_slice() {
         ["content-stores", _, "blobs", ..] => KeyClass::Content,
         ["content-stores", ..] => KeyClass::Metadata,
-        ["namespaces", _, "head.json"] => KeyClass::NamespaceHead,
-        ["namespaces", _, "lease.json"] => KeyClass::Lease,
+        ["namespaces", _, "control", "head.json"] => KeyClass::NamespaceHead,
+        ["namespaces", _, "control", "lease.json"] => KeyClass::Lease,
         ["namespaces", _, "wal", ..] => KeyClass::WalSegment,
-        ["namespaces", _, "checkpoints", _, "manifest.json"] => KeyClass::CheckpointManifest,
-        ["namespaces", _, "checkpoints", _, "runs", _, "tables", ..] => KeyClass::CheckpointTable,
+        ["namespaces", _, "compacted", "checkpoints", _, "manifest.json"] => {
+            KeyClass::CheckpointManifest
+        }
+        ["namespaces", _, "compacted", "checkpoints", _, "runs", _, "tables", ..] => {
+            KeyClass::CheckpointTable
+        }
         ["namespaces", _, "derived", .., "progress.json"] => KeyClass::DerivedProgress,
         ["namespaces", ..] | ["queue", ..] => KeyClass::Metadata,
         _ => KeyClass::Unknown,

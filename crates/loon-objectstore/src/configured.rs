@@ -147,6 +147,7 @@ impl ObjectStore for ConfiguredObjectStore {
 mod tests {
     use super::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
     use crate::fs::LocalFsStore;
+    use crate::keys::namespace_head;
     use crate::r2::R2StoreConfig;
     use crate::s3::AwsS3StoreConfig;
     use crate::ObjectStore;
@@ -160,21 +161,22 @@ mod tests {
         let temp_dir = unique_temp_dir("configured-store-local");
         let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
             .expect("construct configured local fs store");
+        let head_key = namespace_head("ns-1");
 
         store
-            .put_overwrite("namespaces/ns-1/head.json", br#"{"ok":true}"#)
+            .put_overwrite(&head_key, br#"{"ok":true}"#)
             .expect("write scoped object");
 
         let raw_store = LocalFsStore::new(&temp_dir).expect("open raw store");
         assert!(raw_store
-            .head("tenant-a/namespaces/ns-1/head.json")
+            .head(&format!("tenant-a/{head_key}"))
             .expect("head raw scoped object")
             .is_some());
         assert_eq!(
             store
                 .list_prefix("namespaces/ns-1/")
                 .expect("list scoped prefix"),
-            vec!["namespaces/ns-1/head.json".to_owned()]
+            vec![head_key]
         );
     }
 

@@ -1,3 +1,4 @@
+use crate::layout::{self, ObjectLayout};
 use crate::ObjectStoreError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,53 +40,61 @@ impl DerivedWorkClass {
 }
 
 pub fn namespace_head(namespace: &str) -> String {
-    format!("namespaces/{namespace}/head.json")
+    ObjectLayout::new().namespace_head(namespace).into_string()
 }
 
 pub fn namespace_descriptor(namespace: &str) -> String {
-    format!("namespaces/{namespace}/descriptor.json")
+    ObjectLayout::new()
+        .namespace_descriptor(namespace)
+        .into_string()
 }
 
 pub fn namespace_lease(namespace: &str) -> String {
-    format!("namespaces/{namespace}/lease.json")
+    ObjectLayout::new().namespace_lease(namespace).into_string()
 }
 
 pub fn wal_segment(namespace: &str, start_seq: u64, end_seq: u64, segment_id: &str) -> String {
-    format!("namespaces/{namespace}/wal/{start_seq:020}-{end_seq:020}-{segment_id}.cbor.zst")
+    ObjectLayout::new()
+        .wal_segment(namespace, start_seq, end_seq, segment_id)
+        .into_string()
 }
 
 pub fn content_store_descriptor(content_store: &str) -> String {
-    format!("content-stores/{content_store}/descriptor.json")
+    ObjectLayout::new()
+        .content_store_descriptor(content_store)
+        .into_string()
 }
 
 pub fn content_blob(content_store: &str, digest: &str) -> Result<String, ObjectStoreError> {
-    let hex = sha256_hex_from_digest(digest)?;
-    Ok(format!(
-        "content-stores/{content_store}/blobs/sha256/{}/{}/{}",
-        &hex[0..2],
-        &hex[2..4],
-        hex
-    ))
+    ObjectLayout::new()
+        .content_blob(content_store, digest)
+        .map(|key| key.into_string())
 }
 
 pub fn conflict_artifact(namespace: &str, conflict_id: &str) -> String {
-    format!("namespaces/{namespace}/conflicts/{conflict_id}.json")
+    ObjectLayout::new()
+        .conflict_artifact(namespace, conflict_id)
+        .into_string()
 }
 
 pub fn conflict_artifact_prefix(namespace: &str) -> String {
-    format!("namespaces/{namespace}/conflicts/")
+    ObjectLayout::new().conflict_artifact_prefix(namespace)
 }
 
 pub fn upload_session(namespace: &str, upload_id: &str) -> String {
-    format!("namespaces/{namespace}/control/uploads/{upload_id}.json")
+    ObjectLayout::new()
+        .upload_session(namespace, upload_id)
+        .into_string()
 }
 
 pub fn upload_session_prefix(namespace: &str) -> String {
-    format!("namespaces/{namespace}/control/uploads/")
+    ObjectLayout::new().upload_session_prefix(namespace)
 }
 
 pub fn checkpoint_manifest(namespace: &str, seq: u64) -> String {
-    format!("namespaces/{namespace}/checkpoints/{seq:020}/manifest.json")
+    ObjectLayout::new()
+        .checkpoint_manifest(namespace, seq)
+        .into_string()
 }
 
 pub fn checkpoint_run_table(
@@ -95,35 +104,23 @@ pub fn checkpoint_run_table(
     family: CheckpointTableFamily,
     segment_index: u32,
 ) -> String {
-    format!(
-        "namespaces/{namespace}/checkpoints/{run_seq:020}/runs/{run_id}/tables/{}-{segment_index:05}.sst.zst",
-        family.as_str()
-    )
+    ObjectLayout::new()
+        .checkpoint_run_table(namespace, run_seq, run_id, family, segment_index)
+        .into_string()
 }
 
 pub fn derived_progress(namespace: &str, work_class: DerivedWorkClass) -> String {
-    let work_class = work_class.as_str();
-    format!("namespaces/{namespace}/derived/{work_class}/progress.json")
+    ObjectLayout::new()
+        .derived_progress(namespace, work_class)
+        .into_string()
 }
 
 pub fn queue_shard(shard_index: u32) -> String {
-    format!("queue/shards/{shard_index:05}.json")
+    ObjectLayout::new().queue_shard(shard_index).into_string()
 }
 
 pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
-    let Some(hex) = digest.strip_prefix("sha256:") else {
-        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
-    };
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
-    }
-    if !hex
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    {
-        return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
-    }
-    Ok(hex)
+    layout::sha256_hex_from_digest(digest)
 }
 
 #[cfg(test)]
@@ -137,12 +134,15 @@ mod tests {
 
     #[test]
     fn key_builders_match_spec_examples() {
-        assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/head.json");
+        assert_eq!(namespace_head("ns-1"), "namespaces/ns-1/control/head.json");
         assert_eq!(
             namespace_descriptor("ns-1"),
             "namespaces/ns-1/descriptor.json"
         );
-        assert_eq!(namespace_lease("ns-1"), "namespaces/ns-1/lease.json");
+        assert_eq!(
+            namespace_lease("ns-1"),
+            "namespaces/ns-1/control/lease.json"
+        );
         assert_eq!(
             content_store_descriptor("cs_00000000000000000000000000000001"),
             "content-stores/cs_00000000000000000000000000000001/descriptor.json"
@@ -153,7 +153,7 @@ mod tests {
         );
         assert_eq!(
             checkpoint_manifest("ns-1", 400),
-            "namespaces/ns-1/checkpoints/00000000000000000400/manifest.json"
+            "namespaces/ns-1/compacted/checkpoints/00000000000000000400/manifest.json"
         );
         assert_eq!(
             checkpoint_run_table(
@@ -163,7 +163,7 @@ mod tests {
                 CheckpointTableFamily::DirentryBinds,
                 7
             ),
-            "namespaces/ns-1/checkpoints/00000000000000000400/runs/run_00000000000000000000000000000001/tables/direntry-binds-00007.sst.zst"
+            "namespaces/ns-1/compacted/checkpoints/00000000000000000400/runs/run_00000000000000000000000000000001/tables/direntry-binds/00007.sst.zst"
         );
         assert_eq!(
             derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder),
@@ -188,12 +188,9 @@ mod tests {
         );
         assert_eq!(
             upload_session("ns-1", "upl_00000000000000000000000000000001"),
-            "namespaces/ns-1/control/uploads/upl_00000000000000000000000000000001.json"
+            "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
         );
-        assert_eq!(
-            upload_session_prefix("ns-1"),
-            "namespaces/ns-1/control/uploads/"
-        );
+        assert_eq!(upload_session_prefix("ns-1"), "namespaces/ns-1/uploads/");
     }
 
     #[test]

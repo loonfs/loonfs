@@ -26,13 +26,13 @@ The required durable object families and standard key patterns are:
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
 | **Namespace descriptor** | Immutable | Record namespace identity and its immutable content-store relationship. | `namespaces/{namespace_id}/descriptor.json` |
-| **Namespace head** | Mutable | Record the current visible boundary, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/head.json` |
-| **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/lease.json` |
+| **Namespace head** | Mutable | Record the current visible boundary, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/control/head.json` |
+| **Namespace lease** | Mutable | Fence concurrent publishers when the deployment uses more than one possible writer. | `namespaces/{namespace_id}/control/lease.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/{start_seq}-{end_seq}-{segment_id}.cbor.zst` |
-| **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced materialization tables. | `namespaces/{namespace_id}/checkpoints/{checkpoint_seq}/manifest.json` |
-| **Checkpoint run tables** | Immutable | Store one verified metadata materialization run. Runs may be full materializations or WAL-derived runs, and a checkpoint manifest may reference multiple runs. | `namespaces/{namespace_id}/checkpoints/{run_seq}/runs/{run_id}/tables/{family}-{segment_index}.sst.zst` |
+| **Checkpoint manifest** | Immutable | Record the verified checkpoint summary and referenced materialization tables. | `namespaces/{namespace_id}/compacted/checkpoints/{checkpoint_seq}/manifest.json` |
+| **Checkpoint run tables** | Immutable | Store one verified metadata materialization run. Runs may be full materializations or WAL-derived runs, and a checkpoint manifest may reference multiple runs. | `namespaces/{namespace_id}/compacted/checkpoints/{run_seq}/runs/{run_id}/tables/{family}/{segment_index}.sst.zst` |
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
 
@@ -40,7 +40,7 @@ These key shapes are part of the interoperable storage contract. Implementations
 
 LoonFS uses distinct naming conventions for distinct surfaces:
 
-- Fixed object-store path segments use lowercase words or lowercase-kebab, e.g. `content-stores`, `commit-receipts`, and `control/uploads`.
+- Fixed object-store path segments use lowercase words or lowercase-kebab, e.g. `content-stores`, `commit-receipts`, and `uploads`.
 - Generated opaque IDs use underscore-prefixed tokens with 32 lowercase hex characters, e.g. `cs_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41`, `upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c`, and `seg_b7c14a0d9e6f42a38c5d21f0e8a739bc`.
 - Durable work-class names use lowercase-kebab, e.g. `checkpoint-builder`.
 - JSON enum values use snake_case.
