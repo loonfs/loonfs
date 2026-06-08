@@ -1,7 +1,9 @@
 use crate::fault::{FaultSchedule, ObjectStoreFault, ScheduledFault};
 use crate::object_op::{ObjectOp, ObjectOpKind};
 use crate::trace::{RunId, SharedSimTrace, SimEventResult, SimTrace, SimTraceEvent};
-use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use loon_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -11,7 +13,7 @@ pub struct FaultInjectingObjectStore<S> {
     schedule: FaultSchedule,
     trace: SharedSimTrace,
     next_step: AtomicU64,
-    stale_values: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    stale_values: Mutex<HashMap<String, Vec<ObjectBody>>>,
     recent_writes: Mutex<Vec<String>>,
 }
 
@@ -82,13 +84,13 @@ impl<S> FaultInjectingObjectStore<S> {
     where
         S: ObjectStore,
     {
-        if let Ok(Some(bytes)) = self.inner.get(key, None) {
+        if let Ok(Some(body)) = self.inner.get_with_metadata(key) {
             self.stale_values
                 .lock()
                 .expect("stale value lock poisoned")
                 .entry(key.to_owned())
                 .or_default()
-                .push(bytes);
+                .push(body);
         }
     }
 
@@ -99,7 +101,7 @@ impl<S> FaultInjectingObjectStore<S> {
             .push(key.to_owned());
     }
 
-    fn stale_value(&self, key: &str) -> Option<Vec<u8>> {
+    fn stale_value(&self, key: &str) -> Option<ObjectBody> {
         self.stale_values
             .lock()
             .expect("stale value lock poisoned")
@@ -227,14 +229,14 @@ where
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
             Some(ObjectStoreFault::GetReturnsStaleValue) => {
-                if let Some(bytes) = self.stale_value(key) {
+                if let Some(body) = self.stale_value(key) {
                     self.push_trace(
                         op,
                         "get_stale_value",
                         Some(ObjectStoreFault::GetReturnsStaleValue),
                         SimEventResult::Ok,
                     );
-                    return Ok(Some(apply_range(bytes, range)?));
+                    return Ok(Some(apply_range(body.bytes, range)?));
                 }
                 let result = self.inner.get(key, range);
                 self.push_trace(
@@ -277,6 +279,66 @@ where
             None => {
                 let result = self.inner.get(key, range);
                 self.push_trace(op, "get", None, result_class(&result));
+                result
+            }
+        }
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOpKind::Get, key);
+        let scheduled = self.scheduled_fault(&op);
+        match scheduled.as_ref().map(|fault| &fault.fault) {
+            Some(ObjectStoreFault::GetReturnsStaleValue) => {
+                if let Some(body) = self.stale_value(key) {
+                    self.push_trace(
+                        op,
+                        "get_with_metadata_stale_value",
+                        Some(ObjectStoreFault::GetReturnsStaleValue),
+                        SimEventResult::Ok,
+                    );
+                    return Ok(Some(body));
+                }
+                let result = self.inner.get_with_metadata(key);
+                self.push_trace(
+                    op,
+                    "get_with_metadata_stale_value_skipped",
+                    Some(ObjectStoreFault::GetReturnsStaleValue),
+                    SimEventResult::Skipped {
+                        reason: "no_stale_value_recorded".to_owned(),
+                    },
+                );
+                result
+            }
+            Some(ObjectStoreFault::CorruptObjectBytes) => {
+                let mut result = self.inner.get_with_metadata(key);
+                if let Ok(Some(body)) = &mut result {
+                    if let Some(first) = body.bytes.first_mut() {
+                        *first ^= 0x01;
+                    }
+                }
+                self.push_trace(
+                    op,
+                    "get_with_metadata_corrupt_bytes",
+                    Some(ObjectStoreFault::CorruptObjectBytes),
+                    result_class(&result),
+                );
+                result
+            }
+            Some(incompatible) => {
+                let result = self.inner.get_with_metadata(key);
+                self.push_trace(
+                    op,
+                    "get_with_metadata_fault_skipped",
+                    Some(incompatible.clone()),
+                    SimEventResult::Skipped {
+                        reason: "fault_not_applicable_to_operation".to_owned(),
+                    },
+                );
+                result
+            }
+            None => {
+                let result = self.inner.get_with_metadata(key);
+                self.push_trace(op, "get_with_metadata", None, result_class(&result));
                 result
             }
         }
@@ -524,6 +586,31 @@ mod tests {
             Err(ObjectStoreError::Transport(_))
         ));
         assert_eq!(store.inner().get("a", None).unwrap(), None);
+    }
+
+    #[test]
+    fn stale_get_with_metadata_returns_stale_body_and_metadata() {
+        let (_temp_dir, store) = temp_store();
+        let schedule = FaultSchedule {
+            seed: SimSeed(1),
+            faults: vec![ScheduledFault {
+                step: 3,
+                op_kind: Some(ObjectOpKind::Get),
+                key_contains: None,
+                fault: ObjectStoreFault::GetReturnsStaleValue,
+            }],
+        };
+        let store = FaultInjectingObjectStore::new(store, schedule);
+
+        store.put_overwrite("a", b"old").expect("put old");
+        store.put_overwrite("a", b"new-value").expect("put new");
+        let body = store
+            .get_with_metadata("a")
+            .expect("get with metadata")
+            .expect("body");
+
+        assert_eq!(body.bytes, b"old");
+        assert_eq!(body.metadata.size_bytes, 3);
     }
 
     #[test]
