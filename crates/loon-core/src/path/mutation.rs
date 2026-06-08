@@ -20,7 +20,7 @@ fn normalized_commit_id(commit_id: Option<&str>) -> Result<CommitId, CoreError> 
     Ok(commit_id)
 }
 
-pub fn put_file_bytes<S: ObjectStore + ?Sized>(
+pub(crate) fn put_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -42,7 +42,8 @@ pub fn put_file_bytes<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn write_file_bytes<S: ObjectStore + ?Sized>(
+#[cfg(test)]
+pub(crate) fn write_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -61,7 +62,7 @@ pub fn write_file_bytes<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn create_dir_path<S: ObjectStore + ?Sized>(
+pub(crate) fn create_dir_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -81,7 +82,7 @@ pub fn create_dir_path<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn put_file_content_ref<S: ObjectStore + ?Sized>(
+pub(crate) fn put_file_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -105,7 +106,7 @@ pub fn put_file_content_ref<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn delete_path<S: ObjectStore + ?Sized>(
+pub(crate) fn delete_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -126,7 +127,7 @@ pub fn delete_path<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
+pub(crate) fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -147,7 +148,7 @@ pub fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn move_path<S: ObjectStore + ?Sized>(
+pub(crate) fn move_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     from_path: &str,
@@ -170,7 +171,7 @@ pub fn move_path<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn copy_file_path<S: ObjectStore + ?Sized>(
+pub(crate) fn copy_file_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     from_path: &str,
@@ -192,7 +193,7 @@ pub fn copy_file_path<S: ObjectStore + ?Sized>(
     )
 }
 
-pub fn restore_file_revision<S: ObjectStore + ?Sized>(
+pub(crate) fn restore_file_revision<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,

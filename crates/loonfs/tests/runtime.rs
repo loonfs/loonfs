@@ -1,4 +1,5 @@
 use loon_api::wire::checkpoint::decode_checkpoint_manifest_json;
+use loon_core::cache::load_verified_namespace_basis;
 use loon_objectstore::fs::LocalFsStore;
 use loon_objectstore::keys::{
     checkpoint_manifest, namespace_descriptor, namespace_head, namespace_lease,
@@ -430,7 +431,7 @@ fn runtime_basis_cache_evicts_by_decoded_byte_budget() {
         .create_namespace(&second, CreateNamespaceOptions::default())
         .expect("create second namespace");
     let raw_store = store(temp_dir.path());
-    let basis_weight = loon_core::load_verified_namespace_basis(raw_store.as_ref(), &first)
+    let basis_weight = load_verified_namespace_basis(raw_store.as_ref(), &first)
         .expect("load basis")
         .weight();
     assert!(basis_weight.decoded_bytes > 1);
@@ -462,7 +463,7 @@ fn runtime_basis_cache_skips_oversized_basis() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let raw_store = store(temp_dir.path());
-    let basis_weight = loon_core::load_verified_namespace_basis(raw_store.as_ref(), &namespace_id)
+    let basis_weight = load_verified_namespace_basis(raw_store.as_ref(), &namespace_id)
         .expect("load basis")
         .weight();
     assert!(basis_weight.decoded_bytes > 1);

@@ -2,7 +2,7 @@ use super::{MaterializedCommit, Precondition};
 use crate::wal::WalBuildError;
 use loon_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalPrecondition};
 
-pub fn wal_payload_from_materialized_commit(
+pub(crate) fn wal_payload_from_materialized_commit(
     commit: &MaterializedCommit,
 ) -> Result<WalCommitPayload, WalBuildError> {
     let prepared = &commit.prepared;

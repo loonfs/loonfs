@@ -1,8 +1,8 @@
 use super::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
-use crate::basis::{load_verified_namespace_basis, BasisLoadError};
+use crate::basis::{load_verified_namespace_basis, BasisLoadError, VerifiedNamespaceBasis};
 use crate::checkpoint::{
-    checkpoint_basis_head, load_verified_checkpoint_tables_with_cache, MetadataTableCache,
-    VerifiedCheckpointTables,
+    checkpoint_basis_head, load_verified_checkpoint_tables_with_cache, CheckpointLoadError,
+    MetadataTableCache, VerifiedCheckpointTables,
 };
 use crate::content::read_durable_content_bytes;
 use crate::error::CoreError;
@@ -25,43 +25,17 @@ use loon_api::{
 };
 use loon_objectstore::ObjectStore;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetadataReadSource {
-    MaterializedTables,
-    FullBasisFallback,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetadataRead<T> {
-    pub value: T,
-    pub source: MetadataReadSource,
-}
-
-pub fn resolve_path<S: ObjectStore + ?Sized>(
+pub(crate) fn resolve_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
-    Ok(resolve_path_with_read_source(store, namespace_id, absolute_path)?.value)
-}
-
-pub fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-) -> Result<MetadataRead<AuthoritativePathEntry>, CoreError> {
     if let Some(entry) = resolve_path_from_materialized_tables(store, namespace_id, absolute_path)?
     {
-        return Ok(MetadataRead {
-            value: entry,
-            source: MetadataReadSource::MaterializedTables,
-        });
+        return Ok(entry);
     }
     let basis = load_verified_namespace_basis(store, namespace_id)?;
-    Ok(MetadataRead {
-        value: resolve_path_from_basis(&basis, absolute_path)?,
-        source: MetadataReadSource::FullBasisFallback,
-    })
+    resolve_path_from_basis(&basis, absolute_path)
 }
 
 #[tracing::instrument(
@@ -71,8 +45,8 @@ pub fn resolve_path_with_read_source<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "walk_path")
 )]
-pub fn resolve_path_from_basis(
-    basis: &crate::VerifiedNamespaceBasis,
+pub(crate) fn resolve_path_from_basis(
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativePathEntry, CoreError> {
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
@@ -89,30 +63,16 @@ pub fn resolve_path_from_basis(
     )
 }
 
-pub fn list_path<S: ObjectStore + ?Sized>(
+pub(crate) fn list_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
-    Ok(list_path_with_read_source(store, namespace_id, absolute_path)?.value)
-}
-
-pub fn list_path_with_read_source<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    absolute_path: &str,
-) -> Result<MetadataRead<Vec<AuthoritativePathEntry>>, CoreError> {
     if let Some(entries) = list_path_from_materialized_tables(store, namespace_id, absolute_path)? {
-        return Ok(MetadataRead {
-            value: entries,
-            source: MetadataReadSource::MaterializedTables,
-        });
+        return Ok(entries);
     }
     let basis = load_verified_namespace_basis(store, namespace_id)?;
-    Ok(MetadataRead {
-        value: list_path_from_basis(&basis, absolute_path)?,
-        source: MetadataReadSource::FullBasisFallback,
-    })
+    list_path_from_basis(&basis, absolute_path)
 }
 
 #[tracing::instrument(
@@ -122,8 +82,8 @@ pub fn list_path_with_read_source<S: ObjectStore + ?Sized>(
     skip_all,
     fields(phase = "walk_path")
 )]
-pub fn list_path_from_basis(
-    basis: &crate::VerifiedNamespaceBasis,
+pub(crate) fn list_path_from_basis(
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<Vec<AuthoritativePathEntry>, CoreError> {
     let absolute_path = parse_absolute_path_for_core(absolute_path)?;
@@ -175,7 +135,7 @@ pub fn list_path_from_basis(
         .collect()
 }
 
-pub fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
+pub(crate) fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -186,20 +146,7 @@ pub fn resolve_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     Ok(Some(view.resolve_path(absolute_path)?))
 }
 
-pub fn resolve_path_from_materialized_tables_at_head<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    head: &HeadState,
-    absolute_path: &str,
-) -> Result<Option<AuthoritativePathEntry>, CoreError> {
-    let Some(view) = MaterializedLatestView::load_at_head(store, namespace_id, head.clone())?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(view.resolve_path(absolute_path)?))
-}
-
-pub fn resolve_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
+pub(crate) fn resolve_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     head: &HeadState,
@@ -218,7 +165,7 @@ pub fn resolve_path_from_materialized_tables_at_head_with_cache<S: ObjectStore +
     Ok(Some(view.resolve_path(absolute_path)?))
 }
 
-pub fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
+pub(crate) fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -229,20 +176,7 @@ pub fn list_path_from_materialized_tables<S: ObjectStore + ?Sized>(
     Ok(Some(view.list_path(absolute_path)?))
 }
 
-pub fn list_path_from_materialized_tables_at_head<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    head: &HeadState,
-    absolute_path: &str,
-) -> Result<Option<Vec<AuthoritativePathEntry>>, CoreError> {
-    let Some(view) = MaterializedLatestView::load_at_head(store, namespace_id, head.clone())?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(view.list_path(absolute_path)?))
-}
-
-pub fn list_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
+pub(crate) fn list_path_from_materialized_tables_at_head_with_cache<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     head: &HeadState,
@@ -807,7 +741,7 @@ impl<'a, S: ObjectStore + ?Sized> MaterializedLatestView<'a, S> {
     }
 }
 
-fn checkpoint_error_to_core(error: crate::CheckpointLoadError) -> CoreError {
+fn checkpoint_error_to_core(error: CheckpointLoadError) -> CoreError {
     CoreError::Basis(BasisLoadError::CheckpointLoad(error))
 }
 
@@ -920,7 +854,7 @@ fn unbind_matches_binding(unbind: &DirentryUnbindRecord, direntry: &DirentryBind
         && unbind.bind_delta_index == direntry.bind_delta_index
 }
 
-pub fn read_file_bytes<S: ObjectStore + ?Sized>(
+pub(crate) fn read_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -929,9 +863,9 @@ pub fn read_file_bytes<S: ObjectStore + ?Sized>(
     read_file_bytes_from_basis(store, &basis, absolute_path)
 }
 
-pub fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
     let entry = resolve_path_from_basis(basis, absolute_path)?;
@@ -952,7 +886,7 @@ pub fn read_file_bytes_from_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn list_file_revisions<S: ObjectStore + ?Sized>(
+pub(crate) fn list_file_revisions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -961,8 +895,8 @@ pub fn list_file_revisions<S: ObjectStore + ?Sized>(
     list_file_revisions_from_basis(&basis, absolute_path)
 }
 
-pub fn list_file_revisions_from_basis(
-    basis: &crate::VerifiedNamespaceBasis,
+pub(crate) fn list_file_revisions_from_basis(
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
 ) -> Result<ListFileRevisionsResponse, CoreError> {
     let entry = resolve_path_from_basis(basis, absolute_path)?;
@@ -975,7 +909,7 @@ pub fn list_file_revisions_from_basis(
     list_file_revisions_for_inode_from_basis(basis, entry.inode_id)
 }
 
-pub fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
+pub(crate) fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
@@ -984,8 +918,8 @@ pub fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     list_file_revisions_for_inode_from_basis(&basis, inode_id)
 }
 
-pub fn list_file_revisions_for_inode_from_basis(
-    basis: &crate::VerifiedNamespaceBasis,
+pub(crate) fn list_file_revisions_for_inode_from_basis(
+    basis: &VerifiedNamespaceBasis,
     inode_id: InodeId,
 ) -> Result<ListFileRevisionsResponse, CoreError> {
     let inode = basis
@@ -1023,7 +957,7 @@ pub fn list_file_revisions_for_inode_from_basis(
     })
 }
 
-pub fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
+pub(crate) fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -1033,9 +967,9 @@ pub fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     read_file_revision_bytes_from_basis(store, &basis, absolute_path, revision_no)
 }
 
-pub fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     absolute_path: &str,
     revision_no: RevisionNo,
 ) -> Result<AuthoritativeFileBytes, CoreError> {
@@ -1057,7 +991,7 @@ pub fn read_file_revision_bytes_from_basis<S: ObjectStore + ?Sized>(
     })
 }
 
-pub fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
+pub(crate) fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
@@ -1067,9 +1001,9 @@ pub fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     read_file_revision_bytes_for_inode_from_basis(store, &basis, inode_id, revision_no)
 }
 
-pub fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Sized>(
+pub(crate) fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Sized>(
     store: &S,
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
@@ -1079,7 +1013,7 @@ pub fn read_file_revision_bytes_for_inode_from_basis<S: ObjectStore + ?Sized>(
 }
 
 fn revision_for_inode(
-    basis: &crate::VerifiedNamespaceBasis,
+    basis: &VerifiedNamespaceBasis,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<crate::metadata::RevisionRecord, CoreError> {

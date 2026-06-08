@@ -277,8 +277,6 @@ define_invariant_ids! {
     (WalReplayRecordsCommitReceipt, "wal_replay_records_commit_receipt"),
 }
 
-pub const INVARIANTS: &[InvariantId] = InvariantId::ALL;
-
 #[cfg(test)]
 mod tests {
     use super::InvariantId;

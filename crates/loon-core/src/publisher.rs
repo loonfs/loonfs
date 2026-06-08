@@ -1,13 +1,15 @@
+use crate::basis::{
+    load_verified_namespace_basis, probe_namespace_head_etag, BasisLoadError,
+    NamespaceHeadEtagProbe, VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
+};
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::context::MutationContext;
 use crate::error::{CoreError, CoreErrorKind};
+use crate::lease::acquire_or_renew_namespace_lease;
+use crate::loading::load_namespace_lease_control;
 use crate::path::intent::PathMutationIntent;
 use crate::path::planner::{
     path_intent_fingerprint_for_path_intent, PathPlanner, PlannedPathMutation,
-};
-use crate::{
-    load_namespace_lease_control, load_verified_namespace_basis, probe_namespace_head_etag,
-    BasisLoadError, NamespaceHeadEtagProbe, VerifiedNamespaceBasis, VerifiedNamespaceBasisWeight,
 };
 use loon_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loon_api::wire::control::LeaseState;
@@ -181,9 +183,7 @@ impl NamespaceCommitEngine {
         }
 
         let candidate_count = candidates.len();
-        if let Err(error) =
-            crate::acquire_or_renew_namespace_lease(store, &self.namespace_id, context)
-        {
+        if let Err(error) = acquire_or_renew_namespace_lease(store, &self.namespace_id, context) {
             self.invalidate();
             return NamespaceCommitEnginePublishResult {
                 results: repeated_error(candidate_count, CoreError::Lease(error)),
@@ -394,7 +394,7 @@ impl<'a, S: ObjectStore + ?Sized> DirectObjectStorePublisher<'a, S> {
     }
 }
 
-pub fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+pub(crate) fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
@@ -407,8 +407,8 @@ pub fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::basis::NamespaceHeadEtagProbe;
     use crate::metadata::MetadataState;
-    use crate::NamespaceHeadEtagProbe;
     use loon_api::wire::control::{HeadState, NamespaceDescriptorState};
     use loon_api::{ChangeSeq, ContentStoreId, FenceToken};
 

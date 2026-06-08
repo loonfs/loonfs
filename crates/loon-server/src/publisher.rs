@@ -516,7 +516,9 @@ mod tests {
     use loon_api::v0::{CommitOp, CommitRequest};
     use loon_api::wire::wal::decode_wal_segment_envelope_zstd;
     use loon_api::{ChangeSeq, InodeId};
-    use loon_core::{store_bytes_as_content, PathMutationIntent, PutFileBehavior};
+    use loon_core::content::store_bytes_as_content;
+    use loon_core::publish::PathMutationIntent;
+    use loon_core::PutFileBehavior;
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_head;
     use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
