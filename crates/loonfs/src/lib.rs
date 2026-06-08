@@ -50,7 +50,7 @@ pub use loon_objectstore::metrics::{
     JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricSample, ObjectStoreMetricsRecorder,
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
 };
-use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
+use loon_objectstore::{ByteRange, ObjectBody, ObjectMetadata, PutMode};
 pub use loon_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
@@ -528,6 +528,13 @@ impl ObjectStore for UploadedContentProofStore<'_> {
         range: Option<ByteRange>,
     ) -> std::result::Result<Option<Vec<u8>>, ObjectStoreError> {
         self.inner.get(key, range)
+    }
+
+    fn get_with_metadata(
+        &self,
+        key: &str,
+    ) -> std::result::Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key)
     }
 
     fn put(

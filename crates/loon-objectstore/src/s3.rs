@@ -1,5 +1,5 @@
 use super::s3_compatible::{S3CompatibleConfig, S3CompatibleStore};
-use super::{ByteRange, ObjectMetadata, ObjectStore, PutMode};
+use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
 use crate::ObjectStoreError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +45,10 @@ impl ObjectStore for AwsS3Store {
 
     fn head_with_checksum(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         self.inner.head_with_checksum(key)
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key)
     }
 
     fn get(

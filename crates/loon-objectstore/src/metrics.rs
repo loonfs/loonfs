@@ -1,5 +1,5 @@
 use crate::layout::{parse_object_key, DurableObjectFamily};
-use crate::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
@@ -30,6 +30,7 @@ pub struct ObjectStoreMetricSample {
 pub enum ObjectStoreOperation {
     Head,
     HeadWithChecksum,
+    GetWithMetadata,
     Get,
     Put,
     Delete,
@@ -218,6 +219,13 @@ where
         result
     }
 
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        let start = Instant::now();
+        let result = self.inner.get_with_metadata(key);
+        self.record_get_with_metadata(key, start.elapsed(), &result);
+        result
+    }
+
     fn put(
         &self,
         key: &str,
@@ -327,6 +335,29 @@ impl<S> InstrumentedObjectStore<S> {
             item_count: None,
             key_class: classify_key(key),
             range_class: Some(classify_range(range)),
+            put_mode: None,
+            store_kind: self.store_kind.clone(),
+        });
+    }
+
+    fn record_get_with_metadata(
+        &self,
+        key: &str,
+        elapsed: Duration,
+        result: &Result<Option<ObjectBody>, ObjectStoreError>,
+    ) {
+        self.record(ObjectStoreMetricSample {
+            operation: ObjectStoreOperation::GetWithMetadata,
+            elapsed_micros: elapsed.as_micros(),
+            result: classify_optional_result(result),
+            bytes_in: None,
+            bytes_out: result
+                .as_ref()
+                .ok()
+                .and_then(|body| body.as_ref().map(|body| body.bytes.len() as u64)),
+            item_count: None,
+            key_class: classify_key(key),
+            range_class: Some(RangeClass::FullObject),
             put_mode: None,
             store_kind: self.store_kind.clone(),
         });

@@ -8,7 +8,9 @@ use loon_objectstore::keys::{
     namespace_descriptor, namespace_head, namespace_lease, namespace_manifest,
 };
 use loon_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
-use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use loon_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CopyOptions,
     CreateDirOptions, CreateNamespaceOptions, DeleteOptions, ErrorCode, Fs, FsConfig, InodeId,
@@ -1867,6 +1869,19 @@ impl ObjectStore for HeadCasFailureStore {
         self.inner.get(key, range)
     }
 
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        if key.starts_with(&self.wal_prefix) {
+            self.wal_get_count.fetch_add(1, Ordering::SeqCst);
+        }
+        if key.starts_with(&self.manifest_prefix) {
+            self.manifest_get_count.fetch_add(1, Ordering::SeqCst);
+        }
+        if key == self.head_key {
+            self.head_get_count.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.get_with_metadata(key)
+    }
+
     fn put(
         &self,
         key: &str,
@@ -1943,6 +1958,13 @@ impl ObjectStore for ContentBlobGetCountingStore {
             self.content_blob_gets.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.get(key, range)
+    }
+
+    fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        if key.starts_with("content-stores/") && key.contains("/blobs/") {
+            self.content_blob_gets.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.get_with_metadata(key)
     }
 
     fn put(

@@ -9,7 +9,9 @@ use loon_objectstore::metrics::{
     ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
     VecObjectStoreMetricsRecorder,
 };
-use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use loon_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -106,12 +108,17 @@ fn records_head_and_head_with_checksum_as_distinct_operations() {
     store
         .head_with_checksum(&namespace_lease("ns-1"))
         .expect("head with checksum");
+    store
+        .get_with_metadata(&namespace_lease("ns-1"))
+        .expect("get with metadata");
 
     let samples = recorder.samples();
     assert_eq!(samples[1].operation, ObjectStoreOperation::Head);
     assert_eq!(samples[2].operation, ObjectStoreOperation::HeadWithChecksum);
+    assert_eq!(samples[3].operation, ObjectStoreOperation::GetWithMetadata);
     assert_eq!(samples[1].key_class, KeyClass::Lease);
     assert_eq!(samples[2].key_class, KeyClass::Lease);
+    assert_eq!(samples[3].key_class, KeyClass::Lease);
 }
 
 #[test]
@@ -346,6 +353,10 @@ impl ObjectStore for DelegatingWriteStore {
         _key: &str,
         _range: Option<ByteRange>,
     ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
+        Ok(None)
+    }
+
+    fn get_with_metadata(&self, _key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
         Ok(None)
     }
 

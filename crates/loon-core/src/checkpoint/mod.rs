@@ -2346,7 +2346,9 @@ mod tests {
     use loon_api::{validate_checkpoint_id, ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::{metadata_sst, namespace_head, namespace_manifest};
-    use loon_objectstore::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+    use loon_objectstore::{
+        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    };
     use std::collections::BTreeSet;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -4048,6 +4050,10 @@ mod tests {
             self.inner.get(key, range)
         }
 
+        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key)
+        }
+
         fn put(
             &self,
             key: &str,
@@ -4104,6 +4110,10 @@ mod tests {
             range: Option<ByteRange>,
         ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
             self.inner.get(key, range)
+        }
+
+        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key)
         }
 
         fn put(

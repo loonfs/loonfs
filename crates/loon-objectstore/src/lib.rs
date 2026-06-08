@@ -14,6 +14,8 @@ pub mod s3;
 mod s3_compatible;
 
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
-pub use object_store::{ByteRange, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+pub use object_store::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 
 mod object_store;

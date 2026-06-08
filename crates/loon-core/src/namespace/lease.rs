@@ -253,7 +253,7 @@ mod tests {
     use loon_api::{ChangeSeq, CommitId, InodeId};
     use loon_objectstore::fs::LocalFsStore;
     use loon_objectstore::keys::namespace_lease;
-    use loon_objectstore::{ByteRange, ObjectMetadata, PutMode};
+    use loon_objectstore::{ByteRange, ObjectBody, ObjectMetadata, PutMode};
     use tempfile::tempdir;
 
     #[test]
@@ -405,6 +405,10 @@ mod tests {
             range: Option<ByteRange>,
         ) -> Result<Option<Vec<u8>>, ObjectStoreError> {
             self.inner.get(key, range)
+        }
+
+        fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key)
         }
 
         fn put(
