@@ -4,7 +4,9 @@ use loonfs::{
 };
 use std::sync::Arc;
 
+#[allow(clippy::print_stdout)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // This example intentionally prints the file content it just read.
     let root = std::env::temp_dir().join("loonfs-embedded-local-fs-example");
     let store: SharedObjectStore = Arc::new(LocalFsStore::new(root)?);
     let fs = Fs::builder(store).writer_id("embedded-example").build()?;

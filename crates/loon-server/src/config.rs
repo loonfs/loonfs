@@ -302,6 +302,9 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), Se
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+    // Config tests use panic in unexpected match arms for precise diagnostics.
+
     use super::{load_server_config, ServerConfigError};
     use std::fs;
     use tempfile::tempdir;

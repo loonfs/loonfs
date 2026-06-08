@@ -1,3 +1,6 @@
+#![allow(clippy::panic)]
+// These integration tests use panic in unexpected match arms for precise diagnostics.
+
 use loon_api::{
     sha256_digest,
     v0::{

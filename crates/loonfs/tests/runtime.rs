@@ -1,3 +1,6 @@
+#![allow(clippy::panic)]
+// Runtime integration tests use panic in helper assertions for precise diagnostics.
+
 use loon_api::wire::checkpoint::decode_checkpoint_manifest_json;
 use loon_core::cache::load_verified_namespace_basis;
 use loon_objectstore::fs::LocalFsStore;

@@ -177,6 +177,8 @@ impl<S> InstrumentedObjectStore<S> {
     }
 }
 
+// Instrumentation is the explicit timing boundary for object-store latency metrics.
+#[allow(clippy::disallowed_methods)]
 impl<S> ObjectStore for InstrumentedObjectStore<S>
 where
     S: ObjectStore,

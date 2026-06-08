@@ -241,6 +241,9 @@ fn map_head_takeover_error(err: HeadFenceTakeoverError) -> LeaseAcquireError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::panic)]
+    // These tests use panic in fake-store guards to fail if forbidden calls occur.
+
     use super::*;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;

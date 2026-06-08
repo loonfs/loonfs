@@ -1,3 +1,6 @@
+#![allow(clippy::unwrap_used, clippy::panic, clippy::disallowed_methods)]
+// CLI integration tests use concise JSON/path assertions and explicit server polling.
+
 use serde_json::Value;
 use std::env;
 use std::fs;
