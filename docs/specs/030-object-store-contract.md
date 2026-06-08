@@ -36,6 +36,27 @@ The required durable object families and standard key patterns are:
 
 These key shapes are part of the interoperable storage contract. Implementations may add other control-plane objects.
 
+Namespace object keys are built through the central object layout API in `loon-objectstore`.
+The namespace root remains `namespaces/{namespace_id}/`; mutable control objects live under
+`control/`, WAL segments live under `wal/`, and checkpoint materialization files live under
+`compacted/checkpoints/`. Fork-aware copy-on-write manifests and GC pins are planned under the
+same namespace-root model, not under a separate top-level `histories/` root.
+
+The object layout also reserves these namespace-root file families for fork-aware materialization,
+derived indexes, compaction control, and garbage collection:
+
+| Family | Current status | Standard object key pattern |
+| --- | --- | --- |
+| **Namespace fork state** | Reserved for fork provenance/debug control. | `namespaces/{namespace_id}/control/fork.json` |
+| **Namespace manifests** | Reserved for namespace-root manifest snapshots. | `namespaces/{namespace_id}/manifest/{manifest_id}.manifest` |
+| **Compaction plans** | Reserved for compaction control artifacts. | `namespaces/{namespace_id}/compactions/{compactions_id}.compactions` |
+| **Compacted metadata SSTs** | Reserved for immutable metadata file sets referenced by manifests. | `namespaces/{namespace_id}/compacted/metadata/{table_id}.sst` |
+| **Compacted index SSTs** | Reserved for immutable derived-index file sets referenced by index manifests. | `namespaces/{namespace_id}/compacted/indexes/{index_family}/{index_instance}/{table_id}.sst` |
+| **Index manifests** | Reserved for index-specific sequenced manifests. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/manifest/{manifest_id}.manifest` |
+| **Index GC boundary** | Reserved for index-local cleanup boundaries. | `namespaces/{namespace_id}/indexes/{index_family}/{index_instance}/gc/manifest.boundary` |
+| **Namespace GC boundaries** | Reserved for namespace-local cleanup boundaries. | `namespaces/{namespace_id}/gc/{manifest\|compactions\|wal\|compacted}.boundary` |
+| **GC pins** | Reserved for protecting cross-namespace immutable file references. | `namespaces/{source_namespace_id}/gc/pins/{pin_id}.json` |
+
 ## 4. Durable naming conventions
 
 LoonFS uses distinct naming conventions for distinct surfaces:

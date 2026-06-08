@@ -4,6 +4,37 @@ use crate::ObjectStoreError;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ObjectLayout;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DurableObjectFamily {
+    NamespaceDescriptor,
+    NamespaceHead,
+    NamespaceLease,
+    NamespaceForkState,
+    UploadSession,
+    ConflictArtifact,
+    NamespaceManifest,
+    WalSegment,
+    NamespaceCompactions,
+    CompactedMetadataSst,
+    CheckpointManifest,
+    CheckpointRunTable,
+    CompactedIndexSst,
+    IndexManifest,
+    IndexGcBoundary,
+    NamespaceGcBoundary,
+    GcPin,
+    ContentStoreDescriptor,
+    ContentBlob,
+    DerivedProgress,
+    QueueShard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedObjectKey<'a> {
+    family: DurableObjectFamily,
+    owner_namespace_id: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ObjectKey(String);
 
@@ -33,15 +64,53 @@ macro_rules! typed_key {
 typed_key!(NamespaceDescriptorKey);
 typed_key!(NamespaceHeadKey);
 typed_key!(NamespaceLeaseKey);
+typed_key!(NamespaceForkStateKey);
 typed_key!(WalSegmentKey);
 typed_key!(ContentStoreDescriptorKey);
 typed_key!(ContentBlobKey);
 typed_key!(ConflictArtifactKey);
 typed_key!(UploadSessionKey);
+typed_key!(NamespaceManifestKey);
+typed_key!(NamespaceCompactionsKey);
 typed_key!(CheckpointManifestKey);
 typed_key!(CheckpointRunTableKey);
+typed_key!(CompactedMetadataSstKey);
+typed_key!(CompactedIndexSstKey);
+typed_key!(IndexManifestKey);
+typed_key!(IndexGcBoundaryKey);
+typed_key!(NamespaceGcBoundaryKey);
+typed_key!(GcPinKey);
 typed_key!(DerivedProgressKey);
 typed_key!(QueueShardKey);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceGcBoundaryKind {
+    Manifest,
+    Compactions,
+    Wal,
+    Compacted,
+}
+
+impl NamespaceGcBoundaryKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::Compactions => "compactions",
+            Self::Wal => "wal",
+            Self::Compacted => "compacted",
+        }
+    }
+}
+
+impl<'a> ParsedObjectKey<'a> {
+    pub fn family(&self) -> DurableObjectFamily {
+        self.family
+    }
+
+    pub fn owner_namespace_id(&self) -> Option<&'a str> {
+        self.owner_namespace_id
+    }
+}
 
 impl ObjectKey {
     fn new(key: impl Into<String>) -> Self {
@@ -62,6 +131,10 @@ impl ObjectLayout {
         Self
     }
 
+    pub fn namespace_root_prefix(&self, namespace: &str) -> String {
+        format!("namespaces/{namespace}/")
+    }
+
     pub fn namespace_descriptor(&self, namespace: &str) -> NamespaceDescriptorKey {
         NamespaceDescriptorKey(ObjectKey::new(format!(
             "namespaces/{namespace}/descriptor.json"
@@ -77,6 +150,12 @@ impl ObjectLayout {
     pub fn namespace_lease(&self, namespace: &str) -> NamespaceLeaseKey {
         NamespaceLeaseKey(ObjectKey::new(format!(
             "namespaces/{namespace}/control/lease.json"
+        )))
+    }
+
+    pub fn namespace_fork_state(&self, namespace: &str) -> NamespaceForkStateKey {
+        NamespaceForkStateKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/control/fork.json"
         )))
     }
 
@@ -132,6 +211,22 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/uploads/")
     }
 
+    pub fn namespace_manifest(&self, namespace: &str, manifest_id: u64) -> NamespaceManifestKey {
+        NamespaceManifestKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/manifest/{manifest_id:020}.manifest"
+        )))
+    }
+
+    pub fn namespace_compactions(
+        &self,
+        namespace: &str,
+        compactions_id: u64,
+    ) -> NamespaceCompactionsKey {
+        NamespaceCompactionsKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/compactions/{compactions_id:020}.compactions"
+        )))
+    }
+
     pub fn checkpoint_manifest(&self, namespace: &str, seq: u64) -> CheckpointManifestKey {
         CheckpointManifestKey(ObjectKey::new(format!(
             "namespaces/{namespace}/compacted/checkpoints/{seq:020}/manifest.json"
@@ -149,6 +244,68 @@ impl ObjectLayout {
         CheckpointRunTableKey(ObjectKey::new(format!(
             "namespaces/{namespace}/compacted/checkpoints/{run_seq:020}/runs/{run_id}/tables/{}/{segment_index:05}.sst.zst",
             family.as_str()
+        )))
+    }
+
+    pub fn compacted_metadata_sst(
+        &self,
+        namespace: &str,
+        table_id: &str,
+    ) -> CompactedMetadataSstKey {
+        CompactedMetadataSstKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/compacted/metadata/{table_id}.sst"
+        )))
+    }
+
+    pub fn compacted_index_sst(
+        &self,
+        namespace: &str,
+        family: &str,
+        instance: &str,
+        table_id: &str,
+    ) -> CompactedIndexSstKey {
+        CompactedIndexSstKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/compacted/indexes/{family}/{instance}/{table_id}.sst"
+        )))
+    }
+
+    pub fn index_manifest(
+        &self,
+        namespace: &str,
+        family: &str,
+        instance: &str,
+        manifest_id: u64,
+    ) -> IndexManifestKey {
+        IndexManifestKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/indexes/{family}/{instance}/manifest/{manifest_id:020}.manifest"
+        )))
+    }
+
+    pub fn index_gc_boundary(
+        &self,
+        namespace: &str,
+        family: &str,
+        instance: &str,
+    ) -> IndexGcBoundaryKey {
+        IndexGcBoundaryKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/indexes/{family}/{instance}/gc/manifest.boundary"
+        )))
+    }
+
+    pub fn namespace_gc_boundary(
+        &self,
+        namespace: &str,
+        boundary: NamespaceGcBoundaryKind,
+    ) -> NamespaceGcBoundaryKey {
+        NamespaceGcBoundaryKey(ObjectKey::new(format!(
+            "namespaces/{namespace}/gc/{}.boundary",
+            boundary.as_str()
+        )))
+    }
+
+    pub fn gc_pin(&self, source_namespace: &str, pin_id: &str) -> GcPinKey {
+        GcPinKey(ObjectKey::new(format!(
+            "namespaces/{source_namespace}/gc/pins/{pin_id}.json"
         )))
     }
 
@@ -170,6 +327,100 @@ impl ObjectLayout {
     }
 }
 
+pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
+    let segments: Vec<_> = key.split('/').collect();
+    match segments.as_slice() {
+        ["content-stores", _, "descriptor.json"] => {
+            parsed(DurableObjectFamily::ContentStoreDescriptor, None)
+        }
+        ["content-stores", _, "blobs", "sha256", _, _, _] => {
+            parsed(DurableObjectFamily::ContentBlob, None)
+        }
+        ["queue", "shards", _] => parsed(DurableObjectFamily::QueueShard, None),
+        ["namespaces", namespace, "descriptor.json"] => {
+            parsed(DurableObjectFamily::NamespaceDescriptor, Some(namespace))
+        }
+        ["namespaces", namespace, "control", "head.json"] => {
+            parsed(DurableObjectFamily::NamespaceHead, Some(namespace))
+        }
+        ["namespaces", namespace, "control", "lease.json"] => {
+            parsed(DurableObjectFamily::NamespaceLease, Some(namespace))
+        }
+        ["namespaces", namespace, "control", "fork.json"] => {
+            parsed(DurableObjectFamily::NamespaceForkState, Some(namespace))
+        }
+        ["namespaces", namespace, "uploads", upload] if upload.ends_with(".json") => {
+            parsed(DurableObjectFamily::UploadSession, Some(namespace))
+        }
+        ["namespaces", namespace, "conflicts", conflict] if conflict.ends_with(".json") => {
+            parsed(DurableObjectFamily::ConflictArtifact, Some(namespace))
+        }
+        ["namespaces", namespace, "manifest", manifest] if manifest.ends_with(".manifest") => {
+            parsed(DurableObjectFamily::NamespaceManifest, Some(namespace))
+        }
+        ["namespaces", namespace, "wal", _] => {
+            parsed(DurableObjectFamily::WalSegment, Some(namespace))
+        }
+        ["namespaces", namespace, "compactions", compactions]
+            if compactions.ends_with(".compactions") =>
+        {
+            parsed(DurableObjectFamily::NamespaceCompactions, Some(namespace))
+        }
+        ["namespaces", namespace, "compacted", "metadata", table] if table.ends_with(".sst") => {
+            parsed(DurableObjectFamily::CompactedMetadataSst, Some(namespace))
+        }
+        ["namespaces", namespace, "compacted", "checkpoints", _, "manifest.json"] => {
+            parsed(DurableObjectFamily::CheckpointManifest, Some(namespace))
+        }
+        ["namespaces", namespace, "compacted", "checkpoints", _, "runs", _, "tables", _, table]
+            if table.ends_with(".sst.zst") =>
+        {
+            parsed(DurableObjectFamily::CheckpointRunTable, Some(namespace))
+        }
+        ["namespaces", namespace, "compacted", "indexes", _, _, table]
+            if table.ends_with(".sst") =>
+        {
+            parsed(DurableObjectFamily::CompactedIndexSst, Some(namespace))
+        }
+        ["namespaces", namespace, "indexes", _, _, "manifest", manifest]
+            if manifest.ends_with(".manifest") =>
+        {
+            parsed(DurableObjectFamily::IndexManifest, Some(namespace))
+        }
+        ["namespaces", namespace, "indexes", _, _, "gc", "manifest.boundary"] => {
+            parsed(DurableObjectFamily::IndexGcBoundary, Some(namespace))
+        }
+        ["namespaces", namespace, "gc", boundary]
+            if matches!(
+                *boundary,
+                "manifest.boundary"
+                    | "compactions.boundary"
+                    | "wal.boundary"
+                    | "compacted.boundary"
+            ) =>
+        {
+            parsed(DurableObjectFamily::NamespaceGcBoundary, Some(namespace))
+        }
+        ["namespaces", namespace, "gc", "pins", pin] if pin.ends_with(".json") => {
+            parsed(DurableObjectFamily::GcPin, Some(namespace))
+        }
+        ["namespaces", namespace, "derived", .., "progress.json"] => {
+            parsed(DurableObjectFamily::DerivedProgress, Some(namespace))
+        }
+        _ => None,
+    }
+}
+
+fn parsed(
+    family: DurableObjectFamily,
+    owner_namespace_id: Option<&str>,
+) -> Option<ParsedObjectKey<'_>> {
+    Some(ParsedObjectKey {
+        family,
+        owner_namespace_id,
+    })
+}
+
 pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
     let Some(hex) = digest.strip_prefix("sha256:") else {
         return Err(ObjectStoreError::InvalidKey(digest.to_owned()));
@@ -188,13 +439,17 @@ pub fn sha256_hex_from_digest(digest: &str) -> Result<&str, ObjectStoreError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{sha256_hex_from_digest, ObjectLayout};
+    use super::{
+        parse_object_key, sha256_hex_from_digest, DurableObjectFamily, NamespaceGcBoundaryKind,
+        ObjectLayout,
+    };
     use crate::keys::{CheckpointTableFamily, DerivedWorkClass};
 
     #[test]
     fn layout_golden_tree_matches_expected_paths() {
         let layout = ObjectLayout::new();
 
+        assert_eq!(layout.namespace_root_prefix("ns-1"), "namespaces/ns-1/");
         assert_eq!(
             layout.namespace_descriptor("ns-1").as_str(),
             "namespaces/ns-1/descriptor.json"
@@ -206,6 +461,10 @@ mod tests {
         assert_eq!(
             layout.namespace_lease("ns-1").as_str(),
             "namespaces/ns-1/control/lease.json"
+        );
+        assert_eq!(
+            layout.namespace_fork_state("ns-1").as_str(),
+            "namespaces/ns-1/control/fork.json"
         );
         assert_eq!(
             layout
@@ -224,6 +483,14 @@ mod tests {
             "namespaces/ns-1/compacted/checkpoints/00000000000000000400/manifest.json"
         );
         assert_eq!(
+            layout.namespace_manifest("ns-1", 42).as_str(),
+            "namespaces/ns-1/manifest/00000000000000000042.manifest"
+        );
+        assert_eq!(
+            layout.namespace_compactions("ns-1", 42).as_str(),
+            "namespaces/ns-1/compactions/00000000000000000042.compactions"
+        );
+        assert_eq!(
             layout
                 .checkpoint_run_table(
                     "ns-1",
@@ -234,6 +501,45 @@ mod tests {
                 )
                 .as_str(),
             "namespaces/ns-1/compacted/checkpoints/00000000000000000400/runs/run_00000000000000000000000000000001/tables/direntry-binds/00007.sst.zst"
+        );
+        assert_eq!(
+            layout
+                .compacted_metadata_sst("ns-1", "tbl_00000000000000000000000000000001")
+                .as_str(),
+            "namespaces/ns-1/compacted/metadata/tbl_00000000000000000000000000000001.sst"
+        );
+        assert_eq!(
+            layout
+                .compacted_index_sst(
+                    "ns-1",
+                    "grep",
+                    "default",
+                    "tbl_00000000000000000000000000000002"
+                )
+                .as_str(),
+            "namespaces/ns-1/compacted/indexes/grep/default/tbl_00000000000000000000000000000002.sst"
+        );
+        assert_eq!(
+            layout
+                .index_manifest("ns-1", "grep", "default", 17)
+                .as_str(),
+            "namespaces/ns-1/indexes/grep/default/manifest/00000000000000000017.manifest"
+        );
+        assert_eq!(
+            layout.index_gc_boundary("ns-1", "grep", "default").as_str(),
+            "namespaces/ns-1/indexes/grep/default/gc/manifest.boundary"
+        );
+        assert_eq!(
+            layout
+                .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Compacted)
+                .as_str(),
+            "namespaces/ns-1/gc/compacted.boundary"
+        );
+        assert_eq!(
+            layout
+                .gc_pin("source-ns", "pin_00000000000000000000000000000001")
+                .as_str(),
+            "namespaces/source-ns/gc/pins/pin_00000000000000000000000000000001.json"
         );
         assert_eq!(
             layout
@@ -258,6 +564,152 @@ mod tests {
                 .as_str(),
             "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
         );
+    }
+
+    #[test]
+    fn parse_build_round_trips_for_namespace_key_families() {
+        let layout = ObjectLayout::new();
+        let cases = [
+            (
+                layout.namespace_descriptor("ns-1").into_string(),
+                DurableObjectFamily::NamespaceDescriptor,
+            ),
+            (
+                layout.namespace_head("ns-1").into_string(),
+                DurableObjectFamily::NamespaceHead,
+            ),
+            (
+                layout.namespace_lease("ns-1").into_string(),
+                DurableObjectFamily::NamespaceLease,
+            ),
+            (
+                layout.namespace_fork_state("ns-1").into_string(),
+                DurableObjectFamily::NamespaceForkState,
+            ),
+            (
+                layout
+                    .upload_session("ns-1", "upl_00000000000000000000000000000001")
+                    .into_string(),
+                DurableObjectFamily::UploadSession,
+            ),
+            (
+                layout
+                    .conflict_artifact("ns-1", "conflict-deadbeef")
+                    .into_string(),
+                DurableObjectFamily::ConflictArtifact,
+            ),
+            (
+                layout.namespace_manifest("ns-1", 1).into_string(),
+                DurableObjectFamily::NamespaceManifest,
+            ),
+            (
+                layout
+                    .wal_segment("ns-1", 1, 2, "seg_00000000000000000000000000000001")
+                    .into_string(),
+                DurableObjectFamily::WalSegment,
+            ),
+            (
+                layout.namespace_compactions("ns-1", 1).into_string(),
+                DurableObjectFamily::NamespaceCompactions,
+            ),
+            (
+                layout
+                    .compacted_metadata_sst("ns-1", "tbl_abc")
+                    .into_string(),
+                DurableObjectFamily::CompactedMetadataSst,
+            ),
+            (
+                layout.checkpoint_manifest("ns-1", 1).into_string(),
+                DurableObjectFamily::CheckpointManifest,
+            ),
+            (
+                layout
+                    .checkpoint_run_table(
+                        "ns-1",
+                        1,
+                        "run_00000000000000000000000000000001",
+                        CheckpointTableFamily::Inodes,
+                        0,
+                    )
+                    .into_string(),
+                DurableObjectFamily::CheckpointRunTable,
+            ),
+            (
+                layout
+                    .compacted_index_sst("ns-1", "grep", "default", "tbl_abc")
+                    .into_string(),
+                DurableObjectFamily::CompactedIndexSst,
+            ),
+            (
+                layout
+                    .index_manifest("ns-1", "grep", "default", 1)
+                    .into_string(),
+                DurableObjectFamily::IndexManifest,
+            ),
+            (
+                layout
+                    .index_gc_boundary("ns-1", "grep", "default")
+                    .into_string(),
+                DurableObjectFamily::IndexGcBoundary,
+            ),
+            (
+                layout
+                    .namespace_gc_boundary("ns-1", NamespaceGcBoundaryKind::Wal)
+                    .into_string(),
+                DurableObjectFamily::NamespaceGcBoundary,
+            ),
+            (
+                layout
+                    .gc_pin("ns-1", "pin_00000000000000000000000000000001")
+                    .into_string(),
+                DurableObjectFamily::GcPin,
+            ),
+            (
+                layout
+                    .derived_progress("ns-1", DerivedWorkClass::CheckpointBuilder)
+                    .into_string(),
+                DurableObjectFamily::DerivedProgress,
+            ),
+        ];
+
+        for (key, family) in cases {
+            let parsed = parse_object_key(&key).expect("known namespace key parses");
+            assert_eq!(parsed.family(), family);
+            assert_eq!(parsed.owner_namespace_id(), Some("ns-1"));
+        }
+    }
+
+    #[test]
+    fn parse_build_round_trips_for_global_key_families() {
+        let layout = ObjectLayout::new();
+        let content_key = layout
+            .content_blob(
+                "cs_00000000000000000000000000000001",
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+            )
+            .expect("content key")
+            .into_string();
+        let cases = [
+            (
+                layout
+                    .content_store_descriptor("cs_00000000000000000000000000000001")
+                    .into_string(),
+                DurableObjectFamily::ContentStoreDescriptor,
+            ),
+            (content_key, DurableObjectFamily::ContentBlob),
+            (
+                layout.queue_shard(17).into_string(),
+                DurableObjectFamily::QueueShard,
+            ),
+        ];
+
+        for (key, family) in cases {
+            let parsed = parse_object_key(&key).expect("known global key parses");
+            assert_eq!(parsed.family(), family);
+            assert_eq!(parsed.owner_namespace_id(), None);
+        }
+
+        assert!(parse_object_key("namespaces/ns-1/unknown/file").is_none());
     }
 
     #[test]
